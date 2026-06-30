@@ -38,3 +38,5 @@ third_party/i2rt/
 
 # 3D Model Files
 *.stl
+# MujocoRobotServer가 실행 시 생성하는 런타임 산출물
+arena.xml

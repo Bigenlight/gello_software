@@ -402,7 +402,23 @@ class DynamixelDriver(DynamixelDriverProtocol):
                 dxl_comm_result, dxl_error = self._packetHandler.write1ByteTxRx(
                     self._portHandler, dxl_id, ADDR_TORQUE_ENABLE, torque_value
                 )
-                if dxl_comm_result != COMM_SUCCESS or dxl_error != 0:
+                if dxl_comm_result != COMM_SUCCESS:
+                    print(dxl_comm_result)
+                    print(dxl_error)
+                    raise RuntimeError(
+                        f"Failed to set torque mode for Dynamixel with ID {dxl_id}"
+                    )
+                if dxl_error != 0:
+                    # When DISABLING torque, ignore the Dynamixel alert bit (128 / 0x80).
+                    # XL330 servos can raise an alert (e.g. input-voltage flag) on the
+                    # torque write; tolerating it on disable is safe (disable is the
+                    # fail-safe direction) and matches the RWH GELLO hardware fix.
+                    if not enable and dxl_error == 128:
+                        print(
+                            f"Warning: ignoring alert bit while disabling torque "
+                            f"for Dynamixel ID {dxl_id}"
+                        )
+                        continue
                     print(dxl_comm_result)
                     print(dxl_error)
                     raise RuntimeError(

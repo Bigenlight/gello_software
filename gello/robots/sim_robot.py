@@ -51,7 +51,12 @@ def attach_hand_to_arm(
     attachment_site.attach(hand_mjcf)
 
 
-def build_scene(robot_xml_path: str, gripper_xml_path: Optional[str] = None):
+def build_scene(
+    robot_xml_path: str,
+    gripper_xml_path: Optional[str] = None,
+    add_scene: bool = False,
+    add_cube: bool = False,
+):
     # assert robot_xml_path.endswith(".xml")
 
     arena = mjcf.RootElement()
@@ -63,8 +68,78 @@ def build_scene(robot_xml_path: str, gripper_xml_path: Optional[str] = None):
         gripper_simulate = mjcf.from_path(gripper_xml_path)
         attach_hand_to_arm(arm_simulate, gripper_simulate)
 
+    if add_scene:
+        # Replicate the mujoco_menagerie scene.xml aesthetic (skybox + checker
+        # floor + lighting) via the mjcf API so the scene isn't a black void.
+        arena.visual.headlight.diffuse = [0.6, 0.6, 0.6]
+        arena.visual.headlight.ambient = [0.3, 0.3, 0.3]
+        arena.visual.headlight.specular = [0.0, 0.0, 0.0]
+        arena.visual.rgba.haze = [0.15, 0.25, 0.35, 1.0]
+        arena.visual.__getattr__("global").azimuth = 120
+        arena.visual.__getattr__("global").elevation = -20
+
+        arena.asset.add(
+            "texture",
+            type="skybox",
+            builtin="gradient",
+            rgb1=[0.3, 0.5, 0.7],
+            rgb2=[0.0, 0.0, 0.0],
+            width=512,
+            height=3072,
+        )
+        arena.asset.add(
+            "texture",
+            type="2d",
+            name="groundplane",
+            builtin="checker",
+            mark="edge",
+            rgb1=[0.2, 0.3, 0.4],
+            rgb2=[0.1, 0.2, 0.3],
+            markrgb=[0.8, 0.8, 0.8],
+            width=300,
+            height=300,
+        )
+        arena.asset.add(
+            "material",
+            name="groundplane",
+            texture="groundplane",
+            texuniform=True,
+            texrepeat=[5, 5],
+            reflectance=0.2,
+        )
+        arena.worldbody.add(
+            "light",
+            pos=[0, 0, 1.5],
+            dir=[0, 0, -1],
+            directional=True,
+        )
+        arena.worldbody.add(
+            "geom",
+            name="floor",
+            type="plane",
+            material="groundplane",
+            size=[5, 5, 0.1],
+        )
+
     arena.worldbody.attach(arm_simulate)
     # arena.worldbody.attach(arm_copy)
+
+    if add_cube:
+        # IMPORTANT: add the cube AFTER attaching the arm so the cube's freejoint
+        # qpos is appended AFTER the arm joints in the compiled model. This keeps
+        # qpos[:num_joints] mapping to the arm. The cube has no actuator, so nu is
+        # unchanged. Placed on the floor in front of the panda base (+x direction).
+        cube = arena.worldbody.add("body", name="cube", pos=[0.5, 0.0, 0.025])
+        cube.add("freejoint", name="cube_free")
+        cube.add(
+            "geom",
+            type="box",
+            size=[0.02, 0.02, 0.02],
+            rgba=[0.8, 0.2, 0.2, 1.0],
+            mass=0.05,
+            condim=3,
+            friction=[1.0, 0.005, 0.0001],
+        )
 
     return arena
 
@@ -138,9 +213,26 @@ class MujocoRobotServer:
         host: str = "127.0.0.1",
         port: int = 5556,
         print_joints: bool = False,
+        gripper_builtin: bool = False,
+        gripper_invert: bool = False,
+        add_scene: bool = False,
+        add_cube: bool = False,
     ):
         self._has_gripper = gripper_xml_path is not None
-        arena = build_scene(xml_path, gripper_xml_path)
+        # Some models (e.g. franka panda.xml) bundle the gripper actuator in the
+        # main xml instead of attaching a separate gripper_xml. In that case the
+        # GELLO's normalized [0,1] gripper command must be rescaled to the last
+        # actuator's ctrlrange (panda actuator8 is [0, 255]).
+        self._gripper_builtin = gripper_builtin
+        # Invert the gripper polarity when the model's "open" end is the high end
+        # of the ctrlrange (panda actuator8: 255 = open) but GELLO sends 1 = closed.
+        self._gripper_invert = gripper_invert
+        arena = build_scene(
+            xml_path,
+            gripper_xml_path,
+            add_scene=add_scene,
+            add_cube=add_cube,
+        )
 
         assets: Dict[str, str] = {}
         for asset in arena.asset.all_children():
@@ -157,6 +249,9 @@ class MujocoRobotServer:
         self._data = mujoco.MjData(self._model)
 
         self._num_joints = self._model.nu
+
+        if self._gripper_builtin:
+            self._gripper_ctrlrange = self._model.actuator_ctrlrange[-1].copy()
 
         self._joint_state = np.zeros(self._num_joints)
         self._joint_cmd = self._joint_state
@@ -180,6 +275,15 @@ class MujocoRobotServer:
         if self._has_gripper:
             _joint_state = joint_state.copy()
             _joint_state[-1] = _joint_state[-1] * 255
+            self._joint_cmd = _joint_state
+        elif self._gripper_builtin:
+            # map normalized [0,1] gripper command to the actuator's ctrlrange
+            _joint_state = joint_state.copy()
+            g = _joint_state[-1]
+            if self._gripper_invert:
+                g = 1.0 - g
+            lo, hi = self._gripper_ctrlrange
+            _joint_state[-1] = lo + g * (hi - lo)
             self._joint_cmd = _joint_state
         else:
             self._joint_cmd = joint_state.copy()
