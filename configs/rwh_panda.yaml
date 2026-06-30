@@ -19,6 +19,7 @@ robot:
   gripper_invert: true    # panda actuator8 255=open; invert so pulling the GELLO lever closes
   add_scene: true         # add checker floor + skybox + lighting (opt-in; no effect on nu)
   add_cube: true          # add a small red cube on the floor in front of the panda (+x)
+  stable_grasp: true      # elliptic cone + impratio + noslip + finer timestep so grasps don't slip
   host: "127.0.0.1"
   port: 6001
 

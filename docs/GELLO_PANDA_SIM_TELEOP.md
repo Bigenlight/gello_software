@@ -16,6 +16,7 @@
 | 팔 7축 텔레오퍼레이션 | ✅ 라디안 1:1 추종 |
 | 그리퍼 개폐 | ✅ `gripper_builtin` + `gripper_invert`로 정상화 |
 | 배경 씬 & 큐브 | ✅ `add_scene`(바닥+스카이박스+조명) + `add_cube`(로봇 앞 4cm 큐브), opt-in |
+| 그랩 안정화 | ✅ 큐브 마찰(`condim=6`) + `stable_grasp`(elliptic cone/impratio/noslip/finer timestep) |
 | 안전 (GELLO 토크 미인가) | ✅ init부터 끝까지 passive |
 
 ### 변경/추가 파일
@@ -24,8 +25,8 @@
 |---|---|---|
 | `gello/dynamixel/driver.py` | 수정 | `set_torque_mode`: 토크 disable 시 XL330 alert 비트(128) 무시 |
 | `gello/robots/dynamixel.py` | 수정 | init의 `set_torque_mode(False)`를 try/except로 감쌈 |
-| `gello/robots/sim_robot.py` | 수정 | `gripper_builtin` / `gripper_invert` 옵션 + `add_scene` / `add_cube`(배경 씬·큐브) |
-| `configs/rwh_panda.yaml` | 신규 | launch_yaml 설정 (동료 캘리브레이션 + 그리퍼 + 씬/큐브 옵션) |
+| `gello/robots/sim_robot.py` | 수정 | `gripper_builtin`/`gripper_invert` + `add_scene`/`add_cube` + 큐브 마찰·`stable_grasp`(그랩 안정화) |
+| `configs/rwh_panda.yaml` | 신규 | launch_yaml 설정 (캘리브레이션 + 그리퍼 + 씬/큐브 + 그랩 안정화) |
 | `scripts/sim_panda_scripted_demo.py` | 신규 | GELLO 없이 sim 검증용 사인 스윕 + GIF 데모 |
 
 ### 목차
@@ -291,6 +292,9 @@ robot:
   gripper_xml_path: null
   gripper_builtin: true   # panda.xml bundles the hand: rescale GELLO [0,1] -> actuator8 [0,255]
   gripper_invert: true    # panda actuator8 255=open; invert so pulling the GELLO lever closes
+  add_scene: true         # checker floor + skybox + lighting (opt-in)
+  add_cube: true          # small red cube on the floor in front of the panda (+x)
+  stable_grasp: true      # elliptic cone + impratio + noslip + finer timestep so grasps don't slip
   host: "127.0.0.1"
   port: 6001
 
@@ -349,7 +353,7 @@ def build_scene(robot_xml_path, gripper_xml_path=None, add_scene=False, add_cube
         cube = arena.worldbody.add("body", name="cube", pos=[0.5, 0.0, 0.025])
         cube.add("freejoint", name="cube_free")
         cube.add("geom", type="box", size=[0.02, 0.02, 0.02], rgba=[0.8, 0.2, 0.2, 1.0],
-                 mass=0.05, condim=3, friction=[1.0, 0.005, 0.0001])
+                 mass=0.05, condim=6, friction=[2.0, 0.05, 0.001])  # condim=6 + 강화 마찰: 안 미끄러짐
     return arena
 ```
 
@@ -360,6 +364,27 @@ def build_scene(robot_xml_path, gripper_xml_path=None, add_scene=False, add_cube
 - panda 기준 +x 0.5m → 팔 도달범위(~0.85m) 안, 4cm라 Franka 핸드로 그랩 가능.
 
 config `robot:`에 `add_scene: true`, `add_cube: true` 추가.
+
+### 7. 그랩 안정화 — 큐브 마찰 + `stable_grasp` (sim_robot.py)
+
+기본 설정으로는 그리퍼로 큐브를 잡아도 **스윽 미끄러져 나갔다.** 두 축으로 해결:
+
+**(a) 큐브 접촉 마찰** — `add_cube`의 큐브 geom을 `condim=3 → 6`, `friction=[1.0,0.005,0.0001] → [2.0,0.05,0.001]`로. `condim=3`은 slide 마찰 1개 성분만 써서 큐브가 손가락 사이에서 비틀려 빠졌다. `condim=6`은 **slide + 비틀림(torsional) + 구름(rolling)** 마찰을 모두 켠다. MuJoCo 접촉의 condim/friction은 두 geom의 elementwise max이므로, 큐브 쪽만 올려도 큐브↔손가락패드 접촉(패드는 기본 condim=3)이 강해진다.
+
+**(b) 솔버/접촉 옵션 `stable_grasp`** — opt-in 플래그. `build_scene`에서 arena option을 설정:
+
+```python
+if stable_grasp:
+    arena.option.cone = "elliptic"        # pyramidal -> elliptic 마찰콘 (그랩 정확)
+    arena.option.impratio = 10            # 마찰을 법선력 대비 단단하게 (1 -> 10)
+    arena.option.noslip_iterations = 10   # 미끄러짐 억제 전용 솔버 패스 (0 -> 10)
+    arena.option.integrator = "implicitfast"
+    arena.option.timestep = 0.001         # 0.002 -> 0.001 (접촉 연산 정밀도 ↑)
+    arena.option.iterations = 150         # 100 -> 150
+    arena.option.ls_iterations = 50
+```
+
+`nu`/`nq`에는 영향 없음 (솔버 설정일 뿐). config `robot:`에 `stable_grasp: true` 추가. 기본값 `False`라 다른 로봇은 무영향.
 
 ---
 

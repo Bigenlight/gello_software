@@ -56,10 +56,26 @@ def build_scene(
     gripper_xml_path: Optional[str] = None,
     add_scene: bool = False,
     add_cube: bool = False,
+    stable_grasp: bool = False,
 ):
     # assert robot_xml_path.endswith(".xml")
 
     arena = mjcf.RootElement()
+
+    if stable_grasp:
+        # Contact/solver settings that keep a grasped object from slipping out of
+        # the gripper. elliptic cone + high impratio make friction firm relative to
+        # the normal force; noslip_iterations runs MuJoCo's dedicated anti-slip
+        # pass; a smaller timestep + more solver iterations improve contact accuracy
+        # (more compute). integrator stays implicitfast (panda.xml default).
+        arena.option.cone = "elliptic"
+        arena.option.impratio = 10
+        arena.option.noslip_iterations = 10
+        arena.option.integrator = "implicitfast"
+        arena.option.timestep = 0.001
+        arena.option.iterations = 150
+        arena.option.ls_iterations = 50
+
     arm_simulate = mjcf.from_path(robot_xml_path)
     # arm_copy = mjcf.from_path(xml_path)
 
@@ -137,8 +153,13 @@ def build_scene(
             size=[0.02, 0.02, 0.02],
             rgba=[0.8, 0.2, 0.2, 1.0],
             mass=0.05,
-            condim=3,
-            friction=[1.0, 0.005, 0.0001],
+            # condim=6 enables tangential + torsional + rolling friction so the cube
+            # does not twist/slip out of the gripper. MuJoCo contact condim/friction
+            # are the elementwise max of the two geoms, so raising them on the cube
+            # also strengthens the cube<->fingertip-pad contacts (pads default to
+            # condim=3, friction=[1,0.005,0.0001]).
+            condim=6,
+            friction=[2.0, 0.05, 0.001],
         )
 
     return arena
@@ -217,6 +238,7 @@ class MujocoRobotServer:
         gripper_invert: bool = False,
         add_scene: bool = False,
         add_cube: bool = False,
+        stable_grasp: bool = False,
     ):
         self._has_gripper = gripper_xml_path is not None
         # Some models (e.g. franka panda.xml) bundle the gripper actuator in the
@@ -232,6 +254,7 @@ class MujocoRobotServer:
             gripper_xml_path,
             add_scene=add_scene,
             add_cube=add_cube,
+            stable_grasp=stable_grasp,
         )
 
         assets: Dict[str, str] = {}
