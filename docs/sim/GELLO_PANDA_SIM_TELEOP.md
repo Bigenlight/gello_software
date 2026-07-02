@@ -2,7 +2,10 @@
 
 물리 **GELLO** 리더 암으로 **MuJoCo 시뮬레이션 속 Franka Panda**를 텔레오퍼레이션하는 셋업 문서. 실제 Franka 하드웨어 없이 시뮬레이션만으로 동작하며, GELLO는 **passive read-only(토크 미인가)** 로만 사용한다.
 
-- **실행 한 줄**: `DISPLAY=:1 .venv/bin/python experiments/launch_yaml.py --left-config-path configs/rwh_panda.yaml`
+> **먼저 읽을 것**: 저장소 전체 개요와 공통 사전 준비(STEP-0 Dynamixel Wizard 모터 점검, `dialout` 시리얼 권한 설정)는 [README](../../README.md)에 정리돼 있음. 여기서는 Panda sim 경로만 다룬다.
+
+- **실행 한 줄**: `DISPLAY=<your-display> .venv/bin/python experiments/launch_yaml.py --left-config-path configs/rwh_panda.yaml`
+  - `<your-display>`는 세션의 X 디스플레이(일반 모니터면 보통 `:0`). 이 문서의 예시에 나오는 `:1`은 **이 헤드리스 빌드 PC의 가상 X 서버**라서 그대로 쓰면 안 됨 — 각자 환경 값으로 바꿀 것.
 - **결과**: 팔 7축 1:1 추종 + 그리퍼 정방향 개폐, GELLO 모터는 끝까지 통전되지 않음.
 - **참고**: 동료(조민제)의 가이드 + 도커 이미지 `minje227/gello:RWH_Gello_PandaV1.0` (캘리브레이션 값 재사용).
 
@@ -45,7 +48,7 @@
 
 ### 0) 사전 요건 (Prerequisites)
 
-- **OS / 디스플레이**: Ubuntu, 실제 디스플레이가 `DISPLAY=:1`에 붙어 있음 (인터랙티브 MuJoCo 뷰어는 GLFW 창을 띄우므로 실제 X 디스플레이가 필요함). GL/EGL 라이브러리는 이미 설치돼 있음.
+- **OS / 디스플레이**: Ubuntu, 실제 X 디스플레이 필요 (인터랙티브 MuJoCo 뷰어는 GLFW 창을 띄움). 일반 모니터 환경이면 보통 `DISPLAY=:0`. 아래 명령의 `:1`은 이 헤드리스 빌드 PC의 가상 X 서버 예시일 뿐이니 각자 값(`echo $DISPLAY`로 확인)으로 바꿔 쓸 것. GL 라이브러리(`libgl1 libglfw3 libosmesa6`)가 없는 맨 서버라면 `sudo apt install`로 먼저 깐다.
 - **uv**: 0.11.8 설치돼 있음. 없으면 먼저 설치:
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -86,25 +89,33 @@ uv pip install -e third_party/DynamixelSDK/python
 1. GELLO의 서보 버스에 **외부 5V 전원**을 연결한다. USB만으로는 서보가 어떤 baud에서도 응답하지 않음 — 전원이 반드시 따로 필요함.
    - **경고**: XL330은 5V 서보임. 최대 7V를 넘기지 말 것 (전압 잘못 넣으면 서보 손상).
 2. U2D2를 호스트 USB에 연결한다. `lsusb`에서 `0403:6014` (FTDI FT232H)로 보임.
-3. 포트 경로(고정):
+3. 포트 경로 확인:
+   ```bash
+   ls -l /dev/serial/by-id/     # by-id 경로 (재접속/재부팅에도 불변 — 권장)
+   ls /dev/ttyUSB*              # ttyUSBn (enumeration 순서라 바뀔 수 있음)
+   dmesg | grep -i tty          # 방금 꽂은 장치 확인
    ```
-   /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO75A-if00-port0
+   이 빌드 PC의 GELLO는 아래 by-id 경로로 잡히고, `configs/rwh_panda.yaml`의 `agent.port`에 그대로 박혀 있음:
    ```
-   (= `/dev/ttyUSB0`, baud 57600). 이 by-id 경로가 config에 그대로 박혀 있음.
+   /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0
+   ```
+   (= 대략 `/dev/ttyUSB0`, baud 57600). **다른 어댑터/개체를 쓰는 동료는 위 `ls` 결과의 자기 by-id 경로로 yaml의 `agent.port`를 바꿔야 함** (`FTBEO6QK`는 이 개체 고유 시리얼이라 그대로 쓰면 안 됨).
 
 참고로 GELLO는 **read-only(passive leader)로만** 쓰임. 위치를 읽으려면 전원은 필요하지만 토크는 켜지 않음 — DynamixelRobot이 torque OFF 상태로 init하고, 명령은 sim 로봇에만 흐르지 GELLO 모터로는 안 간다.
 
 ### 4) 시리얼 권한 (Serial permission)
 
-현재 유저가 `dialout` 그룹에 없음. 둘 중 하나:
+`/dev/ttyUSB*` 접근 권한이 없어 포트 열기가 실패하면(`Permission denied`) 유저가 `dialout` 그룹에 없는 것. 둘 중 하나:
 
 ```bash
-# 방법 A (영구): 그룹 추가 후 재로그인 필요
+# 방법 A (영구, 권장): 그룹 추가 후 로그아웃/재로그인 필요
 sudo usermod -aG dialout $USER
 
 # 방법 B (임시): 권한만 열기
 sudo chmod 666 /dev/ttyUSB0
 ```
+
+(공통 준비 항목이라 [README](../../README.md)에도 안내돼 있음.)
 
 (선택) 동작을 더 부드럽게 하려면 USB latency timer를 줄여줌:
 
@@ -114,7 +125,7 @@ echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 
 ### 5) (일회성) 캘리브레이션 — 보통 생략 (One-time calibration)
 
-`configs/rwh_panda.yaml`의 `joint_offsets` / `joint_signs` / `gripper_config`는 **조민제의 Docker 이미지에서 가져온 값을 재사용**함 (동일한 물리 GELLO, 같은 포트 FTBEO75A). **GELLO 조립/서보 마운팅이 바뀌지 않았다면 재캘리브레이션 불필요** → 이 단계는 건너뛰면 됨.
+`configs/rwh_panda.yaml`의 `joint_offsets` / `joint_signs` / `gripper_config`는 **조민제의 Docker 이미지에서 가져온 값을 재사용**함 (동일한 물리 GELLO, 같은 포트 FTBEO6QK). **GELLO 조립/서보 마운팅이 바뀌지 않았다면 재캘리브레이션 불필요** → 이 단계는 건너뛰면 됨.
 
 만약 다시 캘리브해야 하면, GELLO를 Panda home 포즈로 잡은 상태에서:
 
@@ -122,7 +133,7 @@ echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 .venv/bin/python scripts/gello_get_offset.py \
   --start-joints 0 0 0 -1.57 0 1.57 0 \
   --joint-signs 1 -1 1 -1 1 -1 1 \
-  --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO75A-if00-port0
+  --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0
 ```
 
 출력된 offset 값을 `configs/rwh_panda.yaml`의 `joint_offsets`에 옮겨 적는다.
@@ -135,17 +146,17 @@ echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 
 ```bash
 cd /home/theo_lab/gello_software
+# DISPLAY은 세션 값으로 (일반 모니터면 :0). :1은 이 헤드리스 빌드 PC 예시.
 DISPLAY=:1 .venv/bin/python experiments/launch_yaml.py \
   --left-config-path configs/rwh_panda.yaml
 ```
 
-- **`MUJOCO_GL=glx`를 설정하지 말 것** (잘못된 값임). 인터랙티브 뷰어는 GLFW를 쓴다.
-- 헤드리스 offscreen 렌더가 필요한 경우에만 `MUJOCO_GL=egl`을 쓴다 (이 런북에서는 불필요).
+- `MUJOCO_GL`은 **설정하지 말 것** (인터랙티브 뷰어는 GLFW 사용). 특히 `MUJOCO_GL=glx`는 크래시하므로 금지. 헤드리스 offscreen 렌더가 필요한 경우에만 `MUJOCO_GL=egl`을 쓴다(이 런북에서는 불필요). 자세한 건 하단 트러블슈팅 참고.
 - 내부 동작: `MujocoRobotServer`가 `127.0.0.1:6001` ZMQ 서버로 뜨고, GELLO `GelloAgent`가 30Hz로 관절값을 읽어 sim에 흘려보냄. config의 `start_joints`(`[0,0,0,-1.57,0,1.57,0, 1.0]`)로 먼저 이동한 뒤 control loop가 돌기 시작함.
 
 ### 7) 정상 동작 확인 (What you should see)
 
-- `:1` 디스플레이에 MuJoCo 뷰어 창이 뜨고 Franka Panda가 **체커보드 바닥 + 스카이박스 배경** 위에 보임. 로봇 앞(+x)에 **작은 빨간 큐브**가 바닥에 놓여 있음 (`add_scene`/`add_cube`).
+- 지정한 X 디스플레이에 MuJoCo 뷰어 창이 뜨고 Franka Panda가 **체커보드 바닥 + 스카이박스 배경** 위에 보임. 로봇 앞(+x)에 **작은 빨간 큐브**가 바닥에 놓여 있음 (`add_scene`/`add_cube`).
 - GELLO를 손으로 움직이면 **시뮬 Panda 팔이 1:1(radian)로 따라옴** (7축).
 - GELLO 그리퍼 레버를 당기면 **sim 핸드가 닫히고**, 놓으면 열림 (`gripper_builtin: true` + `gripper_invert: true`로 GELLO `[0,1]` → panda actuator8 `[0,255]`로 리스케일, 255=open이라 invert).
 - 터미널에는 `Server ready!`, `Launching robot: MujocoRobotServer, agent: GelloAgent`, `Control loop: 30 Hz` 같은 로그가 찍힘.
@@ -167,7 +178,9 @@ pkill -f launch_yaml.py
 
 ## 코드 변경 상세 (Code Changes)
 
-동작에 영향을 주는 변경은 4개 파일(+ 검증용 데모 스크립트 1개)이다. 토크 관련 패치 2개는 GELLO를 안전하게 read-only로 쓰기 위한 것이고 (조민제 docker 커밋 `f67af69`을 미러링, 업스트림에는 없음), 나머지는 panda.xml의 내장 그리퍼를 sim에 연결하고(`sim_robot.py` + `rwh_panda.yaml`) 배경 씬·큐브를 추가하는 변경이다.
+동작에 영향을 주는 변경은 4개 파일(+ 검증용 데모 스크립트 1개)이다. 토크 관련 패치 2개는 GELLO를 안전하게 read-only로 쓰기 위한 것이고 (조민제 docker 커밋 `f67af69`을 미러링, 업스트림 `wuphilipp/gello_software`에는 없음), 나머지는 panda.xml의 내장 그리퍼를 sim에 연결하고(`sim_robot.py` + `rwh_panda.yaml`) 배경 씬·큐브를 추가하는 변경이다.
+
+> **이 두 토크 패치는 이 RWH fork에 이미 커밋돼 있음(`c375187`).** 따라서 이 fork를 그냥 clone/pull 해서 쓰면 초기화 크래시는 나지 않는다. 아래 설명은 "왜 이 패치가 필요한가"의 배경일 뿐이고, 새로 뭔가를 적용할 필요는 없다. (이 패치가 없어서 크래시하는 상황은 오직 업스트림 `wuphilipp/gello_software` 위로 rebase/pull 했을 때뿐 — 하단 트러블슈팅 참고.)
 
 ### 1. `gello/dynamixel/driver.py` — `set_torque_mode()`: disable 시 alert 비트 무시
 
@@ -300,7 +313,7 @@ robot:
 
 agent:
   _target_: gello.agents.gello_agent.GelloAgent
-  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO75A-if00-port0"
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
   dynamixel_config:
     _target_: gello.agents.gello_agent.DynamixelRobotConfig
     joint_ids: [1, 2, 3, 4, 5, 6, 7]
@@ -315,7 +328,7 @@ hz: 30
 설정 해석:
 - `gripper_xml_path: null` + `gripper_builtin: true` 조합이 위 3번 분기를 켜는 트리거. ctrlrange는 모델에서 자동으로 `[0,255]`를 읽어온다 (하드코딩 아님).
 - arm 7관절은 라디안 단위로 1:1 teleop. `joint_ids [1..7]`이 panda의 arm 7축에 대응하고, 8번 채널(`gripper_config`의 첫 값 `8`)이 그리퍼.
-- `joint_offsets`/`joint_signs`/`gripper_config` 값은 전부 **조민제의 docker 이미지**(`minje227/gello:RWH_Gello_PandaV1.0`)에서 그대로 가져온 것. 같은 물리 GELLO(port `FTBEO75A`, XL330 서보)이므로 재캘리브레이션이 필요 없다. GELLO 조립/서보 장착이 바뀌지 않는 한 유효.
+- `joint_offsets`/`joint_signs`/`gripper_config` 값은 전부 **조민제의 docker 이미지**(`minje227/gello:RWH_Gello_PandaV1.0`)에서 그대로 가져온 것. 같은 물리 GELLO(port `FTBEO6QK`, XL330 서보)이므로 재캘리브레이션이 필요 없다. GELLO 조립/서보 장착이 바뀌지 않는 한 유효.
 - `start_joints`는 8개(7 arm + 1 gripper). 앞 7개 `[0,0,0,-1.57,0,1.57,0]`은 panda의 표준 home 포즈에 가깝고, 마지막 `1.0`이 그리퍼 정규화 시작값.
 - `hz: 30` — teleop 루프 주파수.
 
@@ -406,7 +419,7 @@ if stable_grasp:
 |---|---|
 | 어댑터 | U2D2 (FTDI FT232H 기반) |
 | USB id | `0403:6014` |
-| 포트 basename | `usb-FTDI_USB__-__Serial_Converter_FTBEO75A-if00-port0` |
+| 포트 basename | `usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0` |
 
 ### 캘리브레이션 값
 
@@ -514,6 +527,17 @@ GELLO 패시브 텔레오퍼 풀 동작 완성:
 - 그리퍼가 **올바른 방향으로** 열리고 닫힘
 - **GELLO 모터는 한 번도 통전(torque enable)되지 않음** — 끝까지 passive leader로만 사용
 
+### 9. 트러블슈팅 요약 (Troubleshooting)
+
+| 증상 | 원인 / 해결 |
+|---|---|
+| 뷰어 창이 안 뜸, 물리가 안 도는데 로그는 정상 | `DISPLAY`가 잘못됐거나 없음. `echo $DISPLAY`로 세션 값 확인 후 `DISPLAY=<값>`으로 재실행(일반 모니터 `:0`). GLFW 뷰어는 실제 X 디스플레이 필요. |
+| 뷰어가 뜨자마자 크래시 | `MUJOCO_GL=glx`가 설정돼 있음. **unset** 할 것(`unset MUJOCO_GL`). 인터랙티브 뷰어는 GLFW를 쓰므로 이 변수를 건드리면 안 됨. offscreen 렌더가 필요할 때만 `MUJOCO_GL=egl`. |
+| `Address already in use` / 포트 6001 안 풀림 | 이전 프로세스가 남음. `pkill -f launch_yaml.py` 후 몇 초 뒤 재실행. |
+| `Permission denied`로 포트 못 엶 | `dialout` 그룹 미가입. `sudo usermod -aG dialout $USER` 후 재로그인(4단계 참고). |
+| 모터 스캔 0개 / 서보 무응답 | **전원 미인가.** XL330은 읽기조차 별도 5V 전원 필요(전원 ≠ 토크). 5V 연결 후 재시도. |
+| `RuntimeError: Failed to set torque mode for Dynamixel with ID 1` (초기화 크래시) | XL330 alert bit(128) 처리 패치가 없는 상태. **이 RWH fork(`c375187`)에는 이미 들어있어 clone만으로는 안 남.** 이 크래시는 업스트림 `wuphilipp/gello_software` 위로 rebase/pull 해서 패치가 덮인 경우에만 발생 → `gello/dynamixel/driver.py` + `gello/robots/dynamixel.py`의 토크-disable 패치(위 코드 변경 1·2번)를 다시 적용. |
+
 ---
 
 ## 향후 작업 (실로봇 ROS2)
@@ -523,7 +547,7 @@ GELLO 패시브 텔레오퍼 풀 동작 완성:
 - **실행 대시보드**: `ROBOT_IP=172.29.0.2 USE_RVIZ=true /workspace/panda_ros2_ws/rwh_gello_realtime_dashboard.sh` — GELLO publisher → arm controller → gripper client 순서로 띄움.
 - **RViz 전용(실로봇 없이 시각화)**: `ros2 launch franka_bringup rwh_gello_rviz.launch.py gello_com_port:=/dev/ttyUSB0` (`use_fake_hardware:=true`).
 - **Joint impedance controller** (1kHz): P gain `[24,24,24,24,10,6,2]`, D gain `[2,2,2,1,1,1,0.5]`. 실시간성 부족하면 이 게인을 조정.
-- **GELLO publisher 설정**: `rwh_panda_ros2.yaml` (torque_enable 전부 0, com_port FTBEO75A, baud 57600).
+- **GELLO publisher 설정**: `rwh_panda_ros2.yaml` (torque_enable 전부 0, com_port FTBEO6QK, baud 57600).
 - 그리퍼는 실로봇에서 `franka_gripper_client`가 width-percent로 따로 구동 (sim의 `gripper_builtin` 경로와 무관).
 
 > 주의: ROS2 실로봇 경로도 GELLO는 동일하게 passive read-only. 토크 인가 금지 원칙은 그대로 유지한다.

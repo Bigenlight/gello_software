@@ -1,350 +1,145 @@
-# GELLO: General, Low-Cost, and Intuitive Teleoperation Framework
+# GELLO for RWH
 
-<p align="center">
-  <img src="imgs/title.png" />
-</p>
+수동(passive) GELLO 리더 암을 손으로 움직여 **Franka Panda**와 **UR5e**를 원격 조종하는 RWH 랩용 GELLO 포크입니다. 조종 대상은 두 가지 경로로 동작합니다. (1) **MuJoCo 시뮬레이션** — Panda와 UR5e(+ Robotiq 2F-85 그리퍼)를 실시간 뷰어에서 1:1로 미러링, (2) **ROS2 / RViz2** — UR5e는 로컬 native Jazzy, Panda는 docker 이미지로 RViz에 표시. GELLO 자체는 **항상 읽기 전용**이며, 모터에 토크를 인가하지 않습니다.
 
-GELLO is a general, low-cost, and intuitive teleoperation framework for robot manipulators. This repository contains all the software components for GELLO. 
+원본 프로젝트는 [wuphilipp/gello_software](https://github.com/wuphilipp/gello_software)이며, 이 문서는 RWH 랩에서 실제로 쓰는 **Panda + UR** 경로만 다룹니다.
 
-For additional resources:
-- [Project Website](https://wuphilipp.github.io/gello_site/)
-- [Hardware Repository](https://github.com/wuphilipp/gello_mechanical) - STL files and build instructions
-- [ROS 2 Support](ros2/README.md)
+---
 
-## Supported Robots
-- **I2RT YAM**
-- **Franka FR3** (ROS 2 implementation, please refer to the separate documenation in [`ros2/README.md`](ros2/README.md))
-- **Franka FER (Panda)**
-- **UR**
-- **xArm**
-- add your own, see [Adding New Robots](#adding-new-robots)
+## Step 0 — 먼저 모터부터 확인 ⚠️
 
-## Quick Start
+소프트웨어를 건드리기 전에, **모든 Dynamixel 서보가 정상 응답하는지 먼저 확인**하세요. [Dynamixel Wizard 2.0](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_wizard2/)으로 스캔해서 각 모터의 **ID가 올바른지**, **baud가 57600인지** 확인합니다. 여기서 모터가 안 잡히면 이후 어떤 단계도 진행되지 않습니다.
+
+- Wizard 사용법 자체는 이 문서에서 다루지 않습니다 (위 공식 링크 참고).
+- **안전 불변식: GELLO는 passive read-only입니다. GELLO Dynamixel에 절대 토크를 인가하지 마세요.** 드라이버는 토크를 OFF로 초기화하며, 관절 각도를 읽기만 합니다.
+
+---
+
+## USB / Serial 세팅
+
+GELLO는 U2D2(FTDI) USB-시리얼 어댑터로 연결됩니다. 포트를 찾는 방법:
 
 ```bash
-git clone https://github.com/wuphilipp/gello_software.git
-cd gello_software
+ls -l /dev/serial/by-id/     # 안정적인 by-id 경로 (권장)
+ls /dev/ttyUSB*              # enumeration 순서대로 잡히는 임시 경로
+dmesg | grep -i tty          # 방금 꽂은 장치 확인
 ```
 
-## Installation
+config는 `/dev/serial/by-id/usb-FTDI...` 형태의 **by-id 경로**를 사용합니다. `/dev/ttyUSBn`은 재부팅·재연결 시 번호가 바뀌지만 by-id 경로는 장치에 고정되어 있어 안정적입니다. 다른 어댑터를 쓰는 경우 yaml의 `agent.port`만 자신의 by-id 경로로 바꾸면 됩니다.
 
-### Option 1: Virtual Environment (Recommended)
+시리얼 접근 권한이 없으면(permission denied), 사용자를 `dialout` 그룹에 추가한 뒤 **로그아웃/로그인**하세요.
 
-First, install uv if you don't have it:
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo usermod -aG dialout $USER   # 이후 로그아웃 후 다시 로그인 (또는 재부팅)
 ```
 
-Create and activate a virtual environment:
+> 물리적 Dynamixel 배선/조립은 이 문서 범위가 아닙니다 (하드웨어 문서 별도).
+
+---
+
+## 시뮬레이션 (메인)
+
+Sim은 **docker를 쓰지 않습니다.** native `uv` venv(python 3.11)로 실행합니다. 이유: MuJoCo 인터랙티브 GLFW 뷰어(X11/GL) + 실시간 Dynamixel USB 조합은 docker 패스스루가 가장 취약한 케이스입니다. `uv`는 호스트 Ubuntu와 무관하게 py3.11을 제공하고, mujoco는 manylinux wheel로 배포되므로 native가 더 안정적입니다.
+
+### One-time setup
+
+bare 머신이라면 먼저 GL/뷰어 관련 apt 패키지를 설치합니다.
+
 ```bash
-uv venv --python 3.11
-source .venv/bin/activate  # Run this every time you open a new shell
-git submodule init
-git submodule update
+sudo apt install libgl1 libglfw3 libosmesa6
+```
+
+그다음 리포를 준비합니다.
+
+```bash
+git clone <repo> && cd gello_software
+git submodule update --init --recursive    # mujoco_menagerie(로봇 XML) + DynamixelSDK
+
+curl -LsSf https://astral.sh/uv/install.sh | sh   # uv가 없다면
+uv venv --python 3.11 && source .venv/bin/activate
+
 uv pip install -r requirements.txt
 uv pip install -e .
-uv pip install -e third_party/DynamixelSDK/python
+uv pip install -e third_party/DynamixelSDK/python  # 필수 — dynamixel_sdk는 여기서만 설치됨
 ```
 
-### Option 2: Docker
+> 검증된 조합은 **numpy 2.3.5 + mujoco 3.10.0 + python 3.11**입니다. `numpy<2`로 핀하지 마세요 (known-good 환경을 깨뜨립니다).
 
-Install [Docker](https://docs.docker.com/engine/install/ubuntu/), then:
+### 실행
+
+한 프로세스가 MuJoCo 서버 스레드와 GELLO 클라이언트 루프를 함께 돌립니다. `<your-display>`는 자신의 세션 X 디스플레이입니다 (일반 모니터라면 보통 `:0`; 이 headless 빌드 PC 예시에서는 `:1`).
 
 ```bash
-docker build . -t gello:latest
-python scripts/launch.py
+# Panda
+DISPLAY=<your-display> python experiments/launch_yaml.py --left-config-path configs/rwh_panda.yaml
+
+# UR5e (+ Robotiq 2F-85)
+DISPLAY=<your-display> python experiments/launch_yaml.py --left-config-path configs/rwh_ur.yaml
 ```
 
-### ROS 2 Support
+> `MUJOCO_GL`은 **설정하지 마세요** (인터랙티브 GLFW 뷰어를 씀). `MUJOCO_GL=glx`는 크래시합니다.
 
-> **Note:** GELLO also supports ROS 2 Humble for the Franka FR3 robot. See the [ROS 2-specific README](ros2/README.md) in the `ros2` directory.
+**무엇이 보여야 하는가:** MuJoCo 뷰어 창이 뜨고, GELLO를 손으로 움직이면 sim 로봇 팔이 1:1로 따라 움직입니다. GELLO 그리퍼 레버를 여닫으면 sim 그리퍼도 여닫힙니다.
 
-## Hardware Configuration
+### 상세 문서 (config 필드 표 · 캘리브레이션 · 트러블슈팅)
 
-The recommended setup for GELLO is with the I2RT YAM robot arm, using the YAML-based configuration system. This provides the most features and is the best-supported configuration.
+README에는 실행 one-liner만 두었습니다. 전체 config 필드, `joint_offsets` 캘리브레이션(`scripts/gello_get_offset.py`), 트러블슈팅은 아래 딥 문서를 참고하세요.
 
-### Generate YAML Configuration
+| 대상 | 문서 |
+|------|------|
+| Panda (MuJoCo sim) | [`docs/sim/GELLO_PANDA_SIM_TELEOP.md`](docs/sim/GELLO_PANDA_SIM_TELEOP.md) |
+| UR5e + 2F-85 (MuJoCo sim) | [`docs/sim/GELLO_UR_SIM_TELEOP.md`](docs/sim/GELLO_UR_SIM_TELEOP.md) |
 
-For the I2RT YAM robot, you can automatically generate your configuration files. This process calibrates the joint offsets and creates configuration files for both simulation and real hardware.
+---
 
-1.  **Update Motor IDs**: Before generating the config, ensure each Dynamixel motor has a unique ID. Install the [Dynamixel Wizard](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_wizard2/) and follow these steps:
-    1.  Connect a single motor to the U2D2 controller.
-    2.  Open Dynamixel Wizard and scan to detect the motor.
-    3.  Change the ID to a unique number (e.g., 1 through 7).
-    4.  Repeat for each motor, ensuring they are in order from base to gripper.
+## ROS2 / RViz2
 
-2.  **Run the Generation Script**: With the YAM arm in its default build position (see image below), run the script:
-    ```bash
-    python scripts/generate_yam_config.py
-    ```
-    Follow the prompts in the terminal. This will create `configs/yam_auto_generated.yaml` for the real robot and `configs/yam_auto_generated_sim.yaml` for the simulation.
+**UR5e**는 **로컬 native ROS2 Jazzy**(Ubuntu 24.04)로 실행합니다 — docker 없음. UR 드라이버가 최신 Ubuntu에서 잘 동작하기 때문입니다. `ur_gello_bringup` 패키지가 `use_mock_hardware`로 RViz2에 UR5e를 띄우며, `source:=fake`(로봇/GELLO 없이 sine sweep)와 `source:=gello`(실제 GELLO 연결, mock UR) 두 모드가 있습니다. 실제 UR5e는 별도 PC에 있고, 이 빌드 PC는 mock hardware로 RViz만 검증합니다. 빌드/실행 절차와 함정(orphan publisher, 포트, 전원)은 딥 문서에 있습니다.
 
-<p align="center">
-  <img src="imgs/yam_default.JPG" width="42%">
-</p>
+**Franka**는 "어느 Franka인가"를 반드시 구분해야 합니다. 랩의 실제 Panda를 RViz로 보려면 조민제님의 **minje227 docker 이미지**로 `multipanda_ros2` 기반 launch를 실행하는 것이 현재의 turnkey 경로입니다 — docker를 쓰는 이유는 franka_ros2 v2.1.0 / libfranka 0.18.2가 ROS2 Humble / Ubuntu 22.04에 하드락되어 있기 때문입니다. **이 이미지는 이후 수정 + 재빌드/재배포가 필요한 "현재 경로"일 뿐 최종본이 아닙니다.** 또한 이 경로는 private docker 이미지와 물리 GELLO가 모두 있어야 동작합니다(오프라인·완전 로컬이 아님). 반면 리포의 `ros2/` 폴더는 upstream Franka 스택으로 **FR3 전용**(관절명 `fr3_joint1..7` 하드코딩, FR3 impedance gain)이며 RViz에 뜨는 것은 **랩의 Panda와 다른 로봇(FR3)**입니다 — 참고용 reference로만 봅니다.
 
-You can now skip to the [Usage](#usage) section.
+### 어느 Franka인가 (용어 구분)
 
-### YAML Configuration System
+- **Panda (sim)** — MuJoCo 시뮬레이션의 Panda (위 시뮬레이션 섹션).
+- **Panda (minje227 docker, RViz)** — 랩의 실제 Panda 모델을 RViz로 보는 현재 경로 (재빌드 예정).
+- **FR3 (repo `ros2/`, upstream reference)** — upstream 스택이 띄우는 다른 로봇, 참고용.
 
-GELLO uses YAML files in `configs/` for configuration. This allows for flexible setup of different robots, environments, and teleoperation parameters. If you have automatically generated your `.yaml` config files with `scripts/generate_yam_config.py`, you probably will not need to modify these confings manually.
+| 경로 | 문서 |
+|------|------|
+| UR5e — 로컬 native Jazzy `ur_gello_bringup` (검증됨) | [`docs/ros2/GELLO_UR_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR_ROS2_BRINGUP.md) |
+| UR5e — 실제 로봇 계획 (아직 미구현) | [`docs/ros2/GELLO_UR_ROS2_PLAN.md`](docs/ros2/GELLO_UR_ROS2_PLAN.md) |
+| Franka — Panda를 RViz로 (minje227 docker, 현재 경로) | [`docs/ros2/GELLO_FRANKA_RVIZ.md`](docs/ros2/GELLO_FRANKA_RVIZ.md) |
+| FR3-vs-Panda 비교 reference | [`docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md`](docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md) |
 
-#### Sample Configs
+---
 
-Sample configs for the YAM arm and the xarm can be found in `configs`.
-
-
-#### Configuration Components
-
-- **Robot Config**: Defines robot type, communication parameters, and physical settings.
-- **Agent Config**: Defines GELLO device settings, joint mappings, and calibration.
-- **DynamixelRobotConfig**: Motor-specific settings including IDs, offsets, signs, and gripper.
-- **Control Parameters**: Update rates (`hz`), step limits (`max_steps`), and safety settings.
-
-## Manual Configuration for Other Robots
-
-#### Python Configuration for Non-YAM arms
-- Most widely supported across different arms
-- Located in `gello/agents/gello_agent.py`
-- Uses `PORT_CONFIG_MAP` dictionary
-- Maps USB serial ports to robot configurations
-
-## Adding New Robots
-
-To integrate a new robot to the Python configs:
-
-1. **Check Compatibility**: Ensure your GELLO kinematics match the target robot
-2. **Implement Robot Interface**: Create a new class implementing the `Robot` protocol from `gello/robots/robot.py`
-3. **Add Configuration**: Update the configuration system with your robot's parameters
-
-See existing implementations in `gello/robots/` for reference:
-- `panda.py` - Franka Panda robot
-- `ur.py` - Universal Robots
-- `xarm_robot.py` - xArm robots
-- `yam.py` - YAM robot
-
-=======
-
-#### 1. Manual `gello_agent` setup
-Set your GELLO and robot arm to a known, matching configuration (see images below) and run the offset detection script.
-
-<p align="center">
-  <img src="imgs/gello_matching_joints.jpg" width="29%"/>
-  <img src="imgs/robot_known_configuration.jpg" width="29%"/>
-  <img src="imgs/fr3_gello_calib_pose.jpeg" width="31%"/>
-</p>
-
-**Command examples:**
-
-**UR Robot:**
-```bash
-python scripts/gello_get_offset.py \
-    --start-joints 0 -1.57 1.57 -1.57 -1.57 0 \
-    --joint-signs 1 1 -1 1 1 1 \
-    --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT7WBG6
-```
-
-**Franka FER (Panda):**
-```bash
-python scripts/gello_get_offset.py \
-    --start-joints 0 0 0 -1.57 0 1.57 0 \
-    --joint-signs 1 1 1 1 1 -1 1 \
-    --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT7WBG6
-```
-
-**I2RT YAM:**
-```bash
-python scripts/gello_get_offset.py \
-    --start-joints 0 0 0 0 0 0 \
-    --joint-signs 1 -1 -1 -1 1 1 \
-    --port /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAAMLV6-if00-port0
-```
-
-**Joint Signs Reference:**
-- UR: `1 1 -1 1 1 1`
-- Panda: `1 -1 1 1 1 -1 1`
-- xArm: `1 1 1 1 1 1 1`
-- YAM: `1 -1 -1 -1 1 1`
-
-Add the generated joint offsets to `gello/agents/gello_agent.py` in the `PORT_CONFIG_MAP`.
-
-#### 2. Create Custom YAML Configurations
-
-1. Copy an existing config from `configs/` as a template (e.g., `yam_passive.yaml`).
-2. Modify the robot `_target_` and parameters for your setup:
-   - For hardware: `gello.robots.ur.URRobot`, `gello.robots.panda.PandaRobot`, etc.
-   - For simulation: `gello.robots.sim_robot.MujocoRobotServer`
-3. Update the agent configuration with your GELLO device settings:
-   - `port`: Your U2D2 device path
-   - `joint_offsets`: From the offset detection script
-   - `joint_signs`: Based on your robot type
-   - `start_joints`: Your GELLO's starting position
-
-## Usage
-
-The recommended way to launch GELLO is with a YAML configuration file.
-
-### CAN Configuration
-Robot arms such as the YAM use a CAN bus to communicate with your machine. If your arm uses a CAN bus, you will need to configure udev rules.
-First, get your CAN bus ID:
-```
-udevadm info -a -p /sys/class/net/can* | grep -i serial
-```
-Then open your CAN bus rules using your text editor of choice.
-```
-sudo nano /etc/udev/rules.d/90-can.rules
-```
-If you only have one arm, add this line:
-```
-SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="<your-CAN-id>", NAME="can_left"
-```
-If you have two arms (a bimanual setup), you will need a second line for your right arm. Your bimanual CAN rules file should contain:
-```
-SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="<left-CAN-id>", NAME="can_left"
-SUBSYSTEM=="net", ACTION=="add", ATTRS{serial}=="<right-CAN-id>", NAME="can_right"
-```
-
-After updating your udev rules, run the following and then unplug and reconnect your CAN devices.
-```
-sudo udevadm control --reload-rules && sudo systemctl restart systemd-udevd && sudo udevadm trigger
-```
-At this point, your CAN devices are correctly configured. If you encounter CAN connctivity issues after this point run `sh scripts/reset_all_can.sh` to reset your CAN buses.
-
-### YAM GELLO Usage (Recommended)
-
-First, install the YAM-specific dependency:
-- **YAM**: [I2RT](https://github.com/i2rt-robotics/i2rt)
-- `uv pip install -e third_party/i2rt`
-
-**Testing in Simulation:**
-Launch the simulation with the auto-generated sim config file:
-```bash
-python experiments/launch_yaml.py --left-config-path configs/yam_auto_generated_sim.yaml
-```
-
-**Real Robot Operation:**
-Launch the real robot with the auto-generated hardware config file:
-```bash
-python experiments/launch_yaml.py --left-config-path configs/yam_auto_generated.yaml
-```
-
-### Launching `gello_agent` for non-YAM arms
-
-For other robots or if not using a YAML configuration, you must launch the robot and controller nodes in separate terminals.
-
-First, install robot-specific dependencies:
-- **UR**: [ur_rtde](https://sdurobotics.gitlab.io/ur_rtde/installation/installation.html)
-- **Panda**: [polymetis](https://facebookresearch.github.io/fairo/polymetis/installation.html)
-- **xArm**: [xArm Python SDK](https://github.com/xArm-Developer/xArm-Python-SDK)
-
-**1. Launch the robot node:**
-```bash
-# For simulation
-python experiments/launch_nodes.py --robot <sim_ur|sim_panda|sim_xarm>
-
-# For real hardware
-python experiments/launch_nodes.py --robot <ur|panda|xarm>
-```
-
-**2. Launch GELLO controller:**
-```bash
-python experiments/run_env.py --agent=gello
-```
-
-### Troubleshooting
-
-If, when you run `generate_yam_config.py`, you get an error detecting offsets, you may need to add your user to the dialout user group. To do so, run:
-`sudo usermod -aG dialout $USER`
-And then log out and log back in or restart your computer.s
-
-If some joints in your arm are not behaving as expected, you may need to modify the joint signs of your configuration. Simply invert the affected joint sign(s) in your .yaml or `gello_agent.py` or physically reverse the installation of the servo.
-
-### Optional: Starting Configuration
-
-Use `--start-joints` to specify GELLO's starting configuration for automatic robot reset:
-```bash
-python experiments/run_env.py --agent=gello --start-joints <joint_angles>
-```
-
-## Advanced Features
-
-### Data Collection
-
-Collect teleoperation demonstrations with keyboard controls.
-
-For the YAM arm launched with `launch_yaml.py`, you can append the flag `--use-save-interface` to enable data saving. This is the recommended method.
+## Repo Layout
 
 ```
-python experiments/launch_yaml.py --left-config-path configs/yam_passive.yaml --use-save-interface
-```
-After launching, you can begin saving with `s` and stop saving with `q`. Data saved will be in the `data` directory in the root of the project.
-
-For non-YAM setups, use the following:
-```bash
-python experiments/run_env.py --agent=gello --use-save-interface
-```
-Process collected data:
-```bash
-python gello/data_utils/demo_to_gdict.py --source-dir=<source_dir>
-```
-
-### Bimanual Operation
-
-The recommended way to use bimanual mode is with `launch_yaml.py`. Pass a config file for the right arm to `--right-config-path`.
-
-```
-python experiments/launch_yaml.py --left-config-path configs/gello_1.yaml --right-config-path configs/gello_2.yaml
+README.md                                   # 이 문서 (front door)
+configs/rwh_panda.yaml                       # Panda sim config
+configs/rwh_ur.yaml                          # UR5e sim config
+experiments/launch_yaml.py                   # sim 실행 엔트리포인트
+scripts/gello_get_offset.py                  # joint_offsets 캘리브레이션
+gello/                                        # GELLO 코어 패키지 (드라이버·로봇·에이전트)
+ros2_ur_ws/                                   # UR5e ROS2 워크스페이스 (ur_gello_bringup)
+ros2/                                         # upstream Franka 스택 (FR3 전용, 참고용)
+docs/sim/                                     # 시뮬레이션 딥 문서
+docs/ros2/                                    # ROS2 딥 문서
+docs/reference/                              # 동료 셋업 가이드 등
 ```
 
-For non-YAM setups, use:
-```bash
-python experiments/launch_nodes.py --robot=bimanual_ur
-python experiments/run_env.py --agent=gello --bimanual
-```
-### FACTR Gravity Compensation
-If you want to activate gravity compensation, all the code can be found in `gello/factr`. It works similarly to the regular launch but for now it's self-contained inside its own subdirectory and supports the YAM arm in sim and in hardware.
+> **안전 불변식 (재강조): GELLO는 언제나 passive read-only입니다. GELLO Dynamixel에 절대 토크를 인가하지 마세요.** 드라이버는 토크 OFF로 초기화하고 관절만 읽습니다.
 
-The YAML provides important fields that can control the strength of the gravity compensation and friction. Feel free to mess around with the strenght and friction til you attain your desired 
+---
 
-One important step is to add the URDF. We have provided the URDF for the active GELLO in the [Hardware Repository](https://github.com/wuphilipp/gello_mechanical). You will need to update the path in the YAML to the entry point of the URDF. 
-```bash
-python gello/factr/gravity_compensation.py --config configs/yam_gello_factr_hw.yaml
+## Credits & License
 
-```
+원본 GELLO 프로젝트: [wuphilipp/gello_software](https://github.com/wuphilipp/gello_software) ([Project Website](https://wuphilipp.github.io/gello_site/), [Hardware Repository](https://github.com/wuphilipp/gello_mechanical)).
 
-## Development
+> 이 RWH 문서는 **Panda + UR만** 다룹니다. upstream의 YAM / xArm 관련 내용은 제거했으며, 필요하면 [upstream README](https://github.com/wuphilipp/gello_software)를 참고하세요.
 
-### Code Organization
-
-```
-├── scripts/             # Utility scripts
-├── experiments/         # Entry points and launch scripts
-├── gello/               # Core GELLO package
-│   ├── agents/          # Teleoperation agents
-│   ├── cameras/         # Camera interfaces
-│   ├── data_utils/      # Data processing utilities
-│   ├── dm_control_tasks/# MuJoCo environment utilities
-│   ├── dynamixel/       # Dynamixel hardware interface
-|   ├── factr/           # gravity compensation
-│   ├── robots/          # Robot-specific interfaces
-│   ├── utils/           # Shared launch and control utilities
-│   └── zmq_core/        # ZMQ multiprocessing utilities
-```
-
-### Contributing
-
-Install development dependencies and set up pre-commit hooks to ensure code quality before contributing:
-```bash
-uv pip install -r requirements_dev.txt
-uv pip install pre-commit
-pre-commit install
-```
-
-The codebase uses `isort` and `black` for code formatting.
-
-We welcome contributions! Submit pull requests to help make teleoperation more accessible and higher quality.
-
-## Citation
+### Citation
 
 ```bibtex
 @misc{wu2023gello,
@@ -354,13 +149,8 @@ We welcome contributions! Submit pull requests to help make teleoperation more a
 }
 ```
 
-## License & Acknowledgements
+### License
 
-This project is licensed under the MIT License (see LICENSE file).
+This project is licensed under the MIT License (see `LICENSE` file).
 
-### Third-Party Dependencies
-- [google-deepmind/mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie): Robot models for MuJoCo
-- [brentyi/tyro](https://github.com/brentyi/tyro): Argument parsing and configuration
-- [ZMQ](https://zeromq.org/): Multiprocessing communication framework
-
-This project uses components from ‘FACTR Teleop: Low-Cost Force-Feedback Teleoperation’ (Apache‑2.0). See `https://github.com/RaindragonD/factr_teleop/`.
+이 프로젝트는 'FACTR Teleop: Low-Cost Force-Feedback Teleoperation' (Apache-2.0)의 컴포넌트를 사용합니다. https://github.com/RaindragonD/factr_teleop/ 참고.
