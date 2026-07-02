@@ -1,0 +1,21 @@
+robot:
+  _target_: gello.robots.sim_robot.MujocoRobotServer
+  xml_path: "third_party/mujoco_menagerie/universal_robots_ur5e/ur5e.xml"
+  gripper_xml_path: "third_party/mujoco_menagerie/robotiq_2f85/2f85.xml"  # UR uses a separate Robotiq 2F-85 gripper model (not builtin)
+  add_scene: true  # checker floor + skybox + lighting for viewer background
+  add_red_cube: true  # single red cube on a small table, placed within UR5e reach (-x side)
+  host: "127.0.0.1"
+  port: 6001
+
+agent:
+  _target_: gello.agents.gello_agent.GelloAgent
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
+  dynamixel_config:
+    _target_: gello.agents.gello_agent.DynamixelRobotConfig
+    joint_ids: [1, 2, 3, 4, 5, 6]                       # UR is 6-DOF; gripper is Dynamixel id 7
+    joint_offsets: [3.142, 1.571, 4.712, 4.712, 4.712, 3.142]  # from gello_get_offset.py (UR pose 0 -1.57 1.57 -1.57 -1.57 0); recalibrated after J2/J3 remount
+    joint_signs: [1, 1, -1, 1, 1, 1]                    # UR joint-sign convention
+    gripper_config: [7, 210.649609375, 168.849609375]   # [gripper_id, open_deg, close_deg] — tune open/close in sim if needed
+  start_joints: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0, 0.0]  # 6 arm joints (calib pose) + 1 normalized gripper
+
+hz: 30

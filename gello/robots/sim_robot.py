@@ -56,6 +56,7 @@ def build_scene(
     gripper_xml_path: Optional[str] = None,
     add_scene: bool = False,
     add_cube: bool = False,
+    add_red_cube: bool = False,
     stable_grasp: bool = False,
 ):
     # assert robot_xml_path.endswith(".xml")
@@ -141,26 +142,84 @@ def build_scene(
     # arena.worldbody.attach(arm_copy)
 
     if add_cube:
-        # IMPORTANT: add the cube AFTER attaching the arm so the cube's freejoint
-        # qpos is appended AFTER the arm joints in the compiled model. This keeps
-        # qpos[:num_joints] mapping to the arm. The cube has no actuator, so nu is
-        # unchanged. Placed on the floor in front of the panda base (+x direction).
-        cube = arena.worldbody.add("body", name="cube", pos=[0.5, 0.0, 0.025])
-        cube.add("freejoint", name="cube_free")
-        cube.add(
+        # A low, wide table (fixed slab, no joint -> adds no qpos/nu) in front of the
+        # panda so the cube sits at a comfortable grasp height instead of on the floor.
+        # Top surface at z = TABLE_TOP (slab half-height 0.1, center z 0.1).
+        TABLE_TOP = 0.2
+        table = arena.worldbody.add("body", name="table", pos=[0.5, 0.0, TABLE_TOP / 2])
+        table.add(
             "geom",
             type="box",
-            size=[0.02, 0.02, 0.02],
-            rgba=[0.8, 0.2, 0.2, 1.0],
-            mass=0.05,
-            # condim=6 enables tangential + torsional + rolling friction so the cube
-            # does not twist/slip out of the gripper. MuJoCo contact condim/friction
-            # are the elementwise max of the two geoms, so raising them on the cube
-            # also strengthens the cube<->fingertip-pad contacts (pads default to
-            # condim=3, friction=[1,0.005,0.0001]).
-            condim=6,
-            friction=[2.0, 0.05, 0.001],
+            size=[0.25, 0.35, TABLE_TOP / 2],  # 0.5 x 0.7 x 0.2 m slab
+            rgba=[0.55, 0.40, 0.25, 1.0],  # wood-ish brown
+            friction=[1.0, 0.05, 0.001],
         )
+
+        # IMPORTANT: add the cubes AFTER attaching the arm so each cube's freejoint
+        # qpos is appended AFTER the arm joints in the compiled model. This keeps
+        # qpos[:num_joints] mapping to the arm. The cubes have no actuators, so nu is
+        # unchanged. Placed in a row on the table top in front of the panda (+x).
+        # condim=6 enables tangential + torsional + rolling friction so a cube does
+        # not twist/slip out of the gripper. MuJoCo contact condim/friction are the
+        # elementwise max of the two geoms, so raising them on the cube also
+        # strengthens the cube<->fingertip-pad contacts (pads default to
+        # condim=3, friction=[1,0.005,0.0001]).
+        cubes = [
+            ("cube", [0.5, 0.00, TABLE_TOP + 0.022], [0.8, 0.2, 0.2, 1.0]),   # red
+            ("cube_green", [0.5, 0.15, TABLE_TOP + 0.022], [0.2, 0.7, 0.3, 1.0]),  # green
+            ("cube_blue", [0.5, -0.15, TABLE_TOP + 0.022], [0.2, 0.4, 0.8, 1.0]),  # blue
+        ]
+        for name, pos, rgba in cubes:
+            cube = arena.worldbody.add("body", name=name, pos=pos)
+            cube.add("freejoint", name=name + "_free")
+            cube.add(
+                "geom",
+                type="box",
+                size=[0.022, 0.022, 0.022],
+                rgba=rgba,
+                mass=0.05,
+                condim=6,
+                friction=[2.0, 0.05, 0.001],
+            )
+
+    if add_red_cube:
+        # A single red cube on a small table, placed for a fixed-base arm whose
+        # end-effector faces -x at its start pose (e.g. UR5e with base quat
+        # "0 0 0 -1"), unlike add_cube which targets the panda (+x). The UR5e
+        # start pose 0 -1.57 1.57 -1.57 -1.57 0 puts the pinch site near
+        # (-0.49, -0.13, 0.33), so the cube sits just below it within reach.
+        # Added AFTER the arm attach so the freejoint qpos lands after the arm
+        # joints (qpos[:nu] still maps to the arm); no actuator -> nu unchanged.
+        TABLE_TOP = 0.2
+        cx, cy = -0.5, -0.13
+        table = arena.worldbody.add("body", name="table", pos=[cx, cy, TABLE_TOP / 2])
+        table.add(
+            "geom",
+            type="box",
+            size=[0.2, 0.2, TABLE_TOP / 2],  # 0.4 x 0.4 x 0.2 m slab
+            rgba=[0.55, 0.40, 0.25, 1.0],  # wood-ish brown
+            friction=[1.0, 0.05, 0.001],
+        )
+        # Three cubes in a row on the table (spread along y so each can be grasped
+        # individually). Added AFTER the arm attach so their freejoint qpos land
+        # after the arm joints; no actuators -> nu unchanged.
+        cubes = [
+            ("cube", [cx, cy, TABLE_TOP + 0.022], [0.8, 0.2, 0.2, 1.0]),        # red
+            ("cube_green", [cx, cy + 0.15, TABLE_TOP + 0.022], [0.2, 0.7, 0.3, 1.0]),  # green
+            ("cube_blue", [cx, cy - 0.15, TABLE_TOP + 0.022], [0.2, 0.4, 0.8, 1.0]),   # blue
+        ]
+        for name, pos, rgba in cubes:
+            cube = arena.worldbody.add("body", name=name, pos=pos)
+            cube.add("freejoint", name=name + "_free")
+            cube.add(
+                "geom",
+                type="box",
+                size=[0.022, 0.022, 0.022],
+                rgba=rgba,
+                mass=0.05,
+                condim=6,  # tangential + torsional + rolling friction (anti-slip grasp)
+                friction=[2.0, 0.05, 0.001],
+            )
 
     return arena
 
@@ -238,6 +297,7 @@ class MujocoRobotServer:
         gripper_invert: bool = False,
         add_scene: bool = False,
         add_cube: bool = False,
+        add_red_cube: bool = False,
         stable_grasp: bool = False,
     ):
         self._has_gripper = gripper_xml_path is not None
@@ -254,6 +314,7 @@ class MujocoRobotServer:
             gripper_xml_path,
             add_scene=add_scene,
             add_cube=add_cube,
+            add_red_cube=add_red_cube,
             stable_grasp=stable_grasp,
         )
 
@@ -358,13 +419,6 @@ class MujocoRobotServer:
 
                 if self._print_joints:
                     print(self._joint_state)
-
-                # Example modification of a viewer option: toggle contact points every two seconds.
-                with viewer.lock():
-                    # TODO remove?
-                    viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = int(
-                        self._data.time % 2
-                    )
 
                 # Pick up changes to the physics state, apply perturbations, update options from GUI.
                 viewer.sync()
