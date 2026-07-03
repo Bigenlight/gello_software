@@ -155,6 +155,7 @@ HEADLESS=true ./run_ur7e_gello_real.sh    # Method B: 펜던트 REMOTE 모드, P
 |------|------|
 | UR7e — 턴키 셋업 CLI + 프리플라이트 체크리스트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
 | UR7e — sim/mock 브링업 (검증됨) | [`docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md) |
+| UR7e — 2F-85 그리퍼 (Modbus over tool-comm, 검증됨) | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
 | UR7e — 실제 로봇 런북 (코드 완료·실기 미검증) | [`docs/ros2/GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
 | UR7e — Remote Control 모드 (헤드리스/대시보드) 레퍼런스 | [`UR7e_Remote_Control_ROS2.md`](UR7e_Remote_Control_ROS2.md) |
 

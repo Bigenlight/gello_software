@@ -20,9 +20,25 @@
 # #  Auto-sequence: driver(t=0) -> gello_publisher(t=6s, TimerAction) ->     #
 # #  gello_move_to_start handshake(t=8s, smooth trajectory to GELLO pose) -> #
 # #  STRICT switch to forward_position_controller -> once the handshake      #
-# #  process EXITS with returncode==0, gello_ur_bridge streaming + gripper   #
-# #  start together immediately (event-driven via OnProcessExit, NOT a fixed #
-# #  timer). The arm STARTS MOVING around t=8s.                              #
+# #  process EXITS with returncode==0, gello_ur_bridge streaming + the       #
+# #  Robotiq 2F-85 gripper (Modbus over the driver's shared /tmp/ttyUR socat #
+# #  bridge) + gello_gripper_bridge start together immediately (event-driven #
+# #  via OnProcessExit, NOT a fixed timer). The arm STARTS MOVING ~t=8s.     #
+# #                                                                          #
+# #  GRIPPER IS NOW INCLUDED: the 2F-85 is driven from the GELLO gripper     #
+# #  axis (closing the GELLO hand closes the robot gripper). The ROBOT MUST  #
+# #  BE POWERED ON. TOOL VOLTAGE is supplied by the DRIVER (tool_voltage:=24 #
+# #  in the launch), NOT the pendant Installation tab — the driver also runs #
+# #  the tool_communication socat forwarder that owns :54321 and the gripper #
+# #  shares as /tmp/ttyUR. A powered-off robot gives no Modbus response and  #
+# #  the gripper simply won't move. On connect the gripper auto-calibrates   #
+# #  (open/close sweep) — KEEP FINGERS CLEAR. Ctrl-C for a clean shutdown so #
+# #  the driver releases :54321 / /tmp/ttyUR for the next launch.            #
+# #                                                                          #
+# #  ONE-TIME CHECK (do once, do not block on it): after Playing External    #
+# #  Control, confirm /robotiq_gripper/position_percent keeps updating —     #
+# #  i.e. that driver-applied tool voltage survives EC Play. If it cuts out, #
+# #  see GELLO_UR7E_GRIPPER.md for the fallback.                             #
 # #                                                                          #
 # #  GELLO stays PASSIVE read-only throughout (no torque to its motors).     #
 # #  Abort anytime: Ctrl-C here, and/or E-STOP on the pendant.               #
@@ -92,6 +108,11 @@ fi
 
 echo "### REAL UR7e teleop | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>}"
 echo "### headless_mode=${HEADLESS_STATE}"
+echo "### Robotiq 2F-85 gripper INCLUDED (Modbus over driver socat bridge /tmp/ttyUR)."
+echo "### ROBOT MUST BE POWERED ON. Tool voltage is supplied by the DRIVER"
+echo "### (tool_voltage:=24), NOT the pendant Installation tab. Keep fingers clear —"
+echo "### the gripper auto-cal sweeps on connect. Ctrl-C to release :54321 / /tmp/ttyUR."
+echo "### ONE-TIME CHECK: after Play EC, confirm /robotiq_gripper/position_percent updates."
 if [ "${HEADLESS}" = "true" ] || [ "${HEADLESS}" = "1" ]; then
     echo "### HEADLESS: ensure the pendant is in REMOTE mode + Real Robot (not Simulation); the arm will move (~t=8s)."
 else

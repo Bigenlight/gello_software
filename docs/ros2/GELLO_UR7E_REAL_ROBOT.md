@@ -380,3 +380,25 @@ nc <UR7e_IP> 63352
 - 설계·아키텍처·리스크: [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md)
 - mock UR 브링업 상세: [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md)
 - ros2_control 레퍼런스: [`GELLO_ROS2_CONTROL_REFERENCE.md`](./GELLO_ROS2_CONTROL_REFERENCE.md)
+
+---
+
+### 팔 + 그리퍼 동시 구동 (2F-85 포함)
+
+`ur7e_gello_real.launch.py`는 이제 UR7e 팔 텔레오퍼와 **Robotiq 2F-85 그리퍼**를 함께 올립니다. 그리퍼는 GELLO 리더의 그리퍼 축(width 토픽)에서 구동됩니다 — GELLO 손을 **닫으면 로봇 그리퍼도 닫힙니다**(방향 반전 없음, crush 방지).
+
+**공존 모델 (핵심):** 그리퍼용 tool voltage와 RS485 버스는 **드라이버**가 제공합니다(펜던트 Installation 탭 아님).
+
+- 런치의 `ur_control.launch.py` include에 `use_tool_communication:=true`, `tool_voltage:=24`, `tool_device_name:=/tmp/ttyUR`를 전달합니다. 드라이버가 (1) 툴에 24V를 인가하고 (2) `robot_ip:54321`을 소유하는 tool_communication(socat) 포워더를 띄워 시리얼 장치 `/tmp/ttyUR`로 노출합니다.
+- `robotiq_gripper_modbus` 노드는 **직접 TCP가 아니라** 이 브리지를 공유합니다: per-node 오버라이드 `serial_port:=/tmp/ttyUR`. 따라서 `:54321`의 클라이언트는 **드라이버 socat 포워더 단 하나**입니다.
+- 그리퍼(`robotiq_gripper_modbus`)와 `gello_gripper_bridge`는 팔 브리지(`gello_ur_bridge`)와 **동일한** handshake 성공 핸들러(`OnProcessExit(move_to_start)`, returncode==0)에서 함께 시작합니다 — handshake 완료 후에만 올라옵니다.
+
+**왜 펜던트가 아니라 드라이버인가:** 펜던트 Installation 탭에서 tool voltage를 인가하면 External Control이 시작될 때 그것을 **끊어버리고**, EC 실행 중에 다시 인가하면 EC가 **멈춥니다**. 드라이버 인자(`tool_voltage:=24`)로 공급해야 EC PLAY 중에도 유지됩니다.
+
+**필수 조건 / 체크:**
+
+- **로봇 전원 ON** 필수. POWER_OFF면 tool voltage가 없어 Modbus 응답이 없고 그리퍼가 움직이지 않습니다(버그 아님, 노드는 계속 재시도).
+- **1회성 확인 (블로킹 아님):** External Control을 Play한 뒤 `ros2 topic echo /robotiq_gripper/position_percent`가 계속 갱신되는지 확인 — 즉 드라이버가 인가한 tool voltage가 EC Play 중에도 살아있는지. 끊기면 fallback은 [`GELLO_UR7E_GRIPPER.md`](./GELLO_UR7E_GRIPPER.md) 참조.
+- **connect 시 auto-cal(open/close sweep)** — 손가락/물체를 치우세요.
+- **방향 반전 = crush 위험:** `gello_gripper_bridge.invert`는 반드시 `false` 유지.
+- **깨끗한 종료:** 항상 Ctrl-C(SIGINT)로 종료해 드라이버가 `:54321` / `/tmp/ttyUR`를 반납하도록 합니다.

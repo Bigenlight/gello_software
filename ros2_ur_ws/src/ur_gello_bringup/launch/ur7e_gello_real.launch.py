@@ -50,8 +50,20 @@ Bring-up sequence (staggered TimerActions):
                   in ur7e_gello.yaml). The bridge seeds from the robot's ACTUAL
                   /joint_states, so it ramps from the real pose to GELLO with no
                   snap. Started by an OnProcessExit handler (NOT a fixed timer).
-  (5) with the bridge -> robotiq_urcap talks to the Robotiq gripper over the UR
-                  controller's URCap socket.
+  (5) with the bridge -> the Robotiq 2F-85 gripper comes up via Modbus RTU over
+                  the UR RS485 tool-communication bus. The arm driver is started
+                  with use_tool_communication:=true, tool_voltage:=24,
+                  tool_device_name:=/tmp/ttyUR, so the driver both POWERS the
+                  tool (24V) and starts the UR tool_communication (socat)
+                  forwarder that OWNS robot_ip:54321 and exposes it as the
+                  serial device /tmp/ttyUR. The gripper node SHARES that bridge
+                  with serial_port:=/tmp/ttyUR (NOT direct TCP), so exactly one
+                  client owns :54321 = the driver's socat forwarder.
+                  gello_gripper_bridge maps the GELLO width topic
+                  (0=OPEN..1=CLOSED) onto /robotiq_gripper/command_percent
+                  (0=open..1=closed, no inversion) so closing the GELLO hand
+                  closes the robot gripper. The ROBOT MUST BE POWERED ON so tool
+                  voltage powers the 2F-85.
 
 Prerequisites on this machine (real GELLO path):
     sudo apt install ros-humble-dynamixel-sdk
@@ -217,6 +229,21 @@ def generate_launch_description():
             # Optional per-robot calibration (ur_calibration output). Forwarded
             # as-is; empty string -> driver uses nominal kinematics.
             "kinematics_params_file": kinematics_params_file,
+            # Tool communication for the Robotiq 2F-85 gripper. This makes the
+            # DRIVER (not the pendant Installation tab) provision the tool:
+            #   * use_tool_communication:=true starts the UR tool_communication
+            #     (socat) forwarder, which OWNS robot_ip:54321 and exposes it as
+            #     the serial device /tmp/ttyUR.
+            #   * tool_voltage:=24 powers the 2F-85 (24V) from the driver, so it
+            #     stays up while External Control is PLAYING (applying tool
+            #     voltage via the pendant would be cut by EC starting, and
+            #     re-applying it via the pendant would STOP EC).
+            #   * tool_device_name:=/tmp/ttyUR is the serial device the gripper
+            #     Modbus node then SHARES (serial_port:=/tmp/ttyUR below), so
+            #     exactly ONE client owns :54321 = this socat forwarder.
+            "use_tool_communication": "true",
+            "tool_voltage": "24",
+            "tool_device_name": "/tmp/ttyUR",
         }.items(),
     )
 
@@ -258,18 +285,52 @@ def generate_launch_description():
     )
 
     # ------------------------------------------------------------------ #
-    # (5) Robotiq gripper node (talks to the real gripper via URCap socket).
+    # (5) Robotiq 2F-85 gripper over Modbus RTU (SHARED socat bridge /tmp/ttyUR).
+    #
+    #  The gripper is driven via Modbus RTU over the UR RS485 tool-
+    #  communication bus. Because the arm bring-up (ur_control_launch above)
+    #  is started with use_tool_communication:=true / tool_voltage:=24 /
+    #  tool_device_name:=/tmp/ttyUR, the DRIVER powers the tool (24V) AND runs
+    #  the tool_communication (socat) forwarder that OWNS robot_ip:54321 and
+    #  exposes it as the serial device /tmp/ttyUR. So we do NOT use direct TCP
+    #  here — instead the gripper node SHARES the driver's bridge with
+    #  serial_port:=/tmp/ttyUR, keeping exactly ONE client on :54321 (the socat
+    #  forwarder). The ROBOT MUST BE POWERED ON so tool voltage powers the
+    #  2F-85; a powered-off robot gives no Modbus response and the node simply
+    #  keeps retrying (not a bug).
+    #
+    #  Interfaces preserved: action /robotiq_gripper_controller/gripper_cmd,
+    #  service /robotiq_gripper/set_closed, status ~/position_percent +
+    #  ~/joint_states. Streaming command topic ~/command_percent (Float32,
+    #  0=open..1=closed) is what the bridge drives.
     # ------------------------------------------------------------------ #
-    # On the REAL robot the gripper must actually connect: override the
-    # params-file defaults (connect_on_start:false, robot_ip:0.0.0.0) so the
-    # URCap socket (63352) is opened against the real UR7e controller.
-    gripper_node = Node(
+    gripper_modbus_node = Node(
         package="ur_gello_bringup",
-        executable="robotiq_urcap",
+        executable="robotiq_gripper_modbus",
         parameters=[
             params_file,
-            {"robot_ip": robot_ip, "connect_on_start": True},
+            # serial_port=/tmp/ttyUR -> SHARE the driver's socat bridge (NOT
+            # direct TCP). The driver's tool_communication forwarder owns
+            # :54321; this node reads/writes the serial device it exposes.
+            # robot_ip is injected here (not in the yaml). connect_on_start
+            # defaults True in the node so it opens the device on start.
+            {"robot_ip": robot_ip, "serial_port": "/tmp/ttyUR"},
         ],
+        output="screen",
+    )
+
+    # ------------------------------------------------------------------ #
+    # (6) GELLO -> gripper bridge. Subscribes the GELLO width topic
+    #     /gripper/gripper_client/target_gripper_width_percent and republishes
+    #     it onto /robotiq_gripper/command_percent with the CORRECT direction
+    #     (width 0=OPEN..1=CLOSED -> command_percent 0=open..1=closed,
+    #     invert=False). GELLO stays passive; this node only reads a topic and
+    #     publishes a Float32 (no hardware access).
+    # ------------------------------------------------------------------ #
+    gello_gripper_bridge_node = Node(
+        package="ur_gello_bringup",
+        executable="gello_gripper_bridge",
+        parameters=[params_file],
         output="screen",
     )
 
@@ -281,11 +342,12 @@ def generate_launch_description():
     #     scaled_joint_trajectory_controller to become active (i.e. for the
     #     External Control program to be PLAYING on the pendant), so a fixed
     #     delay is no longer timing-critical.
-    #   * bridge + gripper are started ONLY when move_to_start EXITS SUCCESSFULLY
-    #     (return code 0 == handshake done, forward_position_controller active).
-    #     This replaces the old fixed bridge_start_delay timer, which could fire
-    #     before the (variable-duration) handshake had switched controllers and
-    #     leave the arm commanded on an inactive controller (== no motion).
+    #   * arm bridge + Modbus gripper + gello_gripper_bridge are started ONLY
+    #     when move_to_start EXITS SUCCESSFULLY (return code 0 == handshake done,
+    #     forward_position_controller active). This replaces the old fixed
+    #     bridge_start_delay timer, which could fire before the
+    #     (variable-duration) handshake had switched controllers and leave the
+    #     arm commanded on an inactive controller (== no motion).
     # ------------------------------------------------------------------ #
     gello_publisher_delayed = TimerAction(
         period=6.0,
@@ -303,11 +365,13 @@ def generate_launch_description():
                     msg=(
                         "Move-to-start handshake SUCCEEDED "
                         "(forward_position_controller active); starting "
-                        "gello_ur_bridge streaming + gripper."
+                        "gello_ur_bridge streaming + Modbus gripper "
+                        "(shared socat bridge /tmp/ttyUR) + gello_gripper_bridge."
                     )
                 ),
                 bridge_node,
-                gripper_node,
+                gripper_modbus_node,
+                gello_gripper_bridge_node,
             ]
         return [
             LogInfo(

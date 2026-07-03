@@ -55,8 +55,35 @@ gello_move_to_start:
     trajectory_duration: 5.0
     arrival_tolerance: 0.05
 
-robotiq_urcap:
+# Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
+# Driven via Modbus RTU over the UR RS485 tool-communication line.
+# serial_port DEFAULT below is "" = DIRECT TCP :54321, which is the GRIPPER-ONLY
+# path (ur7e_gripper_only.launch.py, no arm/External Control — the gripper node
+# is the sole :54321 owner). The INTEGRATED real teleop launch
+# (ur7e_gello_real.launch.py) OVERRIDES serial_port to /tmp/ttyUR: there the arm
+# driver runs with use_tool_communication:=true + tool_voltage:=24, so the DRIVER
+# powers the tool (pendant Installation-tab voltage would be cut by External
+# Control) and owns :54321 via its socat forwarder, which the gripper SHARES.
+# robot_ip is injected by the launch file (not set here).
+robotiq_gripper:
   ros__parameters:
-    robot_ip: "0.0.0.0"  # placeholder — set to the UR7e controller IP for the real path
-    gripper_port: 63352
-    connect_on_start: false
+    serial_port: ""          # "" => direct TCP :54321 (gripper-only); real launch overrides to /tmp/ttyUR
+    speed: 150               # Robotiq speed (conservative default)
+    force: 50                # Robotiq force (~mid-range, avoids crushing)
+    connect_on_start: true
+    activate_on_connect: true  # triggers auto-cal open/close sweep — keep fingers clear
+    status_rate_hz: 5.0
+    command_rate_hz: 20.0    # streaming ~/command_percent rate-limit toward the bus
+    command_deadband: 0.01   # percent-unit deadband on streaming writes
+
+# GELLO gripper -> command_percent bridge (node name 'gello_gripper_bridge').
+# Reads the GELLO width topic (0=OPEN..1=CLOSED) and publishes
+# /robotiq_gripper/command_percent (0=open..1=closed) with the SAME convention.
+gello_gripper_bridge:
+  ros__parameters:
+    invert: false            # SAFETY: MUST stay false for this robot (crush hazard if true)
+    deadband: 0.02           # 2% deadband suppresses at-rest gripper-axis jitter
+    ema_alpha: 1.0           # EMA off (no lag); set 0.5 if the gripper chatters
+    clamp_min: 0.0
+    clamp_max: 1.0
+    publish_rate_hz: 30.0    # informational; node publishes on receive (~30 Hz GELLO rate)

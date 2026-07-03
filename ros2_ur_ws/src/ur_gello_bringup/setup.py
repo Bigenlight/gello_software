@@ -27,7 +27,10 @@ setup(
         'console_scripts': [
             'gello_publisher = ur_gello_bringup.gello_publisher_node:main',
             'gello_ur_bridge = ur_gello_bringup.gello_ur_bridge_node:main',
+            'gello_gripper_bridge = ur_gello_bringup.gello_gripper_bridge_node:main',
             'robotiq_urcap = ur_gello_bringup.robotiq_urcap_node:main',
+            'robotiq_gripper_modbus = ur_gello_bringup.robotiq_gripper_modbus_node:main',
+            'robotiq_gripper_action = ur_gello_bringup.robotiq_gripper_action_node:main',
             'fake_gello = ur_gello_bringup.fake_gello_node:main',
             'gello_move_to_start = ur_gello_bringup.gello_move_to_start_node:main',
         ],
