@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='Theo',
     maintainer_email='tpingouin@gmail.com',
-    description='GELLO -> UR5e ROS2 teleop bringup (RViz visualization)',
+    description='GELLO -> UR (ur5e/ur7e) ROS2 Humble/Jazzy teleop bringup',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
@@ -29,6 +29,7 @@ setup(
             'gello_ur_bridge = ur_gello_bringup.gello_ur_bridge_node:main',
             'robotiq_urcap = ur_gello_bringup.robotiq_urcap_node:main',
             'fake_gello = ur_gello_bringup.fake_gello_node:main',
+            'gello_move_to_start = ur_gello_bringup.gello_move_to_start_node:main',
         ],
     },
 )

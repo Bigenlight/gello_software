@@ -3,7 +3,7 @@
 <package format="3">
   <name>ur_gello_bringup</name>
   <version>0.1.0</version>
-  <description>GELLO -> UR5e ROS2 teleop bringup (RViz visualization)</description>
+  <description>GELLO -> UR (ur5e/ur7e) ROS2 Humble/Jazzy teleop bringup (RViz visualization)</description>
 
   <maintainer email="tpingouin@gmail.com">Theo</maintainer>
   <license>MIT</license>
@@ -19,6 +19,9 @@
   <exec_depend>ur_description</exec_depend>
   <exec_depend>ur_controllers</exec_depend>
   <exec_depend>dynamixel_sdk</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

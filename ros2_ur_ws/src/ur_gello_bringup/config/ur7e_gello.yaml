@@ -1,0 +1,62 @@
+# ur7e_gello.yaml — parameter file for the GELLO -> UR7e teleop pipeline.
+#
+# Same physical GELLO leader as the ur5e setup (FTDI serial FTBEO6QK).
+# The CALIBRATION block below is REUSED VERBATIM from config/ur_gello.yaml —
+# NO recalibration is needed: the leader hardware is unchanged, and ur5e/ur7e
+# joint_limits are identical (all joints max_velocity 180 deg/s).
+
+gello_publisher:
+  ros__parameters:
+    port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
+    joint_ids: [1, 2, 3, 4, 5, 6]
+    joint_offsets: [3.142, 1.571, 4.712, 4.712, 4.712, 3.142]  # recalibrated after J2/J3 remount
+    joint_signs: [1, 1, -1, 1, 1, 1]
+    # NOTE: must be ALL doubles — rcl's yaml parser rejects mixed int/double arrays.
+    # (gripper id 7 is round-tripped back to int inside the node.)
+    gripper_config: [7.0, 210.649609375, 168.849609375]
+    start_joints: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0, 0.0]
+    publish_rate_hz: 30.0
+
+gello_ur_bridge:
+  ros__parameters:
+    ema_alpha: 0.4
+    # Per-cycle velocity safety (real UR7e). The driver evaluates each command as
+    # delta / 0.002s (500 Hz e-series servo cycle) against the 3.14159 rad/s
+    # (180 deg/s) joint limit, so the safe per-cycle budget is
+    # 3.14159 * 0.002 = 0.00628 rad. At publish 250 Hz two publishes can, under
+    # jitter, coalesce into one 0.002s driver cycle, so the coalescing-safe cap
+    # is HALF that: 0.00314 rad. max_step_rad=0.0025 => single-cycle 1.25 rad/s
+    # and worst-case two-coalesce 2.5 rad/s (~20% margin under the limit).
+    # Sustained teleop speed = 0.0025 * 250 = 0.625 rad/s (~36 deg/s).
+    # For SNAPPIER teleop, first raise publish_rate_hz to 500 (1:1 with the
+    # driver removes the 2x coalescing factor), THEN the single-cycle cap
+    # becomes 0.00628 rad — do NOT raise max_step_rad past ~0.003 while at
+    # 250 Hz. The bridge seeds from the robot's ACTUAL /joint_states, so there is
+    # no start-up snap to absorb; this clamp only bounds slew speed.
+    max_step_rad: 0.0025
+    # NOISE GATE (anti-tremor). A joint only follows GELLO once the leader moves
+    # more than deadband_rad from the held value, so hand tremor + Dynamixel
+    # encoder/motor noise do NOT jitter the arm while you hold still. 0.0 = off.
+    # 0.004 rad ~= 0.23 deg: kills typical at-rest jitter with negligible lag on
+    # intentional motion. Raise (0.006-0.01) if it still shakes at rest; lower
+    # (toward 0.002) if fine moves feel "sticky"/stair-stepped.
+    deadband_rad: 0.004
+    staleness_timeout_s: 0.5
+    # 250 Hz upsamples the 30 Hz GELLO stream into the 500 Hz driver cleanly
+    # (2:1) so at most one new setpoint lands per servo cycle nominally.
+    publish_rate_hz: 250.0
+    # Robot's actual joint state used to seed the first command (prevents snap).
+    joint_states_topic: "/joint_states"
+
+gello_move_to_start:
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+
+robotiq_urcap:
+  ros__parameters:
+    robot_ip: "0.0.0.0"  # placeholder — set to the UR7e controller IP for the real path
+    gripper_port: 63352
+    connect_on_start: false
