@@ -1,0 +1,18 @@
+{
+  "start_wall": "2026-07-03T17:13:23.712113",
+  "session_dir": "/home/laptop3/gello_software/ros2_ur_ws/gello_logs/session_20260703_171323",
+  "sample_rate_hz": 100.0,
+  "duration_s": 43.01,
+  "message_counts": {
+    "command": 10751,
+    "gello_joint_states": 1290,
+    "gello_grip": 1290,
+    "grip_pos": 215,
+    "ur_joint_states": 4233,
+    "wrench": 4233,
+    "tcp_pose": 4233,
+    "grip_cmd": 69
+  },
+  "note": "empty columns => that topic was not publishing this run",
+  "finalized": true
+}
