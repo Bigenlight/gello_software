@@ -19,6 +19,21 @@ gello_publisher:
 
 gello_ur_bridge:
   ros__parameters:
+    # SMOOTHING FILTER (anti-vibration). "one_euro" = speed-adaptive low-pass
+    # applied to the GELLO joint values: smooths HARD when the leader is nearly
+    # still (kills hand tremor + Dynamixel motor noise) but opens up when you
+    # move fast (little lag). This is the recommended anti-vibration path.
+    # Set to "ema" to fall back to the fixed EMA + deadband below.
+    filter_type: "one_euro"
+    # LOWER min_cutoff (Hz) => more smoothing at rest (less vibration, a touch
+    # more lag when moving slowly). Try 0.6-1.5. This is the main anti-tremor knob.
+    one_euro_min_cutoff: 1.0
+    # HIGHER beta => cutoff opens faster with speed => snappier on fast moves
+    # (less smoothing during intentional motion). Try 1.0-5.0.
+    one_euro_beta: 2.0
+    # Derivative low-pass (Hz) so jitter doesn't inflate the cutoff; leave ~1.0.
+    one_euro_d_cutoff: 1.0
+    # --- EMA fallback params (used only when filter_type: "ema") ---
     ema_alpha: 0.4
     # Per-cycle velocity safety (real UR7e). The driver evaluates each command as
     # delta / 0.002s (500 Hz e-series servo cycle) against the 3.14159 rad/s

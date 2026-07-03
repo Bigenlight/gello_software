@@ -198,7 +198,7 @@ export GELLO_REPO_ROOT=/home/laptop3/gello_software   # gello 드라이버 impor
 
 - GELLO 리더의 USB 시리얼(`/dev/ttyUSB0`, by-id에 `FTBEO6QK`)이 인식되어 있어야 합니다. dialout 그룹 권한 필요.
 - RViz2에서 확인할 것: **GELLO 암을 손으로 움직이면 mock UR7e 모델이 실시간으로 동일하게 따라 움직여야 합니다.** 6개 조인트 전부 방향과 속도가 자연스럽게 매칭되는지 확인 (부호 반전, 뒤집힌 축, 튐 현상이 없어야 함).
-- 대기 상태(GELLO를 가만히 들고 있을 때)에서 RViz의 팔이 미세하게 떨리면(tremor) `config/ur7e_gello.yaml`의 `deadband_rad`(기본 0.004)를 0.006~0.01로 올려서 재확인합니다.
+- 대기 상태(GELLO를 가만히 들고 있을 때)에서 RViz의 팔이 미세하게 떨리면(tremor) `config/ur7e_gello.yaml`의 `one_euro_min_cutoff`(기본 1.0)를 0.6~0.8로 낮춰서 재확인합니다(진동 주 노브 — [§5 튜닝](#5-튜닝--떨림속도-파라미터-표) 참고).
 
 ### 2-3. 컨트롤러/토픽 상태로 이중 확인
 
@@ -310,7 +310,7 @@ Play를 누르면 `scaled_joint_trajectory_controller`가 ACTIVE로 전환되고
 [gello_move_to_start] Trajectory goal reached (within arrival_tolerance=0.05)
 [gello_move_to_start] Switching controllers: activate=forward_position_controller, deactivate=scaled_joint_trajectory_controller
 [gello_move_to_start] Handshake complete (returncode=0)
-[gello_ur_bridge] Bridge started (ema_alpha=0.4, max_step_rad=0.0025, deadband_rad=0.004, publish_rate_hz=250.0)
+[gello_ur_bridge] gello_ur_bridge started | filter=one_euro(min_cutoff=1.0Hz beta=2.0 d_cutoff=1.0Hz) max_step_rad=0.0025 staleness_timeout_s=0.5 publish_rate_hz=250.0
 [gripper] Gripper node started
 ```
 
@@ -437,11 +437,16 @@ ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
 
 ### 파라미터 표
 
+**진동(떨림) 억제의 주 필터는 `filter_type: one_euro`** 입니다. GELLO 관절값에 **속도-적응형 저역통과**를 걸어, 리더가 거의 멈춰 있을 때(=떨림/모터 노이즈)는 강하게 스무딩하고 빠르게 움직일 때는 cutoff를 열어 지연을 최소화합니다. (수치 검증: 정지 시 잔여 진동이 raw 대비 ~7배, 고정 EMA 대비 ~6배 감소, 이동 지연 증가 +16ms.)
+
 | 파라미터 | 기본값 | 역할 | 조정 가이드 |
 |---|---|---|---|
-| `deadband_rad` | `0.004` | 정지 상태에서 Dynamixel 노이즈로 생기는 미세 떨림을 무시하는 불감대 | 팔이 가만히 있는데도 떨리면 `0.006~0.01`로 올리기; 반응이 둔하고 끈적하면 `~0.002`까지 낮추기 |
-| `ema_alpha` | `0.4` | 지수이동평균(EMA) 스무딩 계수 — 낮을수록 부드럽지만 지연(lag) 증가 | 더 부드럽게 하려면 `0.2~0.3`으로 낮추기; 반응성을 높이려면 올리기 |
-| `max_step_rad` | `0.0025` | 한 사이클당 허용 최대 관절 이동량(속도 상한) | **250 Hz 기준 `0.003` 이하 유지** — 이 값을 올리기 전에 `publish_rate_hz`부터 올릴 것 |
+| `filter_type` | `one_euro` | 스무딩 필터 선택 (`one_euro` 적응형 / `ema` 고정) | 진동이 문제면 `one_euro` 유지 |
+| `one_euro_min_cutoff` | `1.0` | **주 진동 노브** — 정지 시 cutoff(Hz). 낮을수록 더 조용(약간 더 lag) | 아직 떨리면 `0.6~0.8`로 낮추기; 너무 둔하면 `1.5`로 올리기 |
+| `one_euro_beta` | `2.0` | 속도가 붙을 때 cutoff가 열리는 정도(반응성) | 빠른 동작이 둔하게 끌리면 `3~5`로 올리기 |
+| `one_euro_d_cutoff` | `1.0` | 속도 추정 저역통과(Hz) — 보통 그대로 | 거의 건드릴 일 없음 |
+| `ema_alpha` / `deadband_rad` | `0.4` / `0.004` | **fallback**(`filter_type: ema`일 때만 적용) | one_euro 사용 시 무시됨 |
+| `max_step_rad` | `0.0025` | 한 사이클당 허용 최대 관절 이동량(속도 상한, 안전) | **250 Hz 기준 `0.003` 이하 유지** — 이 값을 올리기 전에 `publish_rate_hz`부터 올릴 것 |
 | `publish_rate_hz` | `250.0` | 브리지의 커맨드 발행 주기 | 더 민첩한 반응이 필요하면 `max_step_rad`를 올리기 전에 먼저 `500`으로 올리기 |
 
 > 참고: 위 `publish_rate_hz`는 **브리지**의 발행 주기입니다. `gello_publisher`(리더암 읽기)는 별도로 `publish_rate_hz=30`으로 동작합니다.
@@ -480,11 +485,12 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 ./run_ur7e_gello_real.sh
 ```
 
-### 권장 튜닝 순서
+### 권장 튜닝 순서 (진동)
 
-1. **`deadband_rad` 먼저** — 정지 시 떨림이 없어질 때까지 조금씩 올린다 (0.004 → 0.006 → 0.008…).
-2. **그다음 `ema_alpha`** — 그래도 움직임 중 미세 떨림/노이즈가 남으면 낮춘다 (0.4 → 0.3 → 0.2). 단, 너무 낮추면 반응 지연이 체감된다.
-3. `max_step_rad`, `publish_rate_hz`는 반응성(속도) 문제일 때만, 위 순서를 마친 후 건드린다. `max_step_rad`는 250 Hz 기준 `0.003` 이하로 유지하고, 더 민첩하게 하려면 `publish_rate_hz`를 먼저 `500`으로 올린다.
+1. **`one_euro_min_cutoff` 먼저** — 정지 시 떨림이 사라질 때까지 낮춘다 (1.0 → 0.8 → 0.6…). 이게 진동의 주 노브다.
+2. **그다음 `one_euro_beta`** — 낮은 cutoff로 인해 빠른 동작이 둔하게 끌리면 올린다 (2.0 → 3 → 5). min_cutoff(정지 스무딩)와 beta(이동 반응성)로 "조용함 ↔ 민첩함"의 균형을 맞춘다.
+3. `max_step_rad`, `publish_rate_hz`는 반응성(속도) 문제일 때만 건드린다. `max_step_rad`는 250 Hz 기준 `0.003` 이하로 유지하고, 더 민첩하게 하려면 `publish_rate_hz`를 먼저 `500`으로 올린다.
+4. (고정 EMA를 선호하면 `filter_type: ema`로 바꾸고 `ema_alpha`를 0.4→0.2로 낮추거나 `deadband_rad`를 0.004→0.008로 올리는 옛 방식도 가능하다.)
 
 ---
 

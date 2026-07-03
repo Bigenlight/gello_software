@@ -35,6 +35,7 @@ Safety / deployment notes
   the watchdog measures real elapsed wall time regardless of clock config.
 """
 
+import math
 import time
 
 import rclpy
@@ -54,6 +55,59 @@ UR_JOINT_ORDER = [
 
 # Throttle period (seconds) for repeated warnings so we don't spam the log.
 _WARN_THROTTLE_S = 2.0
+
+
+class _OneEuro:
+    """Scalar 1-Euro filter (Casiez, Roussel & Vogel 2012) at a FIXED period.
+
+    Adaptive low-pass tuned for teleop input jitter: it low-passes the signal
+    with a cutoff that RISES with the (low-passed) signal speed. So when the
+    GELLO joint is nearly still it smooths HARD (kills hand tremor + Dynamixel
+    encoder/motor noise), and when you move it fast the cutoff opens up so the
+    robot tracks with little lag. This beats a fixed EMA, which must trade lag
+    for smoothing on *every* sample.
+
+    Tuning: ``min_cutoff`` (Hz) sets the at-rest smoothing — LOWER = smoother /
+    less jitter (more lag when slow). ``beta`` sets how fast the cutoff opens
+    with speed — HIGHER = snappier on fast moves (less smoothing). ``d_cutoff``
+    low-passes the internal speed estimate so jitter does not inflate the cutoff.
+    """
+
+    def __init__(self, dt: float, min_cutoff: float, beta: float,
+                 d_cutoff: float) -> None:
+        self._dt = dt
+        self._min_cutoff = min_cutoff
+        self._beta = beta
+        self._d_cutoff = d_cutoff
+        self._x_prev: float | None = None
+        self._dx_prev = 0.0
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        # Smoothing factor of a 1st-order low-pass at the given cutoff (Hz).
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def seed(self, x: float) -> None:
+        """Preload the filter state (e.g. from the robot's actual pose)."""
+        self._x_prev = x
+        self._dx_prev = 0.0
+
+    def __call__(self, x: float) -> float:
+        if self._x_prev is None:
+            self._x_prev = x
+            return x
+        # Low-passed derivative (rad/s) of the input.
+        dx = (x - self._x_prev) / self._dt
+        a_d = self._alpha(self._d_cutoff, self._dt)
+        dx_hat = a_d * dx + (1.0 - a_d) * self._dx_prev
+        # Speed-adaptive cutoff: faster motion -> higher cutoff -> less lag.
+        cutoff = self._min_cutoff + self._beta * abs(dx_hat)
+        a = self._alpha(cutoff, self._dt)
+        x_hat = a * x + (1.0 - a) * self._x_prev
+        self._x_prev = x_hat
+        self._dx_prev = dx_hat
+        return x_hat
 
 
 class GelloUrBridge(Node):
@@ -87,6 +141,31 @@ class GelloUrBridge(Node):
                 f"publish_rate_hz={self.publish_rate_hz} invalid; using 125.0 Hz"
             )
             self.publish_rate_hz = 125.0
+
+        # Smoothing filter: "one_euro" (adaptive, best for tremor) or "ema".
+        # one_euro filters the GELLO joint values directly with a speed-adaptive
+        # cutoff: heavy smoothing at rest (kills tremor), light when moving fast.
+        self.filter_type = str(
+            self.declare_parameter("filter_type", "ema").value
+        ).lower()
+        self.one_euro_min_cutoff = float(
+            self.declare_parameter("one_euro_min_cutoff", 1.0).value
+        )
+        self.one_euro_beta = float(
+            self.declare_parameter("one_euro_beta", 2.0).value
+        )
+        self.one_euro_d_cutoff = float(
+            self.declare_parameter("one_euro_d_cutoff", 1.0).value
+        )
+        # Per-joint 1-Euro filters (None when filter_type != "one_euro").
+        self._euro: list[_OneEuro] | None = None
+        if self.filter_type == "one_euro":
+            _dt = 1.0 / self.publish_rate_hz
+            self._euro = [
+                _OneEuro(_dt, self.one_euro_min_cutoff, self.one_euro_beta,
+                         self.one_euro_d_cutoff)
+                for _ in range(len(UR_JOINT_ORDER))
+            ]
 
         # --- State -------------------------------------------------------
         # Raw target reordered into UR_JOINT_ORDER (6 floats) from last good msg.
@@ -127,11 +206,17 @@ class GelloUrBridge(Node):
         )
 
         # --- Startup log -------------------------------------------------
+        if self._euro is not None:
+            _filt = (
+                f"filter=one_euro(min_cutoff={self.one_euro_min_cutoff}Hz "
+                f"beta={self.one_euro_beta} d_cutoff={self.one_euro_d_cutoff}Hz)"
+            )
+        else:
+            _filt = f"filter=ema(alpha={self.ema_alpha} deadband_rad={self.deadband_rad})"
         self.get_logger().info(
             "gello_ur_bridge started | "
-            f"ema_alpha={self.ema_alpha} "
+            f"{_filt} "
             f"max_step_rad={self.max_step_rad} "
-            f"deadband_rad={self.deadband_rad} "
             f"staleness_timeout_s={self.staleness_timeout_s} "
             f"publish_rate_hz={self.publish_rate_hz}"
         )
@@ -203,23 +288,33 @@ class GelloUrBridge(Node):
             self._filtered = list(self._actual_pose)
             self._last_published = list(self._actual_pose)
             self._gated_target = list(self._raw_target)
+            if self._euro is not None:
+                for i in range(len(UR_JOINT_ORDER)):
+                    self._euro[i].seed(self._actual_pose[i])
             self._publish(self._last_published)
             return
 
         alpha = self.ema_alpha
         step = self.max_step_rad
         deadband = self.deadband_rad
+        use_euro = self._euro is not None
         out: list[float] = []
         for i in range(len(UR_JOINT_ORDER)):
-            # DEADBAND NOISE GATE: only update the held target when GELLO moved
-            # more than deadband_rad, so hand tremor / Dynamixel encoder noise is
-            # ignored while holding still (0.0 => gate off, tracks every sample).
-            if abs(self._raw_target[i] - self._gated_target[i]) > deadband:
-                self._gated_target[i] = self._raw_target[i]
-            # EMA low-pass per joint toward the (gated) target.
-            self._filtered[i] = (
-                (1.0 - alpha) * self._filtered[i] + alpha * self._gated_target[i]
-            )
+            if use_euro:
+                # 1-EURO adaptive low-pass on the GELLO joint value directly:
+                # smooths hard when nearly still (kills tremor / Dynamixel noise),
+                # opens up when moving fast (low lag). No separate deadband needed.
+                self._filtered[i] = self._euro[i](self._raw_target[i])
+            else:
+                # DEADBAND NOISE GATE: only update the held target when GELLO moved
+                # more than deadband_rad, so hand tremor / Dynamixel encoder noise
+                # is ignored while holding still (0.0 => gate off).
+                if abs(self._raw_target[i] - self._gated_target[i]) > deadband:
+                    self._gated_target[i] = self._raw_target[i]
+                # EMA low-pass per joint toward the (gated) target.
+                self._filtered[i] = (
+                    (1.0 - alpha) * self._filtered[i] + alpha * self._gated_target[i]
+                )
             # MAX-STEP CLAMP relative to the last PUBLISHED value (slew limit).
             delta = self._filtered[i] - self._last_published[i]
             if delta > step:
