@@ -30,8 +30,13 @@ config는 `/dev/serial/by-id/usb-FTDI...` 형태의 **by-id 경로**를 사용�
 시리얼 접근 권한이 없으면(permission denied), 사용자를 `dialout` 그룹에 추가한 뒤 **로그아웃/로그인**하세요.
 
 ```bash
-sudo usermod -aG dialout $USER   # 이후 로그아웃 후 다시 로그인 (또는 재부팅)
+sudo usermod -aG dialout $USER   # 이후 로그아웃 후 다시 로그인 (또는 재부팅) — 영구 해결
+
+# 로그아웃 없이 지금 당장 쓰고 싶으면 임시로 권한 부여 (재부팅/재연결 시 초기화됨):
+sudo chmod 666 /dev/ttyUSB0      # 자신의 장치 노드로 (ls /dev/ttyUSB* 로 확인)
 ```
+
+> `dialout` 그룹 추가가 영구적인 권장 방법이고, `chmod 666`은 재부팅하면 풀리는 임시 방편입니다.
 
 > 물리적 Dynamixel 배선/조립은 이 문서 범위가 아닙니다 (하드웨어 문서 별도).
 
