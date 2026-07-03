@@ -2,3 +2,6 @@
 build/
 install/
 log/
+
+# diagnostic recorder output (data, not code)
+gello_logs/
