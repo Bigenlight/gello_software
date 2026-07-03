@@ -16,6 +16,10 @@
 *wandb_logs*
 outputs/*
 
+# ...but keep the GELLO->UR7e diagnostic recorder output (tracked on purpose)
+!ros2_ur_ws/gello_logs/
+!ros2_ur_ws/gello_logs/**
+
 # python
 *__pycache__
 *.egg-info
