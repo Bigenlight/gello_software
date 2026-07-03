@@ -13,6 +13,8 @@ BAG=true ./run_recorder.sh        # + 전체 토픽을 ros2 bag으로도 캡처
 RATE=200 ./run_recorder.sh        # synchronized.csv 샘플레이트(Hz), 기본 100
 ```
 
+> **`HEADLESS=true`는 레코더에 필요 없습니다.** 그 플래그는 텔레오퍼 실행(`run_ur7e_gello_real.sh`)이 Remote 모드로 드라이버를 띄우게 하는 것이고, 레코더는 읽기 전용(구독만)이라 드라이버를 시작하지 않습니다. 실기에서는 터미널 1에서 `HEADLESS=true ./run_ur7e_gello_real.sh`, 터미널 2에서 `./run_recorder.sh` — 같은 PC/같은 ROS 그래프(기본 `ROS_DOMAIN_ID=0`)라 그대로 토픽을 봅니다.
+
 `Ctrl-C`로 종료 → flush + `metadata.json` 마무리(그리고 bag 정리). 직접 실행도 가능:
 
 ```bash
