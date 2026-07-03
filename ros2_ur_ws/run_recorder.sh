@@ -25,6 +25,8 @@ source /opt/ros/humble/setup.bash
 source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
 
 RATE="${RATE:-100}"
+# ROS2 param sample_rate_hz is DOUBLE -> force a decimal so "100" isn't an INTEGER.
+[[ "${RATE}" == *.* ]] || RATE="${RATE}.0"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 SESSION="${GELLO_REPO_ROOT}/ros2_ur_ws/gello_logs/session_${STAMP}"
 mkdir -p "${SESSION}"
