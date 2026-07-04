@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GELLO to UR Control Flow</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --ink: #172033;
+      --muted: #647084;
+      --line: #c7cedb;
+      --panel: #ffffff;
+      --blue: #2667ff;
+      --cyan: #0f9faa;
+      --green: #15935b;
+      --orange: #c97913;
+      --red: #cf3f3f;
+      --shadow: 0 14px 34px rgba(23, 32, 51, 0.10);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+
+    main {
+      width: min(1280px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+
+    header {
+      margin-bottom: 22px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      margin: 0;
+      max-width: 980px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .diagram {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(160px, 1fr));
+      gap: 18px;
+      align-items: stretch;
+      margin-top: 26px;
+    }
+
+    .stage {
+      position: relative;
+      min-height: 200px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .stage::after {
+      content: "";
+      position: absolute;
+      top: 88px;
+      right: -27px;
+      width: 34px;
+      height: 2px;
+      background: var(--line);
+      z-index: 2;
+    }
+
+    .stage::before {
+      content: "";
+      position: absolute;
+      top: 83px;
+      right: -31px;
+      width: 0;
+      height: 0;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-left: 9px solid var(--line);
+      z-index: 3;
+    }
+
+    .stage:last-child::before,
+    .stage:last-child::after {
+      display: none;
+    }
+
+    .stage h2 {
+      margin: 0 0 10px;
+      font-size: 16px;
+      font-weight: 740;
+      letter-spacing: 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      margin-bottom: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: #344158;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .tag.blue { background: #e9efff; color: var(--blue); }
+    .tag.cyan { background: #e6f6f8; color: var(--cyan); }
+    .tag.green { background: #e8f6ef; color: var(--green); }
+    .tag.orange { background: #fff2df; color: var(--orange); }
+    .tag.red { background: #ffebeb; color: var(--red); }
+
+    .stage p {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #26324a;
+    }
+
+    .formula {
+      display: block;
+      margin: 10px 0;
+      padding: 10px;
+      border: 1px solid #dce2ed;
+      border-radius: 6px;
+      background: #f9fbff;
+      color: #1f2a44;
+      white-space: normal;
+    }
+
+    .mini-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .mini-list li {
+      min-height: 22px;
+      padding-left: 13px;
+      border-left: 3px solid #d7deea;
+    }
+
+    .tracks {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 20px;
+    }
+
+    .band {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .band h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .timeline li {
+      display: grid;
+      grid-template-columns: 76px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 10px 0;
+      border-top: 1px solid #e3e8f0;
+    }
+
+    .timeline li:first-child {
+      border-top: 0;
+    }
+
+    .time {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 740;
+      text-transform: uppercase;
+    }
+
+    .detail {
+      color: #2a354d;
+      font-size: 14px;
+    }
+
+    .detail strong {
+      display: block;
+      margin-bottom: 2px;
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .table th,
+    .table td {
+      padding: 9px 8px;
+      border-top: 1px solid #e3e8f0;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .table th {
+      color: #3b465a;
+      font-weight: 740;
+    }
+
+    .table td {
+      color: var(--muted);
+    }
+
+    .note {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--blue);
+      border-radius: 6px;
+      background: #eef4ff;
+      color: #263956;
+      font-size: 14px;
+    }
+
+    @media (max-width: 1050px) {
+      .diagram {
+        grid-template-columns: 1fr;
+      }
+
+      .stage {
+        min-height: auto;
+      }
+
+      .stage::after {
+        top: auto;
+        right: 50%;
+        bottom: -19px;
+        width: 2px;
+        height: 18px;
+      }
+
+      .stage::before {
+        top: auto;
+        right: calc(50% - 5px);
+        bottom: -29px;
+        border-left: 6px solid transparent;
+        border-right: 6px solid transparent;
+        border-top: 9px solid var(--line);
+        border-bottom: 0;
+      }
+
+      .tracks {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 620px) {
+      main {
+        width: min(100vw - 20px, 1280px);
+        padding-top: 20px;
+      }
+
+      h1 {
+        font-size: 24px;
+      }
+
+      .timeline li {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>GELLO joint가 UR joint command가 되는 흐름</h1>
+      <p class="lead">
+        이 제어는 Cartesian IK나 torque 제어가 아니라 joint-space position streaming이다.
+        GELLO의 6개 관절 각도를 UR 관절 이름과 순서에 맞춰 보정하고, 필터와 속도 제한을 거쳐
+        <code>/forward_position_controller/commands</code>로 계속 보낸다.
+      </p>
+    </header>
+
+    <section class="diagram" aria-label="GELLO to UR flow diagram">
+      <article class="stage">
+        <span class="tag blue">1. Hardware read</span>
+        <h2>GELLO Dynamixel</h2>
+        <p>리더암의 Dynamixel encoder 값을 읽는다. GELLO는 passive라서 토크를 켜지 않고 position만 읽는다.</p>
+        <code class="formula">raw = driver.get_joints()</code>
+        <ul class="mini-list">
+          <li>소스: <code>gello/robots/dynamixel.py</code></li>
+          <li>주기: 대략 30 Hz</li>
+        </ul>
+      </article>
+
+      <article class="stage">
+        <span class="tag cyan">2. Calibration</span>
+        <h2>raw를 joint pos로 변환</h2>
+        <p><code>pos</code>는 보정된 GELLO joint position이다. 단위는 arm 6축 기준 radian이다.</p>
+        <code class="formula">pos = (raw - joint_offsets) * joint_signs</code>
+        <ul class="mini-list">
+          <li><code>joint_offsets</code>: 영점 보정</li>
+          <li><code>joint_signs</code>: 축 방향 보정</li>
+          <li><code>pos[:6]</code>: UR 6축에 대응</li>
+        </ul>
+      </article>
+
+      <article class="stage">
+        <span class="tag green">3. ROS publish</span>
+        <h2>GELLO topic 생성</h2>
+        <p>보정된 6축 값을 UR joint name으로 포장해서 ROS topic에 publish한다.</p>
+        <code class="formula">/gello/joint_states</code>
+        <ul class="mini-list">
+          <li><code>shoulder_pan_joint</code></li>
+          <li><code>shoulder_lift_joint</code></li>
+          <li><code>elbow_joint</code>, <code>wrist_*</code></li>
+        </ul>
+      </article>
+
+      <article class="stage">
+        <span class="tag orange">4. Bridge filter</span>
+        <h2>필터 + step clamp</h2>
+        <p>bridge가 GELLO target을 받아 One Euro 또는 EMA로 부드럽게 만들고, 한 cycle 최대 이동량을 제한한다.</p>
+        <code class="formula">filtered = one_euro(gello_pos)<br>delta = clamp(filtered - last_cmd)</code>
+        <ul class="mini-list">
+          <li>bridge publish: 250 Hz</li>
+          <li><code>max_step_rad</code>: 속도 제한 역할</li>
+        </ul>
+      </article>
+
+      <article class="stage">
+        <span class="tag red">5. UR command</span>
+        <h2>UR position controller</h2>
+        <p>최종 joint position command가 UR ros2_control controller로 들어가고, UR driver가 실제 로봇에 전달한다.</p>
+        <code class="formula">/forward_position_controller/commands</code>
+        <ul class="mini-list">
+          <li>메시지: <code>Float64MultiArray</code></li>
+          <li>값: UR order의 6개 joint radian</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="tracks">
+      <article class="band">
+        <h2>실로봇 시작 순서</h2>
+        <ol class="timeline">
+          <li>
+            <span class="time">t=0</span>
+            <span class="detail"><strong>UR driver 시작</strong><code>scaled_joint_trajectory_controller</code>를 먼저 사용한다.</span>
+          </li>
+          <li>
+            <span class="time">t≈6s</span>
+            <span class="detail"><strong>gello_publisher 시작</strong>GELLO를 읽고 <code>/gello/joint_states</code>를 publish한다.</span>
+          </li>
+          <li>
+            <span class="time">t≈8s</span>
+            <span class="detail"><strong>move-to-start handshake</strong>UR을 현재 GELLO pose까지 trajectory로 부드럽게 이동시킨다.</span>
+          </li>
+          <li>
+            <span class="time">success</span>
+            <span class="detail"><strong>controller switch</strong><code>forward_position_controller</code>를 activate한다.</span>
+          </li>
+          <li>
+            <span class="time">teleop</span>
+            <span class="detail"><strong>gello_ur_bridge 시작</strong>이후부터 GELLO joint를 실시간으로 따라간다.</span>
+          </li>
+        </ol>
+      </article>
+
+      <article class="band">
+        <h2>핵심 변수와 topic</h2>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>이름</th>
+              <th>의미</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>raw</code></td>
+              <td>Dynamixel encoder에서 읽은 원 관절각.</td>
+            </tr>
+            <tr>
+              <td><code>pos</code></td>
+              <td>offset/sign 보정이 끝난 GELLO arm joint position. 팔 6축은 radian.</td>
+            </tr>
+            <tr>
+              <td><code>/gello/joint_states</code></td>
+              <td>GELLO pose를 UR joint name으로 담은 입력 topic.</td>
+            </tr>
+            <tr>
+              <td><code>_raw_target</code></td>
+              <td>bridge가 받은 최신 GELLO target. UR joint order로 재정렬된 6개 값.</td>
+            </tr>
+            <tr>
+              <td><code>_filtered</code></td>
+              <td>One Euro 또는 EMA를 거친 중간 command.</td>
+            </tr>
+            <tr>
+              <td><code>_last_published</code></td>
+              <td>마지막으로 UR에 보낸 command. step clamp의 기준.</td>
+            </tr>
+            <tr>
+              <td><code>/forward_position_controller/commands</code></td>
+              <td>UR로 들어가는 최종 6축 joint position command.</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <div class="note">
+      요약: GELLO가 움직이면 <code>pos</code>가 바뀌고, 그 값이 <code>/gello/joint_states</code>로 나간다.
+      bridge는 이 값을 필터링하고 cycle당 이동량을 제한해서 UR position controller에 계속 보낸다.
+      그래서 UR은 GELLO의 joint pose를 따라가지만, 안전 때문에 처음에는 trajectory로 맞춰 놓고 이후 streaming으로 넘어간다.
+    </div>
+  </main>
+</body>
+</html>

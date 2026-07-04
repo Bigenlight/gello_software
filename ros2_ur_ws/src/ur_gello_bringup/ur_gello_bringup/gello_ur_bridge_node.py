@@ -71,6 +71,11 @@ class _OneEuro:
     less jitter (more lag when slow). ``beta`` sets how fast the cutoff opens
     with speed — HIGHER = snappier on fast moves (less smoothing). ``d_cutoff``
     low-passes the internal speed estimate so jitter does not inflate the cutoff.
+
+    GELLO samples arrive at ~30 Hz while this bridge publishes at 250 Hz. The
+    speed estimate must therefore be updated at the GELLO sample cadence, not on
+    every publish tick, otherwise each 30 Hz sample step is interpreted as a
+    much faster 250 Hz jump and the filter opens up in visible pulses.
     """
 
     def __init__(self, dt: float, min_cutoff: float, beta: float,
@@ -80,6 +85,7 @@ class _OneEuro:
         self._beta = beta
         self._d_cutoff = d_cutoff
         self._x_prev: float | None = None
+        self._raw_prev: float | None = None
         self._dx_prev = 0.0
 
     @staticmethod
@@ -91,22 +97,28 @@ class _OneEuro:
     def seed(self, x: float) -> None:
         """Preload the filter state (e.g. from the robot's actual pose)."""
         self._x_prev = x
+        self._raw_prev = x
         self._dx_prev = 0.0
+
+    def update_input(self, x: float, dt: float | None) -> None:
+        """Update the low-passed input-speed estimate at the source cadence."""
+        if self._raw_prev is None or dt is None or dt <= 1e-6:
+            self._raw_prev = x
+            return
+        dx = (x - self._raw_prev) / dt
+        a_d = self._alpha(self._d_cutoff, dt)
+        self._dx_prev = a_d * dx + (1.0 - a_d) * self._dx_prev
+        self._raw_prev = x
 
     def __call__(self, x: float) -> float:
         if self._x_prev is None:
-            self._x_prev = x
+            self.seed(x)
             return x
-        # Low-passed derivative (rad/s) of the input.
-        dx = (x - self._x_prev) / self._dt
-        a_d = self._alpha(self._d_cutoff, self._dt)
-        dx_hat = a_d * dx + (1.0 - a_d) * self._dx_prev
         # Speed-adaptive cutoff: faster motion -> higher cutoff -> less lag.
-        cutoff = self._min_cutoff + self._beta * abs(dx_hat)
+        cutoff = self._min_cutoff + self._beta * abs(self._dx_prev)
         a = self._alpha(cutoff, self._dt)
         x_hat = a * x + (1.0 - a) * self._x_prev
         self._x_prev = x_hat
-        self._dx_prev = dx_hat
         return x_hat
 
 
@@ -239,8 +251,15 @@ class GelloUrBridge(Node):
             return
 
         # Reorder BY NAME into UR command order (never blind index).
-        self._raw_target = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
-        self._last_good_msg_time = time.monotonic()
+        raw_target = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
+        now = time.monotonic()
+        prev_time = self._last_good_msg_time
+        if self._euro is not None:
+            dt = None if prev_time is None else now - prev_time
+            for i in range(len(UR_JOINT_ORDER)):
+                self._euro[i].update_input(raw_target[i], dt)
+        self._raw_target = raw_target
+        self._last_good_msg_time = now
 
     # ---------------------------------------------------------------------
     def _on_actual_joint_state(self, msg: JointState) -> None:
@@ -303,7 +322,10 @@ class GelloUrBridge(Node):
             if use_euro:
                 # 1-EURO adaptive low-pass on the GELLO joint value directly:
                 # smooths hard when nearly still (kills tremor / Dynamixel noise),
-                # opens up when moving fast (low lag). No separate deadband needed.
+                # opens up when moving fast (low lag). The speed estimate is
+                # updated only when new GELLO samples arrive, so 30 Hz sample
+                # edges do not look like 250 Hz velocity spikes. No separate
+                # deadband needed.
                 self._filtered[i] = self._euro[i](self._raw_target[i])
             else:
                 # DEADBAND NOISE GATE: only update the held target when GELLO moved
