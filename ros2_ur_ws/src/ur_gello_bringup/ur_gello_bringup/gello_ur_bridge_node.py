@@ -42,6 +42,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+from std_srvs.srv import Trigger
 
 # Output index order expected by the UR forward_position_controller.
 UR_JOINT_ORDER = [
@@ -197,11 +198,19 @@ class GelloUrBridge(Node):
         # <= max_step_rad per cycle. This is what prevents the start-up snap that
         # trips the UR "External Control speed limit".
         self._actual_pose: list[float] | None = None
+        # PAUSE/RESUME: when paused the timer stops publishing so the robot HOLDS
+        # its last commanded pose (forward_position_controller keeps the setpoint).
+        # On resume we re-seed from the actual pose so following restarts with no
+        # jump (then slews toward GELLO at <= max_step_rad).
+        self._paused = False
 
         # --- ROS interfaces ----------------------------------------------
         self._js_topic = str(
             self.declare_parameter("joint_states_topic", "/joint_states").value
         )
+        # Operator pause/resume of following (driven by the numbered console).
+        self._pause_srv = self.create_service(Trigger, "~/pause", self._on_pause)
+        self._resume_srv = self.create_service(Trigger, "~/resume", self._on_resume)
         self._pub = self.create_publisher(
             Float64MultiArray, "/forward_position_controller/commands", 10
         )
@@ -277,6 +286,10 @@ class GelloUrBridge(Node):
     # ---------------------------------------------------------------------
     def _on_timer(self) -> None:
         """Publish a smoothed, slew-limited command at publish_rate_hz."""
+        # PAUSED: stop publishing so the robot holds its last commanded pose.
+        if self._paused:
+            return
+
         # Nothing valid received yet: stay silent.
         if self._raw_target is None or self._last_good_msg_time is None:
             return
@@ -347,6 +360,33 @@ class GelloUrBridge(Node):
 
         self._last_published = out
         self._publish(out)
+
+    # ---------------------------------------------------------------------
+    def _on_pause(self, request, response):
+        """'2) 정지': stop following; robot holds its last commanded pose."""
+        self._paused = True
+        response.success = True
+        response.message = "Following PAUSED — robot holds position. Resume with proceed."
+        self.get_logger().warn("Following PAUSED by operator (robot holds pose).")
+        return response
+
+    def _on_resume(self, request, response):
+        """'1) 진행': resume following. Re-seed from the actual pose so the restart
+        has no jump; the arm then slews to the GELLO pose at <= max_step_rad."""
+        was_paused = self._paused
+        self._paused = False
+        # Force a re-seed on the next timer cycle (seed from actual, slew to GELLO).
+        self._filtered = None
+        self._last_published = None
+        response.success = True
+        response.message = (
+            "Following RESUMED — arm re-seeds from its current pose and slews to "
+            "GELLO (rate-limited). Keep clear if GELLO moved while paused."
+            if was_paused else
+            "Already following (was not paused)."
+        )
+        self.get_logger().warn("Following RESUMED by operator.")
+        return response
 
     # ---------------------------------------------------------------------
     def _publish(self, positions: list[float]) -> None:

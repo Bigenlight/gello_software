@@ -83,6 +83,7 @@ set -e
 ROBOT_IP="${ROBOT_IP:-192.168.10.11}"     # override: ROBOT_IP=x.x.x.x ./run_ur7e_gello_real.sh
 CALIB="${CALIB:-}"                          # optional: CALIB=/path/ur7e_calibration.yaml
 HEADLESS="${HEADLESS:-}"                     # HEADLESS=true|1 -> Method B (no pendant Play; needs REMOTE mode)
+START_MODE="${START_MODE:-gello}"           # gello (default) | init_align (park at init pose, align GELLO, then stream)
 
 # Also honor headless_mode:=true passed as a launch arg so the banner below can
 # never disagree with the effective launch (ros2 launch is last-wins on dupes).
@@ -92,7 +93,7 @@ export GELLO_REPO_ROOT=/home/laptop3/gello_software
 source /opt/ros/humble/setup.bash
 source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
 
-ARGS=(robot_ip:="${ROBOT_IP}")
+ARGS=(robot_ip:="${ROBOT_IP}" start_mode:="${START_MODE}")
 [ -n "${CALIB}" ] && ARGS+=(kinematics_params_file:="${CALIB}")
 
 # Method B (headless): driver sends URScript directly; robot MUST be in REMOTE
@@ -108,6 +109,12 @@ fi
 
 echo "### REAL UR7e teleop | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>}"
 echo "### headless_mode=${HEADLESS_STATE}"
+if [ "${START_MODE}" = "init_align" ]; then
+    echo "### start_mode=init_align — robot parks at the init pose; ALIGN the GELLO"
+    echo "###   leader to it, then streaming starts automatically. (Safer handover.)"
+else
+    echo "### start_mode=gello — robot moves straight to the GELLO's current pose."
+fi
 echo "### Robotiq 2F-85 gripper INCLUDED (Modbus over driver socat bridge /tmp/ttyUR)."
 echo "### ROBOT MUST BE POWERED ON. Tool voltage is supplied by the DRIVER"
 echo "### (tool_voltage:=24), NOT the pendant Installation tab. Keep fingers clear —"

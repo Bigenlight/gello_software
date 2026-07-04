@@ -35,6 +35,32 @@ and the arm stationary. Streaming never begins from an unsafe state.
 
 GELLO is PASSIVE: this node only READS ``/gello/joint_states``. It never
 commands the GELLO Dynamixels (torque stays off).
+
+Start modes
+-----------
+``start_mode:=gello`` (default) does the classic one-shot handshake described
+above: move straight to the leader's current pose, then hand off.
+
+``start_mode:=init_align`` is an INTERACTIVE, operator-gated flow for extra
+safety on unfamiliar hardware. Every stage transition requires an explicit
+human authorization via a ROS service (Trigger):
+
+    GATE 1  after the source controller is active, the node WAITS. The operator
+            calls ``~/proceed`` to authorize moving the arm to a FIXED, known
+            ``init_pose``.
+    GATE 2  the arm parks at ``init_pose``; the operator moves the passive GELLO
+            leader to match it (live per-joint error is logged). When the
+            operator calls ``~/proceed`` the node COMPUTES the per-joint error
+            |GELLO - init_pose| and:
+              * all joints <= alignment_tolerance  -> hand over (stream).
+              * some joint  >  alignment_tolerance -> REFUSE, and REPORT which
+                joints are off and by how much (so a large lone offset, e.g. the
+                base/shoulder_pan being hard to eyeball, cannot silently drive a
+                big follow move). Operator re-aligns, or, if they accept the
+                offset, calls ``~/override_follow``.
+              * ``~/override_follow`` hands over despite an offset ONLY if every
+                joint is within alignment_hard_limit; beyond that it is refused
+                even with override. Re-align.
 """
 
 import time
@@ -48,6 +74,7 @@ from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTolerance
 from controller_manager_msgs.srv import ListControllers, SwitchController
 from sensor_msgs.msg import JointState
+from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # UR command joint order (identical ur5e & ur7e). Reorder GELLO BY NAME to this.
@@ -59,6 +86,9 @@ UR_JOINT_ORDER = [
     "wrist_2_joint",
     "wrist_3_joint",
 ]
+
+# Short, UNAMBIGUOUS per-joint labels for the alignment report (same order).
+UR_JOINT_SHORT = ["pan", "lift", "elbow", "w1", "w2", "w3"]
 
 # controller_manager_msgs/srv/SwitchController strictness enum.
 _STRICT = 2
@@ -90,6 +120,53 @@ class GelloMoveToStart(Node):
         self.arrival_tolerance = float(
             self.declare_parameter("arrival_tolerance", 0.05).value
         )
+
+        # --- Start-mode (handshake style) --------------------------------
+        #   "gello"      : (default, original) robot moves TO the GELLO's current
+        #                  pose, then streams. Fast, but the arm's first motion
+        #                  goes to wherever the leader happens to be.
+        #   "init_align" : robot first moves to a FIXED, known init_pose; the
+        #                  operator then aligns the GELLO leader to that pose;
+        #                  streaming starts ONLY once the leader is within
+        #                  alignment_tolerance of init_pose for alignment_dwell_s.
+        #                  Safer: the arm's first autonomous motion is to a known
+        #                  pose, and handover happens with leader ~= follower so
+        #                  there is no large slew when streaming begins.
+        self.start_mode = str(
+            self.declare_parameter("start_mode", "gello").value
+        ).strip().lower()
+        self.init_pose = [
+            float(x)
+            for x in self.declare_parameter(
+                "init_pose", [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]
+            ).value
+        ]
+        # Per-joint tolerance (rad): with every joint within this of init_pose, a
+        # ~/proceed call hands over to streaming (init_align mode only).
+        self.alignment_tolerance = float(
+            self.declare_parameter("alignment_tolerance", 0.15).value
+        )
+        # Per-joint HARD limit (rad): a ~/override_follow is accepted only if every
+        # joint is within this of init_pose; beyond it, handover is refused even
+        # with override (protects against a large lone offset, e.g. the base).
+        self.alignment_hard_limit = float(
+            self.declare_parameter("alignment_hard_limit", 0.5).value
+        )
+        # Max time (s) to wait at a gate for the operator; <=0 => wait forever.
+        self.alignment_timeout = float(
+            self.declare_parameter("alignment_timeout", 0.0).value
+        )
+        if self.start_mode not in ("gello", "init_align"):
+            self.get_logger().warn(
+                f"Unknown start_mode '{self.start_mode}'; falling back to 'gello'."
+            )
+            self.start_mode = "gello"
+        if self.start_mode == "init_align" and len(self.init_pose) != len(UR_JOINT_ORDER):
+            self.get_logger().error(
+                f"init_pose has {len(self.init_pose)} values, expected "
+                f"{len(UR_JOINT_ORDER)}; falling back to 'gello' mode (fail-safe)."
+            )
+            self.start_mode = "gello"
         # How long to wait for the source controller to become 'active'. On the
         # real UR the controller_stopper keeps motion controllers inactive until
         # the External Control program is PLAYING on the pendant, so this wait
@@ -99,7 +176,18 @@ class GelloMoveToStart(Node):
         )
 
         # --- State -------------------------------------------------------
+        # _gello_target: FIRST complete GELLO pose (frozen; the move target in
+        #   "gello" mode). _gello_latest: MOST RECENT GELLO pose (updated every
+        #   message; used by the init_align alignment gate).
         self._gello_target: list[float] | None = None
+        self._gello_latest: list[float] | None = None
+        # Operator-gate flags (init_align mode), set by the Trigger services.
+        self._stage = "init"          # "init" -> "wait_align" -> "streaming"
+        self._proceed_init = False    # GATE 1 authorization (move to init pose)
+        self._handover = False        # GATE 2 authorization granted (stream)
+        self._overridden = False      # handover was via ~/override_follow
+        self._abort = False           # operator pressed "2) 정지" -> fail-safe exit
+        self._go_home_requested = False  # "4) 홈으로": re-send init-pose trajectory
 
         # --- ROS interfaces ----------------------------------------------
         self._sub = self.create_subscription(
@@ -116,9 +204,27 @@ class GelloMoveToStart(Node):
         self._list_client = self.create_client(
             ListControllers, "/controller_manager/list_controllers"
         )
+        # Operator-gate services (used only in init_align mode). Resolve to
+        # /gello_move_to_start/proceed and /gello_move_to_start/override_follow.
+        self._proceed_srv = self.create_service(
+            Trigger, "~/proceed", self._on_proceed
+        )
+        self._override_srv = self.create_service(
+            Trigger, "~/override_follow", self._on_override_follow
+        )
+        self._abort_srv = self.create_service(
+            Trigger, "~/abort", self._on_abort
+        )
+        self._go_home_srv = self.create_service(
+            Trigger, "~/go_home", self._on_go_home
+        )
+        self._check_srv = self.create_service(
+            Trigger, "~/check_alignment", self._on_check_alignment
+        )
 
         self.get_logger().info(
             "gello_move_to_start started | "
+            f"start_mode={self.start_mode} "
             f"source={self.source_controller} "
             f"target={self.target_controller} "
             f"trajectory_duration={self.trajectory_duration} "
@@ -127,9 +233,7 @@ class GelloMoveToStart(Node):
 
     # ---------------------------------------------------------------------
     def _on_joint_state(self, msg: JointState) -> None:
-        """Capture the FIRST GELLO message that contains all UR joints (by name)."""
-        if self._gello_target is not None:
-            return
+        """Track the latest complete GELLO pose; latch the first one as target."""
         name_to_pos = dict(zip(msg.name, msg.position))
         missing = [j for j in UR_JOINT_ORDER if j not in name_to_pos]
         if missing:
@@ -140,10 +244,11 @@ class GelloMoveToStart(Node):
             )
             return
         # Reorder BY NAME into UR command order (never blind index).
-        self._gello_target = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
-        self.get_logger().info(
-            f"Captured GELLO target pose: {self._gello_target}"
-        )
+        pose = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
+        self._gello_latest = pose
+        if self._gello_target is None:
+            self._gello_target = pose
+            self.get_logger().info(f"Captured GELLO target pose: {pose}")
 
     # ---------------------------------------------------------------------
     def _wait_for_gello_target(self) -> bool:
@@ -208,9 +313,9 @@ class GelloMoveToStart(Node):
         return False
 
     # ---------------------------------------------------------------------
-    def _send_trajectory(self) -> bool:
-        """Send one FollowJointTrajectory goal to the GELLO pose; wait SUCCEEDED."""
-        assert self._gello_target is not None
+    def _send_trajectory(self, target: list[float], label: str) -> bool:
+        """Send one FollowJointTrajectory goal to ``target``; wait SUCCEEDED."""
+        assert target is not None
 
         if not self._action_client.wait_for_server(
             timeout_sec=_DISCOVERY_TIMEOUT_S
@@ -223,7 +328,7 @@ class GelloMoveToStart(Node):
             return False
 
         point = JointTrajectoryPoint()
-        point.positions = list(self._gello_target)
+        point.positions = list(target)
         point.velocities = [0.0] * len(UR_JOINT_ORDER)
         sec = int(self.trajectory_duration)
         nanosec = int((self.trajectory_duration - sec) * 1e9)
@@ -243,7 +348,7 @@ class GelloMoveToStart(Node):
             goal.goal_tolerance.append(tol)
 
         self.get_logger().info(
-            f"Sending trajectory to GELLO pose over {self.trajectory_duration}s "
+            f"Sending trajectory to {label} over {self.trajectory_duration}s "
             f"via {self.source_controller}..."
         )
         send_future = self._action_client.send_goal_async(goal)
@@ -276,8 +381,194 @@ class GelloMoveToStart(Node):
             )
             return False
 
-        self.get_logger().info("Arm arrived at GELLO pose (trajectory SUCCEEDED).")
+        self.get_logger().info(f"Arm arrived at {label} (trajectory SUCCEEDED).")
         return True
+
+    # ---------------------------------------------------------------------
+    def _alignment_errors(self) -> list[float] | None:
+        """Per-joint |GELLO_latest - init_pose| (rad), or None if no GELLO yet."""
+        latest = self._gello_latest
+        if latest is None:
+            return None
+        return [abs(latest[i] - self.init_pose[i]) for i in range(len(UR_JOINT_ORDER))]
+
+    def _alignment_report(self, errs: list[float]) -> str:
+        """Human-readable per-joint alignment report (worst joint first)."""
+        worst = max(range(len(errs)), key=lambda i: errs[i])
+        per = ", ".join(
+            f"{UR_JOINT_SHORT[i]}={errs[i]:.2f}" for i in range(len(errs))
+        )
+        return (
+            f"max err {errs[worst]:.3f} rad at {UR_JOINT_SHORT[worst]} "
+            f"(tol {self.alignment_tolerance:.2f}, hard {self.alignment_hard_limit:.2f}) "
+            f"| per-joint: {per}"
+        )
+
+    # ---- Operator-gate Trigger service callbacks (init_align mode) --------
+    def _on_proceed(self, request, response):
+        """GATE 1: authorize move-to-init. GATE 2: hand over IF within tolerance."""
+        if self._stage == "init":
+            self._proceed_init = True
+            response.success = True
+            response.message = "Authorized: moving the arm to the init pose."
+            return response
+        if self._stage == "wait_align":
+            errs = self._alignment_errors()
+            if errs is None:
+                response.success = False
+                response.message = "No GELLO pose yet; cannot check alignment."
+                return response
+            report = self._alignment_report(errs)
+            over_tol = [
+                UR_JOINT_ORDER[i] for i, e in enumerate(errs)
+                if e > self.alignment_tolerance
+            ]
+            if not over_tol:
+                self._handover = True
+                response.success = True
+                response.message = f"Aligned within tolerance ({report}). Handing over."
+                return response
+            over_hard = [
+                UR_JOINT_ORDER[i] for i, e in enumerate(errs)
+                if e > self.alignment_hard_limit
+            ]
+            response.success = False
+            if over_hard:
+                response.message = (
+                    f"REFUSED — too far ({report}). Beyond HARD limit: {over_hard}. "
+                    "Re-align these joints and call proceed again."
+                )
+            else:
+                response.message = (
+                    f"NOT within tolerance ({report}). Off joints: {over_tol}. "
+                    "Re-align, OR if you accept this offset call ~/override_follow."
+                )
+            self.get_logger().warn(f"proceed @ wait_align: {response.message}")
+            return response
+        response.success = False
+        response.message = f"Not awaiting authorization (stage={self._stage})."
+        return response
+
+    def _on_override_follow(self, request, response):
+        """GATE 2 override: hand over despite an offset, but only within hard limit."""
+        if self._stage != "wait_align":
+            response.success = False
+            response.message = (
+                f"override_follow only valid during alignment (stage={self._stage})."
+            )
+            return response
+        errs = self._alignment_errors()
+        if errs is None:
+            response.success = False
+            response.message = "No GELLO pose yet; cannot check alignment."
+            return response
+        report = self._alignment_report(errs)
+        over_hard = [
+            UR_JOINT_ORDER[i] for i, e in enumerate(errs)
+            if e > self.alignment_hard_limit
+        ]
+        if over_hard:
+            response.success = False
+            response.message = (
+                f"REFUSED even with override — {over_hard} beyond HARD limit "
+                f"{self.alignment_hard_limit:.2f} rad ({report}). Re-align."
+            )
+            self.get_logger().error(f"override REFUSED: {response.message}")
+            return response
+        self._handover = True
+        self._overridden = True
+        response.success = True
+        response.message = (
+            f"OVERRIDE accepted ({report}). Handing over; the arm will SLEW to the "
+            "GELLO pose at the bridge's rate-limited speed. Keep clear."
+        )
+        self.get_logger().warn(f"override accepted: {response.message}")
+        return response
+
+    def _on_abort(self, request, response):
+        """'2) 정지': abort the handshake (fail-safe; streaming never starts)."""
+        self._abort = True
+        response.success = True
+        response.message = (
+            "ABORT received — handshake will stop; no controller switch, the arm "
+            "holds position. (E-STOP / Ctrl-C for a hard stop during motion.)"
+        )
+        self.get_logger().warn("Operator ABORT: stopping handshake (fail-safe).")
+        return response
+
+    def _on_check_alignment(self, request, response):
+        """'5) 차이 계산': report GELLO vs init_pose per-joint error (no motion)."""
+        errs = self._alignment_errors()
+        if errs is None:
+            response.success = False
+            response.message = "No GELLO pose received yet; cannot compute difference."
+            return response
+        report = self._alignment_report(errs)
+        within_tol = max(errs) <= self.alignment_tolerance
+        # success reflects ALIGNMENT (so the console shows ✅ only when aligned).
+        response.success = within_tol
+        response.message = (
+            ("ALIGNED (within tolerance) — " if within_tol else "not yet aligned — ")
+            + report
+        )
+        return response
+
+    def _on_go_home(self, request, response):
+        """'4) 홈으로': request re-sending the arm to init_pose (before streaming)."""
+        if self._stage == "streaming":
+            response.success = False
+            response.message = (
+                "Already streaming; go_home is unavailable (Ctrl-C and relaunch to "
+                "re-home)."
+            )
+            return response
+        self._go_home_requested = True
+        response.success = True
+        response.message = (
+            f"Go-home requested — arm will move to init pose {self.init_pose} "
+            f"over {self.trajectory_duration:.0f}s. Keep clear."
+        )
+        self.get_logger().warn("Operator GO-HOME: re-sending init-pose trajectory.")
+        return response
+
+    # ---------------------------------------------------------------------
+    def _wait_for_operator(self, flag_name: str, prompt: str) -> bool:
+        """Spin (servicing gate calls + logging live error) until ``flag_name`` set."""
+        self.get_logger().warn(prompt)
+        deadline = (
+            None
+            if self.alignment_timeout <= 0.0
+            else time.monotonic() + self.alignment_timeout
+        )
+        while rclpy.ok() and not getattr(self, flag_name):
+            if self._abort:
+                self.get_logger().error(
+                    "Aborted by operator; not switching controllers (fail-safe)."
+                )
+                return False
+            # '4) 홈으로': re-send the init-pose trajectory on request (blocks ~5s
+            # while the arm moves, then resumes waiting). Only meaningful before
+            # streaming, while the scaled trajectory controller is still active.
+            if self._go_home_requested:
+                self._go_home_requested = False
+                self._send_trajectory(self.init_pose, "init pose (go-home)")
+                continue
+            if deadline is not None and time.monotonic() > deadline:
+                self.get_logger().error(
+                    f"No operator authorization within {self.alignment_timeout:.0f}s; "
+                    "aborting (fail-safe, no switch)."
+                )
+                return False
+            rclpy.spin_once(self, timeout_sec=0.1)
+            # During alignment, log the live per-joint error to guide the operator.
+            if self._stage == "wait_align":
+                errs = self._alignment_errors()
+                if errs is not None:
+                    self.get_logger().info(
+                        "align: " + self._alignment_report(errs),
+                        throttle_duration_sec=1.5,
+                    )
+        return bool(getattr(self, flag_name))
 
     # ---------------------------------------------------------------------
     def _switch_controllers(self) -> bool:
@@ -329,8 +620,36 @@ class GelloMoveToStart(Node):
             return False
         if not self._wait_for_source_active():
             return False
-        if not self._send_trajectory():
-            return False
+
+        if self.start_mode == "init_align":
+            # GATE 1: operator authorizes the move to the fixed init pose.
+            if not self._wait_for_operator(
+                "_proceed_init",
+                "GATE 1 — ready to move the arm to the INIT POSE "
+                f"{self.init_pose}. In the operator console (2nd terminal) press "
+                "[1] 진행 when the workspace is clear ([2] 정지 to abort).",
+            ):
+                return False
+            if not self._send_trajectory(self.init_pose, "init pose"):
+                return False
+            # GATE 2: operator aligns GELLO, then authorizes handover. The
+            # ~/proceed and ~/override_follow callbacks set _handover.
+            self._stage = "wait_align"
+            if not self._wait_for_operator(
+                "_handover",
+                "GATE 2 — the arm is at the init pose. Now move the GELLO leader to "
+                "MATCH it (live per-joint error printed below). In the console press "
+                "[1] 진행 to hand over when aligned; if a joint is off you'll get a "
+                "report and can re-align, or press [3] 강제 진행 to accept the offset "
+                "([2] 정지 to abort).",
+            ):
+                return False
+            self._stage = "streaming"
+        else:  # "gello" (default): move straight to the leader's current pose.
+            assert self._gello_target is not None
+            if not self._send_trajectory(self._gello_target, "GELLO pose"):
+                return False
+
         if not self._switch_controllers():
             return False
         return True

@@ -9,7 +9,15 @@ gello_publisher:
   ros__parameters:
     port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
     joint_ids: [1, 2, 3, 4, 5, 6]
-    joint_offsets: [3.142, 1.571, 4.712, 4.712, 4.712, 3.142]  # recalibrated after J2/J3 remount
+    # w3(마지막) 오프셋: 원래 3.142 -> 0.0 (원래값에서 pi=180deg 이동). 편한 손목
+    # 자세가 UR w3=0 에 오도록. 2pi 정수배는 start_joints 오토랩(dynamixel.py:84-104)이
+    # 부팅 시 start 기준으로 정규화하므로 0.0 과 6.283 은 동일 결과. 방향(sign)은 그대로.
+    joint_offsets: [0.0, 1.571, 4.712, 4.712, 4.712, 0.0]  # w3 원래값=3.142; J2/J3 recalibrated after remount
+    # pan(shoulder_pan) sign = +1 (ORIGINAL). This is the sign that gives the
+    # CORRECT teleop base-rotation direction (flipping to -1 reverses it). The
+    # GELLO base and robot base rotate in opposite senses in this physical setup,
+    # so at a non-zero home the GELLO's reported pan looks "mirrored" vs the robot
+    # — align by the console-5 pan NUMBER (not visually). Home at pan=0 avoids it.
     joint_signs: [1, 1, -1, 1, 1, 1]
     # NOTE: must be ALL doubles — rcl's yaml parser rejects mixed int/double arrays.
     # (gripper id 7 is round-tripped back to int inside the node.)
@@ -69,6 +77,28 @@ gello_move_to_start:
     target_controller: "forward_position_controller"
     trajectory_duration: 5.0
     arrival_tolerance: 0.05
+    # Handshake style (override at launch with start_mode:=..., or env
+    # START_MODE=init_align via run_ur7e_gello_real.sh):
+    #   "gello"      : robot moves TO the leader's CURRENT pose, then streams.
+    #   "init_align" : INTERACTIVE, operator-gated. Robot moves to the FIXED
+    #                  init_pose below only after you authorize GATE 1
+    #                  (ros2 service call /gello_move_to_start/proceed). Then YOU
+    #                  align the GELLO leader to it and authorize GATE 2 (proceed);
+    #                  the node computes per-joint |GELLO-init| and hands over only
+    #                  if all within alignment_tolerance. If a joint is off it
+    #                  REPORTS which and refuses; ~/override_follow accepts an
+    #                  offset only within alignment_hard_limit. Safer: first motion
+    #                  is to a known pose, handover matched, no silent big follow.
+    start_mode: "gello"
+    # Fixed neutral/home pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3)
+    # used only in init_align mode. pan=-1.5708(-pi/2): arm faces the UR 'base'
+    # (pendant) frame +y (0,1) — the frame the operator reads on the pendant.
+    # base(pendant) facing by pan: 0=>-x, -1.5708=>+y, +1.5708=>-y, pi=>+x.
+    # (base_link/RViz is 180deg about Z from this: pan=0 there is +x.)
+    init_pose: [1.5708, -1.57, 1.57, -1.57, -1.57, 0.0]
+    alignment_tolerance: 0.2    # per-joint rad: within this on all joints -> proceed hands over
+    alignment_hard_limit: 0.5   # per-joint rad: override_follow refused beyond this (e.g. big base offset)
+    alignment_timeout: 0.0      # <=0 => wait forever for the operator at a gate
 
 # Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
 # Driven via Modbus RTU over the UR RS485 tool-communication line.

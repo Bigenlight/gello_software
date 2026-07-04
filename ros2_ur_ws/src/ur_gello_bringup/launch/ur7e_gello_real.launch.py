@@ -168,6 +168,17 @@ def generate_launch_description():
                 "move-to-start / gripper nodes."
             ),
         ),
+        DeclareLaunchArgument(
+            "start_mode",
+            default_value="gello",
+            description=(
+                "Handshake style for gello_move_to_start. 'gello' (default): the "
+                "arm moves straight to the leader's current pose, then streams. "
+                "'init_align': the arm moves to a fixed init_pose (from the params "
+                "file), then waits for you to align the GELLO leader to it before "
+                "streaming (safer first motion)."
+            ),
+        ),
     ]
 
     # ------------------------------------------------------------------ #
@@ -268,7 +279,8 @@ def generate_launch_description():
     move_to_start_node = Node(
         package="ur_gello_bringup",
         executable="gello_move_to_start",
-        parameters=[params_file],
+        # start_mode launch arg overrides the value in params_file (last wins).
+        parameters=[params_file, {"start_mode": LaunchConfiguration("start_mode")}],
         output="screen",
     )
 
