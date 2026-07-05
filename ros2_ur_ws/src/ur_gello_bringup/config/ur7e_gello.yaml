@@ -83,6 +83,14 @@ gello_ur_bridge:
     # true in the yaml would make every bridge that loads this file start paused
     # and never resume.
     start_paused: false
+    # RESUME ALIGNMENT GATE (rad). ~/resume only releases the bridge if every joint
+    # of the live GELLO agrees with the arm's ACTUAL pose within this — a sanity
+    # check that the just-converged handover really is aligned before streaming.
+    # INVARIANT: resume_align_tol MUST be >= chase_tol (gello_move_to_start, 0.06),
+    # else a legitimately converged arm (up to chase_tol from the leader) gets its
+    # resume REFUSED and teleop won't start without manual recovery. 0.08 > 0.06.
+    # Raise together with chase_tol if you retune.
+    resume_align_tol: 0.08
     # 250 Hz upsamples the 30 Hz GELLO stream into the 500 Hz driver cleanly
     # (2:1) so at most one new setpoint lands per servo cycle nominally.
     publish_rate_hz: 250.0
@@ -103,9 +111,18 @@ gello_move_to_start:
     # joint, sustained chase_dwell_s. All defaults below are field-proven on the
     # real stack.
     #
-    # Per-joint agreement (rad) required at handover. 0.025 rad ~= 1.4 deg. Loosen
-    # slightly (0.03) if real-robot JTC steady-state error keeps it from settling.
-    chase_tol: 0.025
+    # Per-joint agreement (rad) required at handover. 0.06 rad ~= 3.4 deg; the
+    # residual is closed by the bridge's soft-started, rate-limited slew, so it is
+    # snap-free (the original snap was 0.15-0.25 rad at full speed from a dead stop).
+    # INVARIANT: chase_tol MUST be > arrival_tolerance (0.05 above). The catch-up
+    # trajectory reports SUCCEEDED as soon as the arm is within arrival_tolerance,
+    # so a real servo settling in the (chase_tol, arrival_tolerance] dead band would
+    # satisfy the trajectory yet NEVER satisfy a tighter gate -> the chase livelocks
+    # to chase_timeout_s and teleop never starts (the fake-hardware mock hides this
+    # by arriving exactly). The node auto-raises chase_tol with a warning if this is
+    # violated. After real-robot calibration you MAY tighten BOTH together (e.g.
+    # arrival 0.03 / chase_tol 0.04) if the arm reliably settles that close.
+    chase_tol: 0.06
     # The agreement must HOLD this long (median-of-5 filtered) before handover, so
     # a lone Dynamixel spike can't falsely pass the gate.
     chase_dwell_s: 0.4

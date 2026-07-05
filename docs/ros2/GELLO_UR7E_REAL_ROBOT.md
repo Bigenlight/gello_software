@@ -85,6 +85,11 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 - [ ] **Safety state = Normal인가** — 활성 protective stop / fault 없음(펜던트 안전 상태 확인).
 - [ ] **Installation > Payload(질량/CoG)가 Robotiq 2F-85 그리퍼 포함해 올바르게 설정되었는가** (§5) — 페이로드 미설정 시 보호 정지·처짐을 유발.
 
+> **첫 supervised bring-up 운영자 주의** (실기 실패 모드 리뷰 기반, 모두 안전 방향으로 실패):
+> - **초기 catch-up 스윕 중에는 소프트 `~/abort`(콘솔 "2) 정지")가 즉시 듣지 않습니다.** abort 플래그는 현재 궤적이 끝난 뒤에야 검사되고, 첫 catch-up은 최대 ~π에서 출발해 최대 ~8s 걸릴 수 있습니다. **그 구간에는 물리 E-STOP / Ctrl-C로만 즉시 정지**하세요.
+> - **handover(수렴~전환~resume, ~1s) 동안 GELLO를 완전히 정지**하세요. 이 창에서 손이 `resume_align_tol`(0.08 rad) 넘게 움직이면 `~/resume`가 거부됩니다 — **정상이며 복구 가능**(§복구 절차의 수동 `ros2 service call .../resume`). 3회 재시도(1.5s) 안에 멈추면 자동 재개.
+> - **teleop 도중 펜던트 External Control이 끊기면**(EC stop) 브리지는 계속 발행하지만 컨트롤러가 비활성 → EC 재개 시 잔차로 스냅/보호정지 위험. **그냥 EC만 다시 켜지 말고 handshake를 재실행**하세요(재-seed 보장).
+
 ### 자동 시퀀스 (런치 한 줄)
 
 > **중요 — 아래 전 과정은 `ur7e_gello_real.launch.py`가 staggered `TimerAction` + 이벤트 핸들러로 자동 수행합니다.**
@@ -206,7 +211,12 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 
 ### 실기 캘리브레이션 체크리스트 — `chase_tol` vs JTC 도달 오차
 
-> **왜 필요한가.** 수렴 게이트는 `|live GELLO − actual| <= chase_tol`(**0.025 rad**)을 요구합니다. **mock JTC는 명령 자세에 정확히 도달**하므로 gap이 0으로 떨어져 항상 수렴하지만, **실기 JTC는 정상상태 오차(steady-state error)가 남을 수 있어** catch-up 후에도 gap이 `chase_tol` 밑으로 안 내려가면 게이트가 **livelock**(무한 chase → timeout → exit 1)합니다. 또 `arrival_tolerance`(FollowJointTrajectory goal tolerance, **0.05**)보다 실기 도달 오차가 크면 각 catch-up 궤적이 **SUCCEEDED되지 못해** `_send_trajectory`가 실패 → 수렴 자체가 중단됩니다. 그래서 실기 첫 구동 전 **한 번의 핸드셰이크에 걸쳐 rosbag을 떠서 실측 도달 오차를 재고, `chase_tol`(과 필요 시 `arrival_tolerance`)이 그 위인지 확인**해야 합니다.
+> **왜 필요한가.** 수렴 게이트는 `|live GELLO − actual| <= chase_tol`(배포 **0.06 rad**)을 요구합니다. **mock JTC는 명령 자세에 정확히 도달**하므로 gap이 0으로 떨어져 항상 수렴하지만, **실기 JTC는 정상상태 오차(steady-state error)가 남을 수 있어**(중력 sag, 마찰, following error) 조심할 두 함정이 있습니다:
+>
+> 1. **Dead-band livelock (가장 흔한 실기 실패).** catch-up 궤적은 팔이 `arrival_tolerance`(FollowJointTrajectory goal tolerance, 배포 **0.05**) 이내에 들면 **SUCCEEDED**됩니다. 만약 `chase_tol`이 `arrival_tolerance`보다 **작으면**, 실기가 그 사이 dead band(예: 0.03)에서 정착할 때 궤적은 성공하는데 게이트는 영원히 통과 못 해 → **livelock**(무한 chase → `chase_timeout_s` → exit 1, **teleop 안 켜짐**). 그래서 **불변식: `chase_tol` > `arrival_tolerance`**. 배포 기본값 `chase_tol 0.06 > arrival 0.05`가 이를 만족하며, 노드가 위반 시 경고+자동 상향합니다. (실패 방향은 안전 — 팔은 소스 컨트롤러에서 홀드, 전환 안 함. 하지만 "왜 안 되지?"의 주범.)
+> 2. **궤적 abort.** 반대로 `arrival_tolerance`보다 실기 도달 오차가 **크면** catch-up 궤적이 SUCCEEDED 못 해 abort → 수렴 중단(fail-fast exit). 즉 `arrival_tolerance` >= 실측 오차 `e` 여야 함.
+>
+> 정리하면 **`e <= arrival_tolerance < chase_tol <= resume_align_tol`** 체인을 맞춰야 합니다. 실기 첫 구동 전 **한 번의 핸드셰이크에 걸쳐 rosbag을 떠서 실측 `e`를 재고** 이 체인을 확인하세요.
 
 1. **핸드셰이크 1회에 걸쳐 rosbag 기록.** launch를 올리고(또는 수동으로 `gello_move_to_start` 실행), 핸드셰이크가 진행되는 동안 다음을 녹화합니다:
    ```bash
@@ -222,11 +232,11 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
    ros2 topic echo /joint_states --once
    ros2 topic echo /gello/joint_states --once   # 리더가 정지해 있을 때
    ```
-3. **판정 및 튜닝.**
-   - `chase_tol`(0.025)이 실측 `e`보다 **커야** 합니다. 여유 있게 `e`의 약 1.5~2배로 잡으세요. `e ≈ 0.02`면 `chase_tol: 0.03~0.04`.
-   - `arrival_tolerance`(0.05)도 `e`보다 커야 catch-up 궤적이 SUCCEEDED됩니다. 실기에서 궤적이 자꾸 abort되면 `0.05` → `0.08` 등으로 **완화**하세요.
-   - 두 값은 `ur7e_gello.yaml`의 `gello_move_to_start:` 블록에서 조정 후 `colcon build`(또는 install된 config 갱신)합니다.
-   - **주의:** `chase_tol`을 너무 키우면 그만큼 큰 잔차 gap이 handover 시점에 남고, 그 gap은 브리지 soft-start slew로 닫힙니다(`<= max_step_rad*rate`). `resume_align_tol`(0.05)이 `chase_tol`의 상한 역할을 하므로, `chase_tol`을 `resume_align_tol` 근처까지 키우면 resume 정렬 게이트가 빡빡해집니다 — 필요 시 `resume_align_tol`도 함께 올리세요(단 클수록 resume 시 허용 잔차가 커짐).
+3. **판정 및 튜닝 — `e <= arrival_tolerance < chase_tol <= resume_align_tol` 체인을 유지.**
+   - **기본값(`arrival 0.05 / chase_tol 0.06 / resume_align_tol 0.08`)은 보수적으로 안전**합니다: 실기 `e < 0.05`이면(일반 UR은 << 0.05) 손 안 대도 동작하고, 남는 잔차(최대 0.06 rad ≈ 3.4°)는 브리지 soft-start slew로 완만히 닫혀 스냅이 없습니다.
+   - **더 정밀하게** 하려면 실측 `e`를 재고 **세 값을 함께** 낮추세요 — 예: `e ≈ 0.008`이면 `arrival 0.02 / chase_tol 0.03 / resume_align_tol 0.05`. 순서는 반드시 `arrival(>e) < chase_tol <= resume_align_tol`.
+   - **위반하면:** `chase_tol <= arrival` → **livelock**(노드가 경고+자동 상향); `arrival < e` → 궤적 abort; `resume_align_tol < chase_tol` → 방금 수렴한 팔의 **resume 거부**(수동 복구 필요, §복구 절차).
+   - `arrival_tolerance`·`chase_tol`은 `ur7e_gello.yaml`의 `gello_move_to_start:` 블록, `resume_align_tol`은 `gello_ur_bridge:` 블록에서 조정 후 `colcon build`(또는 install된 config 갱신).
 
 ### 새 파라미터 레퍼런스 (`gello_move_to_start:` / `gello_ur_bridge:`)
 
@@ -236,7 +246,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 
 | 파라미터 | 배포 기본값 | 의미 / 튜닝 시점 |
 |---|---|---|
-| `chase_tol` | `0.025` (≈1.4°) | 핸드오버에 요구되는 per-joint 일치(rad). **실기 JTC 정상상태 오차보다 커야** 함(안 그러면 livelock). 위 캘리브레이션으로 조정. |
+| `chase_tol` | `0.06` (≈3.4°) | 핸드오버에 요구되는 per-joint 일치(rad). 잔차는 soft-start slew로 닫혀 snap-free. **불변식: `arrival_tolerance` < `chase_tol` <= `resume_align_tol`** (안 지키면 livelock/abort/resume거부 — 노드가 `chase_tol<=arrival` 시 경고+자동 상향). 위 캘리브레이션으로 세 값 함께 조정. |
 | `chase_dwell_s` | `0.4` | 위 일치가 **유지**돼야 하는 시간(s, median-of-5 + dwell 중 새 샘플 요구). 낮추면 더 빨리 수렴하나 스파이크 통과 위험↑. |
 | `chase_v_budget` | `0.5` (노드 기본 `0.3`) | catch-up 궤적 길이를 정하는 속도 예산(rad/s): `T = max(gap/v, min_traj_duration)`. 낮추면 더 느리고 안전, 높이면 빠름. |
 | `min_traj_duration` | `0.5` (노드 기본 `0.75`) | 각 catch-up 궤적 최소 길이(s). 작은 gap도 near-step이 아니라 부드럽게. |
@@ -256,7 +266,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 | 파라미터 | 배포 기본값 | 의미 / 튜닝 시점 |
 |---|---|---|
 | `start_paused` | `false` (**런치가 `True`로 override**) | yaml은 `false` 유지 필수(다른 launch가 이 파일을 로드해도 안 멈추도록). 통합 실기 launch만 `True`로 pre-spawn PAUSED. |
-| `resume_align_tol` | *(yaml 없음)* 노드 기본 `0.05` | `~/resume` 정렬 게이트(rad): `|raw GELLO − actual| <= 이 값`일 때만 재개. `chase_tol`의 2배라 방금 수렴한 팔은 통과, 어긋난 수동 resume은 거부. `chase_tol`을 크게 키우면 이것도 함께 올림. |
+| `resume_align_tol` | `0.08` (노드 기본 `0.05`) | `~/resume` 정렬 게이트(rad): `|raw GELLO − actual| <= 이 값`일 때만 재개. **`chase_tol`(0.06)보다 커야** 방금 수렴한 팔(최대 chase_tol)이 통과, 어긋난 수동 resume은 거부. `chase_tol` 재튜닝 시 함께 올림. |
 | `soft_start_s` | `0.7` | 모든 (re)seed(startup/resume/staleness 복구) 후 slew clamp를 ~15%→100%로 램프하는 시간(s). 잔차 gap을 한 사이클이 아니라 완만히 닫음. `0.0`=off. |
 | `max_step_rad` | `0.0025` | per-cycle slew 상한(rad). 250 Hz에서 지속 0.625 rad/s, 최악 coalescing 2.5 rad/s(< 3.14 한계). **250 Hz에서 0.003 초과 금지**; 더 빠르게 하려면 먼저 `publish_rate_hz`를 500으로. |
 | `staleness_timeout_s` | `0.5` | 이보다 GELLO가 오래 안 오면 발행 중단(hold) + 복구 시 재-seed. |

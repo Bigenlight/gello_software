@@ -151,7 +151,26 @@ class GelloMoveToStart(Node):
         # with the LIVE leader within chase_tol on every joint, sustained for
         # chase_dwell_s. If the operator keeps moving, the switch simply does not
         # happen (fail direction is "won't start yet", never "moves unexpectedly").
-        self.chase_tol = float(self.declare_parameter("chase_tol", 0.025).value)
+        #
+        # INVARIANT: chase_tol MUST be > arrival_tolerance. The catch-up
+        # FollowJointTrajectory goal reports SUCCEEDED as soon as the arm is within
+        # arrival_tolerance of the command, so a REAL servo that settles in the
+        # (chase_tol, arrival_tolerance] dead band would satisfy the trajectory yet
+        # NEVER satisfy a tighter gate -> the chase livelocks to chase_timeout_s and
+        # teleop never starts. (The fake-hardware mock hides this by arriving
+        # exactly.) Default 0.06 > arrival 0.05. The guard below enforces it.
+        self.chase_tol = float(self.declare_parameter("chase_tol", 0.06).value)
+        # Enforce the invariant so a misconfig can't silently livelock the arm.
+        if self.chase_tol <= self.arrival_tolerance:
+            bumped = self.arrival_tolerance + 0.01
+            self.get_logger().warn(
+                f"chase_tol ({self.chase_tol}) <= arrival_tolerance "
+                f"({self.arrival_tolerance}): the convergence gate could NEVER pass "
+                f"on real hardware (trajectory succeeds within arrival_tolerance but "
+                f"the gate demands tighter) -> auto-raising chase_tol to {bumped:.3f}. "
+                f"Set chase_tol > arrival_tolerance in the params to silence this."
+            )
+            self.chase_tol = bumped
         self.chase_dwell_s = float(
             self.declare_parameter("chase_dwell_s", 0.4).value
         )
