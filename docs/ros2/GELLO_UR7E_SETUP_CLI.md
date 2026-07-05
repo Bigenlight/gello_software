@@ -216,8 +216,10 @@ ros2 control list_controllers
 ```
 forward_position_controller[position_controllers/JointGroupPositionController] active
 joint_state_broadcaster[joint_state_broadcaster/JointStateBroadcaster] active
-scaled_joint_trajectory_controller[...]  inactive  (혹은 unconfigured)
+joint_trajectory_controller[...]  inactive   # fake HW에서는 scaled_ 가 아니라 이 이름
 ```
+
+> **sim/mock 케이던스 주의 (fake hardware):** `use_fake_hardware:=true`(mock) 경로에서는 궤적 컨트롤러가 `scaled_joint_trajectory_controller`가 **아니라** `joint_trajectory_controller`로 뜹니다(`scaled_`는 실 e-Series 드라이버 전용). mock 경로는 `forward_position_controller`를 처음부터 active로 올리고 `gello_move_to_start` 핸드셰이크를 **쓰지 않으므로** 이 차이는 무해합니다 — 실기 핸드셰이크가 기다리는 `scaled_joint_trajectory_controller`는 실로봇 경로에서만 나타납니다. 또한 mock 부팅 로그의 **`io_and_status_controller` spawner 실패는 무해**합니다(mock에는 IO 인터페이스가 없음). 둘 다 정상이며 조인트 텔레옵에 영향 없음.
 
 ```bash
 # 명령 토픽이 브릿지 발행 주기대로 나가는지 확인 (source:=gello 로 GELLO를 움직이면서)
@@ -273,13 +275,17 @@ Method A는 UR 펜던트에서 **External Control** 프로그램을 사람이 �
 
 1. **t=0s** — `ur_robot_driver` 기동. `scaled_joint_trajectory_controller`가 ACTIVE 상태로, `forward_position_controller`는 로드는 되지만 INACTIVE 상태로 올라옵니다.
 2. **t=6s** — `gello_publisher` 기동 (물리 GELLO 리더암에서 조인트 각도 30Hz로 퍼블리시).
-3. **t=8s** — `gello_move_to_start` (핸드셰이크 노드) 기동:
+3. **t=6s** — `gello_ur_bridge`가 **PRE-SPAWN(선기동)되지만 PAUSED**(`start_paused:=true` launch 오버라이드) 상태로 뜹니다. 구독/서비스(`~/pause`, `~/resume`)만 올리고 `/forward_position_controller/commands`에는 **아무것도 발행하지 않습니다.** 이렇게 미리 띄워 두면, 예전 `OnProcessExit` 콜드스타트 창(그 사이 리더가 계속 드리프트해 인계 gap이 벌어지던 구간)이 사라집니다.
+4. **t=8s** — `gello_move_to_start` (핸드셰이크 노드) 기동:
    - `scaled_joint_trajectory_controller`가 ACTIVE가 될 때까지 대기 (= 펜던트에서 External Control Play를 누르는 시점).
-   - ACTIVE가 확인되면, 현재 GELLO 리더암의 포즈를 읽고 `/scaled_joint_trajectory_controller/follow_joint_trajectory` 액션으로 로봇을 그 자세까지 부드럽게(보간, `trajectory_duration=5.0`, `arrival_tolerance=0.05`) 이동시킵니다.
-   - 도착 확인 후 **STRICT 컨트롤러 스위치**: `forward_position_controller`를 activate, `scaled_joint_trajectory_controller`를 deactivate.
-4. 핸드셰이크 노드가 **returncode==0**으로 정상 종료한 경우에만, `RegisterEventHandler(OnProcessExit(...))`를 통해 **브리지(`gello_ur_bridge`) + 그리퍼**가 자동으로 기동됩니다. (실패 시 브리지는 절대 켜지지 않음 — 안전장치.)
+   - `gello` 모드(기본)는 **수렴-게이트 추격 루프**로 동작합니다: 매 반복마다 **라이브** GELLO 포즈와 로봇 실제 `/joint_states`를 다시 읽어, 측정된 gap으로 각 캐치업 트래젝토리 길이를 `T=max(gap/chase_v_budget, min_traj_duration)`로 산정해(상한 클램프 없음 — gap이 크면 더 *길게* 이동) `scaled_joint_trajectory_controller`로 보냅니다. 관절별 `|라이브GELLO − 실제| ≤ chase_tol`(기본 0.025 rad)이 `chase_dwell_s`(기본 0.4s) 동안 유지(median-of-5)될 때에만 인계합니다. `chase_hard_limit`(4.0 rad)보다 큰 gap은 거부(래핑 백스톱), `chase_timeout_s`(30s) 내 수렴 못 하거나 리더가 stale이면 **exit 1**(스위치 안 함, fail-safe).
+   - 수렴 확인 후 **STRICT 컨트롤러 스위치**: `forward_position_controller`를 activate, `scaled_joint_trajectory_controller`를 deactivate.
+   - 스위치 성공 후 `resume_bridge:=true`이므로 **선기동된 브릿지의 `~/resume`를 직접 호출**해 스트리밍을 시작합니다(스위치 *이후*에만 호출 — 비활성 컨트롤러로 스트리밍하는 일이 없음). 브릿지의 `~/resume`는 정렬-게이트(`|GELLO−실제| ≤ resume_align_tol`)라 방금 수렴한 팔은 통과합니다.
+5. 핸드셰이크 노드가 **returncode==0**으로 정상 종료하면 `RegisterEventHandler(OnProcessExit(...))`로 **그리퍼(Modbus + gello_gripper_bridge)**가 기동됩니다. **브릿지는 여기서 (재)시작되지 않습니다** — 이미 선기동돼 있고 `~/resume`로 방금 풀렸습니다. 핸드셰이크 실패 시 브릿지는 계속 PAUSED로 남고(발행 없음) 그리퍼도 안 뜹니다 — 안전장치. resume가 실패하면 `forward_position_controller`가 도착 포즈를 홀드한 채로 남고, 로그에 수동 복구 명령(`ros2 service call /gello_ur_bridge/resume std_srvs/srv/Trigger`)이 출력됩니다.
 
 이 핸드셰이크는 **필수**입니다. 생략하면 GELLO의 현재 포즈로 로봇이 순간이동(스냅)하려다 velocity-limit 프로텍티브 스탑이 걸립니다.
+
+> **정직한 보증(“제로 스냅”이 아님):** 인계는 팔로워가 **라이브** 리더를 `chase_tol` 이내로 따라잡고 그 상태가 유지될 때에만 일어납니다. 남은 잔차는 소프트스타트·레이트리밋 슬루(`≤ max_step_rad × publish_rate_hz`, `soft_start_s` 동안 램프)로 닫힙니다. 오퍼레이터가 리더를 계속 움직이면 인계가 **지연**될 뿐, 스냅이 발생하지 않습니다.
 
 ### 3-3. 실행
 
@@ -304,23 +310,26 @@ Play를 누르면 `scaled_joint_trajectory_controller`가 ACTIVE로 전환되고
 ```
 [ur_robot_driver] ... scaled_joint_trajectory_controller ... active
 [gello_publisher] Publishing joint states at 30.0 Hz (port ...FTBEO6QK...)
-[gello_move_to_start] Waiting for scaled_joint_trajectory_controller to become ACTIVE...
-# <-- 여기서 펜던트 Load + Play 수행 -->
-[gello_move_to_start] Controller active, moving robot to GELLO start pose...
-[gello_move_to_start] Trajectory goal reached (within arrival_tolerance=0.05)
-[gello_move_to_start] Switching controllers: activate=forward_position_controller, deactivate=scaled_joint_trajectory_controller
-[gello_move_to_start] Handshake complete (returncode=0)
-[gello_ur_bridge] gello_ur_bridge started | filter=one_euro(min_cutoff=1.0Hz beta=2.0 d_cutoff=1.0Hz) max_step_rad=0.0025 staleness_timeout_s=0.5 publish_rate_hz=250.0
-[gripper] Gripper node started
+[gello_ur_bridge] gello_ur_bridge started | filter=one_euro(min_cutoff=1.0Hz beta=2.0 d_cutoff=1.0Hz) max_step_rad=0.0025 soft_start_s=0.7 start_paused=True resume_align_tol=0.05 staleness_timeout_s=0.5 publish_rate_hz=250.0
+[gello_move_to_start] gello_move_to_start started | start_mode=gello source=scaled_joint_trajectory_controller target=forward_position_controller trajectory_duration=5.0 arrival_tolerance=0.05
+# <-- 여기서 펜던트 Load + Play 수행 (scaled_joint_trajectory_controller ACTIVE 대기 중) -->
+[gello_move_to_start] scaled_joint_trajectory_controller is ACTIVE; proceeding with move-to-start.
+[gello_move_to_start] Chasing live GELLO: gap 0.83 rad at elbow -> 1.66s catch-up.   # gap 기반으로 여러 번 반복될 수 있음
+[gello_move_to_start] Converged: max gap 0.0180 rad held 0.41s (<= 0.025 for 0.4s). Handing over to streaming.
+[gello_move_to_start] Switching controllers (STRICT): activate=forward_position_controller, deactivate=scaled_joint_trajectory_controller...
+[gello_move_to_start] Controller switch OK: forward_position_controller active. Bridge may now stream.
+[gello_ur_bridge] Following RESUMED — aligned ... Arm re-seeds from its current pose and soft-starts toward GELLO (rate-limited).
+[gello_move_to_start] Bridge resumed (...); teleop is now streaming.
+[gripper] Modbus gripper + gello_gripper_bridge started
 ```
 
-`Handshake complete` 로그와 브리지/그리퍼 기동 로그가 뒤따라야 정상입니다. 이 로그가 안 뜨면 브리지가 켜지지 않은 것이므로 GELLO를 움직여도 로봇은 반응하지 않습니다 (의도된 안전 동작).
+`Converged` → `Controller switch OK` → `Bridge resumed`(=teleop 스트리밍 시작) 로그가 순서대로 떠야 정상입니다. 리더를 계속 움직이면 `Chasing...` 로그가 반복되며 인계가 지연될 뿐, 스냅은 없습니다. `Bridge resumed` 로그가 안 뜨면 브리지가 아직 PAUSED이므로 GELLO를 움직여도 로봇은 반응하지 않습니다 (의도된 안전 동작 — resume 실패 시 로그의 수동 복구 명령 `ros2 service call /gello_ur_bridge/resume std_srvs/srv/Trigger` 참고).
 
 ### 3-5. 실제 로봇 움직임 시점
 
-- 로봇은 **핸드셰이크가 시작되는 시점(런치 기준 약 t=8초, 실제로는 펜던트 Play를 누른 직후)**에 GELLO의 현재 포즈까지 5초간 보간 이동하며 처음으로 움직입니다.
-- **E-STOP을 항상 손 닿는 곳에 두고, 작업 공간을 비우고, Play를 누르기 전에 GELLO 리더암을 로봇의 현재 자세(중립 부근)와 비슷하게 잡아두세요** — 로봇은 GELLO가 어디에 있든 그 자세로 이동합니다.
-- 이후 컨트롤러가 `forward_position_controller`로 전환되면 브리지가 GELLO 움직임을 실시간으로(30Hz 입력 → 250Hz 퍼블리시, EMA/데드밴드/스텝 제한 적용) 따라갑니다.
+- 로봇은 **핸드셰이크가 시작되는 시점(런치 기준 약 t=8초, 실제로는 펜던트 Play를 누른 직후)**에 처음 움직입니다. 단일 5초 보간이 아니라, **라이브 GELLO 포즈를 향한 캐치업 트래젝토리를 gap 기반 길이로 한 번 이상 보낸 뒤**(리더가 계속 움직이면 여러 번), 관절별 gap이 `chase_tol` 이내로 수렴·유지되면 인계합니다.
+- **E-STOP을 항상 손 닿는 곳에 두고, 작업 공간을 비우고, Play를 누르기 전에 GELLO 리더암을 로봇의 현재 자세(중립 부근)와 비슷하게 잡아두세요** — 로봇은 GELLO가 어디에 있든 그 자세로 이동합니다. 리더를 가까이 잡을수록 gap이 작아 수렴이 빠르고 첫 이동도 짧습니다.
+- 수렴 후 컨트롤러가 `forward_position_controller`로 전환되고 브릿지가 `~/resume`로 풀리면, 브릿지가 GELLO 움직임을 실시간으로(30Hz 입력 → 250Hz 퍼블리시, one_euro/스텝제한 적용) 따라갑니다. resume 직후 `soft_start_s` 동안 슬루 클램프가 램프되어 잔차를 부드럽게 닫습니다.
 
 ### 3-6. 문제 발생 시 복구
 
@@ -451,6 +460,50 @@ ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
 
 > 참고: 위 `publish_rate_hz`는 **브리지**의 발행 주기입니다. `gello_publisher`(리더암 읽기)는 별도로 `publish_rate_hz=30`으로 동작합니다.
 
+### 핸드셰이크 + 안티스냅 안전 파라미터 레퍼런스 (`gello_move_to_start` / 브릿지 안전)
+
+아래는 시작 시 스냅을 막는 **수렴-게이트 핸드셰이크**(`gello_move_to_start`, `start_mode=gello`)와 **브릿지 재개 안전**(`gello_ur_bridge`) 파라미터입니다. 모두 `config/ur7e_gello.yaml`에서 로드되며, **config 값이 노드 기본값을 오버라이드**합니다. `resume_bridge` / `start_paused`는 **yaml에 두지 않고** 통합 launch(`ur7e_gello_real.launch.py`)가 실행 시 오버라이드합니다(standalone/gripper-only 실행이 영향을 받지 않도록).
+
+**`gello_move_to_start` (수렴-게이트 핸드셰이크):**
+
+| 파라미터 | 배포값(config) | 노드 기본값 | 한 줄 의미 |
+|---|---|---|---|
+| `start_mode` | `gello` | `gello` | `gello`=라이브 리더로 수렴 후 자동 인계 / `init_align`=고정 init_pose로 이동 후 오퍼레이터 정렬 게이트 |
+| `source_controller` | `scaled_joint_trajectory_controller` | (동일) | 캐치업 트래젝토리를 보내는(보간) 컨트롤러 |
+| `target_controller` | `forward_position_controller` | (동일) | 인계 후 스트리밍 컨트롤러 |
+| `trajectory_duration` | `5.0` | `5.0` | init_align의 init_pose 이동 시간(s). `gello` 모드 캐치업 길이는 gap 기반 별도 산정이라 이 값을 쓰지 않음 |
+| `arrival_tolerance` | `0.05` | `0.05` | FollowJointTrajectory 관절별 도착 허용오차(rad). **실기 튜닝 주의**: 실 JTC 정상상태 오차가 크면 완화(↑) 필요 |
+| `chase_tol` | `0.025` | `0.025` | 인계 게이트: 관절별 `\|라이브GELLO−실제\|`가 이 값 이하여야 함(≈1.4°). **실기 캘리브 주의** ↓아래 |
+| `chase_dwell_s` | `0.4` | `0.4` | 수렴이 이 시간 동안 유지(median-of-5, 새 샘플 도착 필수)돼야 인계 |
+| `chase_v_budget` | `0.5` | `0.3` | 캐치업 트래젝토리 길이 산정 속도예산(rad/s): `T=max(gap/budget, min_traj_duration)`, 상한 클램프 없음 |
+| `min_traj_duration` | `0.5` | `0.75` | 캐치업 트래젝토리 최소 길이(s) — 작은 gap도 급스텝이 아닌 부드러운 이동 |
+| `chase_hard_limit` | `4.0` | `4.0` | 이보다 큰 gap은 자동추격 거부(래핑/그로스-오포즈 백스톱, **접근 한계 아님** — 정상 접근은 ~π까지 허용) |
+| `chase_timeout_s` | `30.0` | `30.0` | 전체 수렴 시간예산(s). 초과 시 **exit 1**(스위치 안 함, fail-safe). `≤0`=무한 대기 |
+| `gello_staleness_s` | `0.5` | `0.5` | 이보다 오래된 GELLO 샘플=stale. 죽은/멈춘 리더는 dwell 통과 못 하고 타임아웃(재개 시 스냅 방지) |
+| `resume_bridge` | *(launch: `true`)* | `false` | 스위치 성공 후 브릿지 `~/resume` 호출로 스트리밍 시작. yaml에 없음 — 통합 launch가 `true`로 오버라이드 |
+| `bridge_resume_service` | `/gello_ur_bridge/resume` | (동일) | resume를 호출할 브릿지 Trigger 서비스명 |
+| `alignment_tolerance` | `0.2` | `0.15` | *(init_align 전용)* 정렬 게이트 관절별 허용오차(rad) |
+| `alignment_hard_limit` | `0.5` | `0.5` | *(init_align 전용)* `~/override_follow`가 허용되는 상한(rad) |
+| `alignment_timeout` | `0.0` | `0.0` | *(init_align 전용)* 게이트에서 오퍼레이터 대기 상한(s). `≤0`=무한 대기 |
+
+**`gello_ur_bridge` (재개/시딩 안전 — 트레머 노브는 위 표 참고):**
+
+| 파라미터 | 배포값 | 노드 기본값 | 한 줄 의미 |
+|---|---|---|---|
+| `soft_start_s` | `0.7`(config) | `0.7` | **모든** (재)시딩(startup/resume/staleness 복구) 후 이 시간 동안 슬루 클램프를 ~15%→`max_step_rad`로 램프 — 정지 상태에서 풀슬루로 튀지 않게 이즈인 |
+| `start_paused` | `false`(config) / *launch `true`* | `false` | `true`면 시딩돼도 `~/resume` 전까지 발행 안 함(HOLD). yaml은 `false` 유지 — 통합 launch만 `true`로 선기동-일시정지 |
+| `resume_align_tol` | *(yaml 없음)* `0.05` | `0.05` | `~/resume` 정렬 게이트: `\|GELLO−실제\| ≤ 이 값`일 때만 재개 허용(=2×`chase_tol`, 방금 수렴한 팔은 통과, 오정렬 수동 resume은 거부) |
+
+> **정직한 보증(“제로 스냅” 아님):** 인계는 팔로워가 라이브 리더를 `chase_tol` 이내로 따라잡고 유지될 때에만 발생하고, 남은 잔차는 소프트스타트·레이트리밋 슬루(`≤ max_step_rad × publish_rate_hz`)로 닫힙니다. 움직이는/영영 안 멈추는 리더는 스냅이 아니라 **인계 지연**으로 나타납니다.
+
+#### 실기(real GELLO + 실 UR7e) 캘리브레이션 주의 — 미검증 항목
+
+전체 파이프라인은 **하드웨어 없이(ros2_control mock 스택)만 검증**되었고, **실로봇 테스트는 아직 미완료**입니다. 실기 투입 전 다음을 캘리브레이션하세요:
+
+- **`chase_tol`(0.025)은 실 JTC 정상상태 도착오차보다 커야 합니다.** mock JTC는 목표에 *정확히* 도착하므로 게이트가 바로 통과하지만, 실 HW는 정상상태 오차가 남아 gap이 `chase_tol` 아래로 안 떨어지면 게이트가 **라이브락**(영영 인계 안 함)될 수 있습니다. 이때 `chase_tol`을 `0.03` 정도로 살짝 올리세요.
+- **캘리브 방법(1회):** 핸드셰이크 한 번을 진행하며 `/joint_states`와 `/forward_position_controller/commands`(또는 scaled_jtc 명령)를 **rosbag 1개로 기록**해, 수렴 부근에서 명령 대비 실제의 관절별 정상상태 잔차를 측정합니다. 그 잔차의 최대치보다 `chase_tol`을 약간 크게 잡으면 라이브락 없이 인계됩니다.
+- **`arrival_tolerance`(0.05)** 도 실 JTC 도착 정확도에 따라 완화가 필요할 수 있습니다(캐치업 goal이 goal_tolerance 초과로 abort되면 핸드셰이크가 fail-safe 종료).
+
 ### 필터 내부 동작 — 속도 추정의 케이던스 분리 (2026-07-04 개선)
 
 One-Euro는 **속도-적응형**이라 "현재 리더가 얼마나 빨리 움직이는가"(속도 추정)에 따라 cutoff를 여닫습니다. 그런데 GELLO 샘플은 **~30 Hz**로만 들어오고 브리지는 **250 Hz**로 발행합니다. 초기 구현은 이 속도 추정을 **250 Hz 발행 틱마다** 다시 계산했는데, 입력값은 30 Hz로만 갱신되므로:
@@ -531,7 +584,7 @@ cd /home/laptop3/gello_software/ros2_ur_ws
   cd /home/laptop3/gello_software/ros2_ur_ws
   ./run_ur7e_gello_sim.sh
   ```
-- [ ] **전체 스윕 경로가 장애물 없음(handshake move 대비)**: `move_to_start`는 로봇 현재 포즈 → GELLO 현재 포즈까지 조인트 공간을 단순 보간(interpolated)으로 이동하며 **장애물/충돌 인식이 전혀 없다**. 현재 포즈에서의 클리어런스만이 아니라, 두 포즈를 잇는 **전체 조인트 스윕 경로 전 구간**이 사람·장애물·케이블 없이 비어 있는지 확인했다.
+- [ ] **전체 스윕 경로가 장애물 없음(handshake move 대비)**: `move_to_start`는 로봇 현재 포즈 → 라이브 GELLO 포즈로 조인트 공간을 보간(interpolated) 캐치업 트래젝토리로 이동하며(리더가 계속 움직이면 여러 번), **장애물/충돌 인식이 전혀 없다**. 현재 포즈에서의 클리어런스만이 아니라, 두 포즈를 잇는 **전체 조인트 스윕 경로 전 구간**이 사람·장애물·케이블 없이 비어 있는지 확인했다.
   - **Method A (펜던트 Play 수동)** — 선행조건: 펜던트에서 External Control 프로그램을 Load하고 대기 중이어야 함. 실행:
     ```bash
     ./run_ur7e_gello_real.sh
@@ -548,8 +601,9 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 
 - [ ] **첫 움직임은 약 t=8s 부근**: 런치 내 staggered TimerAction 순서상 driver(t0) → gello_publisher(t6) → gello_move_to_start(t8) 이므로, 약 8초 뒤 로봇이 GELLO 자세로 서서히 이동을 시작하는 것이 정상이다. 그 전에 로봇이 움직이면 비정상이니 즉시 정지.
   ```bash
-  # 참고: handshake 성공 시에만 브릿지 + gripper가 이어서 시작됨
-  # (RegisterEventHandler OnProcessExit(move_to_start), returncode==0 조건)
+  # 참고: 브릿지는 t=6s에 선기동-PAUSED로 이미 떠 있고, handshake 성공(returncode==0) 시
+  #       move_to_start가 브릿지 ~/resume를 호출해 스트리밍이 시작됨. 그리퍼(Modbus +
+  #       gello_gripper_bridge)는 OnProcessExit(move_to_start, rc==0)로 이어서 기동됨.
   ```
   이 단계에서 GELLO를 잡고 천천히, 예측 가능한 범위 내에서만 움직인다. 급격한 동작 금지.
 - [ ] **핸드셰이크 스킵 금지**: gello_move_to_start 노드를 건너뛰거나 강제 종료하지 않는다 (건너뛰면 속도 제한 protective stop 위험).
@@ -602,7 +656,7 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 
 **로봇이 전혀 움직이지 않음**
 - `forward_position_controller`가 비활성(inactive) 상태일 수 있음 — 정상 부팅 시퀀스는 `scaled_joint_trajectory_controller`가 ACTIVE로 시작하고, 핸드셰이크 성공 후에만 `forward_position_controller`로 전환(activate)되고 `scaled_jtc`가 deactivate 됩니다.
-- `gello_move_to_start`의 리턴코드(returncode)가 0이 아니면 브릿지와 그리퍼가 아예 시작되지 않습니다 (`RegisterEventHandler(OnProcessExit(...))`로 returncode==0 조건부 실행). 런치 로그에서 handshake 노드 종료 코드를 확인할 것.
+- 브릿지는 t=6s에 **선기동-PAUSED**로 떠 있고, 스트리밍은 `gello_move_to_start`가 STRICT 스위치 성공 후 `~/resume`를 호출해야 시작됩니다. `gello_move_to_start`의 리턴코드(returncode)가 0이 아니면 브릿지는 계속 PAUSED(발행 없음)로 남고 그리퍼도 시작되지 않습니다 (`RegisterEventHandler(OnProcessExit(...))`로 returncode==0 조건부 그리퍼 기동). 스위치는 성공했으나 resume만 실패한 경우 `forward_position_controller`가 도착 포즈를 홀드하며, 로그의 `ros2 service call /gello_ur_bridge/resume std_srvs/srv/Trigger`로 수동 재개할 수 있습니다. 런치 로그에서 handshake 노드 종료 코드를 확인할 것.
 - 컨트롤러 상태 확인:
   ```bash
   ros2 control list_controllers

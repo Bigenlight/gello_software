@@ -45,11 +45,12 @@
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-/home/laptop3/gello_software}"
+_RH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$_RH_DIR/.." && pwd)}"
 export ROBOT_IP="${ROBOT_IP:-192.168.10.11}"
 
 # Overlay names (kept as functions/vars so they are easy to re-source).
-_UR_WS_SETUP="/home/laptop3/gello_software/ros2_ur_ws/install/setup.bash"
+_UR_WS_SETUP="${_RH_DIR}/install/setup.bash"
 
 # Source ROS2 + workspace overlay (idempotent; safe to call repeatedly).
 ur_env() {

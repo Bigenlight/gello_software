@@ -65,6 +65,24 @@ gello_ur_bridge:
     # (toward 0.002) if fine moves feel "sticky"/stair-stepped.
     deadband_rad: 0.004
     staleness_timeout_s: 0.5
+    # SOFT-START (anti-snap ease-in). For soft_start_s seconds after EVERY
+    # (re)seed — startup, operator resume, AND staleness recovery — the per-cycle
+    # slew clamp ramps from ~15% up to max_step_rad, so the arm eases into closing
+    # any residual gap instead of jumping to full slew from a standstill. This is
+    # what bounds the "startup snap": the residual leader<->arm gap at handover is
+    # closed at <= (ramped) max_step_rad*publish_rate_hz, never in one cycle.
+    # 0.0 = off (full slew immediately). 0.7s validated on the real bridge
+    # (ramps 0.17 -> 0.40 -> 0.625 rad/s over 0.7s).
+    soft_start_s: 0.7
+    # START PAUSED default. false = normal standalone behaviour (the bridge
+    # streams as soon as it is seeded), which is what gripper-only / RViz / manual
+    # bridge runs that load this same file expect. The INTEGRATED real teleop
+    # launch (ur7e_gello_real.launch.py) OVERRIDES this to true at launch level so
+    # the bridge is pre-spawned HELD and only released by gello_move_to_start's
+    # ~/resume call AFTER the controller switch. Keep this false here: putting
+    # true in the yaml would make every bridge that loads this file start paused
+    # and never resume.
+    start_paused: false
     # 250 Hz upsamples the 30 Hz GELLO stream into the 500 Hz driver cleanly
     # (2:1) so at most one new setpoint lands per servo cycle nominally.
     publish_rate_hz: 250.0
@@ -77,9 +95,48 @@ gello_move_to_start:
     target_controller: "forward_position_controller"
     trajectory_duration: 5.0
     arrival_tolerance: 0.05
+    # --- Convergence-gated handover ("gello" mode) -----------------------------
+    # The leader is a MOVING target, so instead of one blind trajectory to a
+    # frozen snapshot (which snapped when streaming began because the leader had
+    # drifted) the node CHASES the live GELLO pose and only hands over once the
+    # arm's ACTUAL pose agrees with the LIVE leader within chase_tol on every
+    # joint, sustained chase_dwell_s. All defaults below are field-proven on the
+    # real stack.
+    #
+    # Per-joint agreement (rad) required at handover. 0.025 rad ~= 1.4 deg. Loosen
+    # slightly (0.03) if real-robot JTC steady-state error keeps it from settling.
+    chase_tol: 0.025
+    # The agreement must HOLD this long (median-of-5 filtered) before handover, so
+    # a lone Dynamixel spike can't falsely pass the gate.
+    chase_dwell_s: 0.4
+    # Velocity budget (rad/s) that SIZES each catch-up trajectory from the measured
+    # gap: T = max(gap / chase_v_budget, min_traj_duration). No upper clamp — a big
+    # gap gets a proportionally LONGER (not faster) move, so the JTC spline peak
+    # stays well under the 3.14 rad/s protective-stop limit.
+    chase_v_budget: 0.5
+    # Floor on each catch-up trajectory duration (s) so tiny gaps still move
+    # smoothly rather than as a near-instant step.
+    min_traj_duration: 0.5
+    # Per-joint HARD refuse (rad): never auto-chase a gap larger than this. This is
+    # a WRAPAROUND / gross-mispose BACKSTOP, NOT an approach limit — the arm
+    # legitimately starts far (up to ~pi) from the leader and the duration-sized
+    # catch-up moves it there safely. A SMALLER value wrongly refused the
+    # legitimate initial approach (caught on the real stack). 4.0 rad allows every
+    # normal approach yet still catches a full-turn (2*pi) wraparound.
+    chase_hard_limit: 4.0
+    # Overall convergence time budget (s); on never-settle the node times out and
+    # exits 1 (fail-safe, no switch). <=0 => wait forever.
+    chase_timeout_s: 30.0
+    # A GELLO sample older than this (s) is STALE: a dead/frozen leader stream must
+    # never count as "still" and pass the dwell (that would re-open the snap on
+    # recovery). The convergence gate clears its dwell whenever the sample is not
+    # fresh, so a dead stream cannot hand over — it times out instead.
+    gello_staleness_s: 0.5
     # Handshake style (override at launch with start_mode:=..., or env
     # START_MODE=init_align via run_ur7e_gello_real.sh):
-    #   "gello"      : robot moves TO the leader's CURRENT pose, then streams.
+    #   "gello"      : convergence-gated chase — arm follows the LIVE leader with
+    #                  gap-sized catch-ups, streams only once caught up within
+    #                  chase_tol (below), sustained chase_dwell_s.
     #   "init_align" : INTERACTIVE, operator-gated. Robot moves to the FIXED
     #                  init_pose below only after you authorize GATE 1
     #                  (ros2 service call /gello_move_to_start/proceed). Then YOU

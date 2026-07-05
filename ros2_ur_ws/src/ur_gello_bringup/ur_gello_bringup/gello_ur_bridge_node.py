@@ -54,6 +54,9 @@ UR_JOINT_ORDER = [
     "wrist_3_joint",
 ]
 
+# Short, UNAMBIGUOUS per-joint labels for the resume alignment report (same order).
+UR_JOINT_SHORT = ["pan", "lift", "elbow", "w1", "w2", "w3"]
+
 # Throttle period (seconds) for repeated warnings so we don't spam the log.
 _WARN_THROTTLE_S = 2.0
 
@@ -146,6 +149,37 @@ class GelloUrBridge(Node):
         self.staleness_timeout_s = float(
             self.declare_parameter("staleness_timeout_s", 0.5).value
         )
+        # SOFT-START: for soft_start_s after every (re)seed the per-cycle slew
+        # clamp ramps from a small fraction up to max_step_rad, so the arm eases
+        # into closing any residual gap instead of jumping to full slew from a
+        # dead stop. Covers ALL (re)seed paths — startup, resume, AND staleness
+        # recovery — so none of them can snap. 0.0 = off.
+        self.soft_start_s = float(
+            self.declare_parameter("soft_start_s", 0.7).value
+        )
+        # START PAUSED: spawn the bridge before the handshake completes but hold
+        # (publish nothing) until gello_move_to_start calls ~/resume after the
+        # controller switch. Removes the OnProcessExit cold-start window during
+        # which the leader used to keep drifting (widening the handover gap).
+        self._paused = bool(
+            self.declare_parameter("start_paused", False).value
+        )
+        # RESUME ALIGNMENT GATE: ~/resume is REFUSED (bridge stays paused) unless
+        # the leader and the arm agree within this per-joint tolerance (rad). This
+        # hard-gates the operator-resume snap door: without it, resuming after the
+        # leader moved while paused would slew the whole accumulated gap at the
+        # (soft-started) slew rate. Default 0.05 = 2x the move_to_start chase_tol
+        # so the post-handover resume (arm already converged within chase_tol)
+        # always passes, while a genuinely misaligned manual resume is refused.
+        self.resume_align_tol = float(
+            self.declare_parameter("resume_align_tol", 0.05).value
+        )
+        # Wall-clock (monotonic) of the last (re)seed, for the soft-start ramp.
+        self._seed_time: float | None = None
+        # Set when the staleness watchdog trips; forces a re-seed (and thus a
+        # fresh soft-start) when the stream recovers, so a leader that moved
+        # while the stream was dead does not snap on reconnect.
+        self._was_stale = False
         self.publish_rate_hz = float(
             self.declare_parameter("publish_rate_hz", 125.0).value
         )
@@ -200,9 +234,11 @@ class GelloUrBridge(Node):
         self._actual_pose: list[float] | None = None
         # PAUSE/RESUME: when paused the timer stops publishing so the robot HOLDS
         # its last commanded pose (forward_position_controller keeps the setpoint).
-        # On resume we re-seed from the actual pose so following restarts with no
-        # jump (then slews toward GELLO at <= max_step_rad).
-        self._paused = False
+        # Resume is GATED (see _on_resume): it only proceeds when a fresh leader
+        # sample and the arm pose agree within resume_align_tol, so the restart is
+        # genuinely jump-free (re-seed from actual + soft-start); a misaligned
+        # resume is REFUSED and the bridge stays paused. NOTE: self._paused is
+        # initialized from the start_paused parameter above (do not reset here).
 
         # --- ROS interfaces ----------------------------------------------
         self._js_topic = str(
@@ -238,6 +274,9 @@ class GelloUrBridge(Node):
             "gello_ur_bridge started | "
             f"{_filt} "
             f"max_step_rad={self.max_step_rad} "
+            f"soft_start_s={self.soft_start_s} "
+            f"start_paused={self._paused} "
+            f"resume_align_tol={self.resume_align_tol} "
             f"staleness_timeout_s={self.staleness_timeout_s} "
             f"publish_rate_hz={self.publish_rate_hz}"
         )
@@ -301,6 +340,13 @@ class GelloUrBridge(Node):
                 "GELLO stale, holding — not publishing",
                 throttle_duration_sec=_WARN_THROTTLE_S,
             )
+            # Force a re-seed on recovery: if the leader moved while the stream
+            # was dead, we must NOT resume by closing that gap at full slew. On
+            # the next good message the seed branch below re-seeds from the arm's
+            # actual pose and restarts the soft-start ramp.
+            self._filtered = None
+            self._last_published = None
+            self._was_stale = True
             return
 
         # First valid target: seed filter + last-published to the ROBOT'S ACTUAL
@@ -323,11 +369,23 @@ class GelloUrBridge(Node):
             if self._euro is not None:
                 for i in range(len(UR_JOINT_ORDER)):
                     self._euro[i].seed(self._actual_pose[i])
+            self._seed_time = time.monotonic()  # start the soft-start ramp
+            if self._was_stale:
+                self.get_logger().info("GELLO stream recovered; re-seeded from "
+                                       "actual pose with soft-start.")
+                self._was_stale = False
             self._publish(self._last_published)
             return
 
         alpha = self.ema_alpha
+        # SOFT-START: ramp the effective slew clamp from ~15% up to full over
+        # soft_start_s after the last (re)seed, so gap closure eases in instead of
+        # snapping to full slew from a standstill. After the ramp, step == max.
         step = self.max_step_rad
+        if self.soft_start_s > 0.0 and self._seed_time is not None:
+            frac = (time.monotonic() - self._seed_time) / self.soft_start_s
+            if frac < 1.0:
+                step = self.max_step_rad * (0.15 + 0.85 * max(0.0, frac))
         deadband = self.deadband_rad
         use_euro = self._euro is not None
         out: list[float] = []
@@ -371,21 +429,84 @@ class GelloUrBridge(Node):
         return response
 
     def _on_resume(self, request, response):
-        """'1) 진행': resume following. Re-seed from the actual pose so the restart
-        has no jump; the arm then slews to the GELLO pose at <= max_step_rad."""
-        was_paused = self._paused
+        """'1) 진행': resume following — GATED on leader/arm alignment.
+
+        REFUSES (stays paused, no re-seed, publishes nothing) unless ALL hold:
+          (a) a FRESH GELLO sample exists (age <= staleness_timeout_s),
+          (b) the arm's ACTUAL pose is known (/joint_states seen), and
+          (c) every joint agrees within resume_align_tol: |raw GELLO - actual|.
+
+        This closes the operator-resume snap door with a hard gate, not just the
+        soft-start mitigation: resuming after the leader moved while paused would
+        otherwise slew the whole accumulated gap. On refusal we report the
+        offending joints so the operator can re-align the leader and resume again.
+        On success we re-seed from the actual pose (jump-free restart) and let the
+        soft-start ramp ease the arm toward the (now-aligned) GELLO pose.
+        """
+        if not self._paused:
+            response.success = True
+            response.message = "Already following (was not paused)."
+            self.get_logger().info("Resume requested but already following.")
+            return response
+
+        # (a) FRESH leader sample required — a stale/dead stream cannot resume.
+        age = (
+            None if self._last_good_msg_time is None
+            else time.monotonic() - self._last_good_msg_time
+        )
+        if self._raw_target is None or age is None or age > self.staleness_timeout_s:
+            age_str = "n/a" if age is None else f"{age:.2f}s"
+            response.success = False
+            response.message = (
+                f"Resume REFUSED — no fresh GELLO sample (age={age_str} > "
+                f"{self.staleness_timeout_s:.2f}s). Bridge stays PAUSED (holds "
+                "pose). Restore the leader stream, then resume again."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # (b) arm pose must be known to measure the gap.
+        if self._actual_pose is None:
+            response.success = False
+            response.message = (
+                "Resume REFUSED — robot actual pose unknown (no /joint_states "
+                "yet). Bridge stays PAUSED (holds pose)."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # (c) per-joint alignment gate.
+        gap = [
+            abs(self._raw_target[i] - self._actual_pose[i])
+            for i in range(len(UR_JOINT_ORDER))
+        ]
+        max_gap = max(gap)
+        if max_gap > self.resume_align_tol:
+            worst = max(range(len(gap)), key=lambda i: gap[i])
+            per = ", ".join(
+                f"{UR_JOINT_SHORT[i]}={gap[i]:.3f}" for i in range(len(gap))
+            )
+            response.success = False
+            response.message = (
+                f"Resume REFUSED — leader/arm misaligned: max {max_gap:.3f} rad "
+                f"at {UR_JOINT_SHORT[worst]} > resume_align_tol "
+                f"{self.resume_align_tol:.3f} ({per}). Bridge stays PAUSED (holds "
+                "pose). Re-align the GELLO leader to the arm, then resume again."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # Aligned: resume + force a re-seed from actual (jump-free) + soft-start.
         self._paused = False
-        # Force a re-seed on the next timer cycle (seed from actual, slew to GELLO).
         self._filtered = None
         self._last_published = None
         response.success = True
         response.message = (
-            "Following RESUMED — arm re-seeds from its current pose and slews to "
-            "GELLO (rate-limited). Keep clear if GELLO moved while paused."
-            if was_paused else
-            "Already following (was not paused)."
+            f"Following RESUMED — aligned (max {max_gap:.3f} rad <= "
+            f"{self.resume_align_tol:.3f}). Arm re-seeds from its current pose "
+            "and soft-starts toward GELLO (rate-limited). Keep clear."
         )
-        self.get_logger().warn("Following RESUMED by operator.")
+        self.get_logger().warn(response.message)
         return response
 
     # ---------------------------------------------------------------------

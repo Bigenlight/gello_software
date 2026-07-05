@@ -20,9 +20,10 @@
 # READ-ONLY: subscribes only; never commands the robot or GELLO.
 set -e
 
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 source /opt/ros/humble/setup.bash
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
+source "$SCRIPT_DIR/install/setup.bash"
 
 RATE="${RATE:-100}"
 # ROS2 param sample_rate_hz is DOUBLE -> force a decimal so "100" isn't an INTEGER.

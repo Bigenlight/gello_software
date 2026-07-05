@@ -1,0 +1,33 @@
+{
+  "baseline": {
+    "label": "baseline",
+    "peak_speed_rad_s": 0.625,
+    "peak_speed_deg_s": 35.8,
+    "peak_speed_t_s": 0.048,
+    "settle_s": 0.52,
+    "final_err_rad": 0.00148,
+    "theoretical_max_slew_rad_s": 0.625
+  },
+  "fix2_catchup": {
+    "label": "fix2_catchup",
+    "peak_speed_rad_s": 0.4712,
+    "peak_speed_deg_s": 27.0,
+    "peak_speed_t_s": 0.3,
+    "settle_s": 0.692,
+    "final_err_rad": 0.00382,
+    "catchup_peak_speed_rad_s": 0.4712,
+    "catchup_peak_speed_deg_s": 27.0,
+    "catchup_duration_s": 0.6,
+    "catchup_residual_rad": 0.02
+  },
+  "softstart": {
+    "label": "softstart",
+    "peak_speed_rad_s": 0.4847,
+    "peak_speed_deg_s": 27.8,
+    "peak_speed_t_s": 0.752,
+    "settle_s": 0.732,
+    "final_err_rad": 0.00148,
+    "softstart_ramp_s": 1.0,
+    "softstart_min_step_rad": 0.0002
+  }
+}

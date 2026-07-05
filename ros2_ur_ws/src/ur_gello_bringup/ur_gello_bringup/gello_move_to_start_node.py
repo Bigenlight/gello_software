@@ -38,8 +38,14 @@ commands the GELLO Dynamixels (torque stays off).
 
 Start modes
 -----------
-``start_mode:=gello`` (default) does the classic one-shot handshake described
-above: move straight to the leader's current pose, then hand off.
+``start_mode:=gello`` (default) runs a CONVERGENCE-GATED chase: it re-reads the
+LIVE leader pose (and the robot's actual ``/joint_states``) each iteration and
+drives gap-sized catch-up trajectories, handing over ONLY once the arm agrees
+with the live leader within ``chase_tol`` on every joint, sustained
+``chase_dwell_s``. (This replaced the original one-shot move to the FIRST-seen
+pose, which snapped when streaming began because the leader had drifted/moved
+during the approach.) A leader that keeps moving simply delays handover; a
+dead/stale leader times out to the fail-safe (no switch).
 
 ``start_mode:=init_align`` is an INTERACTIVE, operator-gated flow for extra
 safety on unfamiliar hardware. Every stage transition requires an explicit
@@ -64,6 +70,8 @@ human authorization via a ROS service (Trigger):
 """
 
 import time
+from collections import deque
+from statistics import median
 
 import rclpy
 from rclpy.action import ActionClient
@@ -114,6 +122,20 @@ class GelloMoveToStart(Node):
                 "target_controller", "forward_position_controller"
             ).value
         )
+        # RESUME the pre-spawned (paused) streaming bridge after a successful
+        # STRICT switch. Default False preserves standalone/mock runs where no
+        # bridge exists; the integrated real launch sets resume_bridge:=True (the
+        # bridge is started start_paused:=true, so this call is what actually
+        # begins teleop). The bridge's ~/resume is alignment-gated, so a
+        # just-converged arm (gap <= chase_tol < resume_align_tol) passes.
+        self.resume_bridge = bool(
+            self.declare_parameter("resume_bridge", False).value
+        )
+        self.bridge_resume_service = str(
+            self.declare_parameter(
+                "bridge_resume_service", "/gello_ur_bridge/resume"
+            ).value
+        )
         self.trajectory_duration = float(
             self.declare_parameter("trajectory_duration", 5.0).value
         )
@@ -121,10 +143,54 @@ class GelloMoveToStart(Node):
             self.declare_parameter("arrival_tolerance", 0.05).value
         )
 
+        # --- Convergence-gated handover ("gello" mode) -------------------
+        # The leader is a MOVING target: a single captured pose goes stale while
+        # the arm approaches (and while the operator may keep moving GELLO). So
+        # instead of one blind trajectory to a frozen pose, we CHASE the live
+        # pose and only hand over to streaming once the arm's ACTUAL pose agrees
+        # with the LIVE leader within chase_tol on every joint, sustained for
+        # chase_dwell_s. If the operator keeps moving, the switch simply does not
+        # happen (fail direction is "won't start yet", never "moves unexpectedly").
+        self.chase_tol = float(self.declare_parameter("chase_tol", 0.025).value)
+        self.chase_dwell_s = float(
+            self.declare_parameter("chase_dwell_s", 0.4).value
+        )
+        # Velocity budget (rad/s) used to SIZE each catch-up trajectory from the
+        # measured gap: T = max(gap / chase_v_budget, min_traj_duration). No upper
+        # clamp — a big gap gets a proportionally longer (not faster) move, so the
+        # JTC spline peak stays well under the 3.14 rad/s protective-stop limit.
+        self.chase_v_budget = float(
+            self.declare_parameter("chase_v_budget", 0.3).value
+        )
+        self.min_traj_duration = float(
+            self.declare_parameter("min_traj_duration", 0.75).value
+        )
+        # Per-joint HARD refuse: never auto-chase a gap larger than this. This is
+        # a WRAPAROUND / gross-mispose backstop, NOT an approach limit — the arm
+        # legitimately starts far (up to ~pi) from the leader, and the catch-up
+        # trajectory is duration-sized so even a large approach moves safely. Set
+        # above the largest normal approach (~pi) but below a 2*pi (6.28 rad) wrap.
+        # Calibrate on real hardware. Default 4.0 rad allows normal approaches and
+        # still catches a full-turn wraparound.
+        self.chase_hard_limit = float(
+            self.declare_parameter("chase_hard_limit", 4.0).value
+        )
+        # Overall time budget for convergence; <=0 => wait forever.
+        self.chase_timeout_s = float(
+            self.declare_parameter("chase_timeout_s", 30.0).value
+        )
+        # A GELLO sample older than this is STALE: a dead stream must never count
+        # as "still" and pass the dwell (that would re-open the snap on recovery).
+        self.gello_staleness_s = float(
+            self.declare_parameter("gello_staleness_s", 0.5).value
+        )
+
         # --- Start-mode (handshake style) --------------------------------
-        #   "gello"      : (default, original) robot moves TO the GELLO's current
-        #                  pose, then streams. Fast, but the arm's first motion
-        #                  goes to wherever the leader happens to be.
+        #   "gello"      : (default) CONVERGENCE-GATED chase — re-reads the live
+        #                  leader + actual pose and drives gap-sized catch-ups,
+        #                  handing over only when |leader-arm| <= chase_tol on
+        #                  every joint, sustained chase_dwell_s. A moving leader
+        #                  delays handover; it never streams from a stale gap.
         #   "init_align" : robot first moves to a FIXED, known init_pose; the
         #                  operator then aligns the GELLO leader to that pose;
         #                  streaming starts ONLY once the leader is within
@@ -181,6 +247,11 @@ class GelloMoveToStart(Node):
         #   message; used by the init_align alignment gate).
         self._gello_target: list[float] | None = None
         self._gello_latest: list[float] | None = None
+        # Monotonic time of the last complete GELLO message (staleness gate).
+        self._last_gello_msg_time: float | None = None
+        # Robot's ACTUAL current pose (UR order) from /joint_states — used to
+        # measure the true live gap |leader - arm| at the convergence gate.
+        self._actual_pose: list[float] | None = None
         # Operator-gate flags (init_align mode), set by the Trigger services.
         self._stage = "init"          # "init" -> "wait_align" -> "streaming"
         self._proceed_init = False    # GATE 1 authorization (move to init pose)
@@ -193,6 +264,11 @@ class GelloMoveToStart(Node):
         self._sub = self.create_subscription(
             JointState, "/gello/joint_states", self._on_joint_state, 10
         )
+        # Robot's actual joint state (joint_state_broadcaster; real HW + mock),
+        # reordered BY NAME — the convergence gate compares live GELLO to this.
+        self._actual_sub = self.create_subscription(
+            JointState, "/joint_states", self._on_actual_joint_state, 10
+        )
         self._action_client = ActionClient(
             self,
             FollowJointTrajectory,
@@ -203,6 +279,12 @@ class GelloMoveToStart(Node):
         )
         self._list_client = self.create_client(
             ListControllers, "/controller_manager/list_controllers"
+        )
+        # Resume client for the pre-spawned paused bridge (created early so its
+        # discovery cost is hidden behind the Play-wait). Only USED when
+        # resume_bridge is True, after a successful switch.
+        self._resume_client = self.create_client(
+            Trigger, self.bridge_resume_service
         )
         # Operator-gate services (used only in init_align mode). Resolve to
         # /gello_move_to_start/proceed and /gello_move_to_start/override_follow.
@@ -246,9 +328,24 @@ class GelloMoveToStart(Node):
         # Reorder BY NAME into UR command order (never blind index).
         pose = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
         self._gello_latest = pose
+        self._last_gello_msg_time = time.monotonic()
         if self._gello_target is None:
             self._gello_target = pose
             self.get_logger().info(f"Captured GELLO target pose: {pose}")
+
+    # ---------------------------------------------------------------------
+    def _on_actual_joint_state(self, msg: JointState) -> None:
+        """Track the robot's ACTUAL pose (reordered BY NAME) for the gap check."""
+        name_to_pos = dict(zip(msg.name, msg.position))
+        if any(j not in name_to_pos for j in UR_JOINT_ORDER):
+            return  # partial / unrelated joint_states; ignore
+        self._actual_pose = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
+
+    # ---------------------------------------------------------------------
+    def _gello_fresh(self) -> bool:
+        """True if a complete GELLO sample arrived within gello_staleness_s."""
+        t = self._last_gello_msg_time
+        return t is not None and (time.monotonic() - t) <= self.gello_staleness_s
 
     # ---------------------------------------------------------------------
     def _wait_for_gello_target(self) -> bool:
@@ -313,9 +410,16 @@ class GelloMoveToStart(Node):
         return False
 
     # ---------------------------------------------------------------------
-    def _send_trajectory(self, target: list[float], label: str) -> bool:
-        """Send one FollowJointTrajectory goal to ``target``; wait SUCCEEDED."""
+    def _send_trajectory(
+        self, target: list[float], label: str, duration: float | None = None
+    ) -> bool:
+        """Send one FollowJointTrajectory goal to ``target``; wait SUCCEEDED.
+
+        ``duration`` overrides ``trajectory_duration`` (used by the convergence
+        chase loop to size each catch-up move from the measured gap).
+        """
         assert target is not None
+        dur = self.trajectory_duration if duration is None else duration
 
         if not self._action_client.wait_for_server(
             timeout_sec=_DISCOVERY_TIMEOUT_S
@@ -330,8 +434,8 @@ class GelloMoveToStart(Node):
         point = JointTrajectoryPoint()
         point.positions = list(target)
         point.velocities = [0.0] * len(UR_JOINT_ORDER)
-        sec = int(self.trajectory_duration)
-        nanosec = int((self.trajectory_duration - sec) * 1e9)
+        sec = int(dur)
+        nanosec = int((dur - sec) * 1e9)
         point.time_from_start = Duration(sec=sec, nanosec=nanosec)
 
         traj = JointTrajectory()
@@ -348,7 +452,7 @@ class GelloMoveToStart(Node):
             goal.goal_tolerance.append(tol)
 
         self.get_logger().info(
-            f"Sending trajectory to {label} over {self.trajectory_duration}s "
+            f"Sending trajectory to {label} over {dur:.2f}s "
             f"via {self.source_controller}..."
         )
         send_future = self._action_client.send_goal_async(goal)
@@ -571,6 +675,136 @@ class GelloMoveToStart(Node):
         return bool(getattr(self, flag_name))
 
     # ---------------------------------------------------------------------
+    def _converge_and_handover(self) -> bool:
+        """CHASE the live GELLO pose until the arm agrees with it, then allow
+        handover. Returns True only once |live_gello - actual| <= chase_tol on
+        every joint, sustained chase_dwell_s. Fail-safe False on abort, timeout,
+        or a gap beyond chase_hard_limit.
+
+        This replaces the single frozen-snapshot move: because the leader is a
+        moving target, we re-read it every iteration and only hand over when the
+        follower has genuinely caught up to where the leader NOW is and the
+        leader has settled. If the operator keeps moving GELLO, the gate holds
+        (no switch) rather than letting a stale gap snap when streaming begins.
+        """
+        deadline = (
+            None
+            if self.chase_timeout_s <= 0.0
+            else time.monotonic() + self.chase_timeout_s
+        )
+        err_samples: deque[float] = deque(maxlen=5)
+        dwell_start: float | None = None
+        # GELLO message time captured when the dwell begins. Completing the dwell
+        # additionally requires that a genuinely NEW sample arrived since then, so
+        # a stream that dies at (or just before) convergence cannot pass the dwell
+        # on frozen-but-not-yet-stale samples — the freshness window
+        # (gello_staleness_s, 0.5s) can otherwise exceed the dwell (0.4s).
+        dwell_msg_time: float | None = None
+        warned_wait = False
+        while rclpy.ok():
+            if self._abort:
+                self.get_logger().error(
+                    "Aborted by operator during convergence; no switch (fail-safe)."
+                )
+                return False
+            if deadline is not None and time.monotonic() > deadline:
+                self.get_logger().error(
+                    f"Did not converge within {self.chase_timeout_s:.0f}s "
+                    "(leader still moving / never settled?); aborting "
+                    "(fail-safe, no switch)."
+                )
+                return False
+
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+            # Need a FRESH leader sample and a known arm pose to measure the gap.
+            if (
+                not self._gello_fresh()
+                or self._gello_latest is None
+                or self._actual_pose is None
+            ):
+                dwell_start = None
+                err_samples.clear()
+                if not warned_wait:
+                    self.get_logger().warn(
+                        "Waiting for a fresh GELLO sample + robot /joint_states "
+                        "before convergence (a stale/dead leader will NOT hand "
+                        "over).",
+                        throttle_duration_sec=2.0,
+                    )
+                    warned_wait = True
+                continue
+
+            gap = [
+                abs(self._gello_latest[i] - self._actual_pose[i])
+                for i in range(len(UR_JOINT_ORDER))
+            ]
+            max_gap = max(gap)
+            worst = max(range(len(gap)), key=lambda i: gap[i])
+
+            # SAFETY: never auto-chase an enormous gap (wraparound / mis-pose).
+            if max_gap > self.chase_hard_limit:
+                per = ", ".join(
+                    f"{UR_JOINT_SHORT[i]}={gap[i]:.2f}" for i in range(len(gap))
+                )
+                self.get_logger().error(
+                    f"Live gap {max_gap:.2f} rad at {UR_JOINT_SHORT[worst]} "
+                    f"exceeds chase_hard_limit {self.chase_hard_limit:.2f} rad "
+                    f"({per}); REFUSING to auto-chase (fail-safe, no switch). "
+                    "Re-pose the GELLO leader closer to the robot and relaunch."
+                )
+                return False
+
+            if max_gap <= self.chase_tol:
+                # Converged this sample — require it to HOLD for the dwell using a
+                # median filter so a lone Dynamixel spike can't falsely pass.
+                err_samples.append(max_gap)
+                if dwell_start is None:
+                    dwell_start = time.monotonic()
+                    dwell_msg_time = self._last_gello_msg_time
+                held = time.monotonic() - dwell_start
+                # A LIVE stream (~30 Hz) delivers many new samples over the dwell;
+                # a dead stream delivers none. Requiring the message clock to have
+                # advanced guarantees the dwell was verified against fresh data,
+                # not a frozen pose that merely looks "still".
+                new_sample_during_dwell = (
+                    self._last_gello_msg_time is not None
+                    and dwell_msg_time is not None
+                    and self._last_gello_msg_time > dwell_msg_time
+                )
+                if (
+                    len(err_samples) >= 3
+                    and median(err_samples) <= self.chase_tol
+                    and held >= self.chase_dwell_s
+                    and new_sample_during_dwell
+                ):
+                    self.get_logger().info(
+                        f"Converged: max gap {max_gap:.4f} rad held "
+                        f"{held:.2f}s (<= {self.chase_tol} for {self.chase_dwell_s}s). "
+                        "Handing over to streaming."
+                    )
+                    return True
+                # else keep dwelling (arm holds; no new trajectory)
+                continue
+
+            # Not converged: leader is elsewhere (drifted or actively moving).
+            # Chase it with a catch-up trajectory sized from the measured gap so
+            # the move speed stays within budget regardless of gap magnitude.
+            dwell_start = None
+            err_samples.clear()
+            warned_wait = False
+            dur = max(max_gap / self.chase_v_budget, self.min_traj_duration)
+            self.get_logger().info(
+                f"Chasing live GELLO: gap {max_gap:.3f} rad at "
+                f"{UR_JOINT_SHORT[worst]} -> {dur:.2f}s catch-up."
+            )
+            if not self._send_trajectory(
+                list(self._gello_latest), "live GELLO pose", duration=dur
+            ):
+                return False
+            # Loop re-evaluates: the leader may have moved again while we moved.
+
+    # ---------------------------------------------------------------------
     def _switch_controllers(self) -> bool:
         """STRICT switch: activate target, deactivate source. True on success."""
         if not self._switch_client.wait_for_service(
@@ -645,14 +879,59 @@ class GelloMoveToStart(Node):
             ):
                 return False
             self._stage = "streaming"
-        else:  # "gello" (default): move straight to the leader's current pose.
-            assert self._gello_target is not None
-            if not self._send_trajectory(self._gello_target, "GELLO pose"):
+        else:  # "gello" (default): CHASE the live leader until converged.
+            # (Was: one blind trajectory to the FIRST-frozen pose, which snapped
+            # when streaming began because the leader had drifted/moved since.)
+            if not self._converge_and_handover():
                 return False
 
         if not self._switch_controllers():
             return False
+        # Integrated launch: the streaming bridge was pre-spawned PAUSED, so the
+        # switch alone does not start teleop — release it now (after the switch,
+        # never before, so it can't stream into an inactive controller).
+        if self.resume_bridge:
+            self._resume_bridge_after_switch()
         return True
+
+    # ---------------------------------------------------------------------
+    def _resume_bridge_after_switch(self) -> None:
+        """Release the pre-spawned paused bridge to begin streaming.
+
+        The bridge's ~/resume is alignment-gated (|gello-actual| <=
+        resume_align_tol); a just-converged arm passes. If resume never
+        succeeds, forward_position_controller stays ACTIVE holding the arrived
+        pose (safe) but no teleop streams — surfaced loudly with the manual
+        recovery command. Handshake still counts as succeeded (switch was OK).
+        """
+        svc = self.bridge_resume_service
+        manual = f"ros2 service call {svc} std_srvs/srv/Trigger"
+        if not self._resume_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error(
+                f"Bridge resume service {svc} not available; "
+                f"{self.target_controller} is ACTIVE and HOLDING but teleop is "
+                f"NOT streaming. Recover manually: {manual}"
+            )
+            return
+        for attempt in range(3):
+            future = self._resume_client.call_async(Trigger.Request())
+            rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+            resp = future.result()
+            if resp is not None and resp.success:
+                self.get_logger().info(
+                    f"Bridge resumed ({resp.message}); teleop is now streaming."
+                )
+                return
+            msg = resp.message if resp is not None else "no response"
+            self.get_logger().warn(
+                f"Bridge resume attempt {attempt + 1}/3 not accepted: {msg}"
+            )
+            time.sleep(0.5)
+        self.get_logger().error(
+            "Bridge did NOT resume after 3 attempts (leader likely not aligned "
+            f"within resume_align_tol). {self.target_controller} is ACTIVE and "
+            f"HOLDING; no teleop. Align the GELLO leader, then: {manual}"
+        )
 
 
 def main(args=None) -> None:

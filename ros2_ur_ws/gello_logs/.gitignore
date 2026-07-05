@@ -1,0 +1,7 @@
+# Bulky validation scratch (regenerable from the tracked scripts/reports).
+experiments/*.csv
+experiments/*.png
+experiments/*.log
+experiments/*.mp4
+replays/*.mp4
+replays/*.png

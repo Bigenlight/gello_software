@@ -105,8 +105,8 @@ README에는 실행 one-liner만 두었습니다. 전체 config 필드, `joint_o
 
 > ### 안전 — 시작 전에 반드시 ⚠️
 > - **GELLO는 항상 passive read-only** — 드라이버가 Dynamixel 토크를 OFF로 초기화하고 관절만 읽습니다. GELLO에 절대 토크를 인가하지 마세요.
-> - **실제 UR7e는 물리적으로 움직입니다** (약 t≈8s에 기동하여 로봇이 GELLO의 현재 자세로 이동). E-STOP을 손 닿는 곳에 두고 작업공간을 비운 뒤, GELLO를 중립 근처로 잡고 시작하세요.
-> - **핸드셰이크는 필수** — 부팅 시 `scaled_joint_trajectory_controller`가 로봇을 GELLO 현재 자세로 안전 보간 이동시킨 뒤 `forward_position_controller`로 전환합니다(`gello_move_to_start`). 이 과정을 건너뛰면 속도 리밋 protective stop이 납니다.
+> - **실제 UR7e는 물리적으로 움직입니다** — 기동(약 t≈8s) 후 로봇이 **살아있는 GELLO 자세를 뒤쫓아(chase)** 수렴할 때까지 여러 번 보간 이동합니다. E-STOP을 손 닿는 곳에 두고 작업공간을 비운 뒤, GELLO를 중립 근처로 잡고 시작하세요.
+> - **핸드셰이크는 필수** — 부팅 시 `scaled_joint_trajectory_controller`가 활성 상태로 뜨고, `gello_move_to_start`가 **수렴 게이트(convergence-gated) 추격 루프**를 돕니다: 매 반복마다 살아있는 GELLO 자세 + 로봇 실제 `/joint_states`를 다시 읽어 gap 크기에 맞춘 catch-up 궤적으로 뒤쫓고, 관절별 `|GELLO − 실제| ≤ chase_tol`(0.025 rad ≈ 1.4°)이 `chase_dwell_s`(0.4s) 동안 유지될 때만 `forward_position_controller`로 STRICT 전환한 뒤 브리지 스트리밍을 시작합니다. 즉 **리더≈팔로워가 된 뒤에만 스트리밍이 시작**되며, 조작자가 계속 움직이면 핸드오버가 **지연될 뿐, 스냅(급발진)하지 않습니다**. 남는 미세 오차는 soft-start된 rate-limit slew(`≤ max_step_rad×rate`)로 흡수됩니다 — "제로 스냅"이 아니라 바운드된 ease-in 보장입니다. 게이트가 끝내 수렴하지 못하면(리더가 안 멈춤 / 스트림 사망) 타임아웃 후 전환 없이 fail-safe 종료합니다. 이 과정을 건너뛰면 속도 리밋 protective stop이 납니다. 상세·튜닝·실기 캘리브레이션은 [실제 로봇 런북](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) 참고.
 
 ### 0. 사전 준비 (한 번)
 
@@ -145,7 +145,7 @@ HEADLESS=true ./run_ur7e_gello_real.sh    # Method B: 펜던트 REMOTE 모드, P
 - 대시보드 helper(load/play/stop/powerup/resend 등)가 필요하면 `source ros2_ur_ws/remote_helpers.sh` 후 `ur_help`.
 - **Method A와 B를 한 실행에서 섞지 마세요.** 헤드리스 드롭 복구는 `ur_resend`, Method A 드롭은 `ur_play`.
 
-> **드라이버 안전성 노트:** `gello_ur_bridge`는 첫 명령을 GELLO 자세가 아닌 로봇의 **실제 `/joint_states`**로 시드해 기동 스냅(과거 "External Control speed limit" protective stop의 원인)을 없애고, EMA smoothing · step limiting · **deadband 노이즈 게이트**(정지 시 Dynamixel 떨림 억제) · staleness guard를 적용한 뒤 `/forward_position_controller/commands`로 퍼블리시합니다.
+> **드라이버 안전성 노트:** `gello_ur_bridge`는 명령을 GELLO 자세가 아닌 로봇의 **실제 `/joint_states`**로 시드하고, 모든 (재)시드마다(startup·resume·staleness 복구) **soft-start 램프**(`soft_start_s`)로 slew clamp를 서서히 열어 기동 스냅(과거 "External Control speed limit" protective stop의 원인)을 없앱니다. 이후 one-euro/EMA smoothing · step limiting · **deadband 노이즈 게이트**(정지 시 Dynamixel 떨림 억제) · staleness guard를 적용한 뒤 `/forward_position_controller/commands`로 퍼블리시합니다. 통합 실기 런치에서는 브리지가 `start_paused:=true`로 미리 떠 대기하다가, 핸드셰이크의 STRICT 전환 성공 후 `~/resume`(정렬 게이트) 호출로 스트리밍을 시작합니다.
 
 > **ros-humble-ur 2.8.1 부분 지원:** `ur_type:=ur7e`로 **joint-space teleop은 완전히 정확**합니다(ur5e/ur7e 관절 리밋 동일). 다만 RViz visuals가 아직 ur5e mesh로 렌더되고(`config/ur7e` visual_parameters 미갱신), `ur7e_update_rate.yaml` 누락 경고(무해)가 있습니다. 정확한 ur7e visuals/kinematics가 필요하면 `ros-humble-ur >=2.13.2`로 업그레이드하세요.
 

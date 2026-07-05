@@ -25,8 +25,14 @@
     #    forward_position_controller (STRICT switch:                           #
     #      activate=[forward_position_controller],                             #
     #      deactivate=[scaled_joint_trajectory_controller]).                   #
-    #    Only after that switch does gello_ur_bridge begin streaming raw       #
-    #    position commands. This eliminates the start-up jump.                 #
+    #    The bridge is pre-spawned PAUSED (start_paused:=true) at t=6s so its  #
+    #    ~/resume service already exists at handover; it HOLDS (publishes      #
+    #    nothing) until gello_move_to_start calls ~/resume AFTER the STRICT    #
+    #    switch. HONEST GUARANTEE (not a zero-snap claim): handover happens    #
+    #    only once per-joint |live GELLO - actual| <= chase_tol, sustained     #
+    #    chase_dwell_s; any residual gap is then closed by the soft-started    #
+    #    slew clamp (<= max_step_rad*rate, ramped over soft_start_s): a        #
+    #    bounded ease-in, never a single-cycle jump.                           #
     ############################################################################
 
 Bring-up sequence (staggered TimerActions):
@@ -41,15 +47,30 @@ Bring-up sequence (staggered TimerActions):
                   /gello/joint_states (6 arm joints, radians) +
                   /gripper/... width percent. Started early so a live GELLO
                   pose is available for the handshake target.
+      t=6s    gello_ur_bridge PRE-SPAWNED PAUSED (start_paused:=true). It
+                  subscribes to /gello/joint_states + the robot's actual
+                  /joint_states and brings up its ~/pause + ~/resume services,
+                  but publishes NOTHING on /forward_position_controller/commands
+                  while paused. Pre-spawning removes the old OnProcessExit
+                  cold-start window during which the leader kept drifting (which
+                  widened the handover gap). It is inert until resumed.
   (3) t=8s    gello_move_to_start -> MANDATORY handshake. Waits for the External
                   Control program to be running (scaled_joint_trajectory_controller
-                  active), smoothly drives the UR7e to the current GELLO pose,
-                  then STRICT-switches to forward_position_controller. Exits 0.
-  (4) on handshake success -> gello_ur_bridge streams /gello/joint_states onto
+                  active), CHASES the live GELLO pose with duration-sized catch-up
+                  trajectories until per-joint |live GELLO - actual| <= chase_tol
+                  sustained chase_dwell_s, then STRICT-switches to
+                  forward_position_controller. Run with resume_bridge:=true, so
+                  AFTER a successful switch it calls the bridge's ~/resume service
+                  (alignment-gated in the bridge) to release streaming. Exits 0.
+  (4) on ~/resume -> gello_ur_bridge begins streaming /gello/joint_states onto
                   /forward_position_controller/commands (publish_rate_hz, 250 Hz
-                  in ur7e_gello.yaml). The bridge seeds from the robot's ACTUAL
-                  /joint_states, so it ramps from the real pose to GELLO with no
-                  snap. Started by an OnProcessExit handler (NOT a fixed timer).
+                  in ur7e_gello.yaml). Resume re-seeds from the robot's ACTUAL
+                  /joint_states and soft-starts (soft_start_s ramp of the slew
+                  clamp), so the residual gap is eased in, not snapped. The bridge
+                  is NOT (re)started on handshake exit — it already exists, paused;
+                  the resume call (not a launch timer) releases it strictly after
+                  the controller switch, so it never streams into an inactive
+                  controller.
   (5) with the bridge -> the Robotiq 2F-85 gripper comes up via Modbus RTU over
                   the UR RS485 tool-communication bus. The arm driver is started
                   with use_tool_communication:=true, tool_voltage:=24,
@@ -173,7 +194,8 @@ def generate_launch_description():
             default_value="gello",
             description=(
                 "Handshake style for gello_move_to_start. 'gello' (default): the "
-                "arm moves straight to the leader's current pose, then streams. "
+                "arm CHASES the live leader (gap-sized catch-ups) and streams only "
+                "once caught up within chase_tol, sustained chase_dwell_s. "
                 "'init_align': the arm moves to a fixed init_pose (from the params "
                 "file), then waits for you to align the GELLO leader to it before "
                 "streaming (safer first motion)."
@@ -280,19 +302,43 @@ def generate_launch_description():
         package="ur_gello_bringup",
         executable="gello_move_to_start",
         # start_mode launch arg overrides the value in params_file (last wins).
-        parameters=[params_file, {"start_mode": LaunchConfiguration("start_mode")}],
+        # resume_bridge:=True -> after a SUCCESSFUL STRICT switch, this node
+        # calls the pre-spawned bridge's ~/resume service (with retries) to
+        # release streaming. The resume is issued strictly AFTER the switch, so
+        # the bridge never streams into an inactive controller; the bridge's own
+        # ~/resume is alignment-gated + soft-started. Kept a launch override (not
+        # in yaml) so standalone move_to_start runs do not try to poke a bridge.
+        parameters=[
+            params_file,
+            {
+                "start_mode": LaunchConfiguration("start_mode"),
+                "resume_bridge": True,
+            },
+        ],
         output="screen",
     )
 
     # ------------------------------------------------------------------ #
     # (4) GELLO -> UR bridge. Streams /gello/joint_states onto
-    #     /forward_position_controller/commands (publish_rate_hz, 250 Hz). Only meaningful
-    #     AFTER the handshake has switched to forward_position_controller.
+    #     /forward_position_controller/commands (publish_rate_hz, 250 Hz).
+    #
+    #     PRE-SPAWNED PAUSED: start_paused:=True is a LAUNCH-LEVEL override
+    #     (NOT in the yaml, so gripper-only / standalone bridge runs keep the
+    #     old unpaused behaviour). It comes up at t=6s alongside the publisher
+    #     so its ~/resume service exists at handover, but publishes nothing
+    #     until gello_move_to_start (resume_bridge:=True) calls ~/resume AFTER
+    #     the STRICT switch. This closes the cold-start drift window that the
+    #     old OnProcessExit start left open. On resume the bridge re-seeds from
+    #     the actual /joint_states and soft-starts the slew clamp, so the
+    #     residual gap eases in rather than snapping.
     # ------------------------------------------------------------------ #
     bridge_node = Node(
         package="ur_gello_bringup",
         executable="gello_ur_bridge",
-        parameters=[params_file],
+        # start_paused override kept here (not in yaml) so ONLY this integrated
+        # launch starts the bridge held; other launches loading the same params
+        # file are unaffected.
+        parameters=[params_file, {"start_paused": True}],
         output="screen",
     )
 
@@ -350,20 +396,31 @@ def generate_launch_description():
     # Start-up sequencing.
     #   * gello_publisher after 6s (driver/ros2_control up; publishes the live
     #     GELLO pose the handshake needs).
-    #   * move_to_start after 8s. It now WAITS internally for
+    #   * gello_ur_bridge after 6s TOO, but PAUSED (start_paused:=True). It only
+    #     brings up its ~/pause + ~/resume services and its subscriptions; it
+    #     publishes nothing until resumed. Pre-spawning (vs. cold-starting it on
+    #     handshake exit) removes the window in which the leader used to keep
+    #     drifting, widening the handover gap.
+    #   * move_to_start after 8s. It WAITS internally for
     #     scaled_joint_trajectory_controller to become active (i.e. for the
     #     External Control program to be PLAYING on the pendant), so a fixed
-    #     delay is no longer timing-critical.
-    #   * arm bridge + Modbus gripper + gello_gripper_bridge are started ONLY
-    #     when move_to_start EXITS SUCCESSFULLY (return code 0 == handshake done,
-    #     forward_position_controller active). This replaces the old fixed
-    #     bridge_start_delay timer, which could fire before the
-    #     (variable-duration) handshake had switched controllers and leave the
-    #     arm commanded on an inactive controller (== no motion).
+    #     delay is not timing-critical. On a SUCCESSFUL switch it calls the
+    #     bridge's ~/resume itself (resume_bridge:=True) — so the bridge is
+    #     released strictly AFTER the controller switch, never before.
+    #   * Modbus gripper + gello_gripper_bridge are started ONLY when
+    #     move_to_start EXITS SUCCESSFULLY (return code 0 == handshake done,
+    #     forward_position_controller active + bridge resumed). The bridge is NO
+    #     LONGER started here — it already exists (paused) and resumes itself.
+    #     If the handshake FAILS the bridge simply stays paused and silent
+    #     forever (fail-safe: no streaming from an unsafe state).
     # ------------------------------------------------------------------ #
     gello_publisher_delayed = TimerAction(
         period=6.0,
         actions=[gello_publisher_node],
+    )
+    bridge_paused_delayed = TimerAction(
+        period=6.0,
+        actions=[bridge_node],
     )
     move_to_start_delayed = TimerAction(
         period=8.0,
@@ -376,12 +433,12 @@ def generate_launch_description():
                 LogInfo(
                     msg=(
                         "Move-to-start handshake SUCCEEDED "
-                        "(forward_position_controller active); starting "
-                        "gello_ur_bridge streaming + Modbus gripper "
-                        "(shared socat bridge /tmp/ttyUR) + gello_gripper_bridge."
+                        "(forward_position_controller active; bridge resumed via "
+                        "~/resume). Starting Modbus gripper (shared socat bridge "
+                        "/tmp/ttyUR) + gello_gripper_bridge. The arm bridge was "
+                        "pre-spawned paused and has already been released."
                     )
                 ),
-                bridge_node,
                 gripper_modbus_node,
                 gello_gripper_bridge_node,
             ]
@@ -389,14 +446,19 @@ def generate_launch_description():
             LogInfo(
                 msg=(
                     "Move-to-start handshake FAILED (exit "
-                    f"{event.returncode}); NOT starting the bridge. The robot "
-                    "will stay put. Check that the External Control program is "
-                    "PLAYING on the pendant, then re-launch."
+                    f"{event.returncode}); the pre-spawned bridge stays PAUSED "
+                    "and silent (fail-safe) and the grippers are NOT started. "
+                    "The robot will stay put. Check that the External Control "
+                    "program is PLAYING on the pendant, then re-launch. Manual "
+                    "recovery once aligned: re-align the leader and call "
+                    "'ros2 service call /gello_ur_bridge/resume "
+                    "std_srvs/srv/Trigger' after switching to "
+                    "forward_position_controller."
                 )
             )
         ]
 
-    bridge_after_handshake = RegisterEventHandler(
+    grippers_after_handshake = RegisterEventHandler(
         OnProcessExit(
             target_action=move_to_start_node,
             on_exit=_on_handshake_exit,
@@ -408,7 +470,8 @@ def generate_launch_description():
         + [
             ur_control_launch,
             gello_publisher_delayed,
+            bridge_paused_delayed,
             move_to_start_delayed,
-            bridge_after_handshake,
+            grippers_after_handshake,
         ]
     )

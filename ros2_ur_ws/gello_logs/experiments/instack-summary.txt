@@ -1,0 +1,100 @@
+instack-real-bridge — summary
+==============================
+Goal: run the REAL gello_ur_bridge ROS2 node (not the pure-math harness) with
+synthetic /joint_states and /gello/joint_states inputs, no GELLO hardware and
+no robot, to (a) validate the harness model against the actual deployed node,
+and (b) check for a discriminator signature of an FPC-activation jump vs a
+bounded slew-limited catch-up.
+
+Setup
+-----
+ROS_DOMAIN_ID=42 (isolated). Real node launched exactly as specified:
+  ros2 run ur_gello_bringup gello_ur_bridge --ros-args \
+    -p filter_type:=one_euro -p max_step_rad:=0.0025 -p publish_rate_hz:=250.0 \
+    -p one_euro_min_cutoff:=1.0 -p one_euro_beta:=2.0 -p one_euro_d_cutoff:=1.0
+Node started cleanly (see instack_bridge_stdout.log), logged the expected
+startup line and correctly reported "seeding from actual joint state on
+/joint_states".
+
+Probe script (instack_probe.py):
+  - /joint_states @ 100 Hz: constant ARRIVED pose
+    q0 = [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]  (never moves — this stands in
+    for the robot's real encoder feedback frozen at the move-to-start target)
+  - /gello/joint_states @ 30 Hz: q0 + small tremor (std 0.01 rad, all joints)
+    for the first 2.0 s, then at t=2.0s STEP shoulder_lift_joint by +G=0.2 rad
+    (models the drift gap revealed at handover), tremor continues after the step
+  - subscribed /forward_position_controller/commands, timestamped every
+    message to instack_commands.csv (t_rel_s, wall_recv_time_s, cmd_<joint>x6)
+
+Ran probe for 6.006 s wall time; bridge published 1485 command messages
+(measured rate 249.6 Hz, matches configured 250 Hz publish_rate_hz within
+scheduling jitter). After the probe process exited, the bridge correctly
+logged "GELLO stale, holding — not publishing" (staleness watchdog fires as
+designed) before being pkill'd.
+
+Results
+-------
+1) NO START-UP SNAP confirmed in the real node: first published command
+   (t_rel_s=0.0705) = [0.0, -1.5700000, 1.5700000, -1.5700000, -1.5700000, 0.0]
+   — exactly equal to the actual /joint_states pose q0. Zero jump at seed,
+   as documented in the node's docstring.
+
+2) Per-cycle clamp holds EXACTLY, every cycle, during the catch-up sweep:
+   max |dq| (single-publish-cycle position delta) after the step = 0.0025000
+   rad — i.e. exactly max_step_rad, never exceeded, for every cycle from
+   t=2.00s to t=2.32s while closing the gap. Max |dq| over the ENTIRE 6s run
+   (including the step itself) is also exactly 0.0025 rad. The real node's
+   clamp is bit-exact with the harness's modeled clamp.
+
+3) Catch-up speed:
+   - Sustained average speed over the 2.0-2.1s window (right after the step):
+     0.6267 rad/s.
+   - Harness/model prediction: max_step_rad * publish_rate_hz = 0.0025*250 =
+     0.625 rad/s.
+   - Agreement: 0.6267 vs 0.625 rad/s => 0.27% relative difference. MATCH.
+   - Naive per-sample dq/dt (sensitive to ROS2 timer scheduling jitter around
+     the nominal 4.0 ms period, observed range ~2.8-4.8 ms) peaks at 0.894
+     rad/s at one sample (t=2.254s) purely because that one inter-arrival dt
+     was short (2.797 ms) while dq was still capped at the same 0.0025 rad.
+     This is a measurement artifact of dividing a constant numerator by a
+     jittery small dt, NOT a larger commanded step — the underlying per-cycle
+     POSITION delta is invariant at 0.0025 rad regardless of dt. All observed
+     peaks stay well under the 1.0 rad/s discriminator threshold.
+
+4) Time to close the gap G=0.2 rad on shoulder_lift_joint:
+   - Measured: command first lands within 0.001 rad of the target (-1.37 rad)
+     at t_rel_s=2.322s => 0.3223 s after the step.
+   - Harness/model prediction: G / 0.625 = 0.2/0.625 = 0.320 s.
+   - Agreement: 0.3223 vs 0.320 s => 0.7% relative difference. MATCH.
+
+Verdict
+-------
+CONFIRMS the diagnosed mechanism and validates the harness against the real
+deployed node: the REAL gello_ur_bridge node, exercised end-to-end over actual
+ROS2 pub/sub with no robot present, reproduces the "seed-from-actual +
+bounded slew catch-up" model to within ~1% on both sweep speed and gap-close
+time. The per-cycle max_step_rad clamp is enforced exactly (0.0025 rad, no
+overshoot, no exceptions) in the real node's runtime behavior — this rules
+out any bridge-side implementation quirk (threading, ROS2 QoS/queueing,
+callback ordering) as a source of an unclamped jump. Peak per-cycle speed
+observed (<=0.894 rad/s, mostly ~0.62-0.65 rad/s) stays under the discriminator
+threshold (1.0 rad/s) for an FPC-activation jump.
+
+Scope / what this experiment does NOT resolve: this test never performs an
+actual scaled_joint_trajectory_controller -> forward_position_controller
+switch_controller call (no ros2_control / controller_manager / UR driver in
+the loop) — it only re-exercises the bridge's own streaming/timer logic with
+synthetic inputs on the topics it actually subscribes to. So it positively
+confirms the bridge itself is snap-free and matches the harness, but it
+cannot by itself rule in or out the RANK1 competing cause (an additional
+jump injected by ros2_control's controller activation transition, independent
+of the bridge). That requires a separate experiment with a real or mock
+controller_manager performing the actual switch_controller call.
+
+Artifacts
+---------
+- /home/theo/gello_software/ros2_ur_ws/gello_logs/experiments/instack_probe.py
+- /home/theo/gello_software/ros2_ur_ws/gello_logs/experiments/instack_commands.csv
+- /home/theo/gello_software/ros2_ur_ws/gello_logs/experiments/instack_snap_plot.png
+- /home/theo/gello_software/ros2_ur_ws/gello_logs/experiments/instack_bridge_stdout.log
+- /home/theo/gello_software/ros2_ur_ws/gello_logs/experiments/instack-summary.txt (this file)

@@ -87,7 +87,7 @@ gello_publisher ──▶ /gripper/gripper_client/target_gripper_width_percent �
 | `fake_gello` | 하드웨어 없이 파이프라인을 시험하는 **테스트 전용** 노드. `gello_publisher`와 동일한 토픽에 느린 sine sweep을 발행. GELLO/UR 실물이 전혀 필요 없음. **이 PC에서 GELLO 시리얼이 연결되어 있지 않으므로 `source:=fake`가 기본 검증 경로.** |
 | `gello_ur_bridge` | `/gello/joint_states`를 구독해 이름 기준으로 UR 관절 순서로 재정렬한 뒤, EMA 스무딩(`ema_alpha`) + deadband 노이즈 게이트(`deadband_rad`) + step-clamp(`max_step_rad`) + staleness watchdog(`staleness_timeout_s`)을 적용하여 `/forward_position_controller/commands`(`std_msgs/Float64MultiArray`, 6 doubles)로 **250Hz** 상향 샘플링해 발행. **첫 명령은 GELLO 포즈가 아니라 로봇 실제 `/joint_states`(`joint_states_topic`)에서 seed**하여 스타트업 스냅(→ External Control 속도 제한 protective stop)을 방지. |
 | `robotiq_urcap` | Robotiq 2F-85 그리퍼를 UR URCap 소켓(기본 포트 63352)으로 구동. 이 PC에는 그리퍼가 없으므로 기본 `connect_on_start=False` — 소켓을 열지 않고 로그만 남김. |
-| `gello_move_to_start` *(신규, 실로봇 경로 전용)* | `scaled_joint_trajectory_controller`의 `/scaled_joint_trajectory_controller/follow_joint_trajectory` 액션으로 UR7e를 **현재 라이브 GELLO 자세**(`/gello/joint_states`에서 읽어 이름 기준 재정렬한 6관절 값)까지 안전하게 이동시킨 뒤, `/controller_manager/switch_controller` 서비스(STRICT)로 `forward_position_controller`로 전환하는 핸드셰이크 노드. (목표는 `start_joints`가 아니라 구독한 현재 GELLO 자세임.) **mock 경로(이 PC의 검증 대상)에서는 사용하지 않음** — `ur7e_gello_rviz.launch.py`는 처음부터 `forward_position_controller`를 active로 올리므로 필요 없음. 실로봇 런북([`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md))에서만 사용. |
+| `gello_move_to_start` *(신규, 실로봇 경로 전용)* | **수렴-게이트 핸드셰이크** 노드. `scaled_joint_trajectory_controller`가 active가 되길 기다린 뒤(External Control Play), **라이브** GELLO 포즈와 로봇 실제 `/joint_states`를 매 반복 다시 읽어 gap 기반 길이(`T=max(gap/chase_v_budget, min_traj_duration)`)의 캐치업 트래젝토리를 반복 전송하고, 관절별 `\|라이브GELLO−실제\| ≤ chase_tol`이 `chase_dwell_s` 유지될 때에만 `/controller_manager/switch_controller`(STRICT)로 `forward_position_controller`로 전환한다. (`chase_hard_limit` 초과 gap 거부, `chase_timeout_s` 내 미수렴/stale 리더면 exit 1 = 스위치 안 함.) 스위치 성공 후 `resume_bridge:=true`로 브릿지 `~/resume`를 호출해 스트리밍을 시작. 목표는 `start_joints`가 아니라 구독한 라이브 GELLO 자세임. **mock 경로(이 PC의 검증 대상)에서는 사용하지 않음** — `ur7e_gello_rviz.launch.py`는 처음부터 `forward_position_controller`를 active로 올리므로 필요 없음. 파라미터 표는 [4절](#4-설정-파일-레퍼런스--configur7e_gelloyaml), 절차는 실로봇 런북([`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md)) 참고. |
 
 ### 토픽 계약
 
@@ -279,7 +279,7 @@ gello_publisher:
   ros__parameters:
     port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
     joint_ids: [1, 2, 3, 4, 5, 6]
-    joint_offsets: [3.142, 1.571, 4.712, 4.712, 4.712, 3.142]
+    joint_offsets: [0.0, 1.571, 4.712, 4.712, 4.712, 0.0]   # w3 원래 3.142; J2/J3 remount 후 recalib
     joint_signs: [1, 1, -1, 1, 1, 1]
     gripper_config: [7.0, 210.649609375, 168.849609375]
     start_joints: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0, 0.0]
@@ -287,12 +287,38 @@ gello_publisher:
 
 gello_ur_bridge:
   ros__parameters:
-    ema_alpha: 0.4
-    max_step_rad: 0.0025
-    deadband_rad: 0.004
+    filter_type: "one_euro"          # anti-tremor 주 필터 (ema로 fallback 가능)
+    one_euro_min_cutoff: 1.0
+    one_euro_beta: 2.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4                    # filter_type: ema 일 때만 적용
+    max_step_rad: 0.0025             # 사이클당 슬루 제한(≈속도 캡)
+    deadband_rad: 0.004              # ema 경로 노이즈 게이트
     staleness_timeout_s: 0.5
+    soft_start_s: 0.7                # 모든 (재)시딩 후 슬루 클램프 램프 (anti-snap)
+    start_paused: false              # 통합 launch가 true로 오버라이드(선기동-일시정지)
     publish_rate_hz: 250.0
     joint_states_topic: "/joint_states"
+    # resume_align_tol 은 yaml에 없음 → 노드 기본값 0.05 사용
+
+gello_move_to_start:                 # 실로봇 경로 전용 (mock 미사용)
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+    start_mode: "gello"              # 수렴-게이트 추격 후 자동 인계
+    chase_tol: 0.025
+    chase_dwell_s: 0.4
+    chase_v_budget: 0.5
+    min_traj_duration: 0.5
+    chase_hard_limit: 4.0
+    chase_timeout_s: 30.0
+    gello_staleness_s: 0.5
+    # resume_bridge / bridge_resume_service 는 통합 launch가 주입(true / /gello_ur_bridge/resume)
+    alignment_tolerance: 0.2         # init_align 모드 전용
+    alignment_hard_limit: 0.5
+    alignment_timeout: 0.0
 ```
 
 ### 필드 설명
@@ -312,6 +338,39 @@ gello_ur_bridge:
 | `staleness_timeout_s` | `0.5` | 이 시간 동안 새 GELLO 메시지가 없으면 bridge가 명령 발행을 멈춤(fail-safe). |
 | `publish_rate_hz` (bridge) | `250.0` | `/forward_position_controller/commands` 발행 주기(더 스냅하게 하려면 `max_step_rad`를 올리기 전에 500으로 먼저 올릴 것). |
 | `joint_states_topic` | `/joint_states` | bridge가 **첫 명령을 seed**할 로봇 실제 관절 상태 토픽. GELLO 포즈가 아니라 이 토픽의 실제 자세에서 시작하여 스타트업 스냅(velocity-limit protective stop)을 방지. |
+| `soft_start_s` | `0.7` | **모든** (재)시딩(startup/resume/staleness 복구) 후 이 시간 동안 슬루 클램프를 ~15%→`max_step_rad`로 램프 — 정지 상태에서 풀슬루로 튀지 않게 잔차를 이즈인. `0.0`=off. |
+| `start_paused` | `false` *(통합 launch: `true`)* | `true`면 시딩돼도 `~/resume` 전까지 발행 안 함(HOLD). yaml은 `false` 유지 — `ur7e_gello_real.launch.py`만 launch 레벨에서 `true`로 선기동-일시정지. |
+| `resume_align_tol` | `0.05` *(yaml에 없음 = 노드 기본값)* | `~/resume` 정렬 게이트: `\|GELLO−실제\| ≤ 이 값`(rad)일 때만 재개 허용(=2×`chase_tol`). 방금 수렴한 팔은 통과, 오정렬 수동 resume은 거부(정지 유지). |
+
+### `gello_move_to_start` 파라미터 레퍼런스 (실로봇 경로 전용, 수렴-게이트 핸드셰이크)
+
+mock 경로(`ur7e_gello_rviz.launch.py`)는 이 노드를 **쓰지 않습니다**(처음부터 `forward_position_controller` active). 아래는 실로봇 런북에서 시작 스냅을 막는 수렴-게이트 핸드셰이크(`start_mode=gello`) 파라미터로, **config 값이 노드 기본값을 오버라이드**합니다. `resume_bridge` / `bridge_resume_service`는 yaml에 없고 통합 launch가 주입합니다.
+
+| 파라미터 | 배포값(config) | 노드 기본값 | 한 줄 의미 |
+| --- | --- | --- | --- |
+| `start_mode` | `gello` | `gello` | `gello`=라이브 리더로 수렴 후 자동 인계 / `init_align`=고정 init_pose 이동 후 오퍼레이터 정렬 게이트 |
+| `source_controller` | `scaled_joint_trajectory_controller` | (동일) | 캐치업 트래젝토리를 보내는(보간) 컨트롤러 |
+| `target_controller` | `forward_position_controller` | (동일) | 인계 후 스트리밍 컨트롤러 |
+| `trajectory_duration` | `5.0` | `5.0` | init_align의 init_pose 이동 시간(s). `gello` 캐치업 길이는 gap 기반 별도 산정이라 미사용 |
+| `arrival_tolerance` | `0.05` | `0.05` | FollowJointTrajectory 관절별 도착 허용오차(rad). 실 JTC 도착정확도에 따라 완화(↑) 필요할 수 있음 |
+| `chase_tol` | `0.025` | `0.025` | 인계 게이트: 관절별 `\|라이브GELLO−실제\| ≤ 이 값`(≈1.4°). **실기 캘리브 필요** ↓ |
+| `chase_dwell_s` | `0.4` | `0.4` | 수렴이 이 시간 동안 유지(median-of-5, 새 샘플 도착 필수)돼야 인계 |
+| `chase_v_budget` | `0.5` | `0.3` | 캐치업 길이 산정 속도예산(rad/s): `T=max(gap/budget, min_traj_duration)`, 상한 클램프 없음 |
+| `min_traj_duration` | `0.5` | `0.75` | 캐치업 트래젝토리 최소 길이(s) — 작은 gap도 급스텝 대신 부드럽게 |
+| `chase_hard_limit` | `4.0` | `4.0` | 이보다 큰 gap은 자동추격 거부(래핑/그로스-오포즈 백스톱, **접근 한계 아님**; 정상 접근 ~π 허용) |
+| `chase_timeout_s` | `30.0` | `30.0` | 전체 수렴 시간예산(s). 초과 시 **exit 1**(스위치 안 함). `≤0`=무한 대기 |
+| `gello_staleness_s` | `0.5` | `0.5` | 이보다 오래된 GELLO 샘플=stale. 죽은/멈춘 리더는 dwell 통과 못 하고 타임아웃(재개 스냅 방지) |
+| `resume_bridge` | *(launch: `true`)* | `false` | 스위치 성공 후 브릿지 `~/resume` 호출로 스트리밍 시작. 통합 launch가 `true` 주입 |
+| `bridge_resume_service` | `/gello_ur_bridge/resume` | (동일) | resume를 호출할 브릿지 Trigger 서비스명 |
+| `alignment_tolerance` | `0.2` | `0.15` | *(init_align 전용)* 정렬 게이트 관절별 허용오차(rad) |
+| `alignment_hard_limit` | `0.5` | `0.5` | *(init_align 전용)* `~/override_follow` 허용 상한(rad) |
+| `alignment_timeout` | `0.0` | `0.0` | *(init_align 전용)* 게이트 대기 상한(s). `≤0`=무한 |
+
+> **정직한 보증(“제로 스냅” 아님):** 인계는 팔로워가 라이브 리더를 `chase_tol` 이내로 따라잡고 유지될 때에만 발생하며, 남은 잔차는 소프트스타트·레이트리밋 슬루(`≤ max_step_rad × publish_rate_hz`, `soft_start_s` 램프)로 닫힙니다. 움직이는 리더는 스냅이 아니라 **인계 지연**으로 나타납니다.
+
+> **실기 캘리브 주의(미검증):** 이 파이프라인은 **ros2_control mock 스택에서만 검증**되었고 실로봇 테스트는 미완료입니다. mock JTC는 목표에 *정확히* 도착하지만 실 HW는 정상상태 잔차가 남을 수 있어, `chase_tol`(0.025)이 그 잔차보다 작으면 게이트가 **라이브락**(영영 인계 안 함)될 수 있습니다. 핸드셰이크 1회 동안 `/joint_states` + 명령 토픽을 **rosbag 1개로 기록**해 관절별 정상상태 잔차를 측정하고, 그 최대치보다 `chase_tol`(및 필요 시 `arrival_tolerance`)을 약간 크게(예: `0.03`) 잡으세요.
+
+> **sim/mock 케이던스 주의 (fake hardware):** `use_fake_hardware:=true` mock 경로에서는 궤적 컨트롤러가 `scaled_joint_trajectory_controller`가 **아니라** `joint_trajectory_controller`로 뜹니다(`scaled_`는 실 e-Series 드라이버 전용). mock은 `gello_move_to_start`를 쓰지 않으므로 무해합니다. 또한 mock 부팅 로그의 **`io_and_status_controller` spawner 실패는 무해**합니다(mock에는 IO 인터페이스 없음). 둘 다 정상이며 조인트 텔레옵에 영향 없음.
 
 ### 왜 `max_step_rad=0.0025` @ 250Hz 인가 (velocity-safe 예산)
 

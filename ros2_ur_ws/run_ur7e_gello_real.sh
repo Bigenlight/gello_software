@@ -89,9 +89,10 @@ START_MODE="${START_MODE:-gello}"           # gello (default) | init_align (park
 # never disagree with the effective launch (ros2 launch is last-wins on dupes).
 case " $* " in *" headless_mode:=true "*|*"headless_mode:=true"*) HEADLESS=true ;; esac
 
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 source /opt/ros/humble/setup.bash
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
+source "$SCRIPT_DIR/install/setup.bash"
 
 ARGS=(robot_ip:="${ROBOT_IP}" start_mode:="${START_MODE}")
 [ -n "${CALIB}" ] && ARGS+=(kinematics_params_file:="${CALIB}")

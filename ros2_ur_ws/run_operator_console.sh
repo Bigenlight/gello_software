@@ -15,8 +15,9 @@
 # not command the robot or GELLO directly.
 set -e
 
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 source /opt/ros/humble/setup.bash
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
+source "$SCRIPT_DIR/install/setup.bash"
 
 exec ros2 run ur_gello_bringup gello_operator_console
