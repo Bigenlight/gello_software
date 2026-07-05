@@ -23,7 +23,7 @@
 | 부팅 컨트롤러 | `scaled_joint_trajectory_controller` **active** + `forward_position_controller` **inactive** 로드 |
 | **필수 시퀀스** | 드라이버 기동 → `gello_ur_bridge` **pre-spawn PAUSED** → `gello_move_to_start` **수렴 게이트 chase** → STRICT 전환 → `gello_move_to_start`가 브리지 `~/resume` 호출 → 스트리밍 (**§2, 건너뛰면 protective stop**) |
 | 팔 명령 경로 | `gello_publisher` → `gello_ur_bridge`(actual-`/joint_states` seed + One-Euro 필터 + step-clamp 0.0025 + **soft-start 0.7s** + watchdog) → `/forward_position_controller/commands` (250 Hz) |
-| 그리퍼 | `robotiq_urcap` → UR URCap TCP 소켓(63352) raw 접속, `robot_ip` + `connect_on_start:=true` |
+| 그리퍼 | `robotiq_gripper_modbus` → 드라이버 socat 브리지 공유(`serial_port:=/tmp/ttyUR`, Modbus RTU), `gello_gripper_bridge`가 구동. **로봇 전원 ON 필수**(24V tool voltage로 2F-85 급전) |
 | 캘리브레이션 | GELLO 캘리브(`FTBEO6QK`)는 **그대로 재사용**; UR7e **기구학** 캘리브는 로봇당 1회 별도 추출 |
 | 최대 리스크 | `forward_position_controller`는 보간 없이 즉시 명령 → 활성화 시점 로봇 자세 ≠ GELLO 자세면 **joint-velocity-limit protective stop** → §2 handshake 필수 |
 
@@ -33,7 +33,7 @@
 2. [Move-to-start handshake (필수)](#2-move-to-start-handshake-필수)
 3. [External Control: PolyScope 5 vs PolyScope X](#3-external-control-polyscope-5-vs-polyscope-x)
 4. [UR7e 기구학 캘리브레이션 — 최초 1회](#4-ur7e-기구학kinematics-캘리브레이션--최초-1회)
-5. [Robotiq 2F-85 그리퍼 — URCap 소켓 (63352)](#5-robotiq-2f-85-그리퍼--urcap-소켓-63352-raw-tcp)
+5. [Robotiq 2F-85 그리퍼 — Modbus (tool-comm 공유)](#5-robotiq-2f-85-그리퍼--modbus-tool-comm-공유)
 6. [열린 질문 체크리스트 (실기 연결 전 확인)](#6-열린-질문-체크리스트-실기-연결-전-확인)
 
 ---
@@ -460,43 +460,51 @@ ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
 
 ---
 
-## 5. Robotiq 2F-85 그리퍼 — URCap 소켓 (63352, raw TCP)
+## 5. Robotiq 2F-85 그리퍼 — Modbus (tool-comm 공유)
 
-`robotiq_urcap_node`는 ROS 토픽/서비스가 아니라 **UR 컨트롤러(PolyScope)가 띄우는 URCap TCP 소켓(기본 포트 63352)에 직접 연결**해 그리퍼를 구동합니다. 즉 이 구간은 `ros2_control`/컨트롤러 매니저와 무관하게 동작하는 **raw socket 경로**이며, §2의 `forward_position_controller` / `scaled_joint_trajectory_controller` 전환과는 완전히 독립적입니다.
+배포된(deployed) 그리퍼 경로는 **URCap 63352 raw 소켓이 아니라 `robotiq_gripper_modbus` 노드가 Modbus RTU로 2F-85를 직접 구동**하는 방식입니다. 통합 실기 launch(`ur7e_gello_real.launch.py`)에서 이 노드는 **직접 TCP를 쓰지 않고** 드라이버가 띄운 socat 툴-통신 브리지를 **공유**합니다 — per-node override `serial_port:=/tmp/ttyUR`. 즉 UR 드라이버의 `tool_communication`(socat) 포워더가 `robot_ip:54321`을 **단독 소유**하고 이를 시리얼 장치 `/tmp/ttyUR`로 노출하며, 그리퍼 노드는 그 장치를 읽고 씁니다(따라서 `:54321`의 클라이언트는 socat 포워더 **하나뿐**). 이 socat/24V 공존 모델의 근거·페이로드 주의는 이 문서 말미 [§ 팔 + 그리퍼 동시 구동](#팔--그리퍼-동시-구동-2f-85-포함)을 참고하세요.
 
-구독 토픽은 기존 그대로입니다.
+리더의 그리퍼 축은 **`gello_gripper_bridge`** 노드가 구동합니다: GELLO width 토픽(`/gripper/gripper_client/target_gripper_width_percent`, `std_msgs/Float32`, 0=open..1=closed)을 읽어 **항등(identity) 매핑**(inversion 없음, crush 방지)으로 그리퍼 노드의 `~/command_percent`(`/robotiq_gripper/command_percent`)에 그대로 스트리밍합니다. 두 노드(`robotiq_gripper_modbus` + `gello_gripper_bridge`)는 **handshake 성공 핸들러**(`OnProcessExit(move_to_start)`, returncode==0)에서만 기동되므로 §2 handshake 완료 후에만 올라옵니다.
 
-| 토픽 | 타입 | 비고 |
-| --- | --- | --- |
-| `/gripper/gripper_client/target_gripper_width_percent` | `std_msgs/Float32` | 0..1 (0=open, 1=closed) |
+> **로봇 전원 ON 필수.** 2F-85는 UR 툴 커넥터의 **24V tool voltage**(드라이버 인자 `tool_voltage:=24`가 공급)로 급전됩니다. 로봇이 `POWER_OFF`면 tool voltage가 없어 **Modbus 응답이 없고** 그리퍼가 안 움직입니다 — 이는 **버그가 아니라** 정상 동작이며, 노드는 연결이 될 때까지 백그라운드에서 **계속 재시도**하다가 전원이 켜지면 자동으로 붙습니다.
 
-### 5.1 PolyScope 5 (기존 검증된 UR 컨트롤러) — 그대로 동작
+### 5.1 ROS 인터페이스 (`robotiq_gripper` 노드)
 
-로봇 PC(UR 컨트롤러와 같은 네트워크)에서 다음 파라미터만 맞추면 별도 코드 수정 없이 그대로 씁니다.
+`robotiq_gripper_modbus` 노드(노드명 `robotiq_gripper`)가 올리는 인터페이스는 다음과 같습니다. 접속 여부와 무관하게 항상 광고되며, 미접속 상태에서 명령이 오면 "이 위치로 움직였을 것"만 로그로 남기고 거부(abort)합니다.
 
-```bash
-ros2 run ur_gello_bringup robotiq_urcap --ros-args \
-  -p robot_ip:=<UR7e_IP> \
-  -p connect_on_start:=true
-```
+| 종류 | 이름 | 타입 | 비고 |
+| --- | --- | --- | --- |
+| 액션 | `/robotiq_gripper_controller/gripper_cmd` | `control_msgs/action/GripperCommand` | `command.position` = **미터 gap**(0.0=CLOSED .. 0.085=OPEN, ROS 관례), `command.max_effort` = N(0이면 노드 기본 `force`) |
+| 서비스 | `/robotiq_gripper/set_closed` | `std_srvs/srv/SetBool` | `data:true`=CLOSE, `data:false`=OPEN (편의용 open/close) |
+| 스트리밍 입력 | `/robotiq_gripper/command_percent` | `std_msgs/Float32` | 0.0=OPEN .. 1.0=CLOSED. rate-limit+deadband 후 setpoint당 non-blocking write 1회. `gello_gripper_bridge`가 이걸 구동 |
+| 상태 | `/robotiq_gripper/position_percent` | `std_msgs/Float32` | 현재 위치 0.0=open .. 1.0=closed |
+| 상태 | `/robotiq_gripper/joint_states` | `sensor_msgs/JointState` | `robotiq_85_left_knuckle_joint` 위치(rad) |
 
-- `connect_on_start:=false`(기본값, 이 PC/빌드-검증 PC 기준)에서는 소켓을 열지 않고 "이 위치로 움직였을 것"만 로그로 남깁니다 — 그리퍼가 물리적으로 없는 이 검증 환경에서는 이 상태가 정상입니다.
-- 실 로봇 PC에서 `connect_on_start:=true` + 올바른 `robot_ip`를 주면 URCap 소켓(63352)에 접속해 실제로 그리퍼를 구동합니다.
+### 5.2 수동 테스트 — 그리퍼 단독 launch
 
-### 5.2 PolyScope X (신형 컨트롤러) — 63352 소켓 생존 여부를 먼저 검증할 것
-
-PolyScope X는 URCap 런타임/네트워크 스택이 PolyScope 5와 다르므로, **63352 포트가 동일하게 열려 있다고 가정하지 말고** 실 로봇에 붙이기 전에 반드시 확인합니다.
+팔/ros2_control 없이 그리퍼만 깨끗하게 검증하려면 **그리퍼 전용 launch**(`ur7e_gripper_only.launch.py`)를 씁니다. 통합 launch가 아닌 이 단독 경로에서는 `serial_port` 기본값이 빈 문자열("")이라 노드가 **socat 없이 `robot_ip:54321`으로 직접 Modbus TCP** 접속합니다(단, 이때는 팔 드라이버를 **같이 띄우면 안 됨** — `:54321`은 단일 클라이언트만 허용).
 
 ```bash
-nc <UR7e_IP> 63352
+# 그리퍼만 기동 (로봇 전원 ON, RS485 tool-comm URCap 설치 상태 전제)
+ros2 launch ur_gello_bringup ur7e_gripper_only.launch.py robot_ip:=<UR7e_IP>
+
+# 다른 터미널에서 — 편의 서비스로 open/close
+ros2 service call /robotiq_gripper/set_closed std_srvs/srv/SetBool "{data: true}"    # 닫기
+ros2 service call /robotiq_gripper/set_closed std_srvs/srv/SetBool "{data: false}"   # 열기
+
+# 또는 표준 액션 (position은 METERS: 0.0=닫힘 .. 0.085=열림)
+ros2 action send_goal /robotiq_gripper_controller/gripper_cmd \
+  control_msgs/action/GripperCommand "{command: {position: 0.0, max_effort: 40.0}}"
+
+# 상태 확인
+ros2 topic echo /robotiq_gripper/position_percent
 ```
 
-- **응답이 오면** (연결이 열리고 그리퍼 상태 질의에 반응): PolyScope 5와 동일하게 `robotiq_urcap` 노드를 `robot_ip` + `connect_on_start:=true`로 그대로 사용할 수 있습니다.
-- **응답이 없으면/연결이 거부되면**: PolyScope X에서는 이 raw-socket URCap 경로가 죽어 있는 것이므로, `robotiq_urcap_node`를 신뢰하지 말고 **ToolComm/URCapX 기반 그리퍼 경로**(PolyScope X의 새 Tool Communication 인터페이스를 통한 그리퍼 제어)를 후속 조사 항목으로 남깁니다. 이 경우 이 노드를 수정하기 전에 먼저 별도 스파이크로 PolyScope X 쪽 그리퍼 통신 방식을 확인해야 합니다.
+> **legacy 참고:** 예전 문서가 소개하던 `robotiq_urcap`(UR "Grippers" URCap TCP 소켓, 포트 63352) 노드는 패키지에 **아직 존재**하지만(URCap-소켓 방식 로봇용), 위 두 launch 어디에도 **더 이상 배선되어 있지 않습니다** — 이 로봇은 RS485 tool-comm URCap 구성이라 Modbus 경로를 씁니다. 63352 소켓 방식과 RS485 tool-comm 방식은 **상호 배타적**입니다.
 
 ### 5.3 안전 메모
 
-이 소켓 경로는 **그리퍼 전용**이며 GELLO passive read-only 불변식(§1 참고)과는 무관합니다 — GELLO 쪽에는 항상 어떤 경우에도 토크가 걸리지 않습니다.
+이 그리퍼 경로는 **그리퍼 전용**이며 GELLO passive read-only 불변식(§1 참고)과는 무관합니다 — GELLO 쪽에는 항상 어떤 경우에도 토크가 걸리지 않습니다. `gello_gripper_bridge.invert`는 반드시 **`false`** 유지(반전 시 GELLO 손을 열 때 로봇이 닫혀 crush 위험). connect 시 activate가 **open/close sweep**(auto-cal)을 하므로 손가락/물체를 치우세요.
 
 ---
 
@@ -504,7 +512,7 @@ nc <UR7e_IP> 63352
 
 실 UR7e에 붙이기 직전, 아래 항목을 순서대로 확정하세요. 하나라도 불명확하면 그 항목이 실기 첫 구동 실패의 1순위 원인입니다.
 
-- [ ] **PolyScope 버전 확정 (5 vs X).** 펜던트 `Settings > About` 확인. PolyScope 5면 classic `externalcontrol-*.urcap`, PolyScope X(>=10.8.0)면 `externalcontrol-x-*.urcapx` — 경로가 완전히 갈립니다(§3). PolyScope X면 그리퍼 63352 소켓 생존 여부(§5.2 `nc`)도 함께 확인.
+- [ ] **PolyScope 버전 확정 (5 vs X).** 펜던트 `Settings > About` 확인. PolyScope 5면 classic `externalcontrol-*.urcap`, PolyScope X(>=10.8.0)면 `externalcontrol-x-*.urcapx` — 경로가 완전히 갈립니다(§3). PolyScope 버전과 무관하게 그리퍼는 RS485 tool-comm(Modbus) 경로를 쓰므로, 로봇에 **RS485 / tool communication URCap**이 설치·활성인지와 socat 브리지 `/tmp/ttyUR` 생성 여부(§5)를 함께 확인.
 - [ ] **`robot_ip` 확정.** `ur7e_gello_real.launch.py`의 **필수** 인자, 기본값 없음. UR7e 컨트롤러 본체 IP. External Control 노드에 넣는 IP는 이것이 아니라 **ROS2 PC IP**임에 유의(§3.3).
 - [ ] **`dynamixel_sdk` 설치 확인.** 실 GELLO(`source:=gello`, `gello_publisher`) 경로는 `dynamixel_sdk`가 필요합니다. 실기 GELLO 연결 전 `pip install --user dynamixel-sdk` (v4.0.5, sudo/apt 불필요)로 설치하고 `python3 -c "import dynamixel_sdk"`로 확인합니다. (mock `source:=fake` 경로는 불필요.)
 - [ ] **`GELLO_REPO_ROOT` export.** `gello_publisher`에는 잘못된 하드코딩 fallback 경로(`/home/theo_lab/gello_software`)가 있으므로, `source:=gello` 실행 전 반드시 `export GELLO_REPO_ROOT=/home/laptop3/gello_software`를 설정합니다. (노드는 FROZEN — 수정 금지, docs로 우회.)
