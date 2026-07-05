@@ -226,12 +226,14 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
      /gello/joint_states
    ```
    리더를 멈춰 수렴("Converged")까지 간 뒤 정지합니다. (수렴이 안 되면 그 자체가 `chase_tol`이 너무 빡빡하다는 신호 — 아래 3 참고.)
-2. **catch-up 궤적 도달 후의 정상상태 오차 측정.** 마지막 catch-up이 SUCCEEDED된 직후 구간에서, `/joint_states`(실측)와 그 catch-up의 목표(로그의 live GELLO 자세, 또는 `/gello/joint_states`가 그 순간 정지해 있었다면 그 값)의 **per-joint 차이의 정상상태 값**을 봅니다. 이 잔차가 실기 JTC 도달 오차 `e`입니다.
+2. **catch-up 궤적 도달 후의 정상상태 오차 측정.** 수렴("Converged") 뒤 팔이 홀드 중이고 GELLO를 정지시킨 상태에서, 아래 헬퍼가 두 토픽을 자동 샘플링해 **per-joint 오차 `e`를 재고 tolerance 체인을 PASS/FAIL 판정**합니다(수렴 로그를 읽거나 rosbag을 열어볼 필요 없음):
    ```bash
-   # 빠른 확인용: 팔이 궤적 도달 후 정지한 구간에서 두 토픽을 비교
-   ros2 topic echo /joint_states --once
-   ros2 topic echo /gello/joint_states --once   # 리더가 정지해 있을 때
+   # 팔 홀드 + GELLO 정지 상태에서:
+   /usr/bin/python3 scripts/calibrate_handshake.py            # 3s 샘플, 배포 tolerance로 판정
+   /usr/bin/python3 scripts/calibrate_handshake.py --secs 5   # 더 길게
+   # 튜닝한 값으로 확인: --arrival 0.03 --chase-tol 0.04 --resume-align 0.06
    ```
+   출력: per-joint `e_j`, `e=max e_j`, 리더가 움직였으면 `<-- MOVING` 경고(그럼 정지 후 재실행), 체인 PASS/FAIL, 그리고 측정 `e`에 맞춘 **추천 tolerance 3종**. `e`가 곧 실기 JTC 도달 오차입니다. (수동 확인은 `ros2 topic echo /joint_states --once` + `/gello/joint_states --once` 비교.)
 3. **판정 및 튜닝 — `e <= arrival_tolerance < chase_tol <= resume_align_tol` 체인을 유지.**
    - **기본값(`arrival 0.05 / chase_tol 0.06 / resume_align_tol 0.08`)은 보수적으로 안전**합니다: 실기 `e < 0.05`이면(일반 UR은 << 0.05) 손 안 대도 동작하고, 남는 잔차(최대 0.06 rad ≈ 3.4°)는 브리지 soft-start slew로 완만히 닫혀 스냅이 없습니다.
    - **더 정밀하게** 하려면 실측 `e`를 재고 **세 값을 함께** 낮추세요 — 예: `e ≈ 0.008`이면 `arrival 0.02 / chase_tol 0.03 / resume_align_tol 0.05`. 순서는 반드시 `arrival(>e) < chase_tol <= resume_align_tol`.
