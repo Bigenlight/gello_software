@@ -96,10 +96,17 @@ Example:
         robot_ip:=192.168.10.11 \
         kinematics_params_file:=/path/to/my_robot_calibration.yaml \
         headless_mode:=true
+    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
+        robot_ip:=127.0.0.1 use_fake_hardware:=true   # MOCK validation, no real robot/gripper
 
-This launch file is DOCUMENTED / real-robot-only; it is NOT verifiable on the
-mock-hardware CI machine (no robot, no GELLO serial). For the mock/RViz path
-use ur7e_gello_rviz.launch.py (source:=fake).
+With use_fake_hardware:=true AND a real physical GELLO leader attached, the
+arm-side handshake/bridge pipeline (move-to-start convergence gate, controller
+switching, streaming) IS now verifiable here against ros2_control mock hardware
+— no real robot required, and headless_mode is forced true automatically. Only
+the Robotiq gripper still requires real hardware (Modbus tool bus needs a
+powered robot) and is auto-skipped in that mode. ur7e_gello_rviz.launch.py
+(source:=fake) remains the right choice when there is no physical GELLO either
+(fully synthetic).
 """
 
 from launch import LaunchDescription
@@ -115,6 +122,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     LaunchConfiguration,
     PathJoinSubstitution,
+    PythonExpression,
 )
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -136,6 +144,24 @@ def generate_launch_description():
             # be supplied explicitly, e.g. robot_ip:=192.168.10.11. Launch
             # will error out if it is omitted, which is the desired behaviour.
             description="REQUIRED. IP address of the physical UR7e controller.",
+        ),
+        DeclareLaunchArgument(
+            "use_fake_hardware",
+            default_value="false",
+            description=(
+                "PRE-REAL-HARDWARE VALIDATION SWITCH. Default 'false' -> real "
+                "UR7e (real-hardware behaviour is COMPLETELY unaffected unless a "
+                "caller explicitly passes this arg). When 'true', the underlying "
+                "ur_control.launch.py is switched to ros2_control mock/fake "
+                "hardware so the FULL move-to-start convergence-gate handshake "
+                "plus the bridge pre-spawn/resume sequence can be exercised "
+                "end-to-end against a real physical GELLO leader WITHOUT any real "
+                "robot attached (safe, undamageable validation). In this mode "
+                "headless_mode is forced true (mock hardware has no pendant / "
+                "External Control Play to wait on) and the Robotiq 2F-85 gripper "
+                "is automatically SKIPPED because its Modbus bridge needs a "
+                "powered real robot to supply 24V tool voltage."
+            ),
         ),
         DeclareLaunchArgument(
             "headless_mode",
@@ -208,6 +234,7 @@ def generate_launch_description():
     # ------------------------------------------------------------------ #
     ur_type = LaunchConfiguration("ur_type")
     robot_ip = LaunchConfiguration("robot_ip")
+    use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     headless_mode = LaunchConfiguration("headless_mode")
     launch_rviz = LaunchConfiguration("launch_rviz")
     kinematics_params_file = LaunchConfiguration("kinematics_params_file")
@@ -247,13 +274,22 @@ def generate_launch_description():
         launch_arguments={
             "ur_type": ur_type,
             "robot_ip": robot_ip,
-            # Real hardware: mock/fake both OFF. Pass both spellings so the
-            # value is honoured across driver versions (unknown launch
-            # arguments are silently ignored by the include).
-            "use_mock_hardware": "false",
-            "use_fake_hardware": "false",
+            # Real hardware (default use_fake_hardware:=false): mock/fake both
+            # OFF. Pass both spellings so the value is honoured across driver
+            # versions (unknown launch arguments are silently ignored by the
+            # include). When use_fake_hardware:=true both go ON, switching the
+            # driver to ros2_control mock hardware for pre-real-HW validation.
+            "use_mock_hardware": use_fake_hardware,
+            "use_fake_hardware": use_fake_hardware,
             "launch_rviz": launch_rviz,
-            "headless_mode": headless_mode,
+            # Force headless_mode true under fake hardware (mock HW has no
+            # pendant / External Control Play, so waiting for it would hang
+            # forever); otherwise pass the user's headless_mode value through
+            # unchanged. Equivalent to:
+            #     'true' if use_fake_hardware == 'true' else headless_mode
+            "headless_mode": PythonExpression(
+                ["'true' if '", use_fake_hardware, "' == 'true' else '", headless_mode, "'"]
+            ),
             # Bring the robot up on the trajectory controller (ACTIVE) so the
             # move-to-start handshake can command a smooth catch-up motion.
             # forward_position_controller must NOT be active initially.
@@ -274,7 +310,14 @@ def generate_launch_description():
             #   * tool_device_name:=/tmp/ttyUR is the serial device the gripper
             #     Modbus node then SHARES (serial_port:=/tmp/ttyUR below), so
             #     exactly ONE client owns :54321 = this socat forwarder.
-            "use_tool_communication": "true",
+            # Disable tool communication (and therefore the gripper's Modbus
+            # socat bridge) under fake hardware — there is no real robot to
+            # power the tool or run the socat forwarder — while preserving
+            # "true" unchanged for the real-hardware default. Equivalent to:
+            #     'false' if use_fake_hardware == 'true' else 'true'
+            "use_tool_communication": PythonExpression(
+                ["'false' if '", use_fake_hardware, "' == 'true' else 'true'"]
+            ),
             "tool_voltage": "24",
             "tool_device_name": "/tmp/ttyUR",
         }.items(),
@@ -428,7 +471,23 @@ def generate_launch_description():
     )
 
     def _on_handshake_exit(event, context):
+        # Resolve whether ros2_control mock/fake hardware is in use. Under fake
+        # hardware there is no real powered robot behind the Modbus tool bus, so
+        # the Robotiq gripper nodes must be skipped (see below).
+        fake_hardware = use_fake_hardware.perform(context) == "true"
         if event.returncode == 0:
+            if fake_hardware:
+                return [
+                    LogInfo(
+                        msg=(
+                            "Move-to-start handshake SUCCEEDED "
+                            "(forward_position_controller active; bridge resumed "
+                            "via ~/resume). use_fake_hardware:=true -- skipping "
+                            "the Robotiq gripper (Modbus needs a real powered "
+                            "robot); arm handshake validation complete."
+                        )
+                    ),
+                ]
             return [
                 LogInfo(
                     msg=(

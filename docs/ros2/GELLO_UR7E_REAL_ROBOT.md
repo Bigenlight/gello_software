@@ -1,7 +1,7 @@
 # GELLO → 실제 UR7e + Robotiq 2F-85 ROS2 텔레오퍼레이션 — 실기 런북 (REAL)
 
 > ⚠️ **이 문서는 실제 UR7e 하드웨어를 ROS2 Humble로 구동하기 위한 실기(real-robot) 런북입니다.**
-> 실 UR7e는 이 빌드-검증 PC가 아니라 **별도의 로봇 PC**에 연결되어 있으며, 이 문서의 절차(move-to-start handshake, External Control/URCapX, 기구학 캘리브레이션, 실 그리퍼 소켓)는 **여기(mock) 환경에서는 검증할 수 없습니다.** 로봇에 붙기 전 반드시 mock 경로로 파이프라인을 먼저 확인하세요.
+> 실 UR7e는 이 빌드-검증 PC가 아니라 **별도의 로봇 PC**에 연결되어 있으며, 이 문서의 **실 로봇 전용 절차**(External Control/URCapX 페어링, 기구학 캘리브레이션, 실 그리퍼 24V/Modbus 소켓)는 **여기(mock) 환경에서는 검증할 수 없습니다.** 단, **move-to-start 수렴 게이트 핸드셰이크 + 브리지**는 실물 GELLO 리더를 이 PC에 붙인 채 `use_fake_hardware:=true`로 **이제 여기서(mock) 검증할 수 있습니다**(아래 §"실기 전 mock 검증" 참고). 로봇에 붙기 전 반드시 mock 경로로 파이프라인을 먼저 확인하세요.
 >
 > - **검증 완료된 mock 경로 (여기서 실행 가능)**: [`GELLO_UR7E_ROS2_BRINGUP.md`](./GELLO_UR7E_ROS2_BRINGUP.md) — `source:=fake` + `use_fake_hardware`, RViz2 시각화, 실 UR/GELLO 미접속.
 > - **설계·근거 문서**: [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md) (아키텍처·안전 handshake·리스크 결정), [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md) (mock UR 브링업 상세), [`GELLO_ROS2_CONTROL_REFERENCE.md`](./GELLO_ROS2_CONTROL_REFERENCE.md).
@@ -68,9 +68,10 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 
 1. 매 반복마다 **live GELLO 자세**(`/gello/joint_states`)와 **로봇 실측 자세**(`/joint_states`)를 **다시 읽습니다.**
 2. per-joint gap을 재고, `chase_tol`보다 크면 **그 gap 크기에 비례한 길이**의 catch-up 궤적을 쏩니다: `T = max(gap / chase_v_budget, min_traj_duration)`. **상한 clamp 없음** — gap이 크면 더 *빠르게*가 아니라 더 *길게* 움직여 JTC 스플라인 peak 속도가 3.14 rad/s protective-stop 한계 아래로 유지됩니다.
-3. gap이 `chase_hard_limit`(≈4.0 rad, **wraparound/gross-mispose 백스톱**, approach 제한 아님)을 넘으면 **자동 chase를 거부**하고 fail-safe로 종료(스위치 없음)합니다.
-4. per-joint `|live GELLO − actual| <= chase_tol`가 **`chase_dwell_s` 동안 유지**(median-of-5 필터 + dwell 중 *새* 샘플 도착 요구)되면 **"Converged" 로그 후 핸드오버**합니다.
-5. `~abort`를 폴링하고, `chase_timeout_s` 안에 수렴 못 하거나(계속 움직이는/안 멈추는 리더) 리더 스트림이 **stale(dead)**이면 **exit 1 fail-safe로 종료(스위치 없음)**합니다.
+3. **첫 catch-up 이후로는 리더가 멈췄을 때에만** 다음 catch-up을 쏩니다(stillness gate). 최근 `chase_still_window_s`(배포 0.3s) 동안 측정한 **live 리더의 per-joint 속도**가 모두 `chase_still_speed`(배포 0.1 rad/s) 이하로 떨어져야 새 catch-up 궤적을 dispatch하고, 리더가 아직 움직이는 중이면 **새 궤적을 쏘지 않고 폴링만 하며 리더가 정착하기를 기다립니다(hold).** 이는 **끝없이 움직이는(영영 안 멈추는) 리더를 팔이 back-to-back catch-up으로 자율 추종(shadow)하는 것 — 인가되지 않은 연속 이동 — 을 막기 위함**입니다(그런 리더는 `chase_timeout_s` 동안 팔을 계속 끌고 다녔음). **단, 맨 처음(FIRST) catch-up은 이 게이트에서 면제**되어, 초기 gap이 크더라도 팔이 리더 쪽으로 첫 접근을 시작할 수 있습니다.
+4. gap이 `chase_hard_limit`(≈4.0 rad, **wraparound/gross-mispose 백스톱**, approach 제한 아님)을 넘으면 **자동 chase를 거부**하고 fail-safe로 종료(스위치 없음)합니다.
+5. per-joint `|live GELLO − actual| <= chase_tol`가 **`chase_dwell_s` 동안 유지**(median-of-5 필터 + dwell 중 *새* 샘플 도착 요구)되면 **"Converged" 로그 후 핸드오버**합니다.
+6. `~abort`를 폴링하고, `chase_timeout_s` 안에 수렴 못 하거나(계속 움직이는/안 멈추는 리더) 리더 스트림이 **stale(dead)**이면 **exit 1 fail-safe로 종료(스위치 없음)**합니다.
 
 즉 실패 방향은 항상 **"아직 시작 안 함"**이지 **"예상 못한 이동"**이 아닙니다. 남는 잔차는 브리지의 soft-start된 slew(`<= max_step_rad*rate`)로 닫힙니다 (§2 파라미터 표·복구 참고).
 
@@ -143,7 +144,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
    STRICT이므로 둘 중 하나라도 전환에 실패하면 서비스가 실패로 떨어져, "반쯤 전환된" 위험 상태로 진행되지 않습니다. 이 시점의 로봇 자세와 live GELLO가 `chase_tol` 이내로 일치하므로 첫 fpc 명령에서 스냅이 없습니다.
 
 5. **STRICT 전환 성공 직후 `gello_move_to_start`가 브리지 `~/resume` 호출 → 스트리밍 시작.**
-   `resume_bridge:=true`이면 노드는 전환 성공 **직후** pre-spawn된 브리지의 `~/resume`(`std_srvs/srv/Trigger`)를 **최대 3회 재시도**하며 호출합니다. 브리지의 `~/resume`는 **정렬 게이트(alignment-gated)** — `|raw GELLO − actual| <= resume_align_tol`(기본 0.05 = `chase_tol`의 2배)일 때만 재개 — 이므로 방금 수렴한 팔은 통과합니다. 재개 시 브리지는 **로봇 실제 `/joint_states`에서 재-seed**(jump-free)하고 **soft-start(`soft_start_s=0.7s`)**로 slew clamp를 램프업하므로, 남은 잔차 gap은 한 사이클 점프가 아니라 **완만히 ease-in**됩니다. 정상 로그는 `"Bridge resumed (...); teleop is now streaming."`입니다. 이후 `/gello/joint_states` → `/forward_position_controller/commands`(250 Hz) 스트리밍이 시작됩니다.
+   `resume_bridge:=true`이면 노드는 전환 성공 **직후** pre-spawn된 브리지의 `~/resume`(`std_srvs/srv/Trigger`)를 **최대 3회 재시도**하며 호출합니다. 브리지의 `~/resume`는 **정렬 게이트(alignment-gated)** — `|raw GELLO − actual| <= resume_align_tol`(배포 0.08, 불변식 `>= chase_tol`(0.06))일 때만 재개 — 이므로 방금 수렴한 팔은 통과합니다. 재개 시 브리지는 **로봇 실제 `/joint_states`에서 재-seed**(jump-free)하고 **soft-start(`soft_start_s=0.7s`)**로 slew clamp를 램프업하므로, 남은 잔차 gap은 한 사이클 점프가 아니라 **완만히 ease-in**됩니다. 정상 로그는 `"Bridge resumed (...); teleop is now streaming."`입니다. 이후 `/gello/joint_states` → `/forward_position_controller/commands`(250 Hz) 스트리밍이 시작됩니다.
 
    > **staleness watchdog 동작(`staleness_timeout_s=0.5`).** GELLO 스트림이 끊기거나 늦어져 0.5s를 초과하면, 브리지는 **새 setpoint 발행을 멈추고** `"GELLO stale, holding — not publishing"`을 로그로 남깁니다. 이때 `forward_position_controller`는 **마지막으로 명령된 자세를 그대로 유지**합니다 — 즉 **팔이 그 자리에 정지(freeze)**하며, 감속 램프도, fault도, protective stop도 없습니다. GELLO 메시지가 다시 들어오면 **자동으로 재-seed + soft-start로 스트리밍을 재개**합니다(복구 시 리더가 이동했더라도 full-slew 스냅 없음).
    >
@@ -167,14 +168,14 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 ...
 
 # (3) 리더가 멈춰 gap이 chase_tol 이내로 dwell 동안 유지되면 수렴
-[gello_move_to_start] Converged: max gap 0.0121 rad held 0.42s (<= 0.025 for 0.4s). Handing over to streaming.
+[gello_move_to_start] Converged: max gap 0.0121 rad held 0.42s (<= 0.06 for 0.4s). Handing over to streaming.
 
 # (4) STRICT 전환
 [gello_move_to_start] Switching controllers (STRICT): activate=forward_position_controller, deactivate=scaled_joint_trajectory_controller...
 [gello_move_to_start] Controller switch OK: forward_position_controller active. Bridge may now stream.
 
 # (5) 전환 직후 브리지 resume (정렬 게이트 통과)
-[gello_move_to_start] Bridge resumed (Following RESUMED — aligned (max 0.012 rad <= 0.050). ...); teleop is now streaming.
+[gello_move_to_start] Bridge resumed (Following RESUMED — aligned (max 0.012 rad <= 0.080). ...); teleop is now streaming.
 [gello_move_to_start] Move-to-start handshake complete; shutting down.
 ```
 
@@ -189,13 +190,13 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 **A. 수렴 게이트가 계속 안 넘어감 (chase만 반복하다 timeout).**
 증상: `Chasing live GELLO ...`가 계속 반복되거나, 결국 `Did not converge within 30s (leader still moving / never settled?); aborting (fail-safe, no switch).` 후 노드가 exit 1로 종료. STRICT 전환·스트리밍 없음, 팔은 `scaled_joint_trajectory_controller`가 잡은 마지막 자세에서 정지.
 - **원인 1 — 운영자가 계속 GELLO를 움직임.** 리더를 **가만히** 잡고 있으세요. dwell(`chase_dwell_s=0.4s`) 동안 정지해야 수렴합니다.
-- **원인 2 — 실기 JTC 정상상태 오차 > `chase_tol`(0.025).** mock은 정확히 도달하지만 실기는 catch-up 후에도 per-joint 잔차가 남아 gap이 절대 `chase_tol` 밑으로 안 내려갈 수 있습니다(**livelock**). → 아래 **캘리브레이션 체크리스트**로 실측 오차를 재고 `chase_tol`(및 필요 시 `arrival_tolerance`)을 그 위로 올리세요.
+- **원인 2 — 실기 JTC 정상상태 오차 > `chase_tol`(0.06).** mock은 정확히 도달하지만 실기는 catch-up 후에도 per-joint 잔차가 남아 gap이 절대 `chase_tol` 밑으로 안 내려갈 수 있습니다(**livelock**). → 아래 **캘리브레이션 체크리스트**로 실측 오차를 재고 `chase_tol`(및 필요 시 `arrival_tolerance`)을 그 위로 올리세요.
 - **원인 3 — 리더 스트림 dead/stale.** `Waiting for a fresh GELLO sample + robot /joint_states before convergence ...` 가 반복되면 GELLO USB/`gello_publisher`를 확인하세요.
 - **복구:** 실패 후에는 launch를 다시 올려야 합니다(노드가 종료됨). 파라미터를 바꿔야 하면 `chase_tol`을 올린 뒤 재-launch.
 
 **B. STRICT 전환 성공했으나 `~/resume`가 안 됨.**
 증상: `Controller switch OK` 는 떴는데, `Bridge did NOT resume after 3 attempts (leader likely not aligned within resume_align_tol). forward_position_controller is ACTIVE and HOLDING; no teleop.` 로 끝남. **이 경우 handshake는 성공(exit 0)으로 간주**되어 그리퍼는 올라오지만, **팔 teleop은 아직 스트리밍 안 함.** fpc가 도착 자세를 **잡고 있어(HOLDING)** 안전합니다.
-- **복구:** GELLO 리더를 로봇 현재 자세에 **정렬**(`resume_align_tol=0.05` 이내)시킨 뒤, 아래를 수동 호출:
+- **복구:** GELLO 리더를 로봇 현재 자세에 **정렬**(`resume_align_tol=0.08` 이내)시킨 뒤, 아래를 수동 호출:
   ```bash
   ros2 service call /gello_ur_bridge/resume std_srvs/srv/Trigger
   ```
@@ -250,6 +251,8 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 |---|---|---|
 | `chase_tol` | `0.06` (≈3.4°) | 핸드오버에 요구되는 per-joint 일치(rad). 잔차는 soft-start slew로 닫혀 snap-free. **불변식: `arrival_tolerance` < `chase_tol` <= `resume_align_tol`** (안 지키면 livelock/abort/resume거부 — 노드가 `chase_tol<=arrival` 시 경고+자동 상향). 위 캘리브레이션으로 세 값 함께 조정. |
 | `chase_dwell_s` | `0.4` | 위 일치가 **유지**돼야 하는 시간(s, median-of-5 + dwell 중 새 샘플 요구). 낮추면 더 빨리 수렴하나 스파이크 통과 위험↑. |
+| `chase_still_speed` | `0.1` | **첫 catch-up 이후** 다음 catch-up을 허용하는 live 리더 per-joint 속도 상한(rad/s). 모든 관절이 이 값 이하로 정착해야 새 궤적을 쏨(아니면 hold). 인가되지 않은 연속 shadowing을 막음. 첫 catch-up은 면제. 낮추면 더 엄격히 정지를 요구, 높이면 미세 이동 중에도 catch-up 허용. |
+| `chase_still_window_s` | `0.3` | 위 리더 속도를 측정하는 시간창(s). 이 구간의 per-joint 이동량으로 속도를 추정. 늘리면 노이즈에 둔감하나 판정 지연↑, 줄이면 반응 빠르나 스파이크에 민감. |
 | `chase_v_budget` | `0.5` (노드 기본 `0.3`) | catch-up 궤적 길이를 정하는 속도 예산(rad/s): `T = max(gap/v, min_traj_duration)`. 낮추면 더 느리고 안전, 높이면 빠름. |
 | `min_traj_duration` | `0.5` (노드 기본 `0.75`) | 각 catch-up 궤적 최소 길이(s). 작은 gap도 near-step이 아니라 부드럽게. |
 | `chase_hard_limit` | `4.0` | 이보다 큰 gap은 **자동 chase 거부**(fail-safe). **wraparound/gross-mispose 백스톱**이지 approach 제한 아님(팔은 최대 ~π에서 정상 출발). 실기에서 **줄이지 말 것**(정상 approach를 막음). |
@@ -280,6 +283,38 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 > **정직한 보장(재확인):** 핸드오버는 팔로워가 **살아있는 리더를 `chase_tol` 이내로 따라잡아 유지**했을 때만 일어나며, 남는 잔차는 soft-start된 rate-limited slew로 닫힙니다. 계속 움직이는 리더는 스냅이 아니라 **핸드오버 지연**을 유발합니다("zero snap"이 아님).
 >
 > 안전 불변식(재확인): 이 handshake는 전부 **UR7e 팔로워** 쪽 절차입니다. GELLO는 이 과정 내내 토크 없이 **읽히기만** 합니다.
+
+### 실기 전 mock 검증 — 실물 GELLO + mock UR7e로 handshake 전체를 미리 확인
+
+> **왜 필요한가.** 위 수렴 게이트 핸드셰이크(chase → stillness gate → dwell → "Converged" → STRICT 전환 → 브리지 `~/resume`)는 코드 경로가 복잡하고, 실 UR7e에서 처음 돌리면 팔이 실제로 움직이므로 실수 여지가 큽니다. 그래서 **실 로봇에 붙기 전에**, **진짜 물리 GELLO 리더**로 **손상 불가능한 mock(가짜) UR7e**를 상대로 **동일한 코드 경로 전체**를 먼저 한 번 돌려보는 것이 강력히 권장됩니다. 리더(소스)는 실기와 완전히 같은 `gello_publisher`이고, 팔로워만 안전한 시뮬레이션으로 바꿉니다.
+
+`ur7e_gello_real.launch.py`에는 이를 위한 새 런치 인자 **`use_fake_hardware`(기본 `"false"`)**가 있습니다. 기본값이 false이므로 **실기 동작은 이 인자에 영향받지 않습니다.** `use_fake_hardware:=true`로 주면:
+
+- 하부 `ur_control.launch.py` include가 **ros2_control mock/fake 하드웨어**(손상 불가능한 시뮬레이션 UR7e)로 전환됩니다.
+- `headless_mode`가 **자동으로 true 강제**됩니다 — mock 하드웨어에는 펜던트가 없어 Play를 누를 수 없으므로.
+- `use_tool_communication`이 **자동으로 false 강제**됩니다 — 그리퍼에 24V를 급전할 실 로봇이 없으므로.
+- Robotiq 그리퍼 노드(`robotiq_gripper_modbus`, `gello_gripper_bridge`)는 handshake 성공 후 **자동으로 건너뜁니다**(그 이유를 설명하는 INFO 로그가 남습니다).
+- 그 외 런치 시퀀스 전체 — **FULL `gello_move_to_start` 수렴 게이트 핸드셰이크**, pre-spawn PAUSED된 `gello_ur_bridge`, **STRICT 컨트롤러 전환** — 는 실기와 **정확히 동일하게** 실행되며, **진짜 물리 GELLO 리더**가 이를 구동합니다(소스는 그대로 `gello_publisher`, 변경 없음).
+
+```bash
+cd ros2_ur_ws
+GELLO_REPO_ROOT=/home/laptop3/gello_software ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
+  robot_ip:=127.0.0.1 use_fake_hardware:=true
+```
+
+> `robot_ip`은 여전히 **필수** 인자이지만 mock 하드웨어에서는 그 값이 **사용/무시되지 않으므로**(unused) `127.0.0.1` 같은 아무 placeholder나 넣으면 됩니다.
+
+**무엇을 기대하는가:**
+
+- **RViz2**가 열리며 mock UR7e가 표시됩니다.
+- 콘솔에는 이 문서 앞부분에서 설명한 **동일한 수렴 게이트 로그**가 그대로 흐릅니다(`Chasing live GELLO: gap ... -> ...s catch-up`, `Converged: max gap ...`, `Switching controllers (STRICT) ...`, `Bridge resumed ... teleop is now streaming.` — §"운영자가 보는 것" 참고).
+- 팔은 리더로 **수렴**한 뒤 스트리밍으로 **핸드오버**되어야 합니다.
+- 이후 **실물 GELLO를 움직이면 RViz2의 mock 팔이 1:1로** 따라 움직입니다.
+- **그리퍼는 건너뜁니다**(로그가 그 이유를 설명 — 급전할 실 로봇 없음).
+
+> **⚠️ 중요 한계 — 이 mock 경로로는 dead-band livelock을 재현할 수 없습니다.** ros2_control mock JTC는 명령 자세에 **정확히(정상상태 오차 0으로) 도달**하므로, 이 문서 다른 곳(§"실기 캘리브레이션 체크리스트")에서 설명한 **dead-band livelock 실패 모드(`chase_tol` vs `arrival_tolerance`)를 이 경로로는 절대 exercise할 수 없습니다.** 그 검증은 여전히 **실 로봇**에서 `calibrate_handshake.py` 체크로만 가능합니다. 요컨대 이 mock 경로는 수렴 게이트의 **로직**(chase 반복, stillness gating, dwell, 핸드오버, 컨트롤러 전환, 브리지 resume)은 검증하지만, **실 서보의 도달-오차 엣지 케이스**는 검증하지 못합니다.
+
+> **권장 순서.** 이 mock 검증은 **동일한 코드 경로를 진짜 리더로, 단 안전한 시뮬레이션 팔로워를 상대로** 돌려보는 것이므로, 이 문서의 **실기(real-hardware) 첫 구동에 앞서** 먼저 수행하기 좋은 실전 단계입니다. 여기서 로직 배선(핸드셰이크 순서·로그·resume)을 확인한 뒤, 실 로봇에서는 §"실기 캘리브레이션 체크리스트"의 서보 도달-오차 검증에 집중하세요.
 
 ---
 

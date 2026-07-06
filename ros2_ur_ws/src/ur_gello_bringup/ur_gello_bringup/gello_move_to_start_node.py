@@ -45,7 +45,13 @@ with the live leader within ``chase_tol`` on every joint, sustained
 ``chase_dwell_s``. (This replaced the original one-shot move to the FIRST-seen
 pose, which snapped when streaming began because the leader had drifted/moved
 during the approach.) A leader that keeps moving simply delays handover; a
-dead/stale leader times out to the fail-safe (no switch).
+dead/stale leader times out to the fail-safe (no switch). After the FIRST
+catch-up the chase is also STILLNESS-GATED: it refuses to dispatch another
+catch-up until the live leader is quasi-still (per-joint speed over
+``chase_still_window_s`` below ``chase_still_speed``), so a never-settling
+leader can no longer make the arm autonomously SHADOW its continuous motion
+with back-to-back catch-ups (streaming is not authorized yet — the gate only
+catches up, it does not track).
 
 ``start_mode:=init_align`` is an INTERACTIVE, operator-gated flow for extra
 safety on unfamiliar hardware. Every stage transition requires an explicit
@@ -194,6 +200,18 @@ class GelloMoveToStart(Node):
         self.chase_hard_limit = float(
             self.declare_parameter("chase_hard_limit", 4.0).value
         )
+        # Leader "quasi-still" gate (R3). The convergence loop re-reads the LIVE
+        # leader every iteration and dispatches a duration-sized catch-up toward
+        # wherever it currently is. That is correct while the leader is SETTLING,
+        # but if the operator keeps moving GELLO continuously (it never settles)
+        # the loop fires back-to-back catch-ups toward the moving leader with no
+        # check that it stopped — so the arm autonomously SHADOWS the leader's
+        # motion for up to chase_timeout_s. Streaming has NOT been authorized yet;
+        # the gate's job is to CATCH UP, not to track. So after the FIRST catch-up
+        # we refuse to dispatch another one until the leader is quasi-still: its
+        # per-joint speed over chase_still_window_s has dropped to <= chase_still_speed.
+        self.chase_still_speed = float(self.declare_parameter("chase_still_speed", 0.1).value)  # max per-joint leader speed (rad/s) considered "quasi-still".
+        self.chase_still_window_s = float(self.declare_parameter("chase_still_window_s", 0.3).value)  # time window (s) over which stillness is measured.
         # Overall time budget for convergence; <=0 => wait forever.
         self.chase_timeout_s = float(
             self.declare_parameter("chase_timeout_s", 30.0).value
@@ -268,6 +286,10 @@ class GelloMoveToStart(Node):
         self._gello_latest: list[float] | None = None
         # Monotonic time of the last complete GELLO message (staleness gate).
         self._last_gello_msg_time: float | None = None
+        # Recent (timestamp, pose) history of the LIVE leader, used to measure the
+        # leader's per-joint speed for the R3 quasi-still gate (see
+        # _leader_quasi_still). Bounded so it can never grow unbounded.
+        self._gello_history: deque[tuple[float, list[float]]] = deque(maxlen=64)
         # Robot's ACTUAL current pose (UR order) from /joint_states — used to
         # measure the true live gap |leader - arm| at the convergence gate.
         self._actual_pose: list[float] | None = None
@@ -348,6 +370,7 @@ class GelloMoveToStart(Node):
         pose = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
         self._gello_latest = pose
         self._last_gello_msg_time = time.monotonic()
+        self._gello_history.append((self._last_gello_msg_time, pose))
         if self._gello_target is None:
             self._gello_target = pose
             self.get_logger().info(f"Captured GELLO target pose: {pose}")
@@ -365,6 +388,39 @@ class GelloMoveToStart(Node):
         """True if a complete GELLO sample arrived within gello_staleness_s."""
         t = self._last_gello_msg_time
         return t is not None and (time.monotonic() - t) <= self.gello_staleness_s
+
+    # ---------------------------------------------------------------------
+    def _leader_quasi_still(self) -> bool:
+        """True only if the LIVE leader's per-joint speed over the last
+        chase_still_window_s is <= chase_still_speed.
+
+        DELIBERATELY CONSERVATIVE: returns False ("not yet known to be still")
+        whenever the evidence is insufficient — fewer than 2 samples, or the
+        samples span less than half the window (a sparse or just-started stream).
+        A sparse/just-started stream can therefore NEVER falsely gate as still;
+        stillness must be positively demonstrated by real, time-spanning data.
+        """
+        if len(self._gello_history) < 2:
+            return False
+        newest_t, newest_pose = self._gello_history[-1]
+        # Oldest sample still inside the window. The deque is time-ordered, so the
+        # first entry from the front satisfying t >= newest_t - window is the
+        # oldest-in-window.
+        oldest_t, oldest_pose = newest_t, newest_pose
+        cutoff = newest_t - self.chase_still_window_s
+        for ts, pose in self._gello_history:
+            if ts >= cutoff:
+                oldest_t, oldest_pose = ts, pose
+                break
+        span = newest_t - oldest_t
+        # Not enough temporal coverage yet (stream may have gaps or just started).
+        if span < self.chase_still_window_s * 0.5:
+            return False
+        speed = max(
+            abs(newest_pose[i] - oldest_pose[i]) / span
+            for i in range(len(UR_JOINT_ORDER))
+        )
+        return speed <= self.chase_still_speed
 
     # ---------------------------------------------------------------------
     def _wait_for_gello_target(self) -> bool:
@@ -720,6 +776,10 @@ class GelloMoveToStart(Node):
         # (gello_staleness_s, 0.5s) can otherwise exceed the dwell (0.4s).
         dwell_msg_time: float | None = None
         warned_wait = False
+        # Count of catch-up trajectories dispatched. The FIRST is exempt from the
+        # R3 quasi-still gate (see the "Not converged" branch below); every one
+        # after it requires the leader to have quasi-settled first.
+        chase_iterations = 0
         while rclpy.ok():
             if self._abort:
                 self.get_logger().error(
@@ -812,6 +872,21 @@ class GelloMoveToStart(Node):
             dwell_start = None
             err_samples.clear()
             warned_wait = False
+            # R3: after the FIRST catch-up, refuse to dispatch another one while the
+            # leader is still ACTIVELY moving. Otherwise a leader that never settles
+            # (e.g. continuous operator motion) makes the arm autonomously SHADOW it
+            # with back-to-back catch-up trajectories for up to chase_timeout_s —
+            # unauthorized continuous motion (streaming has not been authorized yet;
+            # the gate's job is to catch up, not to track). The very first catch-up
+            # is exempt so the initial approach is not needlessly delayed by a leader
+            # that may already be settling into position.
+            if chase_iterations >= 1 and not self._leader_quasi_still():
+                self.get_logger().info(
+                    f"Live gap {max_gap:.3f} rad at {UR_JOINT_SHORT[worst]} but the "
+                    "leader is still moving; holding (no new catch-up) until it settles.",
+                    throttle_duration_sec=1.0,
+                )
+                continue
             dur = max(max_gap / self.chase_v_budget, self.min_traj_duration)
             self.get_logger().info(
                 f"Chasing live GELLO: gap {max_gap:.3f} rad at "
@@ -821,6 +896,7 @@ class GelloMoveToStart(Node):
                 list(self._gello_latest), "live GELLO pose", duration=dur
             ):
                 return False
+            chase_iterations += 1
             # Loop re-evaluates: the leader may have moved again while we moved.
 
     # ---------------------------------------------------------------------

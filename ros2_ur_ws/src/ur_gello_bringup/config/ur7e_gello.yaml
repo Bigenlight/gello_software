@@ -141,6 +141,16 @@ gello_move_to_start:
     # legitimate initial approach (caught on the real stack). 4.0 rad allows every
     # normal approach yet still catches a full-turn (2*pi) wraparound.
     chase_hard_limit: 4.0
+    # Leader "quasi-still" gate (rad/s, s). After the FIRST catch-up, the node
+    # REFUSES to dispatch another one until the live leader's per-joint speed over
+    # the last chase_still_window_s has dropped to <= chase_still_speed. This
+    # prevents the arm from autonomously SHADOWING a never-settling leader with
+    # back-to-back catch-ups for up to chase_timeout_s (streaming is not authorized
+    # yet — the gate catches up, it does not track). Values match the node's own
+    # defaults (0.1 rad/s, 0.3 s). Tune chase_still_speed DOWN if real Dynamixel
+    # tremor at rest (roughly 0.003 rad noise band) causes false "still moving" holds.
+    chase_still_speed: 0.1
+    chase_still_window_s: 0.3
     # Overall convergence time budget (s); on never-settle the node times out and
     # exits 1 (fail-safe, no switch). <=0 => wait forever.
     chase_timeout_s: 30.0
