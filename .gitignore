@@ -16,9 +16,12 @@
 *wandb_logs*
 outputs/*
 
-# ...but keep the GELLO->UR7e diagnostic recorder output (tracked on purpose)
+# GELLO->UR7e diagnostic recorder output is large binary data (mp4/h5) and is
+# no longer tracked here -- recordings are archived on Google Drive instead
+# (see ros2_ur_ws/gello_logs/README.md, which stays tracked as a pointer).
 !ros2_ur_ws/gello_logs/
-!ros2_ur_ws/gello_logs/**
+ros2_ur_ws/gello_logs/*
+!ros2_ur_ws/gello_logs/README.md
 
 # python
 *__pycache__
