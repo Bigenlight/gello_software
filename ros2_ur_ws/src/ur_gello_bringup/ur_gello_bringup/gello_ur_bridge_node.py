@@ -44,6 +44,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from std_srvs.srv import Trigger
 
+from ur_gello_bringup.angle_utils import circular_dist, wrapped_nearest
+
 # Output index order expected by the UR forward_position_controller.
 UR_JOINT_ORDER = [
     "shoulder_pan_joint",
@@ -217,6 +219,11 @@ class GelloUrBridge(Node):
         # --- State -------------------------------------------------------
         # Raw target reordered into UR_JOINT_ORDER (6 floats) from last good msg.
         self._raw_target: list[float] | None = None
+        # Running, globally-continuous ("unwrapped") GELLO target, so a physical
+        # crossing of the +/-pi branch cut (or a single-turn Dynamixel raw-tick
+        # wrap) never reaches the deadband gate / EMA / 1-euro / slew clamp as a
+        # ~2*pi step. Re-anchored to the arm's actual-pose branch at every seed.
+        self._unwrapped_target: list[float] | None = None
         # Monotonic timestamp (s) of the last good GELLO message.
         self._last_good_msg_time: float | None = None
         # Deadband-gated target (6 floats): a joint only updates when GELLO moves
@@ -300,13 +307,25 @@ class GelloUrBridge(Node):
 
         # Reorder BY NAME into UR command order (never blind index).
         raw_target = [float(name_to_pos[j]) for j in UR_JOINT_ORDER]
+
+        # CONTINUOUS UNWRAP: only ever accumulate the SHORT-way delta from the
+        # last unwrapped value, so a branch-cut crossing or a single-turn
+        # raw-tick wrap can never appear as a ~2*pi jump to the deadband gate,
+        # EMA/1-euro filter, or slew clamp downstream. Identity no-op when no
+        # wrap occurs.
+        if self._unwrapped_target is None:
+            unwrapped = list(raw_target)
+        else:
+            unwrapped = wrapped_nearest(raw_target, self._unwrapped_target)
+        self._unwrapped_target = unwrapped
+
         now = time.monotonic()
         prev_time = self._last_good_msg_time
         if self._euro is not None:
             dt = None if prev_time is None else now - prev_time
             for i in range(len(UR_JOINT_ORDER)):
-                self._euro[i].update_input(raw_target[i], dt)
-        self._raw_target = raw_target
+                self._euro[i].update_input(unwrapped[i], dt)
+        self._raw_target = unwrapped
         self._last_good_msg_time = now
 
     # ---------------------------------------------------------------------
@@ -363,9 +382,21 @@ class GelloUrBridge(Node):
                     throttle_duration_sec=_WARN_THROTTLE_S,
                 )
                 return
+            # RE-ANCHOR the unwrapped target onto the branch NEAREST the robot's
+            # actual pose, so the initial (and post-resume / post-stale) seed
+            # slew closes only the true SHORT physical gap even when a joint's
+            # neutral (e.g. wrist_3 with a ~pi ergonomic offset) sits by the cut
+            # and the arm reports the opposite branch. Without this the slew
+            # would crawl ~2*pi the LONG way (a full-rev spin in the wrong
+            # direction) — a latent bug that existed even before the wraparound
+            # offset, since _gated_target seeded from raw while _filtered seeded
+            # from actual.
+            anchored = wrapped_nearest(self._raw_target, self._actual_pose)
+            self._unwrapped_target = anchored
+            self._raw_target = anchored
             self._filtered = list(self._actual_pose)
             self._last_published = list(self._actual_pose)
-            self._gated_target = list(self._raw_target)
+            self._gated_target = list(anchored)
             if self._euro is not None:
                 for i in range(len(UR_JOINT_ORDER)):
                     self._euro[i].seed(self._actual_pose[i])
@@ -477,7 +508,7 @@ class GelloUrBridge(Node):
 
         # (c) per-joint alignment gate.
         gap = [
-            abs(self._raw_target[i] - self._actual_pose[i])
+            circular_dist(self._raw_target[i], self._actual_pose[i])
             for i in range(len(UR_JOINT_ORDER))
         ]
         max_gap = max(gap)

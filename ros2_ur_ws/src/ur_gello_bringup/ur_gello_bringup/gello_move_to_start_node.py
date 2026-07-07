@@ -91,6 +91,8 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from ur_gello_bringup.angle_utils import circular_dist, wrapped_nearest
+
 # UR command joint order (identical ur5e & ur7e). Reorder GELLO BY NAME to this.
 UR_JOINT_ORDER = [
     "shoulder_pan_joint",
@@ -190,13 +192,16 @@ class GelloMoveToStart(Node):
         self.min_traj_duration = float(
             self.declare_parameter("min_traj_duration", 0.75).value
         )
-        # Per-joint HARD refuse: never auto-chase a gap larger than this. This is
-        # a WRAPAROUND / gross-mispose backstop, NOT an approach limit — the arm
-        # legitimately starts far (up to ~pi) from the leader, and the catch-up
-        # trajectory is duration-sized so even a large approach moves safely. Set
-        # above the largest normal approach (~pi) but below a 2*pi (6.28 rad) wrap.
-        # Calibrate on real hardware. Default 4.0 rad allows normal approaches and
-        # still catches a full-turn wraparound.
+        # Per-joint HARD refuse: never auto-chase a gap larger than this. The gap
+        # is now a CIRCULAR (branch-cut-aware) distance (see angle_utils.py), so
+        # its maximum possible value is pi (~3.1416) — a joint whose neutral sits
+        # near +/-pi (e.g. wrist_3 rotated ~180 deg for an ergonomic-leader /
+        # camera-up-follower rig) is never falsely flagged as a huge gap anymore.
+        # Default 4.0 rad is ABOVE that theoretical max, so this backstop can
+        # never trip: every measured gap (however it arose — genuine mispose or
+        # branch-cut straddling) is auto-chased via a duration-sized catch-up
+        # rather than refused. Lower this (e.g. ~3.0) if you want a near-pi gross
+        # mispose to still be refused and require a manual re-pose instead.
         self.chase_hard_limit = float(
             self.declare_parameter("chase_hard_limit", 4.0).value
         )
@@ -416,8 +421,11 @@ class GelloMoveToStart(Node):
         # Not enough temporal coverage yet (stream may have gaps or just started).
         if span < self.chase_still_window_s * 0.5:
             return False
+        # Circular distance: a joint whose neutral sits near +/-pi can otherwise
+        # dither across the branch cut between two samples and read a spurious
+        # ~2*pi/span "speed", falsely gating the leader as "still moving".
         speed = max(
-            abs(newest_pose[i] - oldest_pose[i]) / span
+            circular_dist(newest_pose[i], oldest_pose[i]) / span
             for i in range(len(UR_JOINT_ORDER))
         )
         return speed <= self.chase_still_speed
@@ -565,11 +573,19 @@ class GelloMoveToStart(Node):
 
     # ---------------------------------------------------------------------
     def _alignment_errors(self) -> list[float] | None:
-        """Per-joint |GELLO_latest - init_pose| (rad), or None if no GELLO yet."""
+        """Per-joint circular |GELLO_latest - init_pose| (rad), or None if no
+        GELLO yet. Circular distance: the operator aligns GELLO to the PARKED
+        arm, which sits at init_pose + 2*pi*k for a joint whose neutral is near
+        the +/-pi branch cut (e.g. wrist_3 rotated ~180 deg) — a plain abs()
+        would read a false ~2*pi error there and refuse handover forever.
+        """
         latest = self._gello_latest
         if latest is None:
             return None
-        return [abs(latest[i] - self.init_pose[i]) for i in range(len(UR_JOINT_ORDER))]
+        return [
+            circular_dist(latest[i], self.init_pose[i])
+            for i in range(len(UR_JOINT_ORDER))
+        ]
 
     def _alignment_report(self, errs: list[float]) -> str:
         """Human-readable per-joint alignment report (worst joint first)."""
@@ -730,7 +746,10 @@ class GelloMoveToStart(Node):
             # streaming, while the scaled trajectory controller is still active.
             if self._go_home_requested:
                 self._go_home_requested = False
-                self._send_trajectory(self.init_pose, "init pose (go-home)")
+                home_target = self.init_pose
+                if self._actual_pose is not None:
+                    home_target = wrapped_nearest(self.init_pose, self._actual_pose)
+                self._send_trajectory(home_target, "init pose (go-home)")
                 continue
             if deadline is not None and time.monotonic() > deadline:
                 self.get_logger().error(
@@ -815,7 +834,7 @@ class GelloMoveToStart(Node):
                 continue
 
             gap = [
-                abs(self._gello_latest[i] - self._actual_pose[i])
+                circular_dist(self._gello_latest[i], self._actual_pose[i])
                 for i in range(len(UR_JOINT_ORDER))
             ]
             max_gap = max(gap)
@@ -892,8 +911,16 @@ class GelloMoveToStart(Node):
                 f"Chasing live GELLO: gap {max_gap:.3f} rad at "
                 f"{UR_JOINT_SHORT[worst]} -> {dur:.2f}s catch-up."
             )
+            # WRAPAROUND-SAFE TARGET. The JTC interpolates linearly in raw joint
+            # space; sending the raw GELLO value when it straddles the +/-pi cut
+            # would drive ~2*pi the LONG way in a duration sized for the SHORT
+            # gap (a fast near-full-turn wrist spin). Send the nearest angular
+            # equivalent to the actual pose instead — dur above is already
+            # correct, since max_gap is the circular (short-path) distance,
+            # i.e. exactly |safe_target - actual|.
+            safe_target = wrapped_nearest(self._gello_latest, self._actual_pose)
             if not self._send_trajectory(
-                list(self._gello_latest), "live GELLO pose", duration=dur
+                safe_target, "live GELLO pose", duration=dur
             ):
                 return False
             chase_iterations += 1
@@ -959,7 +986,14 @@ class GelloMoveToStart(Node):
                 "[1] 진행 when the workspace is clear ([2] 정지 to abort).",
             ):
                 return False
-            if not self._send_trajectory(self.init_pose, "init pose"):
+            # Same wraparound hazard: init_pose is a FIXED literal, but the arm's
+            # actual wrist_3 winding at startup may be ~2*pi from it while
+            # physically equivalent. Send the nearest equivalent to the actual
+            # pose so this first autonomous motion is the short path.
+            init_target = self.init_pose
+            if self._actual_pose is not None:
+                init_target = wrapped_nearest(self.init_pose, self._actual_pose)
+            if not self._send_trajectory(init_target, "init pose"):
                 return False
             # GATE 2: operator aligns GELLO, then authorizes handover. The
             # ~/proceed and ~/override_follow callbacks set _handover.

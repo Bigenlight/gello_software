@@ -12,7 +12,7 @@ gello_publisher:
     # w3(마지막) 오프셋: 원래 3.142 -> 0.0 (원래값에서 pi=180deg 이동). 편한 손목
     # 자세가 UR w3=0 에 오도록. 2pi 정수배는 start_joints 오토랩(dynamixel.py:84-104)이
     # 부팅 시 start 기준으로 정규화하므로 0.0 과 6.283 은 동일 결과. 방향(sign)은 그대로.
-    joint_offsets: [0.0, 1.571, 4.712, 4.712, 4.712, 0.0]  # w3 원래값=3.142; J2/J3 recalibrated after remount
+    joint_offsets: [0.0, 1.571, 4.712, 4.712, 4.712, 3.142]  # w3 원래값=3.142; J2/J3 recalibrated after remount
     # pan(shoulder_pan) sign = +1 (ORIGINAL). This is the sign that gives the
     # CORRECT teleop base-rotation direction (flipping to -1 reverses it). The
     # GELLO base and robot base rotate in opposite senses in this physical setup,
@@ -134,12 +134,14 @@ gello_move_to_start:
     # Floor on each catch-up trajectory duration (s) so tiny gaps still move
     # smoothly rather than as a near-instant step.
     min_traj_duration: 0.5
-    # Per-joint HARD refuse (rad): never auto-chase a gap larger than this. This is
-    # a WRAPAROUND / gross-mispose BACKSTOP, NOT an approach limit — the arm
-    # legitimately starts far (up to ~pi) from the leader and the duration-sized
-    # catch-up moves it there safely. A SMALLER value wrongly refused the
-    # legitimate initial approach (caught on the real stack). 4.0 rad allows every
-    # normal approach yet still catches a full-turn (2*pi) wraparound.
+    # Per-joint HARD refuse (rad): never auto-chase a gap larger than this. The
+    # gap is a CIRCULAR (branch-cut-aware) distance (angle_utils.py), so its max
+    # possible value is pi (~3.1416) — a joint whose neutral sits near +/-pi
+    # (e.g. wrist_3 rotated ~180 deg for an ergonomic-leader/camera-up-follower
+    # rig) is never falsely flagged as a huge gap. 4.0 is ABOVE that max, so this
+    # backstop never trips: every gap, however large, is auto-chased rather than
+    # refused. Lower this (e.g. ~3.0) if you want a near-pi gross mispose to
+    # still be refused and require a manual re-pose instead.
     chase_hard_limit: 4.0
     # Leader "quasi-still" gate (rad/s, s). After the FIRST catch-up, the node
     # REFUSES to dispatch another one until the live leader's per-joint speed over
