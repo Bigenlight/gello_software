@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>gello_policy</name>
+  <version>0.1.0</version>
+  <description>Real-robot ACT deploy for the UR7e "put right banana in pot" policy. A rclpy node acts as a synthetic GELLO leader (publishes /gello/joint_states + gripper) so the existing gello_ur_bridge + move-to-start handshake + Robotiq modbus stack run unmodified; a separate py3.12 ACT inference server (torch + lerobot) is joined over localhost ZMQ.</description>
+
+  <maintainer email="tpingouin@gmail.com">Theo</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <!-- ur7e_act_real.launch.py runs gello_ur_bridge, gello_move_to_start and
+       robotiq_gripper_modbus from ur_gello_bringup (and includes ur_robot_driver's
+       ur_control.launch.py). Declare it so `colcon build` and rosdep pull it in. -->
+  <exec_depend>ur_gello_bringup</exec_depend>
+  <exec_depend>ur_robot_driver</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

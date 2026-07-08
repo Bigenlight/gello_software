@@ -1,0 +1,45 @@
+{
+  "note": "1.2x expanded symmetric about center of union(observed state, commanded action) per joint. UR7e hard limits +/-2pi; these are well inside.",
+  "joint_order": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow",
+    "wrist_1",
+    "wrist_2",
+    "wrist_3"
+  ],
+  "raw_min": [
+    2.5064,
+    -2.3911,
+    1.181,
+    -3.1413,
+    -2.1031,
+    -4.9145
+  ],
+  "raw_max": [
+    3.562,
+    -1.0215,
+    2.4876,
+    -1.2021,
+    -1.3287,
+    -1.8314
+  ],
+  "safety_lo_1p2x": [
+    2.4008,
+    -2.5281,
+    1.0504,
+    -3.3353,
+    -2.1805,
+    -5.2228
+  ],
+  "safety_hi_1p2x": [
+    3.6676,
+    -0.8845,
+    2.6183,
+    -1.0082,
+    -1.2512,
+    -1.5231
+  ],
+  "gripper_raw_min": 0.0,
+  "gripper_raw_max": 0.9998
+}

@@ -1,0 +1,141 @@
+# act_deploy.yaml — single parameter file for the ACT real-robot deploy pipeline.
+#
+# One file drives EVERY node in ur7e_act_real.launch.py:
+#   * policy_leader_node  — the synthetic GELLO leader (this package). Replaces the
+#     physical gello_publisher: it holds a start pose, then (on ~/start_execution)
+#     queries the ACT server and publishes clamped targets on /gello/joint_states +
+#     /robotiq_gripper/command_percent, so the arm bridge + handshake below run
+#     UNMODIFIED.
+#   * gello_ur_bridge     — REUSED verbatim from ur7e_gello.yaml EXCEPT the two
+#     one-euro smoothing knobs are opened up (ACT output is already smooth/discrete;
+#     heavy at-rest smoothing only adds lag). The slew ceiling / soft-start / staleness
+#     safety values are left UNCHANGED.
+#   * gello_move_to_start — copied VERBATIM from ur7e_gello.yaml. The handshake chases
+#     the pose the leader HOLDS (= start_pose below), then STRICT-switches to
+#     forward_position_controller and resumes the bridge.
+#   * robotiq_gripper     — copied VERBATIM from ur7e_gello.yaml (Modbus 2F-85 driver).
+#
+# NOTE: gello_gripper_bridge is intentionally NOT configured here — the ACT launch
+# drops it and policy_leader_node publishes /robotiq_gripper/command_percent directly.
+
+# ---------------------------------------------------------------------------- #
+# Synthetic ACT leader (this package). See gello_policy README / BUILD spec §5.
+# ---------------------------------------------------------------------------- #
+policy_leader_node:
+  ros__parameters:
+    # Single rclpy timer rate driving BOTH /gello/joint_states and the gripper
+    # command each tick (matches the recorder / dataset control rate).
+    publish_rate_hz: 30.0
+
+    # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
+    # HOLD the leader publishes THIS pose perfectly still so gello_move_to_start
+    # converges on it and the resume-align gate passes. This is the dataset's start
+    # pose; the live arm must be within ~0.1 rad of it before ~/start_execution is
+    # accepted.
+    start_pose: [3.106, -1.817, 1.653, -1.618, -1.628, -3.195]
+    # Held gripper command while in HOLD (0.0 = OPEN .. 1.0 = CLOSED).
+    start_gripper: 0.0
+
+    # ACT inference server endpoint (ZMQ REQ/REP over localhost). Overridable by the
+    # launch act_host / act_port args and by run_ur7e_act_real.sh's ACT_PORT.
+    act_host: "127.0.0.1"
+    act_port: 5591
+    # REQ socket receive timeout (s). On timeout/error the node FAULTS: it STOPS
+    # publishing /gello/joint_states so the bridge's 0.5 s staleness watchdog trips
+    # and halts the arm (never hold-last-target through an outage).
+    act_timeout_s: 0.5
+
+    # SAFETY CLAMP (a): per-joint hard limits = the 1.2x dataset envelope
+    # (see config/joint_safety_limits.json). Any commanded joint outside this is
+    # clipped (OOD guard). Order = UR joint order (pan, lift, elbow, w1, w2, w3).
+    joint_limits_lo: [2.40, -2.53, 1.05, -3.34, -2.18, -5.22]
+    joint_limits_hi: [3.67, -0.88, 2.62, -1.01, -1.25, -1.52]
+
+    # SAFETY CLAMP (b): per-joint max deviation (rad) of a commanded target from the
+    # LIVE /joint_states. Bounds any single-step jump from the actual pose.
+    max_dev_rad: 0.5
+
+    # OBS FRESHNESS WATCHDOG: in EXECUTE, if any observation (joint_states, grip_pos,
+    # cam1, cam2) is missing or older than this many seconds, the node FAULTs (stops
+    # publishing -> bridge halts the arm). Catches a frozen/hung camera driving the
+    # policy on a stale frame. ~0.5 s = a real stall, not a single dropped frame.
+    obs_timeout_s: 0.5
+
+    # If true, auto-enter EXECUTE when /forward_position_controller/commands starts
+    # streaming (i.e. the bridge released), instead of waiting for the operator's
+    # ~/start_execution call. Default false = operator-gated start (safer).
+    auto_start_on_stream: false
+
+# ---------------------------------------------------------------------------- #
+# GELLO -> UR bridge. REUSED from ur7e_gello.yaml. ONLY the two one-euro knobs are
+# changed (opened up) for ACT; every safety-relevant value is IDENTICAL.
+# ---------------------------------------------------------------------------- #
+gello_ur_bridge:
+  ros__parameters:
+    filter_type: "one_euro"
+    # OPENED UP for ACT (was 1.0). ACT emits a smooth, already-filtered target
+    # stream at 30 Hz; a low min_cutoff only adds at-rest lag. Higher = less
+    # smoothing / less lag.
+    one_euro_min_cutoff: 3.0
+    # OPENED UP for ACT (was 2.0). Higher beta => cutoff opens faster with speed
+    # => snappier tracking of the policy's intended motion.
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    # UNCHANGED (safety): per-cycle slew ceiling. 0.0025 rad @ 250 Hz => 0.625 rad/s
+    # sustained, worst-case two-coalesce 2.5 rad/s (~20% margin under the 3.14 rad/s
+    # driver limit). Do NOT raise for ACT.
+    max_step_rad: 0.0025
+    deadband_rad: 0.004
+    # UNCHANGED (safety): 0.5 s staleness watchdog. This is what the leader FAULT
+    # path relies on to halt the arm when it stops publishing.
+    staleness_timeout_s: 0.5
+    # UNCHANGED (safety): soft-start ease-in on every (re)seed.
+    soft_start_s: 0.7
+    start_paused: false
+    # UNCHANGED (safety): resume alignment gate; MUST stay >= chase_tol (0.06).
+    resume_align_tol: 0.08
+    # UNCHANGED: 250 Hz upsample of the 30 Hz leader stream into the 500 Hz driver.
+    publish_rate_hz: 250.0
+    joint_states_topic: "/joint_states"
+
+# ---------------------------------------------------------------------------- #
+# move-to-start handshake. Copied VERBATIM from ur7e_gello.yaml. The handshake
+# chases the pose the leader HOLDS (= policy_leader_node.start_pose) and hands over.
+# ---------------------------------------------------------------------------- #
+gello_move_to_start:
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+    chase_tol: 0.06
+    chase_dwell_s: 0.4
+    chase_v_budget: 0.5
+    min_traj_duration: 0.5
+    chase_hard_limit: 4.0
+    chase_still_speed: 0.1
+    chase_still_window_s: 0.3
+    chase_timeout_s: 30.0
+    gello_staleness_s: 0.5
+    start_mode: "gello"
+    init_pose: [1.5708, -1.57, 1.57, -1.57, -1.57, 0.0]
+    alignment_tolerance: 0.2
+    alignment_hard_limit: 0.5
+    alignment_timeout: 0.0
+
+# ---------------------------------------------------------------------------- #
+# Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
+# Copied VERBATIM from ur7e_gello.yaml. serial_port default "" is overridden to
+# /tmp/ttyUR by the launch (arm driver owns the tool bus via use_tool_communication).
+# ---------------------------------------------------------------------------- #
+robotiq_gripper:
+  ros__parameters:
+    serial_port: ""
+    speed: 150
+    force: 50
+    connect_on_start: true
+    activate_on_connect: true
+    status_rate_hz: 5.0
+    command_rate_hz: 20.0
+    command_deadband: 0.01

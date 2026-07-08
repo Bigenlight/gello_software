@@ -1,0 +1,32 @@
+# requirements-act.lock -- py3.12 ACT inference server (policy_server/act_server.py)
+#
+# Pins the runtime for the SERVER process only (NOT the ROS py3.10 side). Versions
+# are taken from the project's working venv `lr_env` (python3.12, lerobot 0.6.1),
+# which is where the smoke test passed. Install into a fresh py3.12 venv on the
+# robot PC:
+#
+#   python3.12 -m venv act_venv
+#   act_venv/bin/pip install --upgrade pip
+#   # torch/torchvision are CUDA 12.8 builds -> use the cu128 wheel index:
+#   act_venv/bin/pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 \
+#       --index-url https://download.pytorch.org/whl/cu128
+#   act_venv/bin/pip install -r requirements-act.lock
+#
+# NOTE: lerobot 0.6.1 is the exact API these modules target (make_pre_post_processors,
+# ACTPolicy.select_action, ImageTransforms Resize). Do not bump without re-verifying.
+
+# --- core ML / policy (from lr_env: importlib.metadata) ---
+lerobot==0.6.1
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128
+numpy==2.2.6
+pillow==12.3.0
+
+# --- image decode (installed in lr_env as headless build 4.13.0.92) ---
+# Headless avoids GUI/X deps on a server; cv2.imdecode / cvtColor / Resize only.
+opencv-python-headless==4.13.0.92
+
+# --- ZMQ transport (NOT present in lr_env base -- MUST be pip-installed here).
+# Verified working with 27.1.0 (libzmq 4.3.5) during the byte-parity/round-trip
+# smoke test; any recent pyzmq is fine, this is just the tested pin. ---
+pyzmq==27.1.0
