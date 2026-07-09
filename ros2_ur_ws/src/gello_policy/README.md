@@ -241,6 +241,37 @@ launch + both cameras + a faked gripper-position publisher, then `~/start_execut
 > for the full startup-handshake timeline, cadence-tuning guidance, and
 > troubleshooting.
 
+## Diffusion variant
+
+A **Diffusion Policy** sibling deploy reuses this *entire* package unchanged — same
+`policy_leader_node`, same bridge/handshake/clamps/gripper, same 7-D JOINT action
+contract. It swaps **only the inference server**: `policy_server/diffusion_server.py`
+loads `DiffusionPolicy.from_pretrained` instead of `ACTPolicy`. The one substantive code
+difference is at load: it reads a `PreTrainedConfig` and **overrides the noise scheduler
+to DDIM with `num_inference_steps=10`** (`cfg.noise_scheduler_type="DDIM"`), because the
+model was trained as DDPM/100 and a plain `from_pretrained` would keep the slow full
+schedule. DDIM-10 keeps per-replan latency low enough for the 30 Hz loop.
+
+- **ZMQ port `5592`** (ACT is `5591`), so both servers can coexist. Env/CLI use
+  `DIFFUSION_*` names (`DIFFUSION_CHECKPOINT`, `DIFFUSION_PORT`, `DIFFUSION_DEVICE`,
+  `DIFFUSION_N_ACTION_STEPS` (default 32), `DIFFUSION_NUM_INFERENCE_STEPS` (default 10),
+  `DIFFUSION_SCHEDULER` (default DDIM)).
+- **Model:** HF `Bigenlight/diffusion_banana_in_pot_joint` (best checkpoint 80k, selected
+  by open-loop rollout MAE); download via `scripts/download_diffusion_checkpoint.sh`.
+- **Deps:** the py3.12 venv needs `policy_server/requirements-diffusion.lock` — the same
+  pins as the ACT lock **plus `diffusers==0.35.2`** (required by lerobot's diffusion
+  policy; the ACT lock omits it). If you already built the ACT venv, just
+  `pip install diffusers==0.35.2` into it.
+- **Timeouts** are widened in `config/diffusion_deploy.yaml` because a DDIM refill tick is
+  heavier than an ACT forward: `act_timeout_s=0.6` < `staleness_timeout_s=0.8` (the leader
+  stays the primary fault owner). **Run `scripts/benchmark_diffusion_latency.py` on the
+  robot PC before the first arm run**; if p99 refill latency > ~0.5 s, lower
+  `DIFFUSION_NUM_INFERENCE_STEPS` (e.g. 5) rather than widening those timeouts.
+
+Run it with `ros2_ur_ws/run_ur7e_diffusion_real.sh` (mirrors `run_ur7e_act_real.sh`).
+Full standalone runbook (status, model facts, setup, run, diffusion-specific safety and
+inference behavior): [`docs/ros2/GELLO_UR7E_DIFFUSION_DEPLOY.md`](../../../docs/ros2/GELLO_UR7E_DIFFUSION_DEPLOY.md).
+
 ## Safety
 
 > **Keep the teach-pendant E-STOP within reach at all times.** This package drives a

@@ -1,0 +1,151 @@
+# diffusion_deploy.yaml — single parameter file for the DIFFUSION real-robot deploy pipeline.
+#
+# DIFFUSION VARIANT of act_deploy.yaml. The JOINT diffusion model emits the IDENTICAL
+# 7-D joint action contract as ACT, so the whole ROS2 safety stack (leader node, bridge,
+# clamps, gripper) is reused UNCHANGED — only the inference server (and its port/timeout)
+# differs. See BUILD SPEC and GELLO_UR7E_DIFFUSION_DEPLOY.md.
+#
+# TIMEOUTS WIDENED FOR DDIM REFILL: a diffusion net-refill runs a full DDIM-N denoising
+# loop, which is slower than ACT's single transformer forward. act_timeout_s, obs_timeout_s
+# and staleness_timeout_s are therefore all raised (below) so a legitimate refill gap does not
+# trip a spurious FAULT. Ordering invariant preserved: act_timeout_s < obs_timeout_s < staleness_timeout_s
+# (0.6 < 0.7 < 0.8) -> the leader's ZMQ timeout is the clean primary fault owner.
+#
+# >>> RUN scripts/benchmark_diffusion_latency.py ON THE ROBOT PC FIRST <<<
+# If the measured p99 refill latency > ~0.5s, REDUCE DIFFUSION_NUM_INFERENCE_STEPS
+# (e.g. 5) rather than widening these timeouts further — widening them weakens the arm
+# watchdog. Fewer DDIM steps is the correct knob to make refills fit the bridge budget.
+
+# ---------------------------------------------------------------------------- #
+# Synthetic ACT leader (this package). See gello_policy README / BUILD spec §5.
+# ---------------------------------------------------------------------------- #
+policy_leader_node:
+  ros__parameters:
+    # Single rclpy timer rate driving BOTH /gello/joint_states and the gripper
+    # command each tick (matches the recorder / dataset control rate).
+    publish_rate_hz: 30.0
+
+    # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
+    # HOLD the leader publishes THIS pose perfectly still so gello_move_to_start
+    # converges on it and the resume-align gate passes. This is the dataset's start
+    # pose; the live arm must be within ~0.1 rad of it before ~/start_execution is
+    # accepted.
+    start_pose: [3.106, -1.817, 1.653, -1.618, -1.628, -3.195]
+    # Held gripper command while in HOLD (0.0 = OPEN .. 1.0 = CLOSED).
+    start_gripper: 0.0
+
+    # ACT inference server endpoint (ZMQ REQ/REP over localhost). Overridable by the
+    # launch act_host / act_port args and by run_ur7e_diffusion_real.sh's DIFFUSION_PORT.
+    act_host: "127.0.0.1"
+    act_port: 5592  # diffusion server port (ACT is 5591; avoids collision if both coexist)
+    # REQ socket receive timeout (s). On timeout/error the node FAULTS: it STOPS
+    # publishing /gello/joint_states so the bridge's staleness watchdog trips and
+    # halts the arm (never hold-last-target through an outage).
+    act_timeout_s: 0.6  # DDIM refill is slower than an ACT forward; the leader tolerates it
+                        # before FAULT and stays the PRIMARY fault owner (faults first, cleanly).
+
+    # SAFETY CLAMP (a): per-joint hard limits = the 1.2x dataset envelope
+    # (see config/joint_safety_limits.json). Any commanded joint outside this is
+    # clipped (OOD guard). Order = UR joint order (pan, lift, elbow, w1, w2, w3).
+    joint_limits_lo: [2.40, -2.53, 1.05, -3.34, -2.18, -5.22]
+    joint_limits_hi: [3.67, -0.88, 2.62, -1.01, -1.25, -1.52]
+
+    # SAFETY CLAMP (b): per-joint max deviation (rad) of a commanded target from the
+    # LIVE /joint_states. Bounds any single-step jump from the actual pose.
+    max_dev_rad: 0.5
+
+    # OBS FRESHNESS WATCHDOG: in EXECUTE, if any observation (joint_states, grip_pos,
+    # cam1, cam2) is missing or older than this many seconds, the node FAULTs (stops
+    # publishing -> bridge halts the arm). Catches a frozen/hung camera driving the
+    # policy on a stale frame.
+    # RAISED for diffusion (was 0.5). CRITICAL: the node is single-threaded, so during a
+    # refill tick it BLOCKS inside the ZMQ round-trip and cannot service camera callbacks
+    # -> obs timestamps freeze for the refill duration D. rclpy runs the overdue publish
+    # timer BEFORE draining the queued camera frames, so the very next _tick_execute sees
+    # obs aged ~D. If obs_timeout_s stayed 0.5, a legitimate refill of 0.47-0.6 s would trip
+    # a SPURIOUS obs-stale FAULT before act_timeout_s (0.6) ever mattered, making the 0.6 s
+    # widening dead. Keep obs_timeout_s ABOVE act_timeout_s so the ZMQ timeout (0.6) is the
+    # real primary fault owner and a genuinely frozen camera is still caught (0.2 s later).
+    # Ordering: act_timeout_s (0.6) < obs_timeout_s (0.7) < staleness_timeout_s (0.8).
+    obs_timeout_s: 0.7
+
+    # If true, auto-enter EXECUTE when /forward_position_controller/commands starts
+    # streaming (i.e. the bridge released), instead of waiting for the operator's
+    # ~/start_execution call. Default false = operator-gated start (safer).
+    auto_start_on_stream: false
+
+# ---------------------------------------------------------------------------- #
+# GELLO -> UR bridge. REUSED from ur7e_gello.yaml. ONLY the two one-euro knobs are
+# changed (opened up) for ACT; every safety-relevant value is IDENTICAL.
+# ---------------------------------------------------------------------------- #
+gello_ur_bridge:
+  ros__parameters:
+    filter_type: "one_euro"
+    # OPENED UP for ACT (was 1.0). ACT emits a smooth, already-filtered target
+    # stream at 30 Hz; a low min_cutoff only adds at-rest lag. Higher = less
+    # smoothing / less lag.
+    one_euro_min_cutoff: 3.0
+    # OPENED UP for ACT (was 2.0). Higher beta => cutoff opens faster with speed
+    # => snappier tracking of the policy's intended motion.
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    # UNCHANGED (safety): per-cycle slew ceiling. 0.0025 rad @ 250 Hz => 0.625 rad/s
+    # sustained, worst-case two-coalesce 2.5 rad/s (~20% margin under the 3.14 rad/s
+    # driver limit). Do NOT raise for ACT.
+    max_step_rad: 0.0025
+    deadband_rad: 0.004
+    # RAISED for diffusion (was 0.5). Kept ABOVE act_timeout_s (0.6) so the bridge does
+    # NOT halt during a legitimate <=0.6s DDIM refill gap while the leader blocks on ZMQ.
+    # The leader (0.6s) faults FIRST and cleanly on a real outage. Ordering invariant:
+    # act_timeout_s (0.6) < staleness_timeout_s (0.8).
+    staleness_timeout_s: 0.8
+    # UNCHANGED (safety): soft-start ease-in on every (re)seed.
+    soft_start_s: 0.7
+    start_paused: false
+    # UNCHANGED (safety): resume alignment gate; MUST stay >= chase_tol (0.06).
+    resume_align_tol: 0.08
+    # UNCHANGED: 250 Hz upsample of the 30 Hz leader stream into the 500 Hz driver.
+    publish_rate_hz: 250.0
+    joint_states_topic: "/joint_states"
+
+# ---------------------------------------------------------------------------- #
+# move-to-start handshake. Copied VERBATIM from ur7e_gello.yaml. The handshake
+# chases the pose the leader HOLDS (= policy_leader_node.start_pose) and hands over.
+# ---------------------------------------------------------------------------- #
+gello_move_to_start:
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+    chase_tol: 0.06
+    chase_dwell_s: 0.4
+    chase_v_budget: 0.5
+    min_traj_duration: 0.5
+    chase_hard_limit: 4.0
+    chase_still_speed: 0.1
+    chase_still_window_s: 0.3
+    chase_timeout_s: 30.0
+    gello_staleness_s: 0.5
+    start_mode: "gello"
+    init_pose: [1.5708, -1.57, 1.57, -1.57, -1.57, 0.0]
+    alignment_tolerance: 0.2
+    alignment_hard_limit: 0.5
+    alignment_timeout: 0.0
+
+# ---------------------------------------------------------------------------- #
+# Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
+# Copied VERBATIM from ur7e_gello.yaml. serial_port default "" is overridden to
+# /tmp/ttyUR by the launch (arm driver owns the tool bus via use_tool_communication).
+# ---------------------------------------------------------------------------- #
+robotiq_gripper:
+  ros__parameters:
+    serial_port: ""
+    speed: 150
+    force: 50
+    connect_on_start: true
+    activate_on_connect: true
+    status_rate_hz: 5.0
+    command_rate_hz: 20.0
+    command_deadband: 0.01
