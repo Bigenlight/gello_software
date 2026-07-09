@@ -303,7 +303,7 @@ ACT_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_act_real.sh
 
    현재 라이브 자세를 그대로 HOLD로 전환해 그 자리에서 팔을 정지시킨다. **그리퍼는 `start_gripper`(open)로 되돌아가지 않고 마지막으로 명령된 값을 그대로 유지**한다 — 즉 그랩 도중에 `~/hold`를 걸어도 물체를 놓치지 않고 잡은 상태를 유지한다(부팅 시점의 HOLD만 `start_gripper=0.0=open`을 씀). 재시작 시 arming guard는 여전히 `start_pose` 기준으로 평가되므로(다시 EXECUTE로 가려면 라이브 자세가 원래 `start_pose` ±0.1rad 근처여야 함), `~/hold`로 정지시킨 위치가 이미 그 근처가 아니면 재-arm이 거부될 수 있음에 유의.
 
-### 실전 4-터미널 워크플로우 (이 머신에서 검증된 방식)
+### 실전 3-터미널 워크플로우 (이 머신에서 검증된 방식)
 
 이 머신에서는 **Method B (`HEADLESS=true`)를 기본으로 쓴다.** 사람 GELLO 텔레옵도 이미 `HEADLESS=true ./run_ur7e_gello_real.sh`로 헤드리스 구동하고 있고, UR7e 펜던트를 **Remote Control 모드로 상시 켜 둔 상태**이기 때문이다.
 
@@ -313,9 +313,9 @@ Method A와 Method B는 **코드상 완전히 동일**하다 — `HEADLESS=true`
 
 > **⚠️ REMOTE 모드가 꺼진 채로 `headless_mode:=true`를 쓰면 실패는 조용하지 않고 시끄럽다.** `Could not send program to robot` / `Could not resend robot program` 에러가 반복되고 **모션이 전혀 없다** — 부분적으로/위험하게 동작하는 일은 없다.
 
-아래가 실제로 쓰는 4-터미널 순서다.
+아래가 실제로 쓰는 순서다. 예전에는 자율 동작 시작/정지를 위한 별도 터미널(구 Terminal 3)이 필요했지만, 지금은 그 두 서비스 호출이 **Terminal 1 카메라 뷰어 창의 버튼으로 들어와 있어** 일반적인 대화식 세션에서는 **3개 터미널이면 충분**하다. 커맨드라인 호출은 자동화·스크립트용 fallback으로 여전히 문서화해 둔다(아래 "선택 사항" 참고).
 
-**Terminal 1 — 카메라** (§4의 3번과 동일, ACT 실행 **전에 반드시 먼저**):
+**Terminal 1 — 카메라 + 실행 제어 버튼** (§4의 3번과 동일, ACT 실행 **전에 반드시 먼저**):
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -332,6 +332,14 @@ ros2 launch realsense2_camera rs_launch.py \
 
 > **⚠️ `&`로 백그라운드 실행하면 Ctrl-C로 안 죽는다.** 이렇게 띄우면 터미널의 SIGINT가 백그라운드 잡까지 전파되지 않아, 세션을 끝낼 때 `ps aux | grep realsense2_camera`로 PID를 찾아 수동으로 `kill`해야 하는 번거로움이 있다(실제로 이 방식 때문에 정리가 번거로웠던 사례 있음). 카메라를 **하나의 foreground launch + 뷰어**로 묶어 Ctrl-C 한 번에 깨끗이 종료되게 하는 개선판은 [`ros2_ur_ws/launch_cameras.sh`](../../ros2_ur_ws/launch_cameras.sh) 참고.
 
+> **뷰어 창에 실행 제어 버튼이 내장되어 있다 (권장 경로).** `launch_cameras.sh`가 띄우는 뷰어 창([`ros2_ur_ws/camera_viewer.py`](../../ros2_ur_ws/camera_viewer.py))에는 이제 **`START EXECUTION`**·**`HOLD`** 두 버튼이 함께 떠 있다. 두 버튼은 구 Terminal 3이 손으로 치던 서비스(`/policy_leader_node/start_execution`·`/policy_leader_node/hold`)를 **똑같이** 호출한다 — 즉 일반 세션에서는 이 버튼만으로 자율 동작을 시작/정지하면 되고 별도 터미널이 필요 없다. 버튼 상태 표기:
+> - **회색/딤(dimmed)** = 서비스가 아직 안 떠 있음 = Terminal 2의 `ros2 launch`가 `policy_leader_node`를 아직 안 올림. 이 상태에서는 눌러도 반응 없음(= 아직 arm 불가, 대기 중인 호출을 큐에 넣지도 않음).
+> - **컬러(활성)** = 서비스 available = 이제 누를 수 있음.
+> - **pending(호출 진행 중)** = 클릭 후 Trigger 응답을 기다리는 중(다시 눌러도 중복 호출 안 됨).
+> - **초록/빨강(잠깐)** = Trigger 응답의 `success`/`message`를 색으로 표시(초록=성공, 빨강=실패 및 사유). 잠시 후 다시 평상시 활성 상태로 돌아간다.
+>
+> 따라서 **정상 흐름은**: Terminal 2 launch를 올리면 버튼이 회색→컬러로 살아나고, 핸드셰이크 수렴을 (Terminal 2 로그로) 확인한 뒤 뷰어에서 `START EXECUTION`을 눌러 자율 동작을 시작한다. 결과가 초록이면 EXECUTE 진입, 빨강이면 메시지(대개 arming guard 거부)를 확인하고 팔을 `start_pose` 근처로 되돌린 뒤 다시 누른다. 두 버튼은 서로 독립적으로 동작하므로(START가 pending이어도 HOLD는 항상 바로 눌림), 언제든 HOLD로 즉시 정지할 수 있다.
+
 **Terminal 2 — ACT 서버 + 로봇 launch** (Method B, `HEADLESS=true` 추가):
 
 ```bash
@@ -340,9 +348,11 @@ HEADLESS=true ACT_CHECKPOINT=/home/laptop3/gello_software/ros2_ur_ws/src/gello_p
     ./run_ur7e_act_real.sh
 ```
 
-펜던트 REMOTE 모드가 이미 활성화되어 있어야 함 — **Play 누를 필요 없음**. 이 터미널은 `ros2 launch`가 포그라운드로 도는 중이라 이후 명령은 다른 터미널에서 내린다.
+펜던트 REMOTE 모드가 이미 활성화되어 있어야 함 — **Play 누를 필요 없음**. 이 터미널은 `ros2 launch`가 포그라운드로 도는 중이라 이후 명령은 다른 터미널/뷰어 버튼에서 내린다. **로그를 계속 봐야 하므로 이 터미널은 그대로 유지한다** — 로봇/그리퍼 연결, 핸드셰이크 수렴 여부를 여기서 확인한다.
 
-**Terminal 3 — 자율 동작 시작/정지 명령:**
+**선택 사항 — 커맨드라인으로 직접 호출하고 싶다면 (구 Terminal 3, fallback):**
+
+일반적인 대화식 세션에서는 위 **Terminal 1 뷰어의 버튼이 기본/권장 경로**다. 다만 자동화·스크립트에서 호출하거나 어떤 이유로 GUI 버튼을 쓸 수 없을 때를 위해, 버튼이 내부적으로 호출하는 것과 **동일한** 두 서비스를 별도 터미널에서 직접 부를 수도 있다:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -350,6 +360,8 @@ source ~/gello_software/ros2_ur_ws/install/setup.bash
 ros2 service call /policy_leader_node/start_execution std_srvs/srv/Trigger   # 진짜 자율 동작 시작
 ros2 service call /policy_leader_node/hold std_srvs/srv/Trigger              # 그 자리에서 즉시 정지
 ```
+
+> 버튼 클릭과 이 `ros2 service call`은 **완전히 같은 서비스·같은 Trigger**다 — 안전 게이트(arming guard, 클램프)도 동일하게 적용된다. 어느 쪽으로 부르든 결과는 같으니 상황에 맞게 섞어 써도 된다.
 
 **Terminal 4 (선택, 실행 결과 로깅) — `gello_recorder`로 ACT 입출력을 HDF5+MP4 기록:**
 

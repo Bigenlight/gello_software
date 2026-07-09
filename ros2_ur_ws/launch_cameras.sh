@@ -60,30 +60,63 @@ CAM2_TOPIC="/${CAM2_NAME}/${CAM2_NAME}/color/image_raw/compressed"
 
 CAM1_PID=""
 CAM2_PID=""
+VIEWER_PID=""
 VIEWER_LAUNCHED=false
 CLEANED=false
 
 # Stop the viewer + both cameras cleanly when this script exits (Ctrl-C).
-# IMPROVEMENT over run_recorder.sh: after signalling each PID we `wait` for it so
-# the "stopped" line prints only once the process has ACTUALLY exited (not merely
-# once the signal was sent). Guarded so the EXIT+INT double-fire runs it once.
+# IMPROVEMENT over run_recorder.sh: after signalling each PID we wait (BOUNDED,
+# see _kill_and_wait below) so the "stopped" line prints only once the process
+# has ACTUALLY exited. Guarded so the EXIT+INT double-fire runs it once.
+#
+# IMPORTANT: the viewer's PID is signalled EXPLICITLY here (not left to implicit
+# signal propagation to the foreground child) -- relying on the terminal/timeout
+# forwarding SIGINT/SIGTERM to whatever's currently in the foreground is a race
+# that sometimes left it (and the cameras it hadn't gotten to shut down yet)
+# orphaned. Killing VIEWER_PID directly removes that race.
+#
+# IMPORTANT #2: `wait` on a plain `kill -INT` is NOT bounded -- if a process
+# (observed: the rclpy+cv2 viewer, occasionally, likely a signal/GUI-event-loop
+# interaction) doesn't actually exit on SIGINT, an unbounded `wait` here would
+# hang cleanup() forever, which would also strand the cameras (their kill/wait
+# never even runs). _kill_and_wait() gives each process a grace period, then
+# escalates to SIGKILL so cleanup ALWAYS completes.
+_kill_and_wait() {
+    local pid="$1" name="$2" grace_s="${3:-5}"
+    [ -z "${pid}" ] && return 0
+    kill -INT "${pid}" 2>/dev/null || true
+    local waited=0
+    while kill -0 "${pid}" 2>/dev/null; do
+        if [ "${waited}" -ge "${grace_s}" ]; then
+            echo "###   ${name} (pid ${pid}) didn't exit in ${grace_s}s -- SIGKILL"
+            kill -9 "${pid}" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "${pid}" 2>/dev/null || true
+    echo "###   ${name} (pid ${pid}) stopped"
+}
+
 cleanup() {
     [ "${CLEANED}" = "true" ] && return 0
     CLEANED=true
     echo "### Shutting down ..."
-    if [ "${VIEW}" != "false" ] && [ "${VIEW}" != "0" ] && [ "${VIEWER_LAUNCHED}" = "true" ]; then
-        echo "###   viewer closed"
+    if [ -n "${VIEWER_PID}" ]; then
+        _kill_and_wait "${VIEWER_PID}" "viewer"
     fi
-    if [ -n "${CAM1_PID}" ]; then
-        kill -INT "${CAM1_PID}" 2>/dev/null || true
-        wait "${CAM1_PID}" 2>/dev/null || true
-        echo "###   cam1 (pid ${CAM1_PID}) stopped"
-    fi
-    if [ -n "${CAM2_PID}" ]; then
-        kill -INT "${CAM2_PID}" 2>/dev/null || true
-        wait "${CAM2_PID}" 2>/dev/null || true
-        echo "###   cam2 (pid ${CAM2_PID}) stopped"
-    fi
+    _kill_and_wait "${CAM1_PID}" "cam1"
+    _kill_and_wait "${CAM2_PID}" "cam2"
+    # Backstop: the `ros2 launch` wrapper PIDs above are what we track, but if
+    # one of them was ever killed too abruptly to gracefully cascade to ITS
+    # child (the actual realsense2_camera_node) -- observed once during
+    # testing -- that grandchild is orphaned and keeps streaming/holding the
+    # USB device. Sweep for it by name+namespace so a stray one never survives
+    # this script even if the graceful path above didn't reach it.
+    for ns in "${CAM1_NAME}" "${CAM2_NAME}"; do
+        pkill -9 -f "realsense2_camera_node.*__ns:=/${ns}(\$| )" 2>/dev/null || true
+    done
     echo "### All camera processes cleaned up — nothing left to kill manually."
 }
 trap cleanup EXIT INT TERM
@@ -167,13 +200,17 @@ else
     echo "### If they look swapped, Ctrl-C and re-check camera serials before deploying."
     echo "###"
     echo "### Keep this terminal open. Press Ctrl-C HERE to stop both cameras cleanly."
-    # Viewer runs in the FOREGROUND — it keeps the script alive and blocks until
-    # the user closes the window or Ctrl-C's. Then the EXIT trap tears everything
-    # down. (camera_viewer.py is provided separately; see its --help for the CLI.)
+    # Backgrounded (not exec'd/plain-foreground) so cleanup() can always signal
+    # VIEWER_PID directly instead of relying on the terminal/timeout forwarding
+    # the signal to whatever's currently in the foreground -- see the note on
+    # cleanup() above. `wait` below still blocks the script exactly like a plain
+    # foreground run would, until the window closes or Ctrl-C fires the trap.
     VIEWER_LAUNCHED=true
     python3 "$SCRIPT_DIR/camera_viewer.py" \
         --cam1-topic "${CAM1_TOPIC}" \
         --cam2-topic "${CAM2_TOPIC}" \
         --cam1-label "cam1 - SCENE - ${CAM1_SERIAL}" \
-        --cam2-label "cam2 - CLOSE-UP - ${CAM2_SERIAL}"
+        --cam2-label "cam2 - CLOSE-UP - ${CAM2_SERIAL}" &
+    VIEWER_PID=$!
+    wait "${VIEWER_PID}"
 fi
