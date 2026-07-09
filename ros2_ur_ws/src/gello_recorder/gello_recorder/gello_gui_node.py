@@ -65,8 +65,9 @@ class GelloRecorderGuiNode(Node):
         camera_fps: float = 30.0,
         camera_warmup_s: float = 3.0,
         output_root: str = "~/gello_recordings",
+        node_name: str = "gello_recorder_gui_node",
     ) -> None:
-        super().__init__("gello_recorder_gui_node")
+        super().__init__(node_name)
 
         self.cam1_topic = cam1_topic
         self.cam2_topic = cam2_topic

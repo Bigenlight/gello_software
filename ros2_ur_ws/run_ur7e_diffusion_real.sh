@@ -67,6 +67,8 @@
 # #    DIFFUSION_PORT  (default 5592)      DIFFUSION_DEVICE (default cuda)    #
 # #    DIFFUSION_NUM_INFERENCE_STEPS (default 10)  DIFFUSION_SCHEDULER (DDIM) #
 # #    DIFFUSION_N_ACTION_STEPS (default 32)                                 #
+# #    DIFFUSION_ENSEMBLE_K (default unset/empty -> ensemble side-channel OFF;#
+# #        set 16 to log a 16-sample ensemble per refill for offline research)#
 # #    GELLO_REPO_ROOT (default <ros2_ur_ws>/..)                             #
 # ############################################################################
 set -e
@@ -91,6 +93,9 @@ DIFFUSION_CHECKPOINT="${DIFFUSION_CHECKPOINT:-}"
 DIFFUSION_N_ACTION_STEPS="${DIFFUSION_N_ACTION_STEPS:-32}"
 DIFFUSION_NUM_INFERENCE_STEPS="${DIFFUSION_NUM_INFERENCE_STEPS:-10}"
 DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER:-DDIM}"
+# Optional ensemble side-channel: empty (default) means --ensemble-k is NOT passed
+# at all, preserving the server's own default of 0 (feature fully OFF).
+DIFFUSION_ENSEMBLE_K="${DIFFUSION_ENSEMBLE_K:-}"
 RUN_DIFFUSION_SERVER="$SCRIPT_DIR/src/gello_policy/scripts/run_diffusion_server.sh"
 
 if [ -z "${DIFFUSION_CHECKPOINT}" ]; then
@@ -138,6 +143,7 @@ DIFFUSION_VENV="${DIFFUSION_VENV}" DIFFUSION_HOST="${DIFFUSION_HOST}" DIFFUSION_
     DIFFUSION_N_ACTION_STEPS="${DIFFUSION_N_ACTION_STEPS}" \
     DIFFUSION_NUM_INFERENCE_STEPS="${DIFFUSION_NUM_INFERENCE_STEPS}" \
     DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER}" \
+    DIFFUSION_ENSEMBLE_K="${DIFFUSION_ENSEMBLE_K}" \
     bash "${RUN_DIFFUSION_SERVER}" &
 DIFFUSION_SERVER_PID=$!
 # Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).

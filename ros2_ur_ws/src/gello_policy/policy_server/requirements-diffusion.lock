@@ -34,3 +34,7 @@ opencv-python-headless==4.13.0.92
 # Verified working with 27.1.0 (libzmq 4.3.5) during the byte-parity/round-trip
 # smoke test; any recent pyzmq is fine, this is just the tested pin. ---
 pyzmq==27.1.0
+
+# --- Ensemble side-channel logging (ensemble_logger.py; only needed when
+# DIFFUSION_ENSEMBLE_K>0, but harmless otherwise). ---
+h5py==3.16.0

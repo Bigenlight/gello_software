@@ -29,6 +29,10 @@
 # #    DIFFUSION_N_ACTION_STEPS  receding horizon k (default: 32)             #
 # #    DIFFUSION_NUM_INFERENCE_STEPS  DDIM steps (default: 10)                #
 # #    DIFFUSION_SCHEDULER  sampler override    (default: DDIM)               #
+# #    DIFFUSION_ENSEMBLE_K   ensemble size     (default: empty -> flag not   #
+# #        passed, server default 0 = OFF; only 16 is supported)              #
+# #    DIFFUSION_ENSEMBLE_DIR ensemble h5 dir   (default: empty -> server     #
+# #        derives <GELLO_REPO_ROOT>/ros2_ur_ws/diffusion_ensembles)          #
 # ############################################################################
 set -euo pipefail
 
@@ -49,6 +53,9 @@ DIFFUSION_CHECKPOINT="${DIFFUSION_CHECKPOINT:-}"
 DIFFUSION_N_ACTION_STEPS="${DIFFUSION_N_ACTION_STEPS:-32}"
 DIFFUSION_NUM_INFERENCE_STEPS="${DIFFUSION_NUM_INFERENCE_STEPS:-10}"
 DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER:-DDIM}"
+# Empty (default) = do not pass the flag at all -> the server's own default (0/auto).
+DIFFUSION_ENSEMBLE_K="${DIFFUSION_ENSEMBLE_K:-}"
+DIFFUSION_ENSEMBLE_DIR="${DIFFUSION_ENSEMBLE_DIR:-}"
 
 # --- Parse optional flags (override env) -------------------------------------
 while [ "$#" -gt 0 ]; do
@@ -60,6 +67,8 @@ while [ "$#" -gt 0 ]; do
         --n-action-steps) DIFFUSION_N_ACTION_STEPS="$2"; shift 2 ;;
         --num-inference-steps) DIFFUSION_NUM_INFERENCE_STEPS="$2"; shift 2 ;;
         --scheduler)  DIFFUSION_SCHEDULER="$2"; shift 2 ;;
+        --ensemble-k) DIFFUSION_ENSEMBLE_K="$2"; shift 2 ;;
+        --ensemble-dir) DIFFUSION_ENSEMBLE_DIR="$2"; shift 2 ;;
         --checkpoint=*) DIFFUSION_CHECKPOINT="${1#*=}"; shift ;;
         --host=*)     DIFFUSION_HOST="${1#*=}"; shift ;;
         --port=*)     DIFFUSION_PORT="${1#*=}"; shift ;;
@@ -67,6 +76,8 @@ while [ "$#" -gt 0 ]; do
         --n-action-steps=*) DIFFUSION_N_ACTION_STEPS="${1#*=}"; shift ;;
         --num-inference-steps=*) DIFFUSION_NUM_INFERENCE_STEPS="${1#*=}"; shift ;;
         --scheduler=*) DIFFUSION_SCHEDULER="${1#*=}"; shift ;;
+        --ensemble-k=*) DIFFUSION_ENSEMBLE_K="${1#*=}"; shift ;;
+        --ensemble-dir=*) DIFFUSION_ENSEMBLE_DIR="${1#*=}"; shift ;;
         *) echo "run_diffusion_server.sh: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -91,6 +102,17 @@ fi
 echo "### Diffusion server | venv=$DIFFUSION_VENV | device=$DIFFUSION_DEVICE | bind=$DIFFUSION_HOST:$DIFFUSION_PORT"
 echo "### checkpoint=$DIFFUSION_CHECKPOINT | n_action_steps=$DIFFUSION_N_ACTION_STEPS | num_inference_steps=$DIFFUSION_NUM_INFERENCE_STEPS | scheduler=$DIFFUSION_SCHEDULER"
 
+# Optional ensemble side-channel flags: only passed when set, so the server's own
+# defaults (--ensemble-k 0 = OFF, auto dir) stay in charge otherwise.
+ENSEMBLE_ARGS=()
+if [ -n "$DIFFUSION_ENSEMBLE_K" ]; then
+    ENSEMBLE_ARGS+=(--ensemble-k "$DIFFUSION_ENSEMBLE_K")
+    echo "### ensemble side-channel: k=$DIFFUSION_ENSEMBLE_K dir=${DIFFUSION_ENSEMBLE_DIR:-<auto>}"
+fi
+if [ -n "$DIFFUSION_ENSEMBLE_DIR" ]; then
+    ENSEMBLE_ARGS+=(--ensemble-dir "$DIFFUSION_ENSEMBLE_DIR")
+fi
+
 exec "$VENV_PY" "$SERVER_PY" \
     --checkpoint "$DIFFUSION_CHECKPOINT" \
     --host "$DIFFUSION_HOST" \
@@ -98,4 +120,5 @@ exec "$VENV_PY" "$SERVER_PY" \
     --device "$DIFFUSION_DEVICE" \
     --n-action-steps "$DIFFUSION_N_ACTION_STEPS" \
     --num-inference-steps "$DIFFUSION_NUM_INFERENCE_STEPS" \
-    --scheduler "$DIFFUSION_SCHEDULER"
+    --scheduler "$DIFFUSION_SCHEDULER" \
+    ${ENSEMBLE_ARGS[@]+"${ENSEMBLE_ARGS[@]}"}

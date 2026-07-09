@@ -75,17 +75,23 @@ from lerobot.policies import make_pre_post_processors
 
 # ACTION = "action": key of the diffusion policy's internal action deque in
 # policy._queues (modeling_diffusion.py reset/select_action). Used for refill logging.
-from lerobot.utils.constants import ACTION
+# OBS_STATE: key of the normalized observation-state queue, read (non-mutating) to
+# snapshot the obs window the ensemble was conditioned on.
+from lerobot.utils.constants import ACTION, OBS_STATE
 
 # Allow running both as a module (`-m gello_policy.policy_server.diffusion_server`) and as
 # a bare script (scripts/run_diffusion_server.sh). Prefer the package-relative import.
 try:
     from .image_preprocess import decode_jpeg_to_rgb_float_chw, RESIZE_HW
     from . import zmq_protocol as proto
+    from .ensemble_sampler import EnsembleSampler
+    from .ensemble_logger import EnsembleLogger
 except ImportError:  # pragma: no cover - fallback for direct-path execution
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from image_preprocess import decode_jpeg_to_rgb_float_chw, RESIZE_HW  # type: ignore
     import zmq_protocol as proto  # type: ignore
+    from ensemble_sampler import EnsembleSampler  # type: ignore
+    from ensemble_logger import EnsembleLogger  # type: ignore
 
 
 # =============================================================================
@@ -96,7 +102,8 @@ class DiffusionInferenceEngine:
     action. Holds the receding-horizon queue across calls (via policy.reset())."""
 
     def __init__(self, checkpoint: str, device: str, n_action_steps: int,
-                 num_inference_steps: int, scheduler: str) -> None:
+                 num_inference_steps: int, scheduler: str,
+                 ensemble_k: int = 0, ensemble_dir: str = "") -> None:
         self.device = device
         self.n_action_steps = n_action_steps
 
@@ -181,6 +188,114 @@ class DiffusionInferenceEngine:
         # on zero obs, then clears the queue so the first real episode starts fresh.
         self._warmup()
 
+        # --- Optional batch-K ensemble side-channel (offline uncertainty research).
+        # DEFAULT OFF (ensemble_k == 0): everything below stays None and the hot
+        # path (act/serve/_handle) behaves exactly as before. When on, jobs are
+        # submitted ONLY from serve() AFTER the real ZMQ reply is on the wire.
+        self.ensemble_sampler = None
+        self.ensemble_logger = None
+        self._ensemble_pending = False       # set by act() on a refill tick
+        self._last_global_cond = None        # captured by the hook below
+        self._last_action_normalized = None  # first (popped) action of the chunk
+        if ensemble_k > 0:
+            cfg = self.policy.config
+            self.ensemble_logger = EnsembleLogger(
+                ensemble_dir,
+                k=ensemble_k,
+                horizon=cfg.horizon,
+                action_dim=cfg.action_feature.shape[0],
+                n_action_steps=cfg.n_action_steps,
+                n_obs_steps=cfg.n_obs_steps,
+                state_dim=cfg.robot_state_feature.shape[0],
+            )
+            self.ensemble_sampler = EnsembleSampler(
+                self.policy, k=ensemble_k, callback=self._on_ensemble_result
+            )
+            # Capture hook: keep a reference to the exact global_cond tensor the
+            # real refill computed (modeling_diffusion._prepare_global_conditioning
+            # returns it and generate_actions discards it), so the ensemble NEVER
+            # recomputes vision features. Installed only when the feature is on;
+            # installed AFTER _warmup() so warmup stays pristine. The wrapper adds
+            # one attribute assignment per refill -- negligible.
+            _orig_prep = self.policy.diffusion._prepare_global_conditioning
+
+            def _capture_global_cond(batch):
+                gc = _orig_prep(batch)
+                self._last_global_cond = gc
+                return gc
+
+            self.policy.diffusion._prepare_global_conditioning = _capture_global_cond
+            print(
+                f"[diffusion_server] ensemble side-channel ON: k={ensemble_k}, "
+                f"dir={ensemble_dir}",
+                flush=True,
+            )
+
+    def _on_ensemble_result(self, trajectories, meta: dict) -> None:
+        """EnsembleSampler callback (worker thread on success, server thread on a
+        drop). Only forwards to the logger -- no GPU work here."""
+        dropped = bool(meta["dropped"])
+        self.ensemble_logger.log_refill(
+            t_rel_s=meta["t_rel_s"],
+            t_wall=meta["t_wall"],
+            refill_idx=meta["refill_idx"],
+            ensemble_ms=meta["elapsed_ms"],
+            dropped=dropped,
+            trajectories_or_none=(
+                None if dropped else trajectories.numpy()
+            ),
+            committed_chunk_or_none=(None if dropped else meta["committed_chunk"]),
+            obs_state_or_none=(None if dropped else meta["obs_state"]),
+        )
+
+    @torch.no_grad()
+    def maybe_submit_ensemble(self) -> None:
+        """Called by serve() AFTER the real reply was sent (CRITICAL ordering: the
+        ensemble must never sit between the real inference and the ZMQ reply).
+        If the tick that was just answered was a refill, snapshot the committed
+        chunk + obs window from the policy queues (non-mutating list() reads; the
+        next request cannot arrive before this returns, REP socket is serial) and
+        submit one background batch-K job."""
+        if self.ensemble_sampler is None or not self._ensemble_pending:
+            return
+        self._ensemble_pending = False
+        try:
+            global_cond = self._last_global_cond
+            if global_cond is None or self._last_action_normalized is None:
+                return  # nothing captured (shouldn't happen on a refill tick)
+            t_wall = time.time()
+            # Committed chunk = the action select_action just popped + the rest of
+            # the freshly refilled deque, in NORMALIZED action space (the same
+            # space the ensemble trajectories live in). Each element is (1, 7).
+            remaining = list(self.policy._queues[ACTION])
+            committed = torch.cat(
+                [self._last_action_normalized] + remaining, dim=0
+            ).cpu().numpy().astype(np.float32)          # (n_action_steps, 7)
+            # Obs-state window the refill was conditioned on (normalized), shaped
+            # (n_obs_steps, state_dim). Queue elements are (1, state_dim).
+            obs_state = torch.stack(
+                list(self.policy._queues[OBS_STATE]), dim=1
+            ).squeeze(0).cpu().numpy().astype(np.float32)
+            meta = {
+                "refill_idx": self._refills,
+                "t_wall": t_wall,
+                "t_rel_s": t_wall - self.ensemble_logger.t0,
+                "committed_chunk": committed,
+                "obs_state": obs_state,
+            }
+            self.ensemble_sampler.submit(global_cond, meta)
+        except Exception as exc:  # noqa: BLE001 - side-channel must never kill serve()
+            print(f"[diffusion_server] ensemble submit failed (ignored): "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
+    def close_ensemble(self) -> None:
+        """Shutdown path: finish/stop the background sampler, then flush + close
+        the ensemble HDF5 file. Safe when the feature is off."""
+        if self.ensemble_sampler is not None:
+            self.ensemble_sampler.close()
+        if self.ensemble_logger is not None:
+            self.ensemble_logger.close()
+
     @torch.no_grad()
     def _warmup(self) -> None:
         print("[diffusion_server] warming up (compiling inference kernels)...", flush=True)
@@ -227,6 +342,11 @@ class DiffusionInferenceEngine:
 
         proc = self.preprocessor(obs)               # rename -> batch -> device -> normalize
         action = self.policy.select_action(proc)    # (1,7) normalized (modeling_diffusion.py)
+        if refill and self.ensemble_sampler is not None:
+            # Two reference assignments only -- the actual snapshot + submit happen
+            # in maybe_submit_ensemble(), AFTER serve() has sent the real reply.
+            self._last_action_normalized = action
+            self._ensemble_pending = True
         action = self.postprocessor(action)         # (1,7) unnormalized, on cpu
         action = action.squeeze(0).cpu().numpy().astype(np.float64)  # (7,)
 
@@ -265,9 +385,15 @@ def serve(engine: DiffusionInferenceEngine, host: str, port: int) -> None:
                 payload = {proto.KEY_OK: False, proto.KEY_ERR: f"{type(exc).__name__}: {exc}"}
                 print(f"[diffusion_server] ERROR handling request: {payload[proto.KEY_ERR]}", flush=True)
             _reply(sock, payload)
+            # ENSEMBLE ORDERING (safety-critical): only AFTER the real reply is on
+            # the wire may the (optional, default-off) background ensemble job be
+            # submitted -- it can never add latency to the robot-control round trip.
+            if engine.ensemble_sampler is not None:
+                engine.maybe_submit_ensemble()
     except KeyboardInterrupt:
         print("\n[diffusion_server] interrupted; shutting down.", flush=True)
     finally:
+        engine.close_ensemble()
         sock.close(linger=0)
 
 
@@ -327,6 +453,22 @@ def parse_args(argv=None) -> argparse.Namespace:
                    choices=["DDIM", "DDPM", "asis"],
                    help="Noise scheduler override; 'asis' keeps the trained scheduler "
                         "(DDPM/100 for this checkpoint -- much slower refills).")
+    p.add_argument("--ensemble-k", type=int,
+                   # `or "0"` is deliberate, not redundant with the .get() default:
+                   # run_ur7e_diffusion_real.sh/run_diffusion_server.sh export
+                   # DIFFUSION_ENSEMBLE_K="" (present-but-empty, not unset) as their
+                   # OFF sentinel (`VAR="${VAR}" cmd` always exports, even empty).
+                   # os.environ.get()'s default only fires on an ABSENT key, so an
+                   # empty string sails through and int("") raises -- crashing the
+                   # server on every default/off launch via those scripts. Treat
+                   # "" the same as unset.
+                   default=int(os.environ.get("DIFFUSION_ENSEMBLE_K", "0") or "0"),
+                   help="0 (default) = ensemble side-channel OFF. Only 16 is "
+                        "supported; other non-zero values are clipped to 16.")
+    p.add_argument("--ensemble-dir",
+                   default=os.environ.get("DIFFUSION_ENSEMBLE_DIR", ""),
+                   help="Where ensemble_<timestamp>.h5 is written when --ensemble-k>0. "
+                        "Empty = <GELLO_REPO_ROOT>/ros2_ur_ws/diffusion_ensembles.")
     return p.parse_args(argv)
 
 
@@ -354,9 +496,32 @@ def main(argv=None) -> int:
         return 2
 
     device = resolve_device(args.device)
+
+    # --- Ensemble side-channel plumbing (default OFF: --ensemble-k 0) ------------
+    ensemble_k = args.ensemble_k
+    if ensemble_k not in (0, 16):
+        # Spec pins the only supported ensemble size at 16 (HDF5 schema + the
+        # benchmarked GPU budget both assume it). Clip rather than crash so a typo
+        # can't take the deploy stack down, but say so loudly.
+        print(f"[diffusion_server] WARNING: --ensemble-k {ensemble_k} unsupported; "
+              f"only 16 is validated. Clipping to 16.", flush=True)
+        ensemble_k = 16
+    ensemble_dir = args.ensemble_dir
+    if ensemble_k > 0 and not ensemble_dir:
+        # Same GELLO_REPO_ROOT derivation as gello_ur_recorder_node.py; the
+        # ensemble dir sits next to gello_logs, joined by wall-clock timestamp.
+        ensemble_dir = os.path.join(
+            os.environ.get("GELLO_REPO_ROOT", "/home/laptop3/gello_software"),
+            "ros2_ur_ws", "diffusion_ensembles",
+        )
+    if ensemble_k > 0:
+        os.makedirs(ensemble_dir, exist_ok=True)
+
     t0 = time.time()
     engine = DiffusionInferenceEngine(args.checkpoint, device, args.n_action_steps,
-                                      args.num_inference_steps, args.scheduler)
+                                      args.num_inference_steps, args.scheduler,
+                                      ensemble_k=ensemble_k,
+                                      ensemble_dir=ensemble_dir)
     print(f"[diffusion_server] ready in {time.time() - t0:.1f}s", flush=True)
     serve(engine, args.host, args.port)
     return 0
