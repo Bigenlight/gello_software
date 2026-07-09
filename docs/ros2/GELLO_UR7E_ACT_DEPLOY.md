@@ -1,7 +1,7 @@
 # GELLO → UR7e ACT 정책 실기 배포 — 런북 (REAL)
 
 > ⚠️ **이 문서는 학습된 ACT "put right banana in pot" 정책으로 실제 UR7e를 자율 구동하기 위한 실기(real-robot) 런북입니다.**
-> 대상은 **로봇 PC** (실제 UR7e + Robotiq 2F-85 + RealSense 2대가 연결된 머신)이며, 여기서 다루는 콜드스타트 절차(colcon build on Humble, 실제 핸드셰이크, 실제 카메라 시리얼, 실제 팔 동작)는 **이 문서를 작성한 개발 PC에서는 검증되지 않았습니다.** 반면 이미지 파이프라인 byte-parity, ZMQ 라운드트립, HOLD 유지, arming guard, 두 안전 클램프, fail-silent FAULT 전이는 개발 PC에서 오프라인으로 검증되었습니다 — 각 섹션에 어느 쪽인지 명시합니다.
+> 대상은 **로봇 PC** (실제 UR7e + Robotiq 2F-85 + RealSense 2대가 연결된 머신)입니다. **2026-07-08, 실제 로봇 PC에서 콜드스타트 절차(colcon build on Humble, 실제 핸드셰이크, 실제 카메라 시리얼, 실제 팔 동작) 전체가 처음으로 실기 검증되었습니다** — §4.5, §5, §8 참고. 이미지 파이프라인 byte-parity, ZMQ 라운드트립, HOLD 유지, arming guard, 두 안전 클램프, fail-silent FAULT 전이는 그 이전에 개발 PC에서 오프라인으로 검증되었습니다. 단, **정책의 태스크 수행 신뢰도(그랩 성공률 등)는 아직 특성화되지 않았습니다** — §8 참고.
 >
 > - **패키지 개요 / 빌드 방법**: [`gello_policy/README.md`](../../ros2_ur_ws/src/gello_policy/README.md)
 > - **설계 근거**: 프로젝트 루트 `DEPLOY_REPO_DECISION.md` (왜 `gello_software`를 확장하는지, 왜 synthetic-leader + ZMQ 분리인지, HIL-SERL로 가는 길)
@@ -20,8 +20,9 @@
 | 시작 절차 | 핸드셰이크가 HELD start pose로 팔을 파킹 → 오퍼레이터가 명시적으로 `ros2 service call /policy_leader_node/start_execution std_srvs/srv/Trigger` 호출해야 자율 모션 시작 |
 | receding horizon | k=30 (`n_action_steps`) — 30틱마다 net 재실행, 30Hz 발행 |
 | 안전 | 속도는 브리지의 0.625 rad/s slew ceiling(불변), 위치는 `policy_leader_node`의 1.2x envelope 클램프 + live-pose 0.5rad 클램프, ZMQ 실패 **또는 관측 stale(`obs_timeout_s` 0.5s)** 시 fail-silent FAULT |
-| 이 문서에서 검증됨 | 이미지 파이프라인 byte-parity, ZMQ round-trip, HOLD 유지, arming guard, 두 안전 클램프, fail-silent FAULT |
-| 로봇 PC에서 검증 필요 | colcon build on Humble, 실제 handshake, 실제 카메라 시리얼, 실제 팔 동작 |
+| 오프라인 검증됨 (개발 PC) | 이미지 파이프라인 byte-parity, ZMQ round-trip, HOLD 유지, arming guard, 두 안전 클램프, fail-silent FAULT |
+| 실기 검증됨 (로봇 PC, 2026-07-08) | Humble colcon build, 실제 handshake(첫 시도 수렴, 튜닝 불필요), 실제 카메라 시리얼(cam1/cam2 ~30Hz), 실제 그리퍼(auto-cal, gFLT:0), GPU 추론, 엔드투엔드 자율 시도 1회 — **시스템 배관 레벨** |
+| 아직 특성화 안 됨 | 그랩 성공률(첫 시도 미완수), 청크 경계 부드러움, 그리퍼 크러시 — **정책 태스크 성능은 미검증, 후속 튜닝/반복 예상** |
 
 ### 목차
 
@@ -32,7 +33,7 @@
 5. [배포 실행하기](#5-배포-실행하기)
 6. [안전 모델](#6-안전-모델)
 7. [추론 동작 (receding horizon, 이미지 파이프라인)](#7-추론-동작-receding-horizon-이미지-파이프라인)
-8. [검증 완료 vs 로봇 PC에서 검증 필요](#8-검증-완료-vs-로봇-pc에서-검증-필요)
+8. [검증 완료 (실기 포함) vs 아직 특성화 안 됨](#8-검증-완료-실기-포함-vs-아직-특성화-안-됨)
 9. [트러블슈팅](#9-트러블슈팅)
 10. [HIL-SERL으로 가는 길](#10-hil-serl으로-가는-길)
 
@@ -177,7 +178,7 @@ ACT_CHECKPOINT="$CKPT" ./scripts/run_act_server.sh
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam1 camera_namespace:=cam1 \
        serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
-   # cam2 (D435iF, 243222072700) → 네임스페이스 cam2
+   # cam2 (D435if, 243222072700) → 네임스페이스 cam2
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam2 camera_namespace:=cam2 \
        serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
@@ -189,6 +190,72 @@ ACT_CHECKPOINT="$CKPT" ./scripts/run_act_server.sh
    ros2 topic hz /cam1/cam1/color/image_raw/compressed
    ros2 topic hz /cam2/cam2/color/image_raw/compressed
    ```
+
+### 4.5 이 로봇 PC에서 실제로 겪은 환경 이슈 (2026-07-08 실기 셋업 로그)
+
+> 이 절은 **이 머신에서** ACT 배포 환경을 실제로 처음 세팅하며 부딪힌 환경 이슈와 그 해결을 기록한다. 위 §4의 정규 절차가 "무엇을 해야 하는가"라면, 이 절은 "이 PC에서는 그 과정에서 무엇이 실제로 막혔는가"다. 다음에 이 머신에서 GPU/ACT 작업을 하는 오퍼레이터가 같은 디버깅을 반복하지 않도록 하기 위한 것이다.
+
+**1) GPU 드라이버 vs PREEMPT_RT 커널 충돌 — 가장 먼저 부딪히는 벽.**
+이 머신은 실시간 로봇 제어용 커스텀 **PREEMPT_RT 커널(`6.8.2-rt11`)로 부팅되는 것이 기본값**이다. 그런데 NVIDIA 독점 드라이버는 **어떤** PREEMPT_RT 커널에서도 DKMS 커널 모듈 빌드를 거부한다 — 하드코딩된 sanity check가 `Failed PREEMPT_RT sanity check. Bailing out!`을 내며 죽는다. **이는 드라이버 버전과 무관하게 모든 버전에서 동일하며, 버그가 아니라 의도된 거부다.** 즉 RT 커널로 부팅된 채로는 `nvidia-smi`가 절대 뜨지 않고, 따라서 ACT 추론용 CUDA도 못 쓴다.
+
+한편 GELLO↔UR7e teleop 스택 코드를 감사해 본 결과, **이 스택이 실제로 PREEMPT_RT를 요구한다는 증거는 없었다** — 평범한 ROS2 rate(리더 30Hz, 브리지 250Hz, UR servo cycle 500Hz)로 돌고, jitter를 견디는 watchdog / slew 클램프가 이미 설계에 들어가 있다. 그래서 **GPU 작업을 할 때만 non-RT(generic) 커널로 부팅하면** teleop 기능을 잃지 않고 CUDA를 되찾을 수 있다.
+
+다행히 이 머신에는 **이미 non-RT 커널(`6.8.0-124-generic`)이 설치돼 있어서 새 커널 설치는 필요 없었다.** 이 커널로 부팅하는 법: GRUB 메뉴에서 **"Advanced options for Ubuntu" → "Ubuntu, with Linux 6.8.0-124-generic"** 를 선택한다.
+
+> **⚠️ 기본값을 영구 변경하려 했으나 이 머신의 GRUB 설정 특성상 실패하여, 결국 매번 GRUB 메뉴에서 수동으로 generic 커널을 선택하는 방식으로 확정했다.** 즉 **RT 커널이 여전히 자동 기본값**이고, GPU 작업이 필요할 때만 오퍼레이터가 부팅 시 GRUB 메뉴에서 generic 커널을 직접 골라야 한다. (named menu-entry ID가 이 시스템의 `grub.cfg`에서 조용히 매칭 실패하는 별개의 GRUB 문제였고, 파고들 가치가 없어 이 수동 방식으로 확정.)
+
+generic 커널로 부팅한 **뒤에** NVIDIA 모듈을 살린다:
+
+```bash
+sudo dpkg --configure -a   # RT 커널에서 미뤄졌던 NVIDIA DKMS 빌드를 마무리 (non-RT에서는 성공)
+sudo modprobe nvidia       # 현재 세션에 모듈 로드 (이후 generic 부팅 시엔 자동 로드됨)
+nvidia-smi                 # 확인
+```
+
+이 머신에서 확인된 결과: **NVIDIA GeForce RTX 3060 Mobile/Max-Q, driver 595.71.05, CUDA 13.2, VRAM 6GB.** ACT 추론은 ResNet18 백본 정책의 **batch-size-1 inference**만 필요하고 학습이 아니므로, 6GB로 차고 넘친다.
+
+**2) `python3.12`가 stock Ubuntu 22.04에는 없다.**
+`gello_policy`의 ACT 서버는 py3.12를 요구하는데(§1, `lerobot`이 Python ≥3.12) 22.04 기본 저장소에는 3.12가 없다. deadsnakes PPA로 설치:
+
+```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv python3.12-dev
+```
+
+**3) rosdep이 플래그한 실제 시스템 의존성은 `python3-h5py` 하나뿐이었다.**
+§2/§4의 `rosdep install --from-paths src --ignore-src -r -y --skip-keys dynamixel_sdk`가 이 워크스페이스에서 실제로 잡아낸 시스템 의존성은 `python3-h5py` 단 하나다(`gello_recorder`가 쓰는 것으로, `gello_policy` 빌드 자체와는 무관하지만 같은 워크스페이스라 함께 걸린다):
+
+```bash
+sudo apt install -y python3-h5py
+```
+
+**4) 체크포인트 다운로드 — `hf` vs `huggingface-cli` 함정.**
+`pip install --user 'huggingface_hub[cli]'`는 **정상 동작하는 `hf`** 와 **아무 것도 안 하는 deprecated `huggingface-cli` shim** 을 **둘 다** 깐다. 후자는 deprecation 경고만 찍고 **아무 작업도 없이 exit 0** 으로 조용히 끝난다. 그런데 `scripts/download_checkpoint.sh`의 CLI 탐지 루프(`for cand in ... huggingface-cli hf`)는, 둘 다 `$ACT_VENV` 밖(bare PATH)에 있으면 **`hf`보다 망가진 `huggingface-cli`를 먼저 찾는다.** 결과적으로 스크립트는 **"성공"(exit 0)한 것처럼 보이는데 실제로는 아무것도 받지 않아** 체크포인트 디렉터리가 텅 빈 채로 남는다.
+
+> **⚠️ 조용한 no-op이라 특히 위험하다** — 에러가 없어 다음 단계까지 갔다가 로드 시점에서야 빈 디렉터리로 실패한다. 우회책은 둘 중 하나: (a) 래퍼 스크립트 대신 `hf download <repo> --local-dir <dir>`를 **직접** 호출하거나, (b) `ACT_VENV`가 **`hf`만 있는** venv를 가리키게 해서 탐지 루프가 `hf`를 집게 한다.
+
+**5) `lerobot==0.6.1`(락파일에 핀됨)이 PyPI에 존재하지 않는다.**
+`policy_server/requirements-act.lock`은 `lerobot==0.6.1`로 핀돼 있는데, **PyPI에 published된 최신은 `0.6.0`** 이고(`pip index versions lerobot`로 확인), `github.com/huggingface/lerobot`에도 **`v0.6.1` 태그가 없다.** `0.6.1`은 단지 `v0.6.0` 태그를 자른 직후 lerobot `main` 브랜치의 `pyproject.toml`에 박혀 있는 버전 문자열일 뿐이다(`raw.githubusercontent.com/huggingface/lerobot/main/pyproject.toml`에서 `version = "0.6.1"` 확인). 따라서 PyPI가 아니라 **GitHub main에서** 설치해야 한다:
+
+```bash
+act_venv/bin/pip install "lerobot @ git+https://github.com/huggingface/lerobot.git@main" \
+    numpy==2.2.6 pillow==12.3.0 opencv-python-headless==4.13.0.92 pyzmq==27.1.0
+```
+
+> **⚠️ torch/torchvision을 건드리게 두지 말 것.** torch/torchvision은 §4 step 2에서 **cu128 index-url로 이미 별도 설치**돼 있다. 위 lerobot 설치가 이들을 다운그레이드하지 않도록 주의하고, 설치 후 **torch가 `2.11.0+cu128`로 유지되고 `torch.cuda.is_available() == True`인지** 반드시 재확인했다(이 머신에서 확인 완료).
+
+**6) 모든 설치 후 최종 환경 sanity check (한 줄).**
+위 단계가 다 끝나면 아래 한 줄로 py3.12 venv가 온전한지 확인한다 — torch+CUDA, torchvision, lerobot, zmq, cv2, numpy가 모두 임포트되고 `ACTPolicy`까지 로드되면 배포 준비 완료:
+
+```bash
+act_venv/bin/python -c "
+import torch, torchvision, lerobot, zmq, cv2, numpy
+print('torch', torch.__version__, 'cuda:', torch.cuda.is_available())
+from lerobot.policies.act.modeling_act import ACTPolicy
+print('ACTPolicy import OK')
+"
+```
 
 ## 5. 배포 실행하기
 
@@ -235,6 +302,78 @@ ACT_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_act_real.sh
    ```
 
    현재 라이브 자세를 그대로 HOLD로 전환해 그 자리에서 팔을 정지시킨다. **그리퍼는 `start_gripper`(open)로 되돌아가지 않고 마지막으로 명령된 값을 그대로 유지**한다 — 즉 그랩 도중에 `~/hold`를 걸어도 물체를 놓치지 않고 잡은 상태를 유지한다(부팅 시점의 HOLD만 `start_gripper=0.0=open`을 씀). 재시작 시 arming guard는 여전히 `start_pose` 기준으로 평가되므로(다시 EXECUTE로 가려면 라이브 자세가 원래 `start_pose` ±0.1rad 근처여야 함), `~/hold`로 정지시킨 위치가 이미 그 근처가 아니면 재-arm이 거부될 수 있음에 유의.
+
+### 실전 4-터미널 워크플로우 (이 머신에서 검증된 방식)
+
+이 머신에서는 **Method B (`HEADLESS=true`)를 기본으로 쓴다.** 사람 GELLO 텔레옵도 이미 `HEADLESS=true ./run_ur7e_gello_real.sh`로 헤드리스 구동하고 있고, UR7e 펜던트를 **Remote Control 모드로 상시 켜 둔 상태**이기 때문이다.
+
+> **펜던트 REMOTE 모드는 한 번만 켜면 됨 (persistent).** PolyScope 5에서 `Settings > System > Remote Control > Enable`로 활성화(우측 상단 토글로 on/off). 리부트/세션이 바뀌어도 유지되는 **1회성 설정**이다. 활성 상태 표시: **Play/Load 버튼이 회색으로 비활성**되고 우측 상단에 **REMOTE**라고 뜬다.
+
+Method A와 Method B는 **코드상 완전히 동일**하다 — `HEADLESS=true`는 teleop launch와 **byte-for-byte 같은** `headless_mode` 패스-스루로 `ur_control.launch.py`에 넘어갈 뿐이며(같은 인자명·같은 기본값·같은 fake-hardware 오버라이드), `policy_leader_node.py`는 `headless_mode`를 **읽지도 분기하지도 않는다**. 즉 HOLD→`~/start_execution`→EXECUTE 오퍼레이터 게이트, 두 위치 안전 클램프, FAULT 처리 모두 A/B가 100% 동일하다. Method B가 없애는 것은 딱 하나 — 핸드셰이크 move-to-start 모션 직전에 사람이 펜던트 Play를 누르며 갖던 암묵적 일시정지뿐이다. **진짜 자율 ACT 모션은 어느 쪽이든 여전히 명시적 `~/start_execution` 게이트 뒤에 있다** — 헤드리스라고 그 게이트를 건너뛰지 않는다.
+
+> **⚠️ REMOTE 모드가 꺼진 채로 `headless_mode:=true`를 쓰면 실패는 조용하지 않고 시끄럽다.** `Could not send program to robot` / `Could not resend robot program` 에러가 반복되고 **모션이 전혀 없다** — 부분적으로/위험하게 동작하는 일은 없다.
+
+아래가 실제로 쓰는 4-터미널 순서다.
+
+**Terminal 1 — 카메라** (§4의 3번과 동일, ACT 실행 **전에 반드시 먼저**):
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/gello_software/ros2_ur_ws
+ros2 launch realsense2_camera rs_launch.py \
+    camera_name:=cam1 camera_namespace:=cam1 \
+    serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
+ros2 launch realsense2_camera rs_launch.py \
+    camera_name:=cam2 camera_namespace:=cam2 \
+    serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+```
+
+확인: `ros2 topic hz /cam1/cam1/color/image_raw/compressed` / `/cam2/...`로 ~30Hz 나오는지.
+
+> **⚠️ `&`로 백그라운드 실행하면 Ctrl-C로 안 죽는다.** 이렇게 띄우면 터미널의 SIGINT가 백그라운드 잡까지 전파되지 않아, 세션을 끝낼 때 `ps aux | grep realsense2_camera`로 PID를 찾아 수동으로 `kill`해야 하는 번거로움이 있다(실제로 이 방식 때문에 정리가 번거로웠던 사례 있음). 카메라를 **하나의 foreground launch + 뷰어**로 묶어 Ctrl-C 한 번에 깨끗이 종료되게 하는 개선판은 [`ros2_ur_ws/launch_cameras.sh`](../../ros2_ur_ws/launch_cameras.sh) 참고.
+
+**Terminal 2 — ACT 서버 + 로봇 launch** (Method B, `HEADLESS=true` 추가):
+
+```bash
+cd ~/gello_software/ros2_ur_ws
+HEADLESS=true ACT_CHECKPOINT=/home/laptop3/gello_software/ros2_ur_ws/src/gello_policy/checkpoints/act_banana_in_pot \
+    ./run_ur7e_act_real.sh
+```
+
+펜던트 REMOTE 모드가 이미 활성화되어 있어야 함 — **Play 누를 필요 없음**. 이 터미널은 `ros2 launch`가 포그라운드로 도는 중이라 이후 명령은 다른 터미널에서 내린다.
+
+**Terminal 3 — 자율 동작 시작/정지 명령:**
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/gello_software/ros2_ur_ws/install/setup.bash
+ros2 service call /policy_leader_node/start_execution std_srvs/srv/Trigger   # 진짜 자율 동작 시작
+ros2 service call /policy_leader_node/hold std_srvs/srv/Trigger              # 그 자리에서 즉시 정지
+```
+
+**Terminal 4 (선택, 실행 결과 로깅) — `gello_recorder`로 ACT 입출력을 HDF5+MP4 기록:**
+
+`gello_recorder`는 원래 사람 GELLO 텔레옵을 기록하려고 만든 완전 **read-only** 패키지지만, `policy_leader_node`가 정확히 같은 토픽(`/gello/joint_states`, `/robotiq_gripper/command_percent`)에 발행하므로 **리더가 사람이든 ACT든 구분 없이 그대로 재사용 가능**하다:
+
+```bash
+cd ~/gello_software/ros2_ur_ws
+./run_recorder.sh
+```
+
+> **`CAMS=true`를 붙이지 말 것.** 카메라는 이미 Terminal 1에서 떠 있으므로 recorder가 다시 launch를 시도하면 **USB 장치 충돌**이 난다. recorder는 그냥 이미 떠 있는 `/cam1`·`/cam2` 토픽을 구독한다. `~/start_execution` 호출 **전에** 이 recorder를 먼저 켜서 "recording" 로그를 확인한 뒤 시작하는 것을 권장.
+
+기록되는 것: ACT의 관절 출력(`/gello/joint_states`), ACT의 그리퍼 출력(`/robotiq_gripper/command_percent`), 실제 로봇 상태(`/joint_states`), 브리지 최종 커맨드, 힘/토크, TCP pose, 카메라 2대 영상 — 전부 시간 동기화되어 `ros2_ur_ws/gello_logs/session_<타임스탬프>/`에 HDF5(`vectors.h5`) + `cam1.mp4`/`cam2.mp4`로 저장된다. `Ctrl-C`로 정지하면 flush되어 저장 완료.
+
+### 리커버리 / start_pose로 리셋
+
+- `~/hold`은 **현재 위치에서 즉시 정지**(freeze)시킬 뿐이다.
+- 새 시도를 위해 팔을 완전히 `start_pose`로 되돌리는 가장 간단한 검증된 경로: **Terminal 2에서 `Ctrl-C`** (EXIT trap이 ACT 서버와 ros2 launch를 **둘 다** 정리) → 그런 다음 **똑같은 Terminal 2 명령을 그대로 다시 실행**한다. move-to-start 핸드셰이크가 현재 위치가 어디든 자동으로 다시 `start_pose`로 chase해 온다 (펜던트 수동 jog 불필요).
+
+> **⚠️ 이 re-chase 모션은 충돌을 인지하지 못한다(collision-unaware).** 재시작 전에 팔 주변 상황을 한번 눈으로 확인하라.
+
+### 첫 실기 종단(end-to-end) 성공 기록 — 2026-07-08
+
+이 머신에서 첫 실기 전체 파이프라인이 성공했다: 핸드셰이크가 첫 실제 시도에서 깔끔하게 수렴(0.388 rad 갭을 0.78s에 chase, max gap 0.0001 rad로 수렴), 그리퍼가 fault 없이 연결·자동 캘리브레이션, 두 카메라 모두 arming 직전 ~29.7–29.9Hz로 라이브 확인, ACT 서버가 `--device cuda`로 `127.0.0.1:5591`에서 listen 확인. 오퍼레이터가 `~/start_execution`을 호출하자 로봇이 학습된 태스크("put right banana in pot")를 자율로 시도 — 안전 게이팅·실제 핸드셰이크·실제 카메라 매핑·ZMQ·GPU 추론·그리퍼 제어 전 구간이 실기에서 처음으로 종단까지 올바르게 동작했다. 다만 이 시점에서 **태스크 완수(성공률) 자체는 아직 안정적/반복 가능하지 않았다** — 파이프라인이 도는 것과 태스크를 매번 해내는 것은 별개다.
 
 ## 6. 안전 모델
 
@@ -284,9 +423,11 @@ ACT_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_act_real.sh
   ACT_CHECKPOINT=/path/... ACT_N_ACTION_STEPS=15 ./scripts/run_act_server.sh
   ```
 
-## 8. 검증 완료 vs 로봇 PC에서 검증 필요
+## 8. 검증 완료 (실기 포함) vs 아직 특성화 안 됨
 
-**개발 PC에서 오프라인으로 검증됨** (로봇/카메라 없이):
+> **2026-07-08 업데이트 — 실제 로봇 PC에서 첫 엔드투엔드 실기 구동 성공.** 이전까지 "로봇 PC에서 검증 필요"로 남아 있던 콜드스타트 경로(Humble colcon build, 실제 handshake, 실제 카메라 시리얼, 실제 팔 동작)가 실제 UR7e + Robotiq 2F-85 + RealSense 2대가 붙은 로봇 PC에서 **처음으로 실제 구동**되었다. 단, 이는 **시스템 배관(plumbing)이 실기에서 동작함을 확인한 것**이지 **정책의 태스크 성능/신뢰도를 특성화한 것이 아니다** — 아래 세 그룹을 분리해서 읽을 것.
+
+**개발 PC에서 오프라인으로 검증됨** (로봇/카메라 없이 — 기존과 동일):
 
 - 이미지 파이프라인 byte-parity (`image_preprocess.py` vs `eval_offline.py`의 `build_image_transforms()`)
 - ZMQ multipart round-trip (더미 클라이언트)
@@ -295,12 +436,23 @@ ACT_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_act_real.sh
 - 두 안전 클램프 (OOD → clip, max_dev → clip)
 - fail-silent FAULT 전이 (ZMQ 타임아웃/에러 시 발행 중단)
 
-**로봇 PC에서 반드시 검증할 것** (이 개발 PC에는 로봇도 카메라도 없음):
+**실제 로봇 PC에서 실기 검증됨** (2026-07-08, 첫 성공 구동에서 확인 — 시스템 배관 레벨):
 
-- Humble 위에서의 `colcon build --packages-select gello_policy`
-- 실제 handshake (실기 JTC 정상상태 오차, `chase_tol` 체인 — [`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md) §2의 캘리브레이션 체크리스트 참고)
-- 실제 카메라 시리얼 매핑 (cam1/cam2가 실제로 올바른 물리 카메라인지)
-- 실제 팔 동작 (그랩 성공률, 청크 경계에서의 부드러움, 그리퍼 크러시 여부)
+- **Humble colcon build** — `colcon build --packages-select gello_policy ur_gello_bringup`가 실제 로봇 PC의 Humble에서 성공(이전엔 가정이었으나 이제 실제로 수행됨).
+- **실제 handshake** — 실제 UR7e에서 **첫 시도에** 깔끔하게 수렴: 0.388 rad gap을 0.78s 트래젝토리로 chase → max gap 0.0001 rad(`chase_tol` 0.06 rad을 크게 하회)로 수렴 → 0.41s 유지(`chase_dwell_s` 0.4s 요건 충족) → 컨트롤러가 `forward_position_controller`로 깔끔히 전환 → 브리지 resume. dead-band livelock 없음, 튜닝 불필요 — **디폴트 그대로 통과**. ([`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md) §2의 tolerance 체인이 ACT 경로에서도 실기에서 성립함을 확인.)
+- **실제 카메라 시리얼 매핑** — cam1(D435, `147122072740`)·cam2(D435if, `243222072700`) 모두 `rs-enumerate-devices`로 정상 열거, arm 직전 `ros2 topic hz`로 압축 토픽이 ~29.7–29.9Hz 라이브 스트리밍 확인 — 문서의 예상 물리 배치와 일치.
+- **실제 그리퍼** — 공유 Modbus socat 브리지로 연결 후 fault 없이 자동 캘리브레이션 성공(`gACT:1, gFLT:0`). ~1.7s 활성화 창 동안 일시적 "dropped streaming setpoint" 경고 1회가 떴으나 스스로 해소된 benign 현상(실제 문제 아님).
+- **ACT 서버 / GPU 추론** — py3.12·`--device cuda`로 체크포인트 로드 후 `127.0.0.1:5591` listen 확인, GPU 추론 경로 라이브(RTX 3060 Mobile, CUDA 13.2, 드라이버 595.71.05).
+- **엔드투엔드 자율 시도** — 오퍼레이터가 `~/start_execution`을 호출, 로봇이 학습된 "put right banana in pot" 태스크를 실제로 자율 시도. **전체 시스템(안전 게이팅 → 실제 handshake → 실제 카메라 매핑 → ZMQ 라운드트립 → 실제 GPU 추론 → 실제 그리퍼 제어)이 물리 하드웨어에서 엔드투엔드로 올바르게 동작한 첫 확인 사례**다.
+
+**아직 특성화/튜닝 안 됨** (실기 배관은 확인됐으나 정책의 태스크 성능은 미검증):
+
+- **그랩 성공률.** 첫 자율 시도는 태스크를 완전히/신뢰성 있게 완수하지 **못했다**(첫 시도에서 grab/placement 성공에 도달하지 못함). 성공률은 아직 측정된 바 없다 — **한 번의 성공적 구동은 "시스템이 돈다"는 뜻이지 "정책이 태스크를 푼다"는 뜻이 아니다.**
+- **청크 경계에서의 부드러움** (receding horizon 재쿼리 경계) — 미특성화.
+- **그리퍼 크러시 여부** — 미특성화.
+- **후속 반복(iteration) 예상.** 그랩을 자주 놓치면 위 §7 가이드대로 `n_action_steps`/카덴스(재쿼리 주기)를 낮춰(`ACT_N_ACTION_STEPS=10~15`) 반응성을 올리거나, 경우에 따라 추가 학습 데이터가 필요할 수 있다. 현 시점에서 검증된 것은 **배포 파이프라인 자체가 엔드투엔드로 동작한다는 것**뿐이며, **정책의 태스크 수행 신뢰도는 아니다.**
+
+> **알려진(수용된) 갭 — UR7e 기구학 캘리브레이션 파일 없음.** 이 머신에는 `ur7e_calibration.yaml`이 없어 배포는 팩토리/디폴트 기구학으로 돈다. 기존 문서대로 이는 **TCP/Cartesian 정확도에만 영향을 주고 joint-space ACT 제어에는 영향을 주지 않으므로**, 의도적으로 알려진·수용된 갭으로 남겨 두었다(블로킹 아님).
 
 ## 9. 트러블슈팅
 
