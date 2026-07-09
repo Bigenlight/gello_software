@@ -251,6 +251,14 @@ class RobotiqGripperModbusNode(Node):
         cur, obj, stalled = target, 0, False
         try:
             g.move(target, self._speed, force)
+            # Keep the streaming path's bookkeeping in sync: without this, a
+            # later GELLO stream sample that happens to land near the PRE-action
+            # _last_cmd_pct (not where this action just moved the gripper) is
+            # wrongly treated as "no change" by the command_percent deadband and
+            # is silently dropped -- streaming never re-asserts, and the gripper
+            # stays wherever this action left it.
+            self._last_cmd_pct = target / 255.0
+            self._last_cmd_time = time.monotonic()
             deadline = time.time() + self._move_timeout
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
@@ -311,6 +319,11 @@ class RobotiqGripperModbusNode(Node):
             return response
         try:
             g.move(target, self._speed, self._force)
+            # Same streaming-resync fix as _execute (see its comment): keep
+            # _last_cmd_pct current so a subsequent GELLO stream sample isn't
+            # dropped by the command_percent deadband against a stale value.
+            self._last_cmd_pct = target / 255.0
+            self._last_cmd_time = time.monotonic()
             response.success = True
             response.message = f"{'closing' if request.data else 'opening'} (POS={target})"
         except _IOERR as exc:
