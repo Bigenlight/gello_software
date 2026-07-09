@@ -8,6 +8,16 @@
 
 ---
 
+## 데이터셋 (Hugging Face)
+
+이 GELLO/UR7e 텔레오퍼레이션 스택으로 수집한 **"put the right banana in the pot"** 데이터셋을 공개했습니다.
+
+- [`Bigenlight/banana_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 51 데모 / 21,524 프레임 (기본)
+- [`Bigenlight/banana_in_pot_ee_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_ee_lerobot_v3) — 엔드이펙터(EE) 관측 버전
+- [`Bigenlight/banana_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_raw) — 원본 per-take h5 + mp4 (데이터셋 재생성용)
+
+---
+
 ## Step 0 — 먼저 모터부터 확인 ⚠️
 
 소프트웨어를 건드리기 전에, **모든 Dynamixel 서보가 정상 응답하는지 먼저 확인**하세요. [Dynamixel Wizard 2.0](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_wizard2/)으로 스캔해서 각 모터의 **ID가 올바른지**, **baud가 57600인지** 확인합니다. 여기서 모터가 안 잡히면 이후 어떤 단계도 진행되지 않습니다.
