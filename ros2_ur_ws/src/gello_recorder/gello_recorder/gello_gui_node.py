@@ -31,7 +31,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from sensor_msgs.msg import CompressedImage, JointState
-from std_msgs.msg import Float32, Float64MultiArray
+from std_msgs.msg import Float32, Float64MultiArray, String
+from std_srvs.srv import Trigger
 
 from gello_recorder.recording_session import RecordingSession
 
@@ -124,6 +125,56 @@ class GelloRecorderGuiNode(Node):
         self.create_subscription(CompressedImage, self.cam1_topic, self._on_cam1, 10)
         self.create_subscription(CompressedImage, self.cam2_topic, self._on_cam2, 10)
 
+        # ================================================================== #
+        # TELEOP CONTROL PANEL (added block) -- the FIRST control-path code in
+        # this otherwise 100% read-only package. Everything below is guarded by
+        # the existing _state_lock and follows the same threading contract as
+        # the rest of the node: callbacks fire on the spin thread, the GUI polls
+        # copies from the Qt thread. NO blocking waits, ever (call_async +
+        # add_done_callback only).
+        #
+        # Service contract (implemented by other workstreams; we code against
+        # the names even when the servers are not running yet):
+        #   /gello_ur_bridge/pause        (Trigger, unconditional)
+        #   /gello_ur_bridge/resume_chase (Trigger, gated; may succeed=False)
+        #   /gello_gripper_bridge/pause   (Trigger)
+        #   /gello_gripper_bridge/resume  (Trigger, gated)
+        #   /gello_ur_bridge/state        (String, 5 Hz: PAUSED|WAITING|STALE|
+        #                                  CHASING|FOLLOWING)
+        #   /gello_gripper_bridge/state   (String, 5 Hz: PAUSED|WAITING|
+        #                                  RAMPING|FOLLOWING)
+        # The gripper side may be entirely absent (sim) -> degrade gracefully.
+        #
+        # CRITICAL: this dict is named _svc_teleop, NOT _clients -- rclpy.Node
+        # uses self._clients internally and shadowing it corrupts the executor
+        # and destroy_node (documented in gello_operator_console_node.py).
+        self._svc_teleop = {
+            "arm_pause": self.create_client(Trigger, "/gello_ur_bridge/pause"),
+            "arm_resume_chase": self.create_client(
+                Trigger, "/gello_ur_bridge/resume_chase"),
+            "grip_pause": self.create_client(
+                Trigger, "/gello_gripper_bridge/pause"),
+            "grip_resume": self.create_client(
+                Trigger, "/gello_gripper_bridge/resume"),
+        }
+        # Latest state-topic strings + monotonic receipt times (under _state_lock).
+        self._teleop_arm_state = None
+        self._teleop_arm_state_t = None
+        self._teleop_grip_state = None
+        self._teleop_grip_state_t = None
+        # In-flight request bookkeeping (under _state_lock).
+        self._teleop_pending = False
+        self._teleop_outstanding = 0
+        self._teleop_results = {}
+        self._teleop_last_ok = None
+        self._teleop_last_msg = ""
+
+        self.create_subscription(
+            String, "/gello_ur_bridge/state", self._on_arm_state, 10)
+        self.create_subscription(
+            String, "/gello_gripper_bridge/state", self._on_grip_state, 10)
+        # ============ end TELEOP CONTROL PANEL (added block) =============== #
+
         self.get_logger().info(
             f"gello_recorder_gui_node up. cam1={self.cam1_topic} cam2={self.cam2_topic} "
             f"warmup={self.camera_warmup_s:.1f}s output_root={self.output_root}"
@@ -202,6 +253,110 @@ class GelloRecorderGuiNode(Node):
                 "tcp": list(self._tcp),
                 "cam1_last_frame_age_s": cam1_age,
                 "cam2_last_frame_age_s": cam2_age,
+            }
+
+    # ================================================================== #
+    # TELEOP CONTROL PANEL -- public API (thread-safe) + callbacks (added).
+    # ================================================================== #
+    def _on_arm_state(self, msg: String):
+        with self._state_lock:
+            self._teleop_arm_state = msg.data
+            self._teleop_arm_state_t = time.monotonic()
+
+    def _on_grip_state(self, msg: String):
+        with self._state_lock:
+            self._teleop_grip_state = msg.data
+            self._teleop_grip_state_t = time.monotonic()
+
+    def request_teleop_pause(self) -> bool:
+        """Fire the (unconditional) pause services. Non-blocking.
+
+        Pauses the arm bridge (always succeeds) and, if its service is up, the
+        gripper bridge. Returns False without firing if a request is already
+        in flight or the arm service is unavailable.
+        """
+        return self._fire_teleop(pause=True)
+
+    def request_teleop_resume(self) -> bool:
+        """Fire the (gated) resume services. Non-blocking.
+
+        Requests resume_chase on the arm and resume on the gripper. Either may
+        legitimately answer success=False (refused, e.g. leader not still) --
+        that is NOT an error; the explanatory message is surfaced via
+        get_teleop_status()['last_msg'].
+        """
+        return self._fire_teleop(pause=False)
+
+    def _fire_teleop(self, pause: bool) -> bool:
+        arm_name = "arm_pause" if pause else "arm_resume_chase"
+        grip_name = "grip_pause" if pause else "grip_resume"
+        arm_cli = self._svc_teleop[arm_name]
+        grip_cli = self._svc_teleop[grip_name]
+        # service_is_ready() touches rcl graph state -- call it OUTSIDE the lock.
+        arm_ready = arm_cli.service_is_ready()
+        grip_ready = grip_cli.service_is_ready()
+        with self._state_lock:
+            if self._teleop_pending:
+                return False  # overlapping-request guard
+            if not arm_ready:
+                self._teleop_last_ok = False
+                self._teleop_last_msg = (
+                    "arm bridge service unavailable ({})".format(arm_name))
+                return False
+            self._teleop_pending = True
+            self._teleop_outstanding = 1 + (1 if grip_ready else 0)
+            self._teleop_results = {}
+        # call_async + add_done_callback only -- NEVER spin_until_future_complete.
+        arm_future = arm_cli.call_async(Trigger.Request())
+        arm_future.add_done_callback(lambda f: self._teleop_done("arm", f))
+        if grip_ready:
+            grip_future = grip_cli.call_async(Trigger.Request())
+            grip_future.add_done_callback(lambda f: self._teleop_done("grip", f))
+        return True
+
+    def _teleop_done(self, which: str, future):
+        """Done-callback (spin thread): store result; aggregate when all in."""
+        ok = False
+        msg = ""
+        try:
+            resp = future.result()
+            if resp is not None:
+                ok = bool(resp.success)
+                msg = str(resp.message)
+            else:
+                msg = "{}: no response".format(which)
+        except Exception as exc:  # noqa: BLE001 -- surface, never crash spin
+            msg = "{}: {}".format(which, exc)
+        with self._state_lock:
+            self._teleop_results[which] = (ok, msg)
+            self._teleop_outstanding -= 1
+            if self._teleop_outstanding <= 0:
+                results = self._teleop_results
+                self._teleop_last_ok = all(v[0] for v in results.values())
+                self._teleop_last_msg = " | ".join(
+                    "{}: {}".format(k, v[1]) for k, v in sorted(results.items()))
+                self._teleop_pending = False
+
+    def get_teleop_status(self) -> dict:
+        """Copy of the teleop panel state for the Qt polling timer."""
+        now = time.monotonic()
+        # service readiness touches rcl -- read it before taking the lock.
+        grip_svc_ready = (
+            self._svc_teleop["grip_pause"].service_is_ready()
+            or self._svc_teleop["grip_resume"].service_is_ready())
+        with self._state_lock:
+            arm_age = (None if self._teleop_arm_state_t is None
+                       else now - self._teleop_arm_state_t)
+            grip_available = (self._teleop_grip_state_t is not None
+                              or grip_svc_ready)
+            return {
+                "arm_state": self._teleop_arm_state,
+                "arm_state_age_s": arm_age,
+                "grip_state": self._teleop_grip_state,
+                "grip_available": grip_available,
+                "pending": self._teleop_pending,
+                "last_ok": self._teleop_last_ok,
+                "last_msg": self._teleop_last_msg,
             }
 
     # ---- subscription callbacks -------------------------------------------

@@ -37,14 +37,19 @@ Safety / deployment notes
 
 import math
 import time
+from collections import deque
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
-from ur_gello_bringup.angle_utils import circular_dist, wrapped_nearest
+from ur_gello_bringup.angle_utils import (
+    circular_dist,
+    leader_quasi_still,
+    wrapped_nearest,
+)
 
 # Output index order expected by the UR forward_position_controller.
 UR_JOINT_ORDER = [
@@ -176,6 +181,33 @@ class GelloUrBridge(Node):
         self.resume_align_tol = float(
             self.declare_parameter("resume_align_tol", 0.05).value
         )
+        # RESUME-CHASE gate params (the additive ~/resume_chase service). Unlike
+        # the strict ~/resume (which demands the leader already sit within
+        # resume_align_tol of the arm), resume_chase authorizes a rate-limited
+        # GLIDE across a larger — but bounded — gap, under a quasi-still leader.
+        # It never introduces a new publishing path: it only drops the bridge
+        # into the existing seed branch (jump-free + soft-started + slew-clamped).
+        # Per-joint circular-gap hard cap (rad): above this the service REFUSES.
+        self.resume_chase_max_gap = float(
+            self.declare_parameter("resume_chase_max_gap", 1.5).value
+        )
+        # Leader "quasi-still" speed threshold (rad/s) for the resume_chase gate.
+        self.resume_chase_still_speed = float(
+            self.declare_parameter("resume_chase_still_speed", 0.10).value
+        )
+        # Window (s) over which the quasi-still speed is measured.
+        self.resume_chase_still_window_s = float(
+            self.declare_parameter("resume_chase_still_window_s", 0.3).value
+        )
+        # Rate (Hz) of the ~/state String publisher (operator UI status).
+        self.state_publish_rate_hz = float(
+            self.declare_parameter("state_publish_rate_hz", 5.0).value
+        )
+        # Per-joint circular tolerance (rad) below which the state reports
+        # FOLLOWING rather than CHASING (i.e. the glide is done).
+        self.state_chase_done_tol = float(
+            self.declare_parameter("state_chase_done_tol", 0.10).value
+        )
         # Wall-clock (monotonic) of the last (re)seed, for the soft-start ramp.
         self._seed_time: float | None = None
         # Set when the staleness watchdog trips; forces a re-seed (and thus a
@@ -226,6 +258,11 @@ class GelloUrBridge(Node):
         self._unwrapped_target: list[float] | None = None
         # Monotonic timestamp (s) of the last good GELLO message.
         self._last_good_msg_time: float | None = None
+        # Recent leader samples (oldest-first) as (monotonic_ts, unwrapped_pose)
+        # for the resume_chase quasi-still gate. Stores the UNWRAPPED target;
+        # circular_dist inside leader_quasi_still makes any 2*pi re-anchor
+        # discontinuity in the history harmless (short-way distance).
+        self._gello_history: deque = deque(maxlen=64)
         # Deadband-gated target (6 floats): a joint only updates when GELLO moves
         # more than deadband_rad from this held value, killing at-rest jitter.
         self._gated_target: list[float] | None = None
@@ -254,6 +291,11 @@ class GelloUrBridge(Node):
         # Operator pause/resume of following (driven by the numbered console).
         self._pause_srv = self.create_service(Trigger, "~/pause", self._on_pause)
         self._resume_srv = self.create_service(Trigger, "~/resume", self._on_resume)
+        # ADDITIVE resume-chase service (separate from the frozen ~/resume): a
+        # gated glide across a bounded gap under a quasi-still leader.
+        self._resume_chase_srv = self.create_service(
+            Trigger, "~/resume_chase", self._on_resume_chase
+        )
         self._pub = self.create_publisher(
             Float64MultiArray, "/forward_position_controller/commands", 10
         )
@@ -267,6 +309,12 @@ class GelloUrBridge(Node):
         )
         self._timer = self.create_timer(
             1.0 / self.publish_rate_hz, self._on_timer
+        )
+        # Operator-UI status topic: PAUSED / WAITING / STALE / CHASING / FOLLOWING.
+        self._state_pub = self.create_publisher(String, "~/state", 10)
+        _state_hz = self.state_publish_rate_hz if self.state_publish_rate_hz > 0.0 else 5.0
+        self._state_timer = self.create_timer(
+            1.0 / _state_hz, self._on_state_timer
         )
 
         # --- Startup log -------------------------------------------------
@@ -284,6 +332,11 @@ class GelloUrBridge(Node):
             f"soft_start_s={self.soft_start_s} "
             f"start_paused={self._paused} "
             f"resume_align_tol={self.resume_align_tol} "
+            f"resume_chase_max_gap={self.resume_chase_max_gap} "
+            f"resume_chase_still_speed={self.resume_chase_still_speed} "
+            f"resume_chase_still_window_s={self.resume_chase_still_window_s} "
+            f"state_publish_rate_hz={self.state_publish_rate_hz} "
+            f"state_chase_done_tol={self.state_chase_done_tol} "
             f"staleness_timeout_s={self.staleness_timeout_s} "
             f"publish_rate_hz={self.publish_rate_hz}"
         )
@@ -327,6 +380,10 @@ class GelloUrBridge(Node):
                 self._euro[i].update_input(unwrapped[i], dt)
         self._raw_target = unwrapped
         self._last_good_msg_time = now
+        # Record the UNWRAPPED pose for the resume_chase quasi-still gate.
+        # circular_dist inside leader_quasi_still handles any 2*pi re-anchor
+        # discontinuity in this history harmlessly (measures the short-way gap).
+        self._gello_history.append((now, list(unwrapped)))
 
     # ---------------------------------------------------------------------
     def _on_actual_joint_state(self, msg: JointState) -> None:
@@ -539,6 +596,143 @@ class GelloUrBridge(Node):
         )
         self.get_logger().warn(response.message)
         return response
+
+    def _on_resume_chase(self, request, response):
+        """Resume by GLIDING across a bounded gap (additive to ~/resume).
+
+        Unlike the strict ~/resume (leader must already sit within
+        resume_align_tol of the arm), resume_chase authorizes the arm to close a
+        larger — but HARD-CAPPED — gap by re-seeding into the bridge's EXISTING
+        seed branch: the next tick re-anchors the leader target onto the branch
+        nearest the arm's actual pose, seeds from that actual pose (zero jump),
+        restarts the soft-start ramp, and glides at <= (ramped) max_step_rad per
+        cycle. No new publishing path is introduced.
+
+        FAIL CLOSED: refused unless ALL of (a) fresh leader sample, (b) actual
+        pose known, (c) leader quasi-still, (d) every joint's circular gap within
+        resume_chase_max_gap. On any refusal the bridge stays PAUSED (publishes
+        nothing). The ONLY state mutation on acceptance is
+        _paused/_filtered/_last_published — the seed branch does the rest.
+        """
+        if not self._paused:
+            response.success = True
+            response.message = "Already following (was not paused)."
+            self.get_logger().info("Resume-chase requested but already following.")
+            return response
+
+        # (a) FRESH leader sample required (same check as ~/resume).
+        age = (
+            None if self._last_good_msg_time is None
+            else time.monotonic() - self._last_good_msg_time
+        )
+        if self._raw_target is None or age is None or age > self.staleness_timeout_s:
+            age_str = "n/a" if age is None else f"{age:.2f}s"
+            response.success = False
+            response.message = (
+                f"Resume-chase REFUSED — no fresh GELLO sample (age={age_str} > "
+                f"{self.staleness_timeout_s:.2f}s). Bridge stays PAUSED (holds "
+                "pose). Restore the leader stream, then try again."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # (b) arm pose must be known to measure the gap.
+        if self._actual_pose is None:
+            response.success = False
+            response.message = (
+                "Resume-chase REFUSED — robot actual pose unknown (no "
+                "/joint_states yet). Bridge stays PAUSED (holds pose)."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # (c) leader quasi-still (shared, fail-closed gate). Insufficient history
+        # => NOT still => refuse.
+        if not leader_quasi_still(
+            self._gello_history,
+            self.resume_chase_still_window_s,
+            self.resume_chase_still_speed,
+        ):
+            response.success = False
+            response.message = (
+                "Resume-chase REFUSED — leader is moving (or stillness not yet "
+                "established). Hold GELLO steady for ~0.5 s and try again. Bridge "
+                "stays PAUSED (holds pose)."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # (d) per-joint circular-gap hard cap.
+        gap = [
+            circular_dist(self._raw_target[i], self._actual_pose[i])
+            for i in range(len(UR_JOINT_ORDER))
+        ]
+        max_gap = max(gap)
+        if max_gap > self.resume_chase_max_gap:
+            worst = max(range(len(gap)), key=lambda i: gap[i])
+            per = ", ".join(
+                f"{UR_JOINT_SHORT[i]}={gap[i]:.3f}" for i in range(len(gap))
+            )
+            response.success = False
+            response.message = (
+                f"Resume-chase REFUSED — gap too large: max {max_gap:.3f} rad at "
+                f"{UR_JOINT_SHORT[worst]} > resume_chase_max_gap "
+                f"{self.resume_chase_max_gap:.3f} ({per}). Bridge stays PAUSED "
+                "(holds pose). Hold the GELLO leader closer to the frozen arm "
+                "pose, then try again."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        # ACCEPTED. Drop into the existing seed branch: the ONLY mutations are
+        # these three fields. Do NOT publish here, do NOT touch _seed_time,
+        # _unwrapped_target, _gated_target, or the 1-euro filters — the next
+        # _on_timer tick re-anchors, seeds from actual (zero jump), and soft-
+        # starts the slew-clamped glide.
+        self._paused = False
+        self._filtered = None
+        self._last_published = None
+        # Estimated glide time: gap closed at the sustained slew rate
+        # (max_step_rad * publish_rate_hz), plus the soft-start ease-in.
+        slew_rate = self.max_step_rad * self.publish_rate_hz
+        eta = (max_gap / slew_rate) if slew_rate > 0.0 else float("inf")
+        eta += self.soft_start_s
+        response.success = True
+        response.message = (
+            f"Resume-chase ACCEPTED — max gap {max_gap:.3f} rad <= "
+            f"{self.resume_chase_max_gap:.3f}; est. glide ~{eta:.1f}s. Arm will "
+            "GLIDE to the leader pose — keep clear and hold GELLO still until "
+            "FOLLOWING."
+        )
+        self.get_logger().warn(response.message)
+        return response
+
+    # ---------------------------------------------------------------------
+    def _on_state_timer(self) -> None:
+        """Publish the operator-UI status string at state_publish_rate_hz.
+
+        Precedence: PAUSED > WAITING(no target) > STALE > WAITING(unseeded) >
+        CHASING > FOLLOWING. Read-only: never mutates bridge state or publishes
+        commands.
+        """
+        if self._paused:
+            state = "PAUSED"
+        elif self._raw_target is None or self._last_good_msg_time is None:
+            state = "WAITING"
+        elif (time.monotonic() - self._last_good_msg_time) > self.staleness_timeout_s:
+            state = "STALE"
+        elif self._last_published is None:
+            state = "WAITING"
+        elif max(
+            circular_dist(self._last_published[i], self._raw_target[i])
+            for i in range(len(UR_JOINT_ORDER))
+        ) > self.state_chase_done_tol:
+            state = "CHASING"
+        else:
+            state = "FOLLOWING"
+        msg = String()
+        msg.data = state
+        self._state_pub.publish(msg)
 
     # ---------------------------------------------------------------------
     def _publish(self, positions: list[float]) -> None:

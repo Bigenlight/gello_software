@@ -28,6 +28,7 @@ from std_srvs.srv import Trigger
 # streaming bridge (pause/resume of following).
 TARGET = "gello_move_to_start"
 BRIDGE = "gello_ur_bridge"
+GRIPPER = "gello_gripper_bridge"
 
 MENU = """
 ========== GELLO ↔ UR7e 조작 콘솔 ==========
@@ -36,6 +37,9 @@ MENU = """
   3) 강제 진행   — 오차 감수하고 팔로잉 (핸드셰이크, 안전 한계 이내만)
   4) UR 홈으로   — 로봇을 init pose 로 다시 이동 (핸드셰이크)
   5) 차이 계산   — GELLO↔홈 관절별 오차만 보고 (핸드셰이크)
+  6) 재개(글라이드) — 팔로잉 재개, 팔이 GELLO 로 미끄러지듯 이동 (간격 제한/정지 게이트)
+  7) 그리퍼 일시정지 — 그리퍼 출력 정지 (Robotiq 현재 위치 유지)
+  8) 그리퍼 재개   — 실제 위치에서 시드→램프 (신선/실제위치 게이트, 실패시 정지 유지)
   q) 콘솔 종료 (로봇은 안 멈춤 — 급정지는 Ctrl-C / E-STOP)
 ============================================
 선택 > """
@@ -62,6 +66,20 @@ class OperatorConsole(Node):
             # Streaming-phase (bridge) pause/resume of following.
             "resume": self.create_client(Trigger, f"/{BRIDGE}/resume"),
             "pause": self.create_client(Trigger, f"/{BRIDGE}/pause"),
+            # Bridge resume-CHASE: gated glide across a bounded gap (fallback for
+            # when the strict ~/resume refuses a larger — but safe — offset).
+            "resume_chase": self.create_client(
+                Trigger, f"/{BRIDGE}/resume_chase"
+            ),
+            # Gripper bridge pause/resume (drop-hazard mitigation). Resume is
+            # fail-closed: refuses (staying paused & silent) on a stale leader or
+            # unknown actual position.
+            "gripper_pause": self.create_client(
+                Trigger, f"/{GRIPPER}/pause"
+            ),
+            "gripper_resume": self.create_client(
+                Trigger, f"/{GRIPPER}/resume"
+            ),
         }
 
     def call_first(self, names: list[str]) -> None:
@@ -138,8 +156,14 @@ def main(args=None) -> None:
                 node.call("go_home")
             elif choice == "5":
                 node.call("check_alignment")
+            elif choice == "6":
+                node.call("resume_chase")   # 재개(글라이드) — 간격 제한 게이트
+            elif choice == "7":
+                node.call("gripper_pause")  # 그리퍼 일시정지 (출력 정지)
+            elif choice == "8":
+                node.call("gripper_resume")  # 그리퍼 재개 (시드→램프, 실패시 정지)
             else:
-                print("1, 2, 3, 4, 5, q 중에서 입력하세요.")
+                print("1, 2, 3, 4, 5, 6, 7, 8, q 중에서 입력하세요.")
     except KeyboardInterrupt:
         pass
     finally:

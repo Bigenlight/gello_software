@@ -156,6 +156,24 @@ def _fmt_scalar(v):
 
 
 # --------------------------------------------------------------------------- #
+# Teleop control panel (added) -- state -> colour map
+# --------------------------------------------------------------------------- #
+# Covers both arm (PAUSED|WAITING|STALE|CHASING|FOLLOWING) and gripper
+# (PAUSED|WAITING|RAMPING|FOLLOWING) vocabularies. Anything unknown/None -> gray.
+_TELEOP_STATE_COLORS = {
+    "PAUSED": "#cc3333",     # red
+    "STALE": "#cc3333",      # red
+    "CHASING": "#dd8800",    # orange
+    "RAMPING": "#dd8800",    # orange
+    "FOLLOWING": "#22aa22",  # green
+    "WAITING": "#888888",    # gray
+}
+_TELEOP_GRAY = "#888888"
+# A state-topic reading older than this many seconds is treated as unknown.
+_TELEOP_STATE_STALE_S = 2.0
+
+
+# --------------------------------------------------------------------------- #
 # Main window
 # --------------------------------------------------------------------------- #
 
@@ -170,6 +188,11 @@ class MainWindow(QMainWindow):
         self._cameras_killed = False
 
         self._record_start_wall = None  # time.monotonic() at Start, for elapsed
+
+        # --- Teleop control panel state (added block) --------------------- #
+        # Two-click resume confirm gate + last statusBar-shown teleop message.
+        self._teleop_resume_armed = False
+        self._teleop_last_shown_msg = None
 
         self.setWindowTitle("GELLO -> UR7e Recorder")
         self._build_ui()
@@ -209,6 +232,9 @@ class MainWindow(QMainWindow):
         top.addWidget(cams_box, stretch=3)
 
         top.addWidget(self._build_state_panel(), stretch=1)
+
+        # --- Teleop control bar (added) -- directly above record controls -- #
+        root.addLayout(self._build_teleop_bar())
 
         # --- Bottom: record control bar ----------------------------------- #
         root.addLayout(self._build_control_bar())
@@ -253,6 +279,41 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return box
+
+    def _build_teleop_bar(self):
+        """Teleop pause/resume bar (added block).
+
+        Lets a solo operator pause the leader->robot signal path (single click)
+        and resume it (two-click confirm, because resume initiates physical
+        robot motion). State labels reflect the two bridge /state topics. All
+        wiring is non-blocking: buttons call the node's call_async helpers and
+        a QTimer polls get_teleop_status().
+        """
+        bar = QHBoxLayout()
+
+        title = QLabel("Teleop:")
+        title.setStyleSheet("font-weight: bold;")
+
+        self._teleop_arm_label = QLabel("arm: --")
+        self._teleop_arm_label.setMinimumWidth(150)
+        self._teleop_grip_label = QLabel("gripper: --")
+        self._teleop_grip_label.setMinimumWidth(150)
+
+        self._teleop_pause_button = QPushButton("Pause Teleop")
+        self._teleop_pause_button.clicked.connect(self._on_teleop_pause_clicked)
+
+        self._teleop_resume_button = QPushButton("Resume Teleop")
+        self._teleop_resume_button.clicked.connect(self._on_teleop_resume_clicked)
+        self._teleop_resume_button.setEnabled(False)
+
+        bar.addWidget(title)
+        bar.addSpacing(8)
+        bar.addWidget(self._teleop_arm_label)
+        bar.addWidget(self._teleop_grip_label)
+        bar.addStretch(1)
+        bar.addWidget(self._teleop_pause_button)
+        bar.addWidget(self._teleop_resume_button)
+        return bar
 
     def _build_control_bar(self):
         bar = QHBoxLayout()
@@ -383,6 +444,103 @@ class MainWindow(QMainWindow):
             self._take_label.setText("Take: {} (recording)".format(take_n))
         else:
             self._take_label.setText("Take: {}".format(take_n))
+
+        # Teleop panel shares this ~5 Hz timer (added block).
+        self._refresh_teleop()
+
+    # ---------------------------------------------------- teleop (added) --
+    def _refresh_teleop(self):
+        """~5 Hz: drive teleop state labels + pause/resume button enablement."""
+        st = self._node.get_teleop_status()
+        arm_state = st["arm_state"]
+        arm_age = st["arm_state_age_s"]
+        pending = st["pending"]
+
+        # Treat a missing or stale state-topic reading as unknown (gray).
+        arm_live = (
+            arm_state is not None
+            and arm_age is not None
+            and arm_age < _TELEOP_STATE_STALE_S
+        )
+        self._apply_teleop_label(
+            self._teleop_arm_label, "arm",
+            arm_state if arm_live else None,
+        )
+
+        # Gripper may be entirely absent (sim) -> gray 'gripper: n/a'.
+        if not st["grip_available"]:
+            self._teleop_grip_label.setText("gripper: n/a")
+            self._teleop_grip_label.setStyleSheet(
+                "color: {}; font-weight: bold;".format(_TELEOP_GRAY))
+        else:
+            self._apply_teleop_label(
+                self._teleop_grip_label, "gripper", st["grip_state"])
+
+        # Button enablement. Pause is always available (unconditional service)
+        # except while a request is in flight. Resume only when the ARM reports
+        # PAUSED and nothing is pending. While the two-click confirm is armed we
+        # keep the resume button enabled so the confirming click lands.
+        self._teleop_pause_button.setEnabled(not pending)
+        if self._teleop_resume_armed:
+            self._teleop_resume_button.setEnabled(True)
+        else:
+            self._teleop_resume_button.setEnabled(
+                arm_live and arm_state == "PAUSED" and not pending)
+
+        # Surface the latest service reply (incl. a benign refusal) once.
+        last_msg = st["last_msg"]
+        if last_msg and last_msg != self._teleop_last_shown_msg:
+            self._teleop_last_shown_msg = last_msg
+            self.statusBar().showMessage("Teleop: {}".format(last_msg), 6000)
+
+    def _apply_teleop_label(self, label, prefix, state):
+        if not state:
+            label.setText("{}: --".format(prefix))
+            label.setStyleSheet(
+                "color: {}; font-weight: bold;".format(_TELEOP_GRAY))
+            return
+        color = _TELEOP_STATE_COLORS.get(state, _TELEOP_GRAY)
+        label.setText("{}: {}".format(prefix, state))
+        label.setStyleSheet("color: {}; font-weight: bold;".format(color))
+
+    def _on_teleop_pause_clicked(self):
+        # Single click: pause is unconditional. Non-blocking call_async in node.
+        fired = self._node.request_teleop_pause()
+        if fired:
+            self.statusBar().showMessage("Teleop: pause requested.", 3000)
+        else:
+            self.statusBar().showMessage(
+                "Teleop: pause not sent (request in flight or service down).",
+                3000)
+
+    def _on_teleop_resume_clicked(self):
+        # Two-click confirm (no modal dialogs in this codebase): the first click
+        # arms an orange 'Confirm' button that reverts after 3 s; the second
+        # click within that window actually requests resume (robot WILL move).
+        if not self._teleop_resume_armed:
+            self._teleop_resume_armed = True
+            self._teleop_resume_button.setText("Confirm Resume (robot will move!)")
+            self._teleop_resume_button.setStyleSheet(
+                "background-color: #dd8800; color: white; font-weight: bold;")
+            QTimer.singleShot(3000, self._disarm_teleop_resume)
+            self.statusBar().showMessage(
+                "Click 'Confirm Resume' within 3 s -- the robot WILL move.", 3000)
+            return
+        self._disarm_teleop_resume()
+        fired = self._node.request_teleop_resume()
+        if fired:
+            self.statusBar().showMessage("Teleop: resume requested...", 3000)
+        else:
+            self.statusBar().showMessage(
+                "Teleop: resume not sent (request in flight or service down).",
+                3000)
+
+    def _disarm_teleop_resume(self):
+        # Revert the confirm button to its resting look; the ~5 Hz refresh
+        # re-drives its enabled state on the next tick.
+        self._teleop_resume_armed = False
+        self._teleop_resume_button.setText("Resume Teleop")
+        self._teleop_resume_button.setStyleSheet("")
 
     # ------------------------------------------------------------- actions --
     def _on_start_clicked(self):

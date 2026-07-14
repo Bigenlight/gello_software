@@ -39,3 +39,57 @@ def wrapped_nearest(target: list[float], reference: list[float]) -> list[float]:
         reference[i] + wrap_to_pi(target[i] - reference[i])
         for i in range(len(target))
     ]
+
+
+def leader_quasi_still(history, window_s: float, max_speed: float) -> bool:
+    """SAFETY-CRITICAL gate: True only if the leader is demonstrably quasi-still.
+
+    ``history`` is an ordered sequence (OLDEST-FIRST) of
+    ``(monotonic_ts: float, pose: list[float])`` tuples — the recent samples of
+    the GELLO leader. The gate returns True only when the leader's per-joint
+    angular speed, measured over roughly the last ``window_s`` seconds, is
+    <= ``max_speed`` (rad/s) on EVERY joint.
+
+    CONSERVATIVE-DEFAULT CONTRACT (safety-critical — do not weaken)
+    --------------------------------------------------------------
+    This gate authorizes physical robot motion (a resume/catch-up), so it MUST
+    fail closed: whenever the evidence is insufficient to POSITIVELY demonstrate
+    stillness it returns ``False`` ("not known to be still"), never True. In
+    particular it returns False when:
+
+      * there are fewer than 2 samples; or
+      * the samples inside the window span less than half of ``window_s``
+        (a sparse or just-started stream — too little temporal coverage to
+        trust a speed estimate).
+
+    Stillness must be positively demonstrated by real, time-spanning data; a
+    frozen or dead stream can therefore never falsely gate as "still".
+
+    Branch-cut aware: per-joint displacement uses ``circular_dist`` so a joint
+    dithering across the +/-pi cut is not read as a spurious ~2*pi excursion.
+
+    Does NOT assume 6 joints — it iterates over ``len(newest_pose)``.
+    """
+    # (1) Need at least two samples to measure any displacement over time.
+    if len(history) < 2:
+        return False
+    # (2) Newest sample is the last (oldest-first ordering).
+    newest_t, newest_pose = history[-1]
+    # (3) Scan oldest-first for the FIRST entry still inside the window.
+    oldest_t, oldest_pose = newest_t, newest_pose
+    cutoff = newest_t - window_s
+    for ts, pose in history:
+        if ts >= cutoff:
+            oldest_t, oldest_pose = ts, pose
+            break
+    # (4) Reject insufficient temporal coverage (span guard).
+    span = newest_t - oldest_t
+    if span < window_s * 0.5:
+        return False
+    # (5) Per-joint circular speed; take the worst joint.
+    speed = max(
+        circular_dist(newest_pose[i], oldest_pose[i]) / span
+        for i in range(len(newest_pose))
+    )
+    # (6) Still only if the worst joint is at or below the speed threshold.
+    return speed <= max_speed

@@ -91,7 +91,11 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from ur_gello_bringup.angle_utils import circular_dist, wrapped_nearest
+from ur_gello_bringup.angle_utils import (
+    circular_dist,
+    leader_quasi_still,
+    wrapped_nearest,
+)
 
 # UR command joint order (identical ur5e & ur7e). Reorder GELLO BY NAME to this.
 UR_JOINT_ORDER = [
@@ -405,30 +409,11 @@ class GelloMoveToStart(Node):
         A sparse/just-started stream can therefore NEVER falsely gate as still;
         stillness must be positively demonstrated by real, time-spanning data.
         """
-        if len(self._gello_history) < 2:
-            return False
-        newest_t, newest_pose = self._gello_history[-1]
-        # Oldest sample still inside the window. The deque is time-ordered, so the
-        # first entry from the front satisfying t >= newest_t - window is the
-        # oldest-in-window.
-        oldest_t, oldest_pose = newest_t, newest_pose
-        cutoff = newest_t - self.chase_still_window_s
-        for ts, pose in self._gello_history:
-            if ts >= cutoff:
-                oldest_t, oldest_pose = ts, pose
-                break
-        span = newest_t - oldest_t
-        # Not enough temporal coverage yet (stream may have gaps or just started).
-        if span < self.chase_still_window_s * 0.5:
-            return False
-        # Circular distance: a joint whose neutral sits near +/-pi can otherwise
-        # dither across the branch cut between two samples and read a spurious
-        # ~2*pi/span "speed", falsely gating the leader as "still moving".
-        speed = max(
-            circular_dist(newest_pose[i], oldest_pose[i]) / span
-            for i in range(len(UR_JOINT_ORDER))
+        return leader_quasi_still(
+            self._gello_history,
+            self.chase_still_window_s,
+            self.chase_still_speed,
         )
-        return speed <= self.chase_still_speed
 
     # ---------------------------------------------------------------------
     def _wait_for_gello_target(self) -> bool:

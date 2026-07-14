@@ -91,6 +91,25 @@ gello_ur_bridge:
     # resume REFUSED and teleop won't start without manual recovery. 0.08 > 0.06.
     # Raise together with chase_tol if you retune.
     resume_align_tol: 0.08
+    # RESUME-CHASE (additive ~/resume_chase service). Unlike the strict ~/resume,
+    # this authorizes a rate-limited GLIDE across a larger — but bounded — gap
+    # while the leader is quasi-still. It drops into the SAME jump-free +
+    # soft-started + slew-clamped seed branch (no new publishing path).
+    # Per-joint circular-gap HARD CAP (rad): above this the service REFUSES and
+    # the bridge stays PAUSED. 1.5 rad worst-case glide ~2.4s + 0.7s ease-in.
+    resume_chase_max_gap: 1.5
+    # Leader quasi-still speed threshold (rad/s): the worst-joint leader speed
+    # over resume_chase_still_window_s must be <= this for the chase to be armed.
+    resume_chase_still_speed: 0.10
+    # Window (s) over which the quasi-still speed is measured (fail-closed:
+    # insufficient temporal coverage => NOT still => refuse).
+    resume_chase_still_window_s: 0.3
+    # Rate (Hz) of the ~/state operator-UI status publisher
+    # (PAUSED/WAITING/STALE/CHASING/FOLLOWING).
+    state_publish_rate_hz: 5.0
+    # Per-joint circular tolerance (rad) below which ~/state reports FOLLOWING
+    # instead of CHASING (i.e. the glide is considered done).
+    state_chase_done_tol: 0.10
     # 250 Hz upsamples the 30 Hz GELLO stream into the 500 Hz driver cleanly
     # (2:1) so at most one new setpoint lands per servo cycle nominally.
     publish_rate_hz: 250.0
@@ -218,3 +237,24 @@ gello_gripper_bridge:
     clamp_min: 0.0
     clamp_max: 1.0
     publish_rate_hz: 30.0    # informational; node publishes on receive (~30 Hz GELLO rate)
+    # --- PAUSE/RESUME (drop-hazard mitigation) ---------------------------------
+    # start_paused: false = normal standalone streaming as soon as seeded. Keep
+    # false here; a launch may override to true to pre-spawn the bridge HELD.
+    start_paused: false
+    # A leader gripper sample older than this (s) is STALE: ~/resume REFUSES on it
+    # (fail-closed) so a dead/frozen leader stream can never re-open the drop hazard.
+    staleness_timeout_s: 0.5
+    # Duration (s) of the slew-limited ramp after ~/resume. During it the output
+    # crawls from the gripper's ACTUAL position to the live leader value with the
+    # deadband bypassed, so there is never a jump on resume.
+    resume_ramp_s: 2.0
+    # Max output change per second (fraction of stroke) during the resume ramp.
+    # 0.6 => full 0..1 stroke in ~1.67s, so resume_ramp_s=2.0 always lets a static
+    # leader converge inside the window.
+    resume_slew_per_s: 0.6
+    # Rate (Hz) of the ~/state operator-UI status publisher
+    # (PAUSED/WAITING/RAMPING/FOLLOWING).
+    state_publish_rate_hz: 5.0
+    # Actual gripper position feedback topic (Robotiq modbus node, 0=open..1=closed);
+    # used to SEED ~/resume for a zero-jump first output.
+    actual_topic: "/robotiq_gripper/position_percent"

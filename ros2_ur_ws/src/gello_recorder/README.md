@@ -96,7 +96,26 @@ ros2 run gello_recorder gello_recorder_gui
 
 창을 닫으면 진행 중인 take 를 먼저 마무리 저장한 뒤 카메라 프로세스를 정리합니다. take 는 `<RECORDER_OUTPUT_ROOT>/take_<NN>_<YYYYmmdd_HHMMSS>/` 아래에 저장됩니다 (헤드리스의 `session_<stamp>/` 와 이름 규칙이 다름에 유의).
 
-### 5. Output Layout — 세션/테이크 폴더 안에 생기는 것
+#### 4-1. Teleop 바 — 텔레옵 일시정지 / 재개 (씬 리셋)
+
+GUI 창의 녹화 컨트롤 **바로 위**에는 **Teleop 바**가 있습니다. 혼자 작업하는 오퍼레이터가 **두 손을 자유롭게 하여 씬을 리셋**(물체 재배치, 지그 이동, 재-그립)할 수 있도록, 리더→로봇 신호 경로를 일시정지/재개하는 조작 패널입니다. 이 블록은 그 외에는 100% read-only 인 이 패키지에서 **유일한 제어(control-path) 코드**이며, 로봇을 직접 명령하지 않고 두 브릿지의 `std_srvs/Trigger` 서비스만 호출합니다(호출은 전부 non-blocking `call_async` + done-callback — Qt 스레드에서 절대 spin/블록하지 않음).
+
+구성 요소:
+
+- **상태 라벨 2개** — `arm:` 와 `gripper:`. 각 브릿지의 `/state` 토픽(5 Hz)을 반영해 색으로 표시합니다: `PAUSED`/`STALE` = 빨강, `CHASING`/`RAMPING` = 주황, `FOLLOWING` = 초록, `WAITING`/미상 = 회색. state 토픽이 2초 넘게 갱신 안 되면 미상(회색) 처리.
+  - 팔 상태 어휘: `PAUSED` · `WAITING` · `STALE` · `CHASING` · `FOLLOWING`.
+  - 그리퍼 상태 어휘: `PAUSED` · `WAITING` · `RAMPING` · `FOLLOWING`.
+  - **`gripper: n/a`** 로 보이면 그리퍼 브릿지/state가 아직 없다는 뜻입니다. 정상일 수 있음 — 그리퍼 브릿지는 **핸드셰이크 완료 후에 기동**하므로, 팔 텔레옵이 스트리밍을 시작한 뒤 채워집니다.
+- **Pause Teleop 버튼** — **한 번 클릭**. pause는 무조건(unconditional) 서비스라 항상 성공하며, 팔과 그리퍼 브릿지를 함께 정지시킵니다. 로봇은 마지막 자세를 홀드.
+- **Resume Teleop 버튼** — 실 로봇을 움직이므로 **두 번 클릭 확인**입니다. 첫 클릭에서 버튼이 주황색 *"Confirm Resume (robot will move!)"* 로 바뀌고, **3초 안에** 다시 누르면 실제 재개 요청이 나갑니다(시간 초과 시 원상복귀). 이 버튼은 팔이 `PAUSED` 를 보고할 때만 활성화됩니다. 재개는 팔의 `/gello_ur_bridge/resume_chase` 와 그리퍼의 `/gello_gripper_bridge/resume` 를 함께 호출합니다.
+
+**거부(refusal)는 에러가 아닙니다.** 재개는 게이팅되어 있어 `success=false` 로 정당하게 거부될 수 있으며(예: 리더가 안 멈춤, gap이 너무 큼), 그때 로봇은 **움직이지 않고 브릿지는 PAUSED로 유지**됩니다. 거부 사유는 상태바에 ~6초간 표시되니, 읽고 그 한 가지(리더를 가만히 / 더 가깝게 등)를 고친 뒤 다시 재개하세요.
+
+> 안전 게이트(fresh 리더, quasi-still, 관절별 gap ≤ 1.5 rad), zero-jump 재시딩, 소프트스타트 글라이드, 그리고 각 거부 메시지의 정확한 의미는 `ur_gello_bringup` 의 **README "Pause / Resume (scene reset with both hands free)"** 절과 `docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md` §6 에 정리되어 있습니다. Teleop 바는 그 브릿지 서비스들의 GUI 프런트엔드일 뿐입니다.
+
+---
+
+## 5. Output Layout — 세션/테이크 폴더 안에 생기는 것
 
 ```
 session_<YYYYmmdd_HHMMSS>/       (GUI는 take_<NN>_<YYYYmmdd_HHMMSS>/)

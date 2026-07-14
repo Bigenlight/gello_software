@@ -43,6 +43,7 @@ ros2 param get /robot_state_publisher robot_description | grep -o ur7e   # ur7e
 - [3. 빌드 & 실행 (이 PC — fake/mock 경로, 검증됨)](#3-빌드--실행-이-pc--fakemock-경로-검증됨)
 - [4. 설정 파일 레퍼런스 — `config/ur7e_gello.yaml`](#4-설정-파일-레퍼런스--configur7e_gelloyaml)
 - [5. 트러블슈팅](#5-트러블슈팅)
+- [6. 일시정지·재개 (두 손 자유 씬 리셋)](#6-일시정지재개-두-손-자유-씬-리셋)
 
 ---
 
@@ -410,6 +411,101 @@ mock 경로(`ur7e_gello_rviz.launch.py`)는 이 노드를 **쓰지 않습니다*
 ---
 
 **안전 재확인**: 위 어떤 트러블슈팅 단계를 수행하더라도 GELLO는 **항상 passive read-only** 입력 장치다. Dynamixel 드라이버는 토크를 OFF로 초기화하고 관절 각도를 읽기만 하며, 이 브링업의 어떤 노드도 GELLO 모터에 토크 명령을 보내지 않는다.
+
+---
+
+## 6. 일시정지·재개 (두 손 자유 씬 리셋)
+
+텔레옵 중에 물체를 제자리에 놓거나 지그를 옮기는 등 **씬을 리셋하려면 리더암에서 손을 떼야** 합니다. 그런데 GELLO 리더는 **수동(passive)** 이라 손을 놓으면 중력에 처지고, 그 처지는 관절값이 그대로 로봇으로 흘러 들어갑니다(실기에서는 스냅/충돌 위험). 이 기능은 **리더→로봇 신호 경로를 확실히 끊는(pause)** 스위치와, 리셋 후 로봇을 **부드럽고 속도-제한된 글라이드로 되돌리는(resume)** 경로를 제공합니다.
+
+- **Pause** 는 무조건(unconditional) 스트리밍을 멈춥니다. 팔은 마지막 명령 자세를 유지하고(`forward_position_controller` 셋포인트 홀드), Robotiq 그리퍼는 마지막 위치를 온보드로 유지합니다. **발행하지 않음이 안전 상태**이므로 pause는 게이팅/지연/거부되지 않습니다 — 한 번 클릭, 항상 성공.
+- **Resume** 는 **게이팅 + fail-closed** 입니다: 거부되거나 실패한 재개는 **일시정지 상태를 유지하고 아무것도 발행하지 않습니다.** 점프 없이 재시작 가능할 때만 진행하며, 첫 명령은 팔/그리퍼가 이미 있는 위치와 같습니다(zero-jump). 이후 속도-제한 글라이드로 gap을 닫습니다.
+
+이 기능은 mock 경로(`source:=fake`)에서도 서비스/토픽이 그대로 존재하므로 **이 PC에서 리허설 가능**합니다(§끝의 리허설 참고).
+
+### 오퍼레이터 워크플로우
+
+권장 UI는 `gello_recorder`의 **Teleop 바**입니다(`ros2 run gello_recorder gello_recorder_gui`, 녹화 컨트롤 바로 위). `arm:` / `gripper:` 상태 라벨과 **Pause Teleop** · **Resume Teleop** 버튼이 있습니다.
+
+1. **Pause** — **Pause Teleop** 클릭(한 번). 팔·그리퍼 브릿지 모두 정지, 라벨이 빨강(`PAUSED`).
+2. **씬 리셋** — 두 손을 자유롭게. 일시정지 중에는 리더가 처지든 옮겨지든 로봇에 아무것도 전달되지 않음.
+3. **리더 재정렬** — 리더를 로봇의 **멈춰 있는(frozen) 자세**에 대략 다시 맞추고 약 0.5초간 **가만히 유지**. (로봇은 움직이지 않았으므로, 로봇을 리더에 맞추는 게 아니라 리더를 로봇에 맞추는 것.)
+4. **Resume** — **Resume Teleop** 클릭. 실 로봇을 움직이므로 **두 번 클릭 확인**입니다: 버튼이 주황색 *"Confirm Resume (robot will move!)"* 로 바뀌고, **3초 안에** 다시 클릭해야 실제로 재개 요청이 나갑니다(시간 초과 시 원상복귀 — 다시 클릭해 재무장).
+5. 수락되면 팔은 실제 자세에서 재시딩(zero-jump)→소프트스타트→리더 자세로 **글라이드**(`CHASING`→`FOLLOWING`), 그리퍼는 실제 위치에서 ~2초 램프(`RAMPING`→`FOLLOWING`). 둘 다 `FOLLOWING` 이 될 때까지 로봇에서 물러서고 리더를 가만히 유지.
+
+**Resume Teleop** 버튼은 팔이 `PAUSED` 일 때만 활성화됩니다. 재개가 **거부**되면 로봇은 움직이지 않고 브릿지는 일시정지 상태로 남으며, 거부 사유가 상태바에 ~6초간 표시됩니다 — 읽고, 그 한 가지를 고친 뒤(§트러블슈팅 표), 다시 재개하세요.
+
+**터미널 대체 수단(GUI 없이):**
+
+```bash
+# Pause (무조건 — 항상 성공)
+ros2 service call /gello_ur_bridge/pause        std_srvs/srv/Trigger
+ros2 service call /gello_gripper_bridge/pause   std_srvs/srv/Trigger
+
+# ... 씬 리셋, 리더를 로봇 자세에 재정렬, 가만히 유지 ...
+
+# Resume (게이팅 — success/message 확인. 거부되면 PAUSED 유지)
+ros2 service call /gello_ur_bridge/resume_chase std_srvs/srv/Trigger
+ros2 service call /gello_gripper_bridge/resume  std_srvs/srv/Trigger
+
+# 실시간 상태
+ros2 topic echo /gello_ur_bridge/state
+ros2 topic echo /gello_gripper_bridge/state
+```
+
+> ⚠️ 수동 리셋에는 `/gello_ur_bridge/resume`(엄격 게이트)가 아니라 **`/gello_ur_bridge/resume_chase`** 를 쓰세요. 전자는 시작 핸드셰이크 전용이라 조금이라도 gap이 있으면 거부합니다. `success: false` 는 **에러가 아니라 거부** — 로봇은 안 움직였고 브릿지는 여전히 PAUSED입니다.
+
+### 서비스 · 토픽 · 상태 (contract)
+
+모든 서비스는 `std_srvs/srv/Trigger`, 모든 state 토픽은 `std_msgs/msg/String` 5 Hz. 노드: `gello_ur_bridge`, `gello_gripper_bridge`.
+
+| 이름 | 동작 |
+| --- | --- |
+| `/gello_ur_bridge/pause` | 무조건 정지. 팔 홀드. 항상 성공. |
+| `/gello_ur_bridge/resume` | **엄격** 게이트(`resume_align_tol` 이내). 시작 핸드셰이크 전용 — 수동 리셋엔 쓰지 말 것. |
+| `/gello_ur_bridge/resume_chase` | **수동 리셋용 재개.** 리더가 quasi-still일 때 bounded gap을 글라이드로 닫음. |
+| `/gello_ur_bridge/state` | `PAUSED` / `WAITING` / `STALE` / `CHASING` / `FOLLOWING` (이 우선순위). |
+| `/gello_gripper_bridge/pause` | 무조건 정지. Robotiq 온보드 홀드. 항상 성공. |
+| `/gello_gripper_bridge/resume` | 게이팅(fresh 리더 그리퍼 샘플 + 실제 그리퍼 위치 필요). 실제 위치에서 시딩 후 램프. |
+| `/gello_gripper_bridge/state` | `PAUSED` / `WAITING` / `RAMPING` / `FOLLOWING`. |
+
+### 안전 게이트와 이유
+
+`resume_chase` 는 **모두 만족할 때만** 수락(아니면 PAUSED 유지, 무발행):
+
+| 게이트 | 기본값 | 이유 |
+| --- | --- | --- |
+| (a) fresh 리더 샘플 | age ≤ `staleness_timeout_s`(0.5s) | 죽은/멈춘 리더 스트림이 모션을 승인하면 안 됨(크래시한 `gello_publisher`가 stale 타깃으로 재개하는 것 차단). |
+| (b) 로봇 실제 자세 인지 | `/joint_states` 수신 | gap 측정과 zero-jump 시딩 모두 실제 자세 필요. |
+| (c) 리더 quasi-still | 최악 관절 속도 ≤ `resume_chase_still_speed`(0.10 rad/s), `resume_chase_still_window_s`(0.3s) 창 | 움직이는 리더로 재개하면 로봇이 움직이는 타깃을 추격. **fail-closed:** 샘플/시간 커버리지 부족 = *not still* → 거부. 리더를 ~0.5초 가만히. |
+| (d) 관절별 gap ≤ 상한 | `resume_chase_max_gap`(1.5 rad) | 글라이드를 유계화. 1.5 rad ≈ 글라이드 ~2.4s + 이즈인 0.7s. 더 큰 오정렬은 거부 → 로봇의 긴 자율 스윕 방지. 리더를 더 가깝게. |
+
+수락 시 상태 변경은 브릿지의 **기존 seed 브랜치**로 떨어뜨리는 것뿐입니다: 다음 250 Hz tick이 리더 타깃을 팔의 실제 자세에 가장 가까운 분기로 재앵커(`wrapped_nearest` — 항상 짧은 쪽, ~2π 스핀 없음)하고, 실제 자세에서 시딩(첫 명령 = 현재 팔 위치, zero-jump)하며, `soft_start_s`(0.7s) 램프를 재시작하고, 이후 사이클당 최대 `max_step_rad`(0.0025 rad @ 250 Hz = 지속 0.625 rad/s)로 슬루합니다. **새 발행 경로는 도입되지 않으며**, 시작 핸드셰이크·staleness 복구가 이미 쓰는 그 machinery입니다. 그리퍼 resume은 실제 위치에서 시딩(`invert`는 crush-hazard 방지로 `false` 유지) 후 `resume_ramp_s` 동안 리더로 슬루-제한(램프 중 deadband 우회)하여 점프 없음.
+
+### 트러블슈팅 (일시정지·재개)
+
+| 증상 | 원인 | 해결 |
+| --- | --- | --- |
+| resume 거부: `leader is moving (or stillness not yet established)` | 게이트 (c): 리더가 아직 quasi-still로 입증되지 않음(움직이거나 창이 덜 참). | GELLO를 ~0.5초 **가만히** 잡고 다시 재개. |
+| resume 거부: `gap too large: max … > resume_chase_max_gap 1.500` | 게이트 (d): 리더가 멈춰 있는 팔 자세에서 1.5 rad 넘게 벗어남(메시지가 최악 관절·관절별 gap 표기). | 리더를 로봇의 멈춘 자세에 **더 가깝게** 맞춘 뒤 재개. |
+| resume 거부: `no fresh GELLO sample (age=… > 0.50s)` / state가 `STALE` | 리더 스트림이 stale/dead. | `gello_publisher`(또는 `fake_gello`)가 살아 `/gello/joint_states`를 발행 중인지 확인(`ros2 topic hz /gello/joint_states`). |
+| resume 거부: `robot actual pose unknown (no /joint_states yet)` | 로봇 드라이버/`joint_state_broadcaster` 미기동. | `/joint_states` 복구를 기다림. |
+| GUI 그리퍼 라벨이 `gripper: n/a` | 그리퍼 브릿지/state가 아직 없음. | 정상일 수 있음 — 그리퍼 브릿지는 **핸드셰이크 완료 후에 기동**하므로, 팔 텔레옵이 스트리밍을 시작한 뒤 라벨이 채워짐. 팔 텔레옵을 먼저 붙일 것. |
+| Pause를 눌렀는데 팔이 계속 움직임 | 두 개의 `gello_ur_bridge`가 떠 있거나(고스트 노드), state를 잘못된 네임스페이스에서 봄. | `ros2 node list`로 중복 확인 후 정리(§5 트러블슈팅 표의 고스트/오번 노드 항목). `ros2 topic echo /gello_ur_bridge/state`가 `PAUSED`인지 확인. |
+| 그리퍼 resume 거부: `no actual gripper position` | `/robotiq_gripper/position_percent` 피드백이 없고 아직 아무것도 발행 안 됨. | Robotiq 노드가 떠서 position feedback을 발행하는지 확인. |
+
+### 리허설 (mock, 필수 주의)
+
+로봇 없이 pause/거부/글라이드 전체를 mock에서 리허설할 수 있습니다. 한 터미널에서 fake 스택을 띄우고(`ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake` 또는 `./run_ur7e_gello_sim.sh`), 다른 터미널에서:
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws
+./check_pause_resume_sim.sh
+```
+
+`fake_gello`의 `/fake_gello/hold` · `/fake_gello/sweep` · `/fake_gello/collapse` · `/fake_gello/set_pose` 를 구동해 pause, fail-closed 거부(움직이는 리더 / gap>1.5 rad), 그리고 수락된 ~0.8 rad 글라이드를 단계별 PASS/FAIL로 검증합니다.
+
+> ⚠️ **SIM PASS는 필요조건이지 충분조건이 아님.** mock 하드웨어는 속도 제한도 protective stop도 **강제하지 않습니다.** 속도-제한 및 부드러움 안전은 데이터 수집에 쓰기 전 **실 UR7e에서 사람이 반드시 재검증**해야 합니다.
 
 ---
 
