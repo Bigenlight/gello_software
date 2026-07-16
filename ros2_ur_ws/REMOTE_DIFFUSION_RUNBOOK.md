@@ -57,7 +57,14 @@ at approximately 9.8--10 Hz and reached
 `/forward_position_controller/commands`. The node timer remains 30 Hz; in gRPC
 EXECUTE it publishes only when a new inference result is ready, so the observed
 topic rate follows the remote request/response cadence rather than the timer.
-The controlled disconnect/timeout-to-FAULT test remains.
+The controlled SSH-tunnel disconnect test also passed: terminating only the
+runner-owned forwarding process closed the laptop loopback port, the next RPC
+failed with gRPC `UNAVAILABLE` (`Socket closed`), the leader entered FAULT and
+stopped publishing, and the bridge reported stale input about 0.703 seconds
+later. A 5-second `/gello/joint_states` rate check produced no samples and timed
+out with exit code 124. The forward-position controller remaining active is
+expected; the safety boundary is that no new commands are published after the
+leader and bridge fail silent.
 Do not treat a synthetic action as safe to publish to physical hardware.
 
 The no-device path uses
@@ -387,11 +394,17 @@ images because their policy output has no task meaning; they confirm the normal
 maximum-deviation safety path remains active. No `RESOURCE_EXHAUSTED`, stream
 collision, or FAULT recurred during this sustained run.
 
-Gate D still requires a controlled tunnel/server-disconnect transition to FAULT;
-do not mark that portion complete until its logs are recorded.
+Gate D is complete. In the controlled disconnect test, only the SSH process that
+owned `127.0.0.1:50051` was terminated. The listener disappeared, the active RPC
+failed with `StatusCode.UNAVAILABLE: Socket closed`, and the policy leader entered
+FAULT and stopped `/gello/joint_states`. The bridge detected stale input about
+0.703 seconds later and stopped publishing commands. A 5-second topic-rate probe
+received no leader samples and exited 124. `forward_position_controller` remained
+active, which is expected: controller lifecycle state is distinct from receiving
+fresh commands, and the verified fail-safe behavior is that the leader and bridge
+send no new commands.
 
-Only after fake-hardware ARMING, action receipt, and disconnect-to-FAULT pass
-should an operator plan
+Only after the now-complete fake-hardware gate should an operator plan
 a real-hardware test with the normal UR safety procedure, held start pose, clear
 workspace, pendant/e-stop access, and explicit `start_execution` service call.
 
@@ -501,7 +514,7 @@ Diffusion boundary.
 - [x] ROS fake-hardware bring-up, held-pose handshake, and bridge resume
 - [x] ROS fake-hardware HOLD-to-ARMING-to-EXECUTE transition
 - [x] Sustained fake-hardware EXECUTE and returned-action topic test
-- [ ] Disconnect/timeout-to-FAULT test under ROS
+- [x] SSH-tunnel disconnect-to-FAULT and bridge-staleness test under ROS
 - [ ] Operator-reviewed real-hardware test plan and execution
 
 When updating this document, record only commands and behavior confirmed by code

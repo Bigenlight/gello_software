@@ -120,8 +120,18 @@ shortest physically equivalent controller angle as designed. Synthetic black
 images repeatedly engaged the maximum-deviation clamp, which is expected and
 confirms the production safety path is still active. After draining every
 one-request response iterator to EOF, sustained execution showed no repeat of
-the server's single-stream `RESOURCE_EXHAUSTED` rejection or FAULT. A controlled
-disconnect-to-FAULT test remains before the fake-hardware gate is complete.
+the server's single-stream `RESOURCE_EXHAUSTED` rejection or FAULT.
+
+The controlled disconnect gate also passed. Only the runner-owned SSH forwarding
+process was terminated; the laptop loopback listener closed, the active RPC
+failed with gRPC `UNAVAILABLE` (`Socket closed`), and the policy leader entered
+FAULT and stopped its synthetic leader publication. The bridge observed stale
+input about 0.703 seconds later and stopped publishing commands. A 5-second
+`/gello/joint_states` rate probe received no samples and timed out. The forward
+position controller remaining active is expected and does not imply command
+flow: fail-safe control here is achieved by the leader and bridge going silent.
+This completes the no-device fake-hardware gate; physical hardware remains
+unverified.
 
 ## Implementation gates
 
