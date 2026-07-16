@@ -1,0 +1,42 @@
+services:
+  diffusion-server:
+    build:
+      # Compose resolves this relative to this file. Keep the build context at the
+      # gello_policy package so the large repository and checkpoints are excluded.
+      context: ../..
+      dockerfile: deploy/remote_diffusion/Dockerfile
+    image: gello-remote-diffusion:${IMAGE_TAG:-dev}
+    container_name: ${CONTAINER_NAME:-gello-remote-diffusion}
+    init: true
+    restart: unless-stopped
+    ports:
+      # Loopback-only by default: the laptop reaches it through an SSH tunnel.
+      # Set INFERENCE_BIND_IP only when a private firewall/VPN is in place.
+      - "${INFERENCE_BIND_IP:-127.0.0.1}:${INFERENCE_PORT:-50051}:50051"
+    environment:
+      CHECKPOINT_PATH: /models/checkpoint
+      MODEL_ID: ${MODEL_ID:-Bigenlight/diffusion_banana_in_pot_joint}
+      CHECKPOINT_REVISION: ${CHECKPOINT_REVISION:-unknown}
+      GRPC_BIND_ADDRESS: 0.0.0.0:50051
+      DIFFUSION_DEVICE: cuda
+      DIFFUSION_SCHEDULER: ${DIFFUSION_SCHEDULER:-DDIM}
+      DIFFUSION_NUM_INFERENCE_STEPS: ${DIFFUSION_NUM_INFERENCE_STEPS:-10}
+      DIFFUSION_N_ACTION_STEPS: ${DIFFUSION_N_ACTION_STEPS:-32}
+    volumes:
+      - "${CHECKPOINT_DIR:?Set CHECKPOINT_DIR to the pretrained_model directory}:/models/checkpoint:ro"
+    shm_size: "2gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Select a physical GPU on every run, e.g. GPU_DEVICE=3.
+              device_ids: ["${GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777

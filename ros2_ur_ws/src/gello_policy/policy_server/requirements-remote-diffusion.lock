@@ -1,0 +1,15 @@
+# Remote Diffusion container dependencies. PyTorch and torchvision are installed
+# separately from the official cu128 wheel index in the Dockerfile.
+lerobot==0.6.1
+numpy==2.2.6
+pillow==12.3.0
+diffusers==0.35.2
+opencv-python-headless==4.13.0.92
+h5py==3.16.0
+
+# Pinned together; grpcio-tools supplies protoc and its matching protobuf runtime
+# during the image build. The generated modules remain inside the image.
+grpcio==1.74.0
+grpcio-health-checking==1.74.0
+grpcio-tools==1.74.0
+protobuf==6.31.1
