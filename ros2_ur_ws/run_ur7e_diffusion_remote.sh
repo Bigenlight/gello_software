@@ -135,6 +135,11 @@ finally:
 print("### gRPC preflight PASS")
 PY
 
+if [ "${PREFLIGHT_ONLY:-0}" = "1" ]; then
+    echo "### PREFLIGHT_ONLY=1: tunnel/gRPC verified; skipping ROS launch."
+    exit 0
+fi
+
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 

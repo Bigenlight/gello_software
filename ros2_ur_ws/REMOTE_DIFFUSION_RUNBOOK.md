@@ -28,6 +28,13 @@ rm -rf .venv-remote-client
 ./setup_remote_client_venv.sh
 ```
 
+Verify only the SSH tunnel and gRPC handshake without starting ROS or touching the
+robot:
+
+```bash
+PREFLIGHT_ONLY=1 ./run_ur7e_diffusion_remote.sh
+```
+
 Common overrides:
 
 ```bash
