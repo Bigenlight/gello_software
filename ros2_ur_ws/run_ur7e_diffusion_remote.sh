@@ -70,7 +70,9 @@ TUNNEL_PID=$!
 
 # ExitOnForwardFailure covers bind/forward setup. Check both process liveness and
 # that the forwarded local socket accepts connections before touching ROS/robot.
-for _ in $(seq 1 20); do
+# Password-authenticated SSH may need operator input. Allow up to 60 seconds,
+# but continue immediately once the forwarded socket is ready.
+for _ in $(seq 1 120); do
     if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
         wait "$TUNNEL_PID" || true
         echo "ERROR: SSH tunnel exited during startup." >&2
@@ -89,7 +91,7 @@ PY
     then
         break
     fi
-    sleep 0.25
+    sleep 0.5
 done
 
 if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
