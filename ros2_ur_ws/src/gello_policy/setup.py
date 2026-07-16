@@ -29,6 +29,7 @@ setup(
     entry_points={
         'console_scripts': [
             'policy_leader_node = gello_policy.policy_leader_node:main',
+            'fake_diffusion_observations = gello_policy.fake_diffusion_observation_node:main',
         ],
     },
 )

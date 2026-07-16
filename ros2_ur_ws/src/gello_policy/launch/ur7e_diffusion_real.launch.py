@@ -7,8 +7,8 @@ r"""Bring up a REAL UR7e and drive it AUTONOMOUSLY from the trained Diffusion po
     #  THE DIFFUSION POLICY DRIVES THE ARM AUTONOMOUSLY.                       #
     #    This launch REPLACES the physical GELLO leader with policy_leader_node #
     #    (package gello_policy), a SYNTHETIC leader. Instead of reading a human #
-    #    GELLO arm it queries the py3.12 Diffusion inference server over        #
-    #    localhost ZMQ and publishes the policy's joint targets onto            #
+    #    GELLO arm it queries the Diffusion server over the configured ZMQ or   #
+    #    gRPC transport and publishes the policy's joint targets onto           #
     #    /gello/joint_states (+ the gripper). Everything downstream             #
     #    (gello_ur_bridge handshake, move-to-start, Robotiq Modbus) is          #
     #    UNCHANGED and unaware the leader is a policy, not a person.             #
@@ -30,13 +30,13 @@ r"""Bring up a REAL UR7e and drive it AUTONOMOUSLY from the trained Diffusion po
     #    leader RESETs the server and enters EXECUTE: each tick it queries the  #
     #    Diffusion server, SAFETY-CLAMPS the returned target (1.2x joint        #
     #    envelope, then per-joint max-deviation from the live pose) and         #
-    #    publishes it. On any ZMQ timeout / server error it FAULTS: it STOPS    #
-    #    publishing, so the bridge's staleness watchdog halts the arm           #
+    #    publishes it. On any transport timeout / server error it FAULTS: it    #
+    #    STOPS publishing, so the bridge's staleness watchdog halts the arm     #
     #    (fail-silent — never a stale held target through an outage). Recover   #
     #    with ~/start_execution again.                                          #
     #                                                                          #
-    #  Keep the teach-pendant E-STOP within reach at all times. Ctrl-C on the   #
-    #  run script tears down BOTH the Diffusion server and this launch cleanly. #
+    #  Keep the teach-pendant E-STOP within reach at all times. Ctrl-C stops    #
+    #  this launch and runner-owned SSH tunnel, not the GPU server container.   #
     ############################################################################
 
 Bring-up sequence (staggered TimerActions) — identical topology to
@@ -101,6 +101,7 @@ from launch.substitutions import (
     PythonExpression,
 )
 from launch_ros.actions import Node
+from launch.conditions import IfCondition, UnlessCondition
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
@@ -139,6 +140,15 @@ def generate_launch_description():
                 "FAULTs on missing observations (obs-freshness watchdog) instead "
                 "of moving, because the skipped gripper leaves "
                 "/robotiq_gripper/position_percent unpublished."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "fake_observations",
+            default_value="false",
+            description=(
+                "Publish deterministic black camera JPEGs and fixed gripper feedback "
+                "for a no-device integration test. Effective only together with "
+                "use_fake_hardware:=true; never enable on a physical robot."
             ),
         ),
         DeclareLaunchArgument(
@@ -260,6 +270,7 @@ def generate_launch_description():
     ur_type = LaunchConfiguration("ur_type")
     robot_ip = LaunchConfiguration("robot_ip")
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
+    fake_observations = LaunchConfiguration("fake_observations")
     headless_mode = LaunchConfiguration("headless_mode")
     launch_rviz = LaunchConfiguration("launch_rviz")
     kinematics_params_file = LaunchConfiguration("kinematics_params_file")
@@ -277,6 +288,24 @@ def generate_launch_description():
     #     arm stack unchanged (trajectory controller ACTIVE for the handshake;
     #     forward_position_controller INACTIVE; tool communication for the 2F-85).
     # ------------------------------------------------------------------ #
+    ur_launch_arguments = {
+        "ur_type": ur_type,
+        "robot_ip": robot_ip,
+        "use_mock_hardware": use_fake_hardware,
+        "use_fake_hardware": use_fake_hardware,
+        "launch_rviz": launch_rviz,
+        "headless_mode": PythonExpression(
+            ["'true' if '", use_fake_hardware, "' == 'true' else '", headless_mode, "'"]
+        ),
+        "initial_joint_controller": "scaled_joint_trajectory_controller",
+        "activate_joint_controller": "true",
+        "kinematics_params_file": kinematics_params_file,
+        "use_tool_communication": PythonExpression(
+            ["'false' if '", use_fake_hardware, "' == 'true' else 'true'"]
+        ),
+        "tool_voltage": "24",
+        "tool_device_name": "/tmp/ttyUR",
+    }
     ur_control_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -287,31 +316,17 @@ def generate_launch_description():
                 ]
             )
         ),
-        launch_arguments={
-            "ur_type": ur_type,
-            "robot_ip": robot_ip,
-            "use_mock_hardware": use_fake_hardware,
-            "use_fake_hardware": use_fake_hardware,
-            "launch_rviz": launch_rviz,
-            # Force headless_mode true under fake hardware (mock HW has no pendant /
-            # External Control Play); otherwise pass the user's value through.
-            "headless_mode": PythonExpression(
-                ["'true' if '", use_fake_hardware, "' == 'true' else '", headless_mode, "'"]
-            ),
-            # Bring up on the trajectory controller (ACTIVE) so the handshake can
-            # command a smooth catch-up; forward_position_controller INACTIVE.
-            "initial_joint_controller": "scaled_joint_trajectory_controller",
-            "activate_joint_controller": "true",
-            "kinematics_params_file": kinematics_params_file,
-            # Tool communication for the Robotiq 2F-85 gripper (driver owns the
-            # tool bus; the gripper node shares /tmp/ttyUR). Disabled under fake
-            # hardware (no real robot to power/forward the tool).
-            "use_tool_communication": PythonExpression(
-                ["'false' if '", use_fake_hardware, "' == 'true' else 'true'"]
-            ),
-            "tool_voltage": "24",
-            "tool_device_name": "/tmp/ttyUR",
-        }.items(),
+        launch_arguments=ur_launch_arguments.items(),
+        condition=UnlessCondition(use_fake_hardware),
+    )
+    ur_control_fake_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution(
+                [FindPackageShare("gello_policy"), "launch", "ur_control_fake_safe.launch.py"]
+            )
+        ),
+        launch_arguments=ur_launch_arguments.items(),
+        condition=IfCondition(use_fake_hardware),
     )
 
     # ------------------------------------------------------------------ #
@@ -343,6 +358,26 @@ def generate_launch_description():
             },
         ],
         output="screen",
+    )
+
+    # ros2_control fake hardware supplies /joint_states, but no cameras or
+    # Robotiq feedback. Supply only those missing observations when both fake
+    # switches are explicit; the physical-robot path is therefore unchanged.
+    fake_observation_node = Node(
+        package="gello_policy",
+        executable="fake_diffusion_observations",
+        output="screen",
+        condition=IfCondition(
+            PythonExpression(
+                [
+                    "'true' if ('",
+                    use_fake_hardware,
+                    "' == 'true' and '",
+                    fake_observations,
+                    "' == 'true') else 'false'",
+                ]
+            )
+        ),
     )
 
     # ------------------------------------------------------------------ #
@@ -398,8 +433,14 @@ def generate_launch_description():
     # ------------------------------------------------------------------ #
     provenance_banner = LogInfo(
         msg=[
-            "Diffusion deploy: policy_leader_node will query the Diffusion server at ",
-            act_host, ":", act_port,
+            "Diffusion deploy: policy_leader_node transport=", inference_transport,
+            " endpoint=", act_host, ":",
+            PythonExpression(
+                [
+                    "'", inference_transport, "' == 'grpc' and '", grpc_port,
+                    "' or '", act_port, "'",
+                ]
+            ),
             " | checkpoint (server-side): ", checkpoint_path,
             " | start_pose override (yaml is authoritative): ", start_pose,
         ]
@@ -407,7 +448,7 @@ def generate_launch_description():
 
     policy_leader_delayed = TimerAction(
         period=6.0,
-        actions=[policy_leader_node],
+        actions=[policy_leader_node, fake_observation_node],
     )
     bridge_paused_delayed = TimerAction(
         period=6.0,
@@ -435,7 +476,9 @@ def generate_launch_description():
                             "parked on the held start pose. NOTE: autonomous "
                             "Diffusion execution additionally requires the two "
                             "RealSense cameras running AND the gripper position "
-                            "topic faked (the gripper node was skipped, so "
+                            "topic faked, unless fake_observations:=true was "
+                            "explicitly selected for this no-device test (the "
+                            "gripper node was skipped, so "
                             "/robotiq_gripper/position_percent has no publisher), "
                             "e.g.:  ros2 topic pub /robotiq_gripper/position_percent "
                             "std_msgs/Float32 \"{data: 0.0}\" -r 10 . Without those, "
@@ -484,6 +527,7 @@ def generate_launch_description():
         + [
             provenance_banner,
             ur_control_launch,
+            ur_control_fake_launch,
             policy_leader_delayed,
             bridge_paused_delayed,
             move_to_start_delayed,

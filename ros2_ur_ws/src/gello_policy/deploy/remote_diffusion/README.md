@@ -5,9 +5,9 @@ robot drivers, safety clamps, and controller watchdogs remain on the robot lapto
 
 ## Server assumptions
 
-The initial target is `kanu` (`x86_64`, Ubuntu 24.04, eight RTX A4000 GPUs,
-NVIDIA driver 550.144.03, Docker 27, Compose 2.32, NVIDIA Container Toolkit
-1.17.3). The host driver must not be upgraded for this project.
+The validated server class is `x86_64`, Ubuntu 24.04, eight RTX A4000 GPUs,
+NVIDIA driver 550.144.03, Docker 27, Compose 2.32, and NVIDIA Container Toolkit
+1.17.3. Do not upgrade a shared host driver for this project.
 
 The image deliberately tries the project's tested PyTorch cu128 build first. Driver
 550 advertises CUDA 12.4, so compatibility is **not assumed**: the CUDA smoke test
@@ -41,7 +41,7 @@ Keep every project-owned file below the dedicated workspace; the shared account'
 home directory must not be used as an unstructured project store:
 
 ```text
-/home/junhyeong/workspace/youngwoong/
+/path/to/server/project-workspace/
 ├── gello_software/   # repository checkout
 ├── models/           # downloaded checkpoints
 ├── logs/             # inference logs

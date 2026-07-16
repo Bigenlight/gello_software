@@ -33,10 +33,12 @@ policy leader clamps -> existing GELLO/UR safety stack -> physical robot
 
 ## Transport contract
 
-The canonical schema is `proto/remote_diffusion.proto`. Protocol v1 uses one
-persistent bidirectional gRPC stream with at most one request in flight. Images stay
-as the existing ROS `CompressedImage` JPEG payload; raw RGB or float tensors are not
-sent over the network.
+The canonical schema is `proto/remote_diffusion.proto`. Protocol v1 defines a
+bidirectional `StreamActions` RPC, but the current laptop worker opens one short-lived
+stream per request and permits at most one request in flight. Images stay as the
+existing ROS `CompressedImage` JPEG payload; raw RGB or float tensors are not sent
+over the network. See `ros2_ur_ws/REMOTE_DIFFUSION_RUNBOOK.md` for the verified
+deployment state and operating procedure.
 
 Each request carries a monotonically increasing request ID, session ID, laptop
 monotonic timestamp, camera ROS timestamps, state, and both JPEGs. A reply is usable
@@ -74,6 +76,36 @@ when protected by a firewall/VPN.
 The native laptop ROS stack remains outside Docker so USB cameras, robot networking,
 ROS controller lifecycle, RViz, and the existing safety behavior do not acquire a new
 container/device/network failure boundary.
+
+## No-device integration boundary
+
+For no-device ROS integration, `use_fake_hardware:=true` selects a local wrapper
+around the installed Humble UR launch. That installed launch creates
+`urscript_interface` even in fake mode; the wrapper removes only this
+real-robot-only action so it cannot retry `robot_ip:30002`. With fake hardware
+disabled, the project continues to include the official launch file directly.
+The wrapper uses the ROS 2 Humble launch API and handles both resolved strings
+and substitution objects when identifying the executable. It was checked
+against the installed package: it loads the official `ur_control.launch.py`,
+generates its description, retains ordinary launch actions, and removes only
+the node whose executable is `urscript_interface`.
+
+For the pre-hardware gate, `use_fake_hardware:=true` makes the UR driver provide
+mock arm state but does not provide camera or gripper observations. The optional
+`fake_diffusion_observations` node fills exactly those missing inputs with two
+synchronized black JPEG messages and a fixed gripper position. The launch permits
+that node to run only when `fake_observations:=true` is also explicit. It does not
+publish actions or replace the policy leader, bridge, controller, gRPC worker, or
+server, so the inference/control path under test remains the production path.
+
+Synthetic observations demonstrate transport and state-machine behavior, not task
+quality. They must never be enabled for physical-arm operation.
+
+The observed no-device launch has passed mock UR initialization, synthetic
+observation startup, held-pose move-to-start, strict controller handover, and
+bridge resume. It is intentionally still in the operator-gated HOLD state;
+ARMING/EXECUTE, ROS-path action receipt, and disconnect-to-FAULT remain to be
+observed before the fake-hardware gate is complete.
 
 ## Implementation gates
 

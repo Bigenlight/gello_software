@@ -151,8 +151,13 @@ if [ "${ROUNDTRIP_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
+# ROS Humble setup scripts may read optional variables before defining them.
+# Keep strict nounset checking for this runner, but disable it only while the
+# upstream/generated environment scripts are sourced.
+set +u
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
+set -u
 
 ARGS=(
     robot_ip:="$ROBOT_IP"
