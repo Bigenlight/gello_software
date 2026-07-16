@@ -68,6 +68,23 @@ class FakeStub:
         return iter((self.reply_transform(request),))
 
 
+class EofTrackingStub(FakeStub):
+    def __init__(self):
+        super().__init__()
+        self.response_stream_closed = threading.Event()
+
+    def StreamActions(self, requests, timeout):
+        request = next(requests)
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+
+        def responses():
+            yield self.reply_transform(request)
+            self.response_stream_closed.set()
+
+        return responses()
+
+
 def test_server_info_reset_and_action_round_trip():
     stub = FakeStub()
     worker = RemoteDiffusionWorker(stub, client_id="laptop", rpc_deadline_s=0.25)
@@ -84,6 +101,18 @@ def test_server_info_reset_and_action_round_trip():
     assert stub.requests[0].client_id == "laptop"
     assert stub.requests[0].session_id == "episode-1"
     assert stub.timeouts == [0.25]
+
+
+def test_one_request_stream_is_drained_to_eof_before_result_is_published():
+    stub = EofTrackingStub()
+    worker = RemoteDiffusionWorker(stub, client_id="laptop")
+    worker.reset_episode("episode-1")
+    worker.start()
+    worker.submit(_observation(1))
+    _wait_until(worker.has_result)
+    worker.close()
+
+    assert stub.response_stream_closed.is_set()
 
 
 def test_server_contract_is_strictly_checked():

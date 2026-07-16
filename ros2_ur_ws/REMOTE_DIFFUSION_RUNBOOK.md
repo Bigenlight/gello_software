@@ -49,8 +49,15 @@ result: PASS, one finite 7-D action
 
 This proves the remote inference boundary, not physical robot motion. The ROS
 fake-hardware launch has additionally reached the held start pose, completed its
-strict controller hand-off, and remained safely in operator-gated HOLD. ROS-path
-ARMING/EXECUTE, returned-action observation, and disconnect-to-FAULT remain.
+strict controller hand-off, entered ROS-path ARMING then EXECUTE, and sustained
+remote inference without recurrence of `RESOURCE_EXHAUSTED` or FAULT after the
+laptop worker was changed to close each one-request gRPC stream at EOF before
+opening the next. Returned 7-D actions were observed on `/gello/joint_states`
+at approximately 9.8--10 Hz and reached
+`/forward_position_controller/commands`. The node timer remains 30 Hz; in gRPC
+EXECUTE it publishes only when a new inference result is ready, so the observed
+topic rate follows the remote request/response cadence rather than the timer.
+The controlled disconnect/timeout-to-FAULT test remains.
 Do not treat a synthetic action as safe to publish to physical hardware.
 
 The no-device path uses
@@ -136,6 +143,14 @@ invalidates pending/late results. A network/server error clears the session and
 is surfaced to the policy leader; it is not converted to a held action or CPU
 fallback. Existing laptop-side joint limits, deviation clamps, bridge watchdog,
 controller, and operator execution gate remain in authority.
+
+UR joint positions are periodic. Before the start-pose gate, model observation,
+or action-deviation clamp uses live joint feedback, the laptop expresses each
+joint in the `2*pi`-equivalent branch nearest the configured `start_pose`. This
+keeps the state in the checkpoint's dataset convention and prevents a wrapped
+value such as wrist `+3.088` from appearing `6.283 rad` away from its equivalent
+dataset value `-3.195`. A real shortest-angle deviation still fails the gate or
+engages the configured clamp normally.
 
 ## 4. Server layout and configuration
 
@@ -337,10 +352,11 @@ gate:
 - the controller switched strictly from
   `scaled_joint_trajectory_controller` to `forward_position_controller`; and
 - `gello_ur_bridge` resumed after alignment and the handshake exited cleanly.
+- both synthetic camera topics were observed at approximately 10 Hz, gripper
+  feedback was `0.0`, and all six mock UR joint positions were present.
 
 No further output after that handshake is expected: the launch is intentionally
-waiting in `HOLD` for the operator's `~/start_execution` service call. This gate
-does **not** yet prove ROS-path GPU inference or action publication.
+waiting in `HOLD` for the operator's `~/start_execution` service call.
 
 After the move-to-start handshake succeeds and the bridge is resumed, use a
 second ROS-sourced terminal to confirm inputs before arming:
@@ -359,11 +375,20 @@ are suitable only for transport/state-machine validation; their resulting action
 has no task-performance meaning. Do not use `fake_observations:=true` with a
 physical robot.
 
-At the time of this update the helper node has passed package build, executable
-installation, JPEG decoding checks, and the full fake-hardware handshake through
-the explicit HOLD gate. Gate D still requires observed ARMING -> EXECUTE, action
-receipt on the ROS path, and a controlled tunnel/server-disconnect transition to
-FAULT; do not mark those complete until their logs are recorded.
+The helper node has passed package build, executable installation, JPEG decoding
+checks, and the full fake-hardware handshake through the explicit HOLD gate. The
+operator service call then completed ARMING -> EXECUTE, and returned actions were
+observed continuously on `/gello/joint_states` at about 9.8--10 Hz and on
+`/forward_position_controller/commands`. A target near `-4.12 rad` appeared at
+the controller as its shortest equivalent near `+2.06 rad`; this is the expected
+bridge handling across the +/-pi representation boundary, not a different
+physical target. Repeated `SAFETY CLAMP` warnings are expected for black synthetic
+images because their policy output has no task meaning; they confirm the normal
+maximum-deviation safety path remains active. No `RESOURCE_EXHAUSTED`, stream
+collision, or FAULT recurred during this sustained run.
+
+Gate D still requires a controlled tunnel/server-disconnect transition to FAULT;
+do not mark that portion complete until its logs are recorded.
 
 Only after fake-hardware ARMING, action receipt, and disconnect-to-FAULT pass
 should an operator plan
@@ -449,7 +474,7 @@ observation sizes before changing timing.
 
 ## 9. Git and ownership boundaries
 
-All work is isolated on `feat/remote-diffusion-inference`; modifying this branch
+All work is isolated on `feat/remote-diffusion-gpu-server`; modifying this branch
 does not modify `main` or another branch unless it is explicitly merged. Server
 copies have been transferred through Git bundles because the server checkout is
 separate. Before sending another bundle, compare commit IDs and include only the
@@ -474,7 +499,8 @@ Diffusion boundary.
 - [x] Laptop-to-server production-client synthetic inference
 - [x] Opt-in fake camera/gripper observation helper builds and installs
 - [x] ROS fake-hardware bring-up, held-pose handshake, and bridge resume
-- [ ] ROS fake-hardware ARMING/EXECUTE and returned-action topic test
+- [x] ROS fake-hardware HOLD-to-ARMING-to-EXECUTE transition
+- [x] Sustained fake-hardware EXECUTE and returned-action topic test
 - [ ] Disconnect/timeout-to-FAULT test under ROS
 - [ ] Operator-reviewed real-hardware test plan and execution
 

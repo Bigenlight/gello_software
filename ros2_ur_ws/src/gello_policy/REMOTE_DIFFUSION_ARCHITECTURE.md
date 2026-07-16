@@ -31,11 +31,19 @@ latest observation snapshot
 policy leader clamps -> existing GELLO/UR safety stack -> physical robot
 ```
 
+The UR driver may report a periodic joint on a different `2*pi` branch from the
+training dataset. The laptop maps live joint feedback to the equivalent angle
+nearest `start_pose` before the arming gate, model state construction, and
+action-deviation clamp. Published policy targets remain in the model/dataset
+convention; this conversion does not relax genuine shortest-angle deviations.
+
 ## Transport contract
 
 The canonical schema is `proto/remote_diffusion.proto`. Protocol v1 defines a
 bidirectional `StreamActions` RPC, but the current laptop worker opens one short-lived
-stream per request and permits at most one request in flight. Images stay as the
+stream per request and permits at most one request in flight. After receiving the
+single expected reply, it drains that stream to EOF before starting the next call;
+this releases the server's single-stream guard deterministically. Images stay as the
 existing ROS `CompressedImage` JPEG payload; raw RGB or float tensors are not sent
 over the network. See `ros2_ur_ws/REMOTE_DIFFUSION_RUNBOOK.md` for the verified
 deployment state and operating procedure.
@@ -102,10 +110,18 @@ Synthetic observations demonstrate transport and state-machine behavior, not tas
 quality. They must never be enabled for physical-arm operation.
 
 The observed no-device launch has passed mock UR initialization, synthetic
-observation startup, held-pose move-to-start, strict controller handover, and
-bridge resume. It is intentionally still in the operator-gated HOLD state;
-ARMING/EXECUTE, ROS-path action receipt, and disconnect-to-FAULT remain to be
-observed before the fake-hardware gate is complete.
+observation startup, held-pose move-to-start, strict controller handover, bridge
+resume, operator-gated ARMING, and EXECUTE. Returned actions were observed on
+`/gello/joint_states` at about 9.8--10 Hz and at the forward-position controller.
+Although the policy timer runs at 30 Hz, the gRPC path publishes only when its
+nonblocking worker has a new inference result, so action topic frequency follows
+the remote round-trip cadence. The bridge mapped a wrapped joint target to its
+shortest physically equivalent controller angle as designed. Synthetic black
+images repeatedly engaged the maximum-deviation clamp, which is expected and
+confirms the production safety path is still active. After draining every
+one-request response iterator to EOF, sustained execution showed no repeat of
+the server's single-stream `RESOURCE_EXHAUSTED` rejection or FAULT. A controlled
+disconnect-to-FAULT test remains before the fake-hardware gate is complete.
 
 ## Implementation gates
 

@@ -41,6 +41,7 @@ from std_srvs.srv import Trigger
 import zmq
 
 from gello_policy import obs_assembler
+from gello_policy.joint_angles import angular_deviations, positions_near_reference
 from gello_policy.obs_assembler import UR_JOINT_ORDER
 from gello_policy.remote_diffusion_client import (
     ImageSnapshot,
@@ -374,7 +375,10 @@ class PolicyLeaderNode(Node):
                 f"refused: observations missing/stale {stale} "
                 f"(are the RealSense cameras + gripper running?)."
             )
-        devs = [abs(self._live_q[i] - self._start_pose[i]) for i in range(_N)]
+        # UR joint-state publishers may wrap a joint at +/-pi.  Compare periodic
+        # equivalents so, for example, +3.088 and -3.195 are treated as the same
+        # physical wrist pose rather than as a spurious 2*pi deviation.
+        devs = angular_deviations(self._live_q, self._start_pose)
         worst = max(devs)
         if worst > START_GATE_RAD:
             j = devs.index(worst)
@@ -466,7 +470,10 @@ class PolicyLeaderNode(Node):
             self._enter_fault(f"observation missing/stale {stale} (>{self._obs_timeout_s}s)")
             return
 
-        live_q = list(self._live_q)  # snapshot (callbacks may update mid-tick)
+        # Keep observations in the checkpoint/dataset branch defined by start_pose.
+        # The same representation is used by the max-deviation clamp below, so a
+        # wrapped /joint_states sample cannot corrupt either inference or safety.
+        live_q = positions_near_reference(self._live_q, self._start_pose)
         state = live_q + [float(self._grip_pos)]
         if self._transport == "grpc":
             error = self._grpc_worker.error()

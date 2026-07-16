@@ -223,7 +223,16 @@ class RemoteDiffusionWorker:
                 replies = self._stub.StreamActions(
                     iter((request,)), timeout=self._rpc_deadline_s
                 )
-                reply = next(iter(replies))
+                # Each call intentionally carries exactly one request.  Drain the
+                # response iterator to EOF so gRPC closes the bidi stream before
+                # the worker starts the next call; taking only the first reply can
+                # leave the server's single-stream guard occupied briefly.
+                reply_batch = tuple(replies)
+                if len(reply_batch) != 1:
+                    raise RuntimeError(
+                        f"expected exactly one action reply, got {len(reply_batch)}"
+                    )
+                reply = reply_batch[0]
                 received_ns = self._clock_ns()
                 result = self._parse_reply(
                     reply, session_id, request_id, observation, received_ns
