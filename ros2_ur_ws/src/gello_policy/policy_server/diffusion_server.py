@@ -344,6 +344,10 @@ class DiffusionInferenceEngine:
         proc = self.preprocessor(obs)               # rename -> batch -> device -> normalize
         t_preprocessed = time.perf_counter()
         action = self.policy.select_action(proc)    # (1,7) normalized (modeling_diffusion.py)
+        if self.device == "cuda":
+            # CUDA launches asynchronously. Synchronize before recording inference_ms
+            # so refill latency is not incorrectly attributed to postprocessing.
+            torch.cuda.synchronize()
         t_inferred = time.perf_counter()
         if refill and self.ensemble_sampler is not None:
             # Two reference assignments only -- the actual snapshot + submit happen

@@ -52,13 +52,21 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
         self._lock = threading.Lock()
         self._active_client_id = ""
         self._active_session_id = ""
+        self._last_request_id = 0
+        self._stream_active = False
+        self._ready = True
 
     def Health(self, request, context):  # noqa: N802 - generated gRPC API
-        return pb.HealthReply(alive=True, ready=True, detail="model warm and ready")
+        with self._lock:
+            ready = self._ready
+        detail = "model warm and ready" if ready else "inference failed; restart required"
+        return pb.HealthReply(alive=True, ready=ready, detail=detail)
 
     def GetServerInfo(self, request, context):  # noqa: N802
+        with self._lock:
+            ready = self._ready
         return pb.ServerInfoReply(
-            ready=True,
+            ready=ready,
             protocol_version=PROTOCOL_VERSION,
             model_id=self._model_id,
             checkpoint_revision=self._checkpoint_revision,
@@ -76,25 +84,55 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
         if not request.client_id or not request.session_id:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "client_id and session_id are required")
         with self._lock:
+            if not self._ready:
+                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "server restart required")
+            if self._stream_active:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "cannot reset while an action stream is active",
+                )
             self._engine.reset()
             self._active_client_id = request.client_id
             self._active_session_id = request.session_id
+            self._last_request_id = 0
         return pb.ResetEpisodeReply(ok=True, detail="policy queues reset")
 
     def StreamActions(self, request_iterator, context):  # noqa: N802
-        for request in request_iterator:
-            try:
-                yield self._infer_one(request)
-            except ValueError as exc:
-                # Invalid observation data is a per-request failure, not a process
-                # crash. No action is included in a failed reply.
-                yield pb.ActionReply(
-                    protocol_version=PROTOCOL_VERSION,
-                    session_id=request.session_id,
-                    request_id=request.request_id,
-                    ok=False,
-                    error=str(exc),
-                )
+        with self._lock:
+            if not self._ready:
+                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "server restart required")
+            if self._stream_active:
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "another action stream is active")
+            self._stream_active = True
+        try:
+            for request in request_iterator:
+                try:
+                    yield self._infer_one(request)
+                except ValueError as exc:
+                    # Invalid observation data is a per-request failure and does
+                    # not consume an action or advance the request sequence.
+                    yield pb.ActionReply(
+                        protocol_version=PROTOCOL_VERSION,
+                        session_id=request.session_id,
+                        request_id=request.request_id,
+                        ok=False,
+                        error=str(exc),
+                    )
+                except Exception as exc:
+                    # The stateful policy queue may be partially changed after an
+                    # unexpected inference failure. Refuse all further work until
+                    # the process is restarted and warmed from a clean state.
+                    with self._lock:
+                        self._ready = False
+                        self._active_client_id = ""
+                        self._active_session_id = ""
+                    context.abort(
+                        grpc.StatusCode.INTERNAL,
+                        f"inference failed; server restart required: {type(exc).__name__}",
+                    )
+        finally:
+            with self._lock:
+                self._stream_active = False
 
     def _infer_one(self, request) -> pb.ActionReply:
         self._validate_request(request)
@@ -108,11 +146,16 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
                 or request.session_id != self._active_session_id
             ):
                 raise ValueError("session is not active; ResetEpisode must succeed first")
+            expected_request_id = self._last_request_id + 1
+            if request.request_id != expected_request_id:
+                raise ValueError(
+                    f"request_id must be {expected_request_id}, got {request.request_id}"
+                )
             action = self._engine.act(state, bytes(request.cam1.data), bytes(request.cam2.data))
             metadata = dict(self._engine.last_act_metadata)
-
-        if action.shape != (dimensions.ACTION_DIM,) or not np.all(np.isfinite(action)):
-            raise ValueError("policy returned an invalid action")
+            if action.shape != (dimensions.ACTION_DIM,) or not np.all(np.isfinite(action)):
+                raise RuntimeError("policy returned an invalid action")
+            self._last_request_id = request.request_id
 
         return pb.ActionReply(
             protocol_version=PROTOCOL_VERSION,

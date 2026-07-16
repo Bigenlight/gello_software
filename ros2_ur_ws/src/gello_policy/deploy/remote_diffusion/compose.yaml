@@ -8,7 +8,9 @@ services:
     image: gello-remote-diffusion:${IMAGE_TAG:-dev}
     container_name: ${CONTAINER_NAME:-gello-remote-diffusion}
     init: true
-    restart: unless-stopped
+    # Shared GPU host: never reclaim the previously selected GPU automatically
+    # after a daemon/host restart. An operator must inspect occupancy and start it.
+    restart: "no"
     ports:
       # Loopback-only by default: the laptop reaches it through an SSH tunnel.
       # Set INFERENCE_BIND_IP only when a private firewall/VPN is in place.
