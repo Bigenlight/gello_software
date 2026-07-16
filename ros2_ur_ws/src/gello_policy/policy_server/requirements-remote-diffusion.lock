@@ -5,6 +5,7 @@ pillow==12.3.0
 diffusers==0.35.2
 opencv-python-headless==4.13.0.92
 h5py==3.16.0
+pyzmq==27.1.0
 
 # Pinned together; grpcio-tools supplies protoc and its matching protobuf runtime
 # during the image build. The generated modules remain inside the image.
