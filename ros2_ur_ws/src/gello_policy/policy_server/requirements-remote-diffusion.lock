@@ -1,6 +1,5 @@
 # Remote Diffusion container dependencies. PyTorch and torchvision are installed
 # separately from the official cu128 wheel index in the Dockerfile.
-lerobot==0.6.1
 numpy==2.2.6
 pillow==12.3.0
 diffusers==0.35.2

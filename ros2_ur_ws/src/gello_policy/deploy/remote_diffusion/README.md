@@ -14,6 +14,10 @@ The image deliberately tries the project's tested PyTorch cu128 build first. Dri
 below is a mandatory gate. A failure must be reported; the service never silently
 falls back to CPU.
 
+LeRobot 0.6.1 is not published on PyPI. The image installs the experiment's exact
+upstream commit `8a74e0ac6d01706d67fddfed682a09d694d9c8c0` instead of substituting the
+incompatible PyPI 0.6.0 release.
+
 ## GPU selection
 
 Choose a physical GPU for every invocation. Check current occupancy first:

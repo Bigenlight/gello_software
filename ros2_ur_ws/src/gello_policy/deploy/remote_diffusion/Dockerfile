@@ -7,6 +7,7 @@ FROM python:3.12.10-slim-bookworm
 
 ARG TORCH_VERSION=2.11.0
 ARG TORCHVISION_VERSION=0.26.0
+ARG LEROBOT_COMMIT=8a74e0ac6d01706d67fddfed682a09d694d9c8c0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,7 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libglib2.0-0 libgl1 \
+    && apt-get install -y --no-install-recommends ca-certificates git libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -31,7 +32,9 @@ RUN python -m pip install --upgrade pip \
         --index-url https://download.pytorch.org/whl/cu128
 
 COPY policy_server/requirements-remote-diffusion.lock /tmp/requirements.lock
-RUN python -m pip install -r /tmp/requirements.lock
+RUN python -m pip install -r /tmp/requirements.lock \
+    && python -m pip install \
+      "git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
 
 COPY proto/ /app/proto/
 COPY policy_server/ /app/policy_server/
