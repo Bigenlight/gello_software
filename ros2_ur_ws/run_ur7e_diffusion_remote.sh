@@ -4,6 +4,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYSTEM_PYTHON="${SYSTEM_PYTHON:-/usr/bin/python3}"
+REMOTE_CLIENT_VENV="${REMOTE_CLIENT_VENV:-${SCRIPT_DIR}/.venv-remote-client}"
 SSH_HOST="${SSH_HOST:-kanu}"
 LOCAL_GRPC_PORT="${LOCAL_GRPC_PORT:-50051}"
 REMOTE_GRPC_PORT="${REMOTE_GRPC_PORT:-50051}"
@@ -11,6 +13,19 @@ ROBOT_IP="${ROBOT_IP:-192.168.10.11}"
 HEADLESS="${HEADLESS:-}"
 CALIB="${CALIB:-}"
 START_MODE="${START_MODE:-gello}"
+
+if [ ! -x "${REMOTE_CLIENT_VENV}/bin/python" ]; then
+    echo "ERROR: remote-client environment is missing: ${REMOTE_CLIENT_VENV}" >&2
+    echo "Run ${SCRIPT_DIR}/setup_remote_client_venv.sh first." >&2
+    exit 1
+fi
+if [ ! -x "$SYSTEM_PYTHON" ]; then
+    echo "ERROR: system Python is not executable: ${SYSTEM_PYTHON}" >&2
+    exit 1
+fi
+
+REMOTE_CLIENT_SITE="$(${REMOTE_CLIENT_VENV}/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+export PYTHONPATH="${REMOTE_CLIENT_SITE}${PYTHONPATH:+:${PYTHONPATH}}"
 
 for value in "$LOCAL_GRPC_PORT" "$REMOTE_GRPC_PORT"; do
     case "$value" in
@@ -21,7 +36,7 @@ done
 case " $* " in *" headless_mode:=true "*|*"headless_mode:=true"*) HEADLESS=true ;; esac
 
 # Binding is a reliable collision check even when `ss` is unavailable.
-python3 - "$LOCAL_GRPC_PORT" <<'PY'
+"$SYSTEM_PYTHON" - "$LOCAL_GRPC_PORT" <<'PY'
 import socket
 import sys
 
@@ -61,7 +76,7 @@ for _ in $(seq 1 20); do
         echo "ERROR: SSH tunnel exited during startup." >&2
         exit 1
     fi
-    if python3 - "$LOCAL_GRPC_PORT" <<'PY'
+    if "$SYSTEM_PYTHON" - "$LOCAL_GRPC_PORT" <<'PY'
 import socket
 import sys
 
@@ -81,7 +96,7 @@ if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
     echo "ERROR: SSH tunnel is not running." >&2
     exit 1
 fi
-if ! python3 - "$LOCAL_GRPC_PORT" <<'PY'
+if ! "$SYSTEM_PYTHON" - "$LOCAL_GRPC_PORT" <<'PY'
 import socket
 import sys
 with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1.0):
@@ -91,6 +106,34 @@ then
     echo "ERROR: tunnel is alive but local gRPC port is not reachable." >&2
     exit 1
 fi
+
+# A listening TCP socket alone does not prove that gRPC completed its HTTP/2
+# handshake. Ubuntu 22.04's grpcio 1.30.2 timed out here, while the pinned
+# robot-client version below is verified against the remote service.
+"$SYSTEM_PYTHON" - "$LOCAL_GRPC_PORT" <<'PY'
+import sys
+
+import grpc
+
+expected = "1.74.0"
+print(f"### gRPC preflight: grpcio={grpc.__version__}, target=127.0.0.1:{sys.argv[1]}")
+if grpc.__version__ != expected:
+    raise SystemExit(
+        f"ERROR: expected grpcio {expected}, loaded {grpc.__version__}; "
+        "rerun setup_remote_client_venv.sh"
+    )
+channel = grpc.insecure_channel(
+    f"127.0.0.1:{sys.argv[1]}",
+    options=(("grpc.enable_http_proxy", 0),),
+)
+try:
+    grpc.channel_ready_future(channel).result(timeout=5)
+except grpc.FutureTimeoutError:
+    raise SystemExit("ERROR: gRPC channel did not become ready within 5 seconds")
+finally:
+    channel.close()
+print("### gRPC preflight PASS")
+PY
 
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"

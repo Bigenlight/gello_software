@@ -8,7 +8,24 @@ On the robot laptop:
 
 ```bash
 cd /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws
+./setup_remote_client_venv.sh
 ./run_ur7e_diffusion_remote.sh
+```
+
+Run the setup script once (and again only when its lock file changes). It creates
+`.venv-remote-client` with `--system-site-packages`, so ROS2 continues to use the
+Ubuntu system Python packages while the remote runner puts the verified
+`grpcio==1.74.0` ahead of Ubuntu 22.04's `python3-grpcio` 1.30.2. The latter was
+observed accepting the forwarded TCP connection but timing out during the gRPC
+handshake. Do not replace the system ROS Python or activate this venv globally.
+
+Before launching ROS, the runner prints the loaded grpcio version and requires a
+successful channel-ready handshake through the SSH tunnel. A failure stops before
+any robot launch. To rebuild the isolated environment:
+
+```bash
+rm -rf .venv-remote-client
+./setup_remote_client_venv.sh
 ```
 
 Common overrides:
