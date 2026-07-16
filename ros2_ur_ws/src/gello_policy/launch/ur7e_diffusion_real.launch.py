@@ -222,6 +222,16 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            "inference_transport",
+            default_value="zmq",
+            description="Inference transport: legacy local 'zmq' or remote 'grpc'.",
+        ),
+        DeclareLaunchArgument(
+            "grpc_port",
+            default_value="50051",
+            description="Remote Diffusion gRPC port when inference_transport:=grpc.",
+        ),
+        DeclareLaunchArgument(
             "checkpoint_path",
             default_value="",
             description=(
@@ -256,6 +266,8 @@ def generate_launch_description():
     params_file = LaunchConfiguration("params_file")
     act_host = LaunchConfiguration("act_host")
     act_port = LaunchConfiguration("act_port")
+    inference_transport = LaunchConfiguration("inference_transport")
+    grpc_port = LaunchConfiguration("grpc_port")
     checkpoint_path = LaunchConfiguration("checkpoint_path")
     start_pose = LaunchConfiguration("start_pose")
 
@@ -326,6 +338,8 @@ def generate_launch_description():
             {
                 "act_host": ParameterValue(act_host, value_type=str),
                 "act_port": ParameterValue(act_port, value_type=int),
+                "inference_transport": ParameterValue(inference_transport, value_type=str),
+                "grpc_port": ParameterValue(grpc_port, value_type=int),
             },
         ],
         output="screen",

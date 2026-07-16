@@ -43,6 +43,21 @@ policy_leader_node:
     # halts the arm (never hold-last-target through an outage).
     act_timeout_s: 0.6  # DDIM refill is slower than an ACT forward; the leader tolerates it
                         # before FAULT and stays the PRIMARY fault owner (faults first, cleanly).
+    # Keep "zmq" for the legacy same-machine runner. Set "grpc" for the remote
+    # GPU Docker service; launch arguments override this value.
+    inference_transport: "zmq"
+    grpc_port: 50051
+    camera_width: 1280
+    camera_height: 720
+    max_camera_skew_s: 0.1
+    max_jpeg_bytes: 4194304
+    expected_model_id: "Bigenlight/diffusion_banana_in_pot_joint"
+    expected_checkpoint_revision: "sha256:d4722b60caee5d76d004a37e16b2d7adecc1668f79703259ea7260fc9c723c57"
+    expected_scheduler: "DDIM"
+    expected_inference_steps: 10
+    expected_action_steps: 32
+    expected_resize_height: 360
+    expected_resize_width: 640
 
     # SAFETY CLAMP (a): per-joint hard limits = the 1.2x dataset envelope
     # (see config/joint_safety_limits.json). Any commanded joint outside this is

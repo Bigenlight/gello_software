@@ -155,6 +155,14 @@ class RemoteDiffusionWorker:
             )
             self._thread.start()
 
+    def disarm(self) -> None:
+        """Invalidate pending/in-flight work without contacting the server."""
+        with self._condition:
+            self._session_id = ""
+            self._pending = None
+            self._latest_result = None
+            self._error = None
+
     def close(self, timeout_s: float = 2.0) -> None:
         with self._condition:
             self._stopping = True
