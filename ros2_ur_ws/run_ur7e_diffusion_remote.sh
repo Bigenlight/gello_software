@@ -142,6 +142,15 @@ if [ "${PREFLIGHT_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
+if [ "${ROUNDTRIP_ONLY:-0}" = "1" ]; then
+    echo "### ROUNDTRIP_ONLY=1: sending two black JPEGs and the held start state."
+    PYTHONPATH="$SCRIPT_DIR/src/gello_policy:${PYTHONPATH}" \
+        ROUNDTRIP_TARGET="127.0.0.1:${LOCAL_GRPC_PORT}" \
+        "$SYSTEM_PYTHON" "$SCRIPT_DIR/remote_diffusion_roundtrip_smoke.py"
+    echo "### ROUNDTRIP_ONLY PASS: received one 7-D action; skipping ROS launch."
+    exit 0
+fi
+
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 
