@@ -39,6 +39,7 @@ RUN python -m pip install -r /tmp/requirements.lock \
 COPY proto/ /app/proto/
 COPY policy_server/ /app/policy_server/
 COPY deploy/remote_diffusion/healthcheck.py /app/healthcheck.py
+COPY deploy/remote_diffusion/smoke_client.py /app/smoke_client.py
 
 # Generate Python protobuf/gRPC bindings inside the pinned build environment.
 # Both modules are emitted into policy_server so its relative imports are stable.

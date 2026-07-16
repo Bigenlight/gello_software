@@ -71,3 +71,13 @@ The gate passes only if `torch.cuda.is_available()` is `True` and the selected R
 A4000 is printed. If driver/runtime initialization fails, stop here and choose a
 driver-compatible PyTorch/CUDA image deliberately; do not widen robot timeouts or
 fall back to CPU.
+
+## In-container inference smoke test
+
+With the service running and healthy, execute the committed smoke client inside
+the container. It resets one temporary session, sends two synthetic JPEGs and the
+held start state, and validates one 7-D action reply without touching ROS or a robot:
+
+```bash
+docker exec gello-remote-diffusion python /app/smoke_client.py
+```
