@@ -10,11 +10,29 @@
 
 ## 데이터셋 (Hugging Face)
 
-이 GELLO/UR7e 텔레오퍼레이션 스택으로 수집한 **"put the right banana in the pot"** 데이터셋을 공개했습니다.
+이 GELLO/UR7e 텔레오퍼레이션 스택으로 수집한 데이터셋을 공개했습니다. 두 태스크 모두 동일한 리그(UR7e + GELLO 리더 + Robotiq 2F-85 + RealSense 2대)와 동일한 recorder·변환 파이프라인을 씁니다.
+
+**"put the right banana in the pot"** — 51 데모 / 21,524 프레임 / ~12분
 
 - [`Bigenlight/banana_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 51 데모 / 21,524 프레임 (기본)
 - [`Bigenlight/banana_in_pot_ee_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_ee_lerobot_v3) — 엔드이펙터(EE) 관측 버전
 - [`Bigenlight/banana_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_raw) — 원본 per-take h5 + mp4 (데이터셋 재생성용)
+
+**"put the cube in the cup"** — 23 데모 / 6,177 프레임 / ~3.4분 (2026-07-20 수집)
+
+- [`Bigenlight/cube_in_cup_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/cube_in_cup_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 23 에피소드
+- [`Bigenlight/cube_in_cup_raw`](https://huggingface.co/datasets/Bigenlight/cube_in_cup_raw) — 원본 per-take h5 + mp4 (24 테이크) + `DATA_DICTIONARY.md` + `dataset_stats.json`
+
+> **규모 주의:** cube 쪽은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. 단독으로 견고한 정책을 학습시키기엔 부족하며, 현재 학습된 cube 정책은 없습니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다.
+
+### 데이터셋 만드는 법 (h5 → LeRobot)
+
+변환기는 **이 리포에 없습니다** — 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)의 `convert_to_lerobot.py`입니다. 요점:
+
+- 마스터 클럭은 `cam1_frames/t_rel_s` (30fps). 모든 로봇 스트림을 각자의 `t_rel_s` 기준 **nearest-timestamp**로 이 격자에 리샘플링합니다. 샘플링이 균일하지 않으므로 인덱스 산술로 정렬하면 안 됩니다.
+- `observation.state`(7) = `ur_q1..6` + `grip_pos`, `action`(7) = `cmd1..6` + `grip_cmd`. `gello_*` 리더 스트림은 추론 시 관측 불가라 제외합니다.
+- `lerobot 0.6.1`이 필요한데 PyPI에 없습니다 (최신 0.6.0). 커밋 `8a74e0a` 핀으로 설치하세요. **`ros2_ur_ws/act_venv`에는 설치하지 마세요** — 실기 배포가 검증된 환경이므로 별도 venv를 쓰십시오.
+- `hf upload`는 `LeRobotDataset(repo_id)` 로딩에 필요한 `v3.0` 태그를 만들지 않습니다. 업로드 후 `HfApi().create_tag(repo_id, tag="v3.0", repo_type="dataset")`를 별도로 실행해야 합니다.
 
 ---
 
