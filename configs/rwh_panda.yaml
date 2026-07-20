@@ -1,7 +1,7 @@
 # RWH GELLO -> Franka Panda MuJoCo sim teleop config.
 # Calibration values reused from 조민제's Docker image
 # (minje227/gello:RWH_Gello_PandaV1.0, /gello/configs/rwh_panda.yaml) — SAME physical
-# GELLO (port FTBEO6QK, XL330 servos, motor IDs 1-7 arm + 8 gripper). No re-calibration
+# GELLO (port FTBEO75A, XL330 servos, motor IDs 1-7 arm + 8 gripper). No re-calibration
 # needed unless the GELLO assembly/servo mounting changes.
 #
 # SAFETY: GELLO is used READ-ONLY (passive leader). DynamixelRobot inits with torque
@@ -25,7 +25,7 @@ robot:
 
 agent:
   _target_: gello.agents.gello_agent.GelloAgent
-  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO75A-if00-port0"
   dynamixel_config:
     _target_: gello.agents.gello_agent.DynamixelRobotConfig
     joint_ids: [1, 2, 3, 4, 5, 6, 7]
