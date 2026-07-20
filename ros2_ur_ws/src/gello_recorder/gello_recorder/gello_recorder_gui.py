@@ -57,6 +57,12 @@ DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"
 
+# Shared sizing for the big operator-facing buttons (Start/Stop/Pause/Resume) so
+# they're easy to hit one-handed while the other hand holds the GELLO leader.
+# Kept separate from color/weight so the armed "Confirm Resume" state can layer
+# its own background color on top without losing the size.
+_BIG_BUTTON_STYLE = "font-size: 16pt; padding: 14px 22px; min-height: 48px;"
+
 
 def _launch_realsense(camera_name, serial, color_profile):
     """Launch one realsense2_camera node via ``ros2 launch`` in its own session.
@@ -300,9 +306,15 @@ class MainWindow(QMainWindow):
         self._teleop_grip_label.setMinimumWidth(150)
 
         self._teleop_pause_button = QPushButton("Pause Teleop")
+        self._teleop_pause_button.setStyleSheet(_BIG_BUTTON_STYLE)
         self._teleop_pause_button.clicked.connect(self._on_teleop_pause_clicked)
 
-        self._teleop_resume_button = QPushButton("Resume Teleop")
+        # Resting label spells out "click twice" up front -- a first-time
+        # operator should never be surprised that one click doesn't move the
+        # robot. The armed (post-first-click) label in
+        # _on_teleop_resume_clicked spells out the second click too.
+        self._teleop_resume_button = QPushButton("Resume Teleop (click twice)")
+        self._teleop_resume_button.setStyleSheet(_BIG_BUTTON_STYLE)
         self._teleop_resume_button.clicked.connect(self._on_teleop_resume_clicked)
         self._teleop_resume_button.setEnabled(False)
 
@@ -319,8 +331,10 @@ class MainWindow(QMainWindow):
         bar = QHBoxLayout()
 
         self._start_button = QPushButton("Start Recording")
+        self._start_button.setStyleSheet(_BIG_BUTTON_STYLE)
         self._start_button.clicked.connect(self._on_start_clicked)
         self._stop_button = QPushButton("Stop Recording")
+        self._stop_button.setStyleSheet(_BIG_BUTTON_STYLE)
         self._stop_button.clicked.connect(self._on_stop_clicked)
         self._stop_button.setEnabled(False)
 
@@ -519,12 +533,13 @@ class MainWindow(QMainWindow):
         # click within that window actually requests resume (robot WILL move).
         if not self._teleop_resume_armed:
             self._teleop_resume_armed = True
-            self._teleop_resume_button.setText("Confirm Resume (robot will move!)")
+            self._teleop_resume_button.setText("Click AGAIN to Resume (robot will move!)")
             self._teleop_resume_button.setStyleSheet(
+                _BIG_BUTTON_STYLE +
                 "background-color: #dd8800; color: white; font-weight: bold;")
             QTimer.singleShot(3000, self._disarm_teleop_resume)
             self.statusBar().showMessage(
-                "Click 'Confirm Resume' within 3 s -- the robot WILL move.", 3000)
+                "Click again within 3 s to Resume -- the robot WILL move.", 3000)
             return
         self._disarm_teleop_resume()
         fired = self._node.request_teleop_resume()
@@ -539,8 +554,8 @@ class MainWindow(QMainWindow):
         # Revert the confirm button to its resting look; the ~5 Hz refresh
         # re-drives its enabled state on the next tick.
         self._teleop_resume_armed = False
-        self._teleop_resume_button.setText("Resume Teleop")
-        self._teleop_resume_button.setStyleSheet("")
+        self._teleop_resume_button.setText("Resume Teleop (click twice)")
+        self._teleop_resume_button.setStyleSheet(_BIG_BUTTON_STYLE)
 
     # ------------------------------------------------------------- actions --
     def _on_start_clicked(self):
@@ -682,6 +697,21 @@ def main(args=None):
     window = MainWindow(node, cam1_proc, cam2_proc)
     window.resize(1280, 720)
     window.show()
+
+    # Ctrl-C in the launching terminal is otherwise SILENTLY SWALLOWED: Qt's
+    # C++ event loop never yields back to the Python interpreter on its own,
+    # so Python's SIGINT handler doesn't get a chance to run (a well-known
+    # PyQt gotcha) -- if a KeyboardInterrupt happens to land inside a Qt slot
+    # anyway (e.g. a QTimer callback), PyQt5 just prints the traceback and
+    # keeps the event loop running, which looks exactly like "Ctrl-C did
+    # nothing." Fix: make SIGINT ask Qt to quit, and use a short-interval
+    # QTimer purely to tick the interpreter often enough for that handler to
+    # actually fire promptly (Qt's own timers don't wake up the signal
+    # machinery by themselves).
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    sigint_pump = QTimer()
+    sigint_pump.start(200)
+    sigint_pump.timeout.connect(lambda: None)
 
     exit_code = app.exec_()
 
