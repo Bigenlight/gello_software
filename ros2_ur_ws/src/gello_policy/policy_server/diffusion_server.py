@@ -329,6 +329,7 @@ class DiffusionInferenceEngine:
         # Build obs dict with EXACT dataset feature keys (BUILD_SPEC §4). Images are
         # RGB, CHW, float32 [0,1], (3,360,640) -- resize+BGR->RGB done here, NOT by
         # the saved preprocessor. State is float32 (7,).
+        t_start = time.perf_counter()
         obs = {
             proto.OBS_STATE_KEY: torch.from_numpy(state.astype(np.float32)),  # (7,)
             proto.OBS_CAM1_KEY: decode_jpeg_to_rgb_float_chw(cam1_jpeg),      # (3,360,640)
@@ -341,7 +342,13 @@ class DiffusionInferenceEngine:
         refill = len(self.policy._queues[ACTION]) == 0
 
         proc = self.preprocessor(obs)               # rename -> batch -> device -> normalize
+        t_preprocessed = time.perf_counter()
         action = self.policy.select_action(proc)    # (1,7) normalized (modeling_diffusion.py)
+        if self.device == "cuda":
+            # CUDA launches asynchronously. Synchronize before recording inference_ms
+            # so refill latency is not incorrectly attributed to postprocessing.
+            torch.cuda.synchronize()
+        t_inferred = time.perf_counter()
         if refill and self.ensemble_sampler is not None:
             # Two reference assignments only -- the actual snapshot + submit happen
             # in maybe_submit_ensemble(), AFTER serve() has sent the real reply.
@@ -349,6 +356,19 @@ class DiffusionInferenceEngine:
             self._ensemble_pending = True
         action = self.postprocessor(action)         # (1,7) unnormalized, on cpu
         action = action.squeeze(0).cpu().numpy().astype(np.float64)  # (7,)
+        t_finished = time.perf_counter()
+
+        # Transport-neutral diagnostics consumed by the remote gRPC wrapper. Keep
+        # `act()`'s return type unchanged so the validated ZMQ deploy remains fully
+        # backward compatible. Timings are wall-clock service timings; the final
+        # CPU numpy conversion synchronizes the returned CUDA work before reply.
+        self.last_act_metadata = {
+            "preprocess_ms": (t_preprocessed - t_start) * 1000.0,
+            "inference_ms": (t_inferred - t_preprocessed) * 1000.0,
+            "total_server_ms": (t_finished - t_start) * 1000.0,
+            "chunk_refill": refill,
+            "remaining_chunk_actions": len(self.policy._queues[ACTION]),
+        }
 
         self._act_calls += 1
         if refill:

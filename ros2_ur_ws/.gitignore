@@ -1,4 +1,5 @@
 # colcon build artifacts — never commit
+.venv-remote-client/
 build/
 install/
 log/

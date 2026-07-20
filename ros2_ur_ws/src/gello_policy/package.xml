@@ -16,6 +16,10 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <!-- Baseline ROS/system dependency. The remote robot runner overlays its
+       separately pinned compatible grpcio; see requirements-remote-client.lock. -->
+  <exec_depend>python3-grpcio</exec_depend>
+  <exec_depend>python3-protobuf</exec_depend>
   <!-- ur7e_act_real.launch.py runs gello_ur_bridge, gello_move_to_start and
        robotiq_gripper_modbus from ur_gello_bringup (and includes ur_robot_driver's
        ur_control.launch.py). Declare it so `colcon build` and rosdep pull it in. -->

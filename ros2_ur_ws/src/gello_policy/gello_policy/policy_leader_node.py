@@ -29,8 +29,8 @@ rclpy). Verified to construct under ROS2 Jazzy on the dev PC; the target robot P
 runs Humble -- no Jazzy-only APIs are used (see module docstring caveats below).
 """
 
-import json
 import time
+import threading
 
 import rclpy
 from rclpy.node import Node
@@ -41,7 +41,14 @@ from std_srvs.srv import Trigger
 import zmq
 
 from gello_policy import obs_assembler
+from gello_policy.joint_angles import angular_deviations, positions_near_reference
 from gello_policy.obs_assembler import UR_JOINT_ORDER
+from gello_policy.remote_diffusion_client import (
+    ImageSnapshot,
+    ObservationSnapshot,
+    ServerContract,
+    create_worker,
+)
 
 _N = len(UR_JOINT_ORDER)
 
@@ -49,6 +56,7 @@ _N = len(UR_JOINT_ORDER)
 HOLD = "HOLD"
 EXECUTE = "EXECUTE"
 FAULT = "FAULT"
+ARMING = "ARMING"
 
 # Live-pose gate for arming: the arm must already be sitting on start_pose (the
 # handshake has converged) before we hand control to the policy.
@@ -70,6 +78,19 @@ class PolicyLeaderNode(Node):
         self.declare_parameter("act_host", "127.0.0.1")
         self.declare_parameter("act_port", 5591)
         self.declare_parameter("act_timeout_s", 0.5)
+        self.declare_parameter("inference_transport", "zmq")
+        self.declare_parameter("grpc_port", 50051)
+        self.declare_parameter("camera_width", 1280)
+        self.declare_parameter("camera_height", 720)
+        self.declare_parameter("max_camera_skew_s", 0.1)
+        self.declare_parameter("max_jpeg_bytes", 4194304)
+        self.declare_parameter("expected_model_id", "Bigenlight/diffusion_banana_in_pot_joint")
+        self.declare_parameter("expected_checkpoint_revision", "unknown")
+        self.declare_parameter("expected_scheduler", "DDIM")
+        self.declare_parameter("expected_inference_steps", 10)
+        self.declare_parameter("expected_action_steps", 32)
+        self.declare_parameter("expected_resize_height", 360)
+        self.declare_parameter("expected_resize_width", 640)
         self.declare_parameter(
             "joint_limits_lo", [2.40, -2.53, 1.05, -3.34, -2.18, -5.22]
         )
@@ -93,6 +114,12 @@ class PolicyLeaderNode(Node):
         self._act_host = str(gp("act_host").value)
         self._act_port = int(gp("act_port").value)
         self._act_timeout_s = float(gp("act_timeout_s").value)
+        self._transport = str(gp("inference_transport").value).lower()
+        self._grpc_port = int(gp("grpc_port").value)
+        self._camera_width = int(gp("camera_width").value)
+        self._camera_height = int(gp("camera_height").value)
+        self._max_camera_skew_s = float(gp("max_camera_skew_s").value)
+        self._max_jpeg_bytes = int(gp("max_jpeg_bytes").value)
         self._lo = [float(x) for x in gp("joint_limits_lo").value]
         self._hi = [float(x) for x in gp("joint_limits_hi").value]
         self._max_dev = float(gp("max_dev_rad").value)
@@ -100,6 +127,8 @@ class PolicyLeaderNode(Node):
         self._auto_start = bool(gp("auto_start_on_stream").value)
         cam1_topic = str(gp("cam1_topic").value)
         cam2_topic = str(gp("cam2_topic").value)
+        if self._transport not in ("zmq", "grpc"):
+            raise ValueError("inference_transport must be 'zmq' or 'grpc'")
 
         # Validate array param lengths early -- a wrong-length limit vector would
         # silently disable a joint's clamp.
@@ -118,6 +147,8 @@ class PolicyLeaderNode(Node):
         self._grip_pos = None      # gripper position percent (0..1)
         self._cam1_jpeg = None     # raw JPEG bytes, cam1
         self._cam2_jpeg = None     # raw JPEG bytes, cam2
+        self._cam1_ros_stamp_ns = 0
+        self._cam2_ros_stamp_ns = 0
         # Arrival time (time.monotonic()) of each obs; None until first message.
         # Used by the EXECUTE freshness watchdog to catch a frozen/hung stream.
         self._live_q_t = None
@@ -133,6 +164,9 @@ class PolicyLeaderNode(Node):
         self._last_grip_cmd = self._start_gripper
 
         self._state = HOLD
+        self._arming_generation = 0
+        self._arming_origin = HOLD
+        self._arming_result = None
 
         # --- Publishers (EXACT synthetic-leader contract) ----------------
         # Plain depth-10 publishers (default QoS), matching gello_publisher_node.
@@ -164,7 +198,28 @@ class PolicyLeaderNode(Node):
         # --- ZMQ REQ client ----------------------------------------------
         self._zmq_ctx = zmq.Context.instance()
         self._sock = None
-        self._connect_socket()
+        self._grpc_worker = None
+        if self._transport == "zmq":
+            self._connect_socket()
+        else:
+            self._grpc_contract = ServerContract(
+                str(gp("expected_model_id").value),
+                str(gp("expected_checkpoint_revision").value),
+                str(gp("expected_scheduler").value),
+                int(gp("expected_inference_steps").value),
+                int(gp("expected_action_steps").value),
+                int(gp("expected_resize_height").value),
+                int(gp("expected_resize_width").value),
+            )
+            self._grpc_worker = create_worker(
+                f"{self._act_host}:{self._grpc_port}",
+                client_id=self.get_name(),
+                rpc_deadline_s=self._act_timeout_s,
+                max_response_age_s=self._obs_timeout_s,
+                max_camera_skew_s=self._max_camera_skew_s,
+                max_jpeg_bytes=self._max_jpeg_bytes,
+            )
+            self._grpc_worker.start()
 
         # --- Timer (single timer drives BOTH publishes each tick) --------
         rate = self._publish_rate_hz
@@ -175,9 +230,14 @@ class PolicyLeaderNode(Node):
             rate = 30.0
         self._timer = self.create_timer(1.0 / rate, self._on_timer)
 
+        endpoint = (
+            f"{self._act_host}:{self._grpc_port} (gRPC)"
+            if self._transport == "grpc"
+            else f"tcp://{self._act_host}:{self._act_port} (ZMQ)"
+        )
         self.get_logger().info(
             f"policy_leader_node up in HOLD @ {rate:.1f} Hz. "
-            f"ACT server tcp://{self._act_host}:{self._act_port}, "
+            f"Inference server {endpoint}, "
             f"timeout={self._act_timeout_s}s, max_dev={self._max_dev} rad, "
             f"auto_start_on_stream={self._auto_start}. "
             f"Holding start_pose; call ~/start_execution to begin."
@@ -227,10 +287,16 @@ class PolicyLeaderNode(Node):
     def _on_cam1(self, msg: CompressedImage):
         self._cam1_jpeg = bytes(msg.data)
         self._cam1_t = time.monotonic()
+        self._cam1_ros_stamp_ns = self._stamp_ns(msg)
 
     def _on_cam2(self, msg: CompressedImage):
         self._cam2_jpeg = bytes(msg.data)
         self._cam2_t = time.monotonic()
+        self._cam2_ros_stamp_ns = self._stamp_ns(msg)
+
+    @staticmethod
+    def _stamp_ns(msg):
+        return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
 
     def _stale_obs(self, now):
         """Return a list of (name) for observations that are missing OR older than
@@ -278,7 +344,11 @@ class PolicyLeaderNode(Node):
         # Hold the LAST commanded gripper, not start_gripper -- pausing mid-grasp must
         # not open the gripper and drop the object (review).
         self._hold_gripper = self._last_grip_cmd
+        self._arming_generation += 1
+        self._arming_result = None
         self._state = HOLD
+        if self._grpc_worker is not None:
+            self._grpc_worker.disarm()
         self._auto_start_fired = True  # don't auto-rearm after a manual hold
         self.get_logger().info(
             f"~/hold -> HOLD, holding {src}, gripper={self._hold_gripper:.3f}."
@@ -292,6 +362,8 @@ class PolicyLeaderNode(Node):
 
         Returns (ok, message). On refusal/failure the state is unchanged (stays
         HOLD/FAULT) so the operator can safely retry."""
+        if self._state == ARMING:
+            return False, "refused: gRPC server check/reset already in progress"
         if self._live_q is None:
             return False, "refused: no live /joint_states yet"
         # Require a COMPLETE, FRESH observation set before arming: otherwise EXECUTE
@@ -303,7 +375,10 @@ class PolicyLeaderNode(Node):
                 f"refused: observations missing/stale {stale} "
                 f"(are the RealSense cameras + gripper running?)."
             )
-        devs = [abs(self._live_q[i] - self._start_pose[i]) for i in range(_N)]
+        # UR joint-state publishers may wrap a joint at +/-pi.  Compare periodic
+        # equivalents so, for example, +3.088 and -3.195 are treated as the same
+        # physical wrist pose rather than as a spurious 2*pi deviation.
+        devs = angular_deviations(self._live_q, self._start_pose)
         worst = max(devs)
         if worst > START_GATE_RAD:
             j = devs.index(worst)
@@ -311,26 +386,75 @@ class PolicyLeaderNode(Node):
                 f"refused: live pose not within {START_GATE_RAD} rad of start_pose "
                 f"(worst joint {j}: {worst:.3f} rad). Let the handshake converge first."
             )
-        # RESET the policy (clears the ACT action queue).
+        if self._transport == "grpc":
+            self._arming_generation += 1
+            generation = self._arming_generation
+            self._arming_origin = self._state
+            self._arming_result = None
+            self._state = ARMING
+            threading.Thread(
+                target=self._grpc_arm,
+                args=(generation,),
+                name="remote-diffusion-arming",
+                daemon=True,
+            ).start()
+            return True, "ARMING (checking/resetting remote inference server)"
+
+        # RESET the legacy ZMQ policy (clears its action queue).
         try:
             reply = self._zmq_roundtrip(obs_assembler.build_reset_request())
             obj = obs_assembler.parse_reply(reply)
         except Exception as exc:  # noqa: BLE001
-            return False, f"refused: ZMQ RESET failed ({exc})"
+            return False, f"refused: inference RESET failed ({exc})"
         if not obj.get(obs_assembler.KEY_OK, False):
             return False, f"refused: server RESET returned ok:false ({obj})"
         self._state = EXECUTE
         self.get_logger().info("~/start_execution: RESET ok -> EXECUTE.")
         return True, "EXECUTE"
 
+    def _grpc_arm(self, generation):
+        try:
+            self._grpc_worker.get_server_info(self._grpc_contract)
+            if generation != self._arming_generation:
+                return
+            self._grpc_worker.reset_episode()
+            result = (generation, True, "remote server ready; RESET ok")
+        except Exception as exc:  # noqa: BLE001 - reported by timer thread
+            result = (generation, False, str(exc))
+        if generation == self._arming_generation and self._state == ARMING:
+            self._arming_result = result
+        elif self._state != ARMING:
+            # HOLD/FAULT may have cancelled ARMING while ResetEpisode was on
+            # the wire. Ensure that late success cannot leave the worker armed.
+            self._grpc_worker.disarm()
+
     # ---- timer / state machine -----------------------------------------
     def _on_timer(self):
         if self._state == HOLD:
             self._tick_hold()
+        elif self._state == ARMING:
+            self._tick_arming()
         elif self._state == EXECUTE:
             self._tick_execute()
         else:  # FAULT: fail-silent, publish nothing.
             return
+
+    def _tick_arming(self):
+        result = self._arming_result
+        if result is None:
+            if self._arming_origin == HOLD:
+                self._tick_hold()
+            return
+        generation, ok, detail = result
+        self._arming_result = None
+        if generation != self._arming_generation:
+            return
+        if ok:
+            self._state = EXECUTE
+            self.get_logger().info(f"gRPC ARMING complete -> EXECUTE ({detail}).")
+        else:
+            self._state = self._arming_origin
+            self.get_logger().error(f"gRPC ARMING failed: {detail}")
 
     def _tick_hold(self):
         # Publish the held pose + held gripper constantly. Never query server.
@@ -346,16 +470,48 @@ class PolicyLeaderNode(Node):
             self._enter_fault(f"observation missing/stale {stale} (>{self._obs_timeout_s}s)")
             return
 
-        live_q = list(self._live_q)  # snapshot (callbacks may update mid-tick)
+        # Keep observations in the checkpoint/dataset branch defined by start_pose.
+        # The same representation is used by the max-deviation clamp below, so a
+        # wrapped /joint_states sample cannot corrupt either inference or safety.
+        live_q = positions_near_reference(self._live_q, self._start_pose)
         state = live_q + [float(self._grip_pos)]
-        req = obs_assembler.build_act_request(state, self._cam1_jpeg, self._cam2_jpeg)
-
-        try:
-            reply = self._zmq_roundtrip(req)
-            action = obs_assembler.parse_action_reply(reply)
-        except Exception as exc:  # noqa: BLE001 -- any failure => FAULT
-            self._enter_fault(str(exc))
-            return
+        if self._transport == "grpc":
+            error = self._grpc_worker.error()
+            if error is not None:
+                self._enter_fault(error)
+                return
+            try:
+                result = self._grpc_worker.take_result(self._obs_timeout_s)
+                oldest_arrival = min(
+                    self._live_q_t, self._grip_pos_t, self._cam1_t, self._cam2_t
+                )
+                observation = ObservationSnapshot(
+                    created_monotonic_ns=int(oldest_arrival * 1e9),
+                    state=tuple(state),
+                    cam1=ImageSnapshot(
+                        self._cam1_ros_stamp_ns, self._camera_width,
+                        self._camera_height, self._cam1_jpeg,
+                    ),
+                    cam2=ImageSnapshot(
+                        self._cam2_ros_stamp_ns, self._camera_width,
+                        self._camera_height, self._cam2_jpeg,
+                    ),
+                )
+                self._grpc_worker.submit(observation)
+            except Exception as exc:  # noqa: BLE001 -- any failure => FAULT
+                self._enter_fault(str(exc))
+                return
+            if result is None:
+                return
+            action = result.action
+        else:
+            req = obs_assembler.build_act_request(state, self._cam1_jpeg, self._cam2_jpeg)
+            try:
+                reply = self._zmq_roundtrip(req)
+                action = obs_assembler.parse_action_reply(reply)
+            except Exception as exc:  # noqa: BLE001 -- any failure => FAULT
+                self._enter_fault(str(exc))
+                return
 
         # --- SAFETY CLAMP (order matters; BUILD_SPEC §5) -----------------
         target = list(action[:_N])
@@ -399,7 +555,11 @@ class PolicyLeaderNode(Node):
         self._publish_gripper(grip)
 
     def _enter_fault(self, reason):
+        self._arming_generation += 1
+        self._arming_result = None
         self._state = FAULT
+        if self._grpc_worker is not None:
+            self._grpc_worker.disarm()
         self.get_logger().error(
             f"FAULT: {reason}. STOPPING /gello/joint_states publishing "
             f"(bridge staleness watchdog will halt the arm). "
@@ -424,6 +584,8 @@ class PolicyLeaderNode(Node):
 
     # ---- shutdown -------------------------------------------------------
     def destroy_node(self):
+        if self._grpc_worker is not None:
+            self._grpc_worker.close()
         try:
             if self._sock is not None:
                 self._sock.close(0)
