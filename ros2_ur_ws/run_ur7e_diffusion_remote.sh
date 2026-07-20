@@ -6,7 +6,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEM_PYTHON="${SYSTEM_PYTHON:-/usr/bin/python3}"
 REMOTE_CLIENT_VENV="${REMOTE_CLIENT_VENV:-${SCRIPT_DIR}/.venv-remote-client}"
-SSH_HOST="${SSH_HOST:-kanu}"
 LOCAL_GRPC_PORT="${LOCAL_GRPC_PORT:-50051}"
 REMOTE_GRPC_PORT="${REMOTE_GRPC_PORT:-50051}"
 ROBOT_IP="${ROBOT_IP:-192.168.10.11}"
@@ -14,6 +13,15 @@ HEADLESS="${HEADLESS:-}"
 CALIB="${CALIB:-}"
 START_MODE="${START_MODE:-gello}"
 
+# The remote GPU server is site-specific, so there is no safe default host.
+# Fail before any tunnel or ROS work rather than at the live robot.
+if [ -z "${SSH_HOST:-}" ]; then
+    echo "ERROR: SSH_HOST is not set." >&2
+    echo "Export the SSH host or ~/.ssh/config alias for the remote GPU server, e.g.:" >&2
+    echo "  SSH_HOST=my-gpu-box $0" >&2
+    echo "See ros2_ur_ws/src/gello_policy/deploy/remote_diffusion/README.md for server setup." >&2
+    exit 1
+fi
 if [ ! -x "${REMOTE_CLIENT_VENV}/bin/python" ]; then
     echo "ERROR: remote-client environment is missing: ${REMOTE_CLIENT_VENV}" >&2
     echo "Run ${SCRIPT_DIR}/setup_remote_client_venv.sh first." >&2

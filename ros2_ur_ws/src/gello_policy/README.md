@@ -8,6 +8,72 @@ Robotiq Modbus) drives the arm **completely unmodified**. The joint targets come
 a separate Python 3.12 process (`policy_server/act_server.py`, torch + lerobot 0.6.1)
 that the leader node queries over a localhost ZMQ REQ/REP link.
 
+## Local (production) vs remote (WIP): which files do what
+
+This package now holds two deploy paths that share a folder. **Local** is what runs on
+the real UR7e every day (ACT, Flow-Matching, local Diffusion — all over localhost ZMQ).
+**Remote** is an opt-in work-in-progress that moves Diffusion inference to a separate
+GPU server over gRPC. Nothing in the layout distinguishes them, so this is the list:
+
+**LOCAL / PRODUCTION — load-bearing, treat as safety-critical:**
+
+- `gello_policy/policy_leader_node.py` — **SHARED**: the single executable behind ACT,
+  FM *and* local Diffusion
+- `gello_policy/obs_assembler.py`, `gello_policy/joint_angles.py`
+- `policy_server/` — the py3.12 torch/lerobot side (`act_server.py`, `fm_server.py`,
+  `diffusion_server.py`)
+- `config/act_deploy.yaml`, `config/fm_deploy.yaml`, `config/diffusion_deploy.yaml`
+- `launch/ur7e_act_real.launch.py`, `launch/ur7e_diffusion_real.launch.py` —
+  **SHARED**: `ur7e_diffusion_real.launch.py` serves **both** `run_ur7e_fm_real.sh` and
+  `run_ur7e_diffusion_real.sh`
+- [`../../run_ur7e_act_real.sh`](../../run_ur7e_act_real.sh),
+  [`../../run_ur7e_fm_real.sh`](../../run_ur7e_fm_real.sh),
+  [`../../run_ur7e_diffusion_real.sh`](../../run_ur7e_diffusion_real.sh)
+
+**REMOTE / WIP — opt-in only, has never driven the physical arm:**
+
+- `gello_policy/remote_diffusion_client.py`, `gello_policy/remote_diffusion_pb2.py`,
+  `gello_policy/remote_diffusion_pb2_grpc.py`
+- `policy_server/remote_diffusion_server.py`,
+  `policy_server/requirements-remote-diffusion.lock`
+- [`../../run_ur7e_diffusion_remote.sh`](../../run_ur7e_diffusion_remote.sh),
+  [`../../setup_remote_client_venv.sh`](../../setup_remote_client_venv.sh)
+- `deploy/remote_diffusion/`, `proto/`, `scripts/generate_remote_diffusion_stubs.sh`,
+  `test/test_remote_diffusion_client.py`
+  (the rest of `scripts/` — `run_*_server.sh`, `download_*.sh`, the benchmarks — is
+  local/production)
+
+**FAKE-HARDWARE HELPERS — transport-agnostic, added alongside the remote work:**
+
+- `gello_policy/fake_diffusion_observation_node.py`
+- `launch/ur_control_fake_safe.launch.py`
+
+Both are reachable from the LOCAL FM/Diffusion launch with `use_fake_hardware:=true`
+under the default `inference_transport:=zmq`; they are not remote-only.
+
+### Invariants a future editor must preserve
+
+- **`inference_transport` defaults to `"zmq"` in three places** — the node's
+  `declare_parameter`, the launch argument default, and `config/diffusion_deploy.yaml` —
+  and **none of the three production run scripts pass it**. The remote path is reached
+  only by explicitly passing `inference_transport:=grpc` (which only
+  `run_ur7e_diffusion_remote.sh` does).
+- **`use_fake_hardware` defaults to `false`.** The real-robot `ur_control.launch.py`
+  include is selected by `UnlessCondition(use_fake_hardware)` with an unchanged argument
+  set, and the new `fake_diffusion_observations` node is double-gated behind **both**
+  `use_fake_hardware:=true` **and** `fake_observations:=true`.
+- **The two SHARED files** (`policy_leader_node.py`, `ur7e_diffusion_real.launch.py`)
+  must keep defaulting to zmq + real hardware. Any change to them affects ACT, FM and
+  local Diffusion **simultaneously**.
+- **The remote gRPC path has never driven the physical arm.** What HAS been validated
+  (see [`../../REMOTE_DIFFUSION_RUNBOOK.md`](../../REMOTE_DIFFUSION_RUNBOOK.md) §1):
+  synthetic observations round-tripping to a real GPU server over the SSH tunnel, and a
+  full ROS run against **fake hardware** that reached the start pose, armed, executed,
+  and passed a tunnel-disconnect FAULT test. Real-robot latency has also been measured
+  end-to-end (~130 ms per inference refill, ~17 ms cached).
+  What remains unproven is the only part that matters: a real arm moving under remote
+  inference. Keep the teach-pendant **E-STOP in hand** on the first attempt.
+
 ## Architecture
 
 Two processes, joined by ZMQ on `localhost`, because `lerobot` requires Python

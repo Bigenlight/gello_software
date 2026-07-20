@@ -142,3 +142,103 @@ unverified.
 4. Move inference I/O out of the rclpy timer into a latest-only worker.
 5. Exercise timeouts, malformed actions, camera loss, and server loss.
 6. Pass the full path using ROS fake hardware before any physical-arm run.
+
+## Accepted shared-path changes from this merge
+
+Remote diffusion is a work-in-progress, opt-in feature. It is selected explicitly
+(`inference_transport: grpc` plus the runner and tunnel described in
+`ros2_ur_ws/REMOTE_DIFFUSION_RUNBOOK.md`); the LOCAL ACT, LOCAL Flow-Matching, and
+LOCAL Diffusion paths (`run_ur7e_act_real.sh`, `run_ur7e_fm_real.sh`,
+`run_ur7e_diffusion_real.sh`, all of which speak ZMQ to a policy server on this
+laptop) continue to run without a GPU server. Everything the merge added is gated
+behind that explicit selection, with two deliberate exceptions recorded here.
+
+Both exceptions were reviewed and knowingly ACCEPTED as un-gated rather than hidden
+behind `inference_transport == 'grpc'`. They therefore change SHARED production code
+and apply to every transport. They are documented here so that a future maintainer
+debugging an arming refusal or a latency regression has a paper trail instead of only
+an inline code comment.
+
+### 1. Wrap-aware joint comparison in `policy_leader_node.py` (all transports, including ZMQ)
+
+Two call sites changed:
+
+- The `~/start_execution` arming gate (around line 381) now computes
+  `angular_deviations(self._live_q, self._start_pose)` instead of the previous raw
+  `abs(self._live_q[i] - self._start_pose[i])`.
+- `_tick_execute` (around line 476) now computes
+  `live_q = positions_near_reference(self._live_q, self._start_pose)` instead of
+  `live_q = list(self._live_q)`. That wrapped vector is BOTH the state sent to the
+  LOCAL ZMQ ACT/FM/Diffusion server AND the reference for the per-joint
+  `max_dev_rad` action clamp.
+
+The helpers live in `gello_policy/joint_angles.py`, and reduce to
+`nearest_equivalent(angle, reference) = reference + math.remainder(angle - reference, math.tau)`.
+
+Why it is safe: `math.remainder(d, tau)` reproduces `d` with exactly zero
+floating-point error whenever `|d| < pi`, so for any joint already within `+/-pi` of
+its `start_pose` reference the new code is bit-identical to the old. It differs ONLY
+at a wrap boundary.
+
+Why it was kept rather than gated behind gRPC: the shipped default `start_pose` is
+`[3.106, -1.817, 1.653, -1.618, -1.628, -3.195]`, in which shoulder_pan sits 0.036 rad
+from `+pi` and wrist_3 sits 0.053 rad past `-pi`. A `/joint_states` publisher reporting
+wrist_3 as its positive equivalent (about +3.088 rad) previously registered a spurious
+~`2*pi` deviation, which falsely REFUSED arming.
+
+More importantly, the rest of this workspace had ALREADY committed to branch-cut-aware
+comparison. `ur_gello_bringup/angle_utils.py` states the rule outright ("Every angular
+COMPARISON must therefore be circular"), `gello_move_to_start_node.py` parks the arm via
+`wrapped_nearest(target, actual_pose)` — i.e. on whichever revolution is nearest the
+arm — and `gello_ur_bridge_node.py:451` re-anchors every outgoing target onto the
+actual-pose branch before publishing to `/forward_position_controller/commands`.
+Leaving `policy_leader_node` comparing raw values made it the ONLY node in the chain
+using a non-circular comparison, against a `start_pose` that its own upstream node may
+legitimately park on the far branch.
+
+Note what this does NOT do: normalizing `live_q` cannot cause a full-revolution spin.
+The clamped action is an absolute joint target, and `gello_ur_bridge_node` re-anchors it
+to the arm's actual pose (`wrapped_nearest`, line 451) before it reaches the controller,
+so the `2*pi` is stripped downstream. Sending the `start_pose`-branch representation is
+also what the policy expects, since the checkpoint was trained on a dataset recorded in
+that branch; feeding the raw far-branch value would be out-of-distribution.
+
+Residual risk to check: the arming gate is now permissive in a case where it used to
+be conservative. This is worth one deliberate arming test at the shipped `start_pose`.
+
+### 2. Timing instrumentation in `policy_server/diffusion_server.py` (LOCAL diffusion hot loop)
+
+`DiffusionInferenceEngine.act()` gained `t_start`/`t_preprocessed`/`t_inferred`/
+`t_finished` timestamps, an explicit `if self.device == "cuda": torch.cuda.synchronize()`
+between `select_action()` and the postprocess step, and a `self.last_act_metadata`
+dict that only the remote gRPC wrapper consumes.
+
+Accepted un-gated because the immediately following `action.squeeze(0).cpu().numpy()`
+already forced the identical device synchronization: the explicit `synchronize()`
+moves WHERE the wait happens by two statements, not how long it is. On the ZMQ path
+`last_act_metadata` is write-only, and the return type of `act()` is unchanged, so
+the validated LOCAL ZMQ deploy stays backward compatible.
+
+Residual risk to check: during the next LOCAL Diffusion session, confirm that
+per-tick latency is unchanged within noise and that `act_timeout_s: 0.6`
+(`config/diffusion_deploy.yaml`) is still comfortably met. Note that this file runs
+in the separate Python 3.12 torch/LeRobot venv, so it is covered by neither
+`colcon build` nor the package's pytest suite; only an empirical run exercises it.
+
+### Build note
+
+`gello_policy/package.xml` gained two `exec_depend` entries, `python3-grpcio` and
+`python3-protobuf`, for the opt-in remote path. Both are already present on the current
+robot PC (protobuf 3.12.4, grpcio 1.30.2), so nothing breaks today; the declaration
+matters for a fresh machine.
+
+`ros2_ur_ws/build_ur7e.sh` runs `rosdep install --from-paths src --ignore-src -r -y
+--skip-keys dynamixel_sdk`, which covers EVERY package under `src/` and therefore does
+resolve the two new keys. But its `colcon build --packages-select ur_gello_bringup`
+builds only that one package — it does NOT build `gello_policy`. On a fresh machine run
+both steps:
+
+```bash
+./build_ur7e.sh                                   # rosdep for all packages + ur_gello_bringup
+colcon build --packages-select gello_policy       # then gello_policy itself
+```

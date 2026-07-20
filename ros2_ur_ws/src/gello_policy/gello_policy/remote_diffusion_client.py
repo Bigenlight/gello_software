@@ -11,8 +11,6 @@ import time
 import uuid
 from typing import Optional, Tuple
 
-from . import remote_diffusion_pb2 as pb
-
 
 PROTOCOL_VERSION = "1"
 STATE_DIM = 7
@@ -95,6 +93,11 @@ class RemoteDiffusionWorker:
         self._thread = None  # type: Optional[threading.Thread]
 
     def get_server_info(self, expected: Optional[ServerContract] = None):
+        # Lazy protobuf import: the local ZMQ deploy paths (ACT / FM / local
+        # Diffusion) must never load google.protobuf.  Mirrors create_worker()'s
+        # lazy ``import grpc``.
+        from . import remote_diffusion_pb2 as pb
+
         info = self._stub.GetServerInfo(
             pb.ServerInfoRequest(), timeout=self._rpc_deadline_s
         )
@@ -126,6 +129,8 @@ class RemoteDiffusionWorker:
         return info
 
     def reset_episode(self, session_id: Optional[str] = None) -> str:
+        from . import remote_diffusion_pb2 as pb
+
         new_session_id = session_id or uuid.uuid4().hex
         with self._condition:
             if self._in_flight or self._pending is not None:
@@ -258,6 +263,8 @@ class RemoteDiffusionWorker:
                     self._error = None
 
     def _build_request(self, observation, session_id, request_id):
+        from . import remote_diffusion_pb2 as pb
+
         def frame(image):
             return pb.ImageFrame(
                 ros_stamp_ns=image.ros_stamp_ns,

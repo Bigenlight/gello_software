@@ -172,9 +172,10 @@ $GPU_WORKSPACE/
 └── runtime/          # transfer bundles or local runtime files
 ```
 
-For example, configure `SSH_HOST` as an alias in `~/.ssh/config` and set
-`GPU_WORKSPACE` to the project directory owned by the server account. The
-validated server class is Ubuntu 24.04 x86_64, Docker 27.4.1, Compose 2.32.1,
+`SSH_HOST` is site-specific and has no default: export it to your own hostname
+or `~/.ssh/config` alias (for example `my-gpu-box`) before running the laptop
+runner. Set `GPU_WORKSPACE` to the project directory owned by the server
+account. The validated server class is Ubuntu 24.04 x86_64, Docker 27.4.1, Compose 2.32.1,
 NVIDIA Container Toolkit 1.17.3, eight RTX A4000 16-GB GPUs, and NVIDIA driver
 550.144.03. Do not upgrade a shared host driver for this work.
 
@@ -414,16 +415,18 @@ The eventual real launch command is:
 
 ```bash
 cd "$LAPTOP_WS"
-./run_ur7e_diffusion_remote.sh
+SSH_HOST=my-gpu-box ./run_ur7e_diffusion_remote.sh
 ```
+
+`SSH_HOST` is required; the script exits immediately with an error if it is unset.
 
 It opens the tunnel, verifies gRPC 1.74.0, sources ROS Humble and the built
 workspace, then launches the existing `ur7e_diffusion_real.launch.py` with
 `inference_transport:=grpc`, `act_host:=127.0.0.1`, and the selected local port.
-Common overrides are:
+Common overrides, alongside the required `SSH_HOST`, are:
 
 ```bash
-SSH_HOST=my-gpu-server ROBOT_IP=192.168.10.11 \
+SSH_HOST=my-gpu-box ROBOT_IP=192.168.10.11 \
 LOCAL_GRPC_PORT=50051 REMOTE_GRPC_PORT=50051 \
 CALIB=/path/to/ur7e_calibration.yaml START_MODE=gello \
 ./run_ur7e_diffusion_remote.sh launch_rviz:=false
