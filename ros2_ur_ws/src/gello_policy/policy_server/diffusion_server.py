@@ -85,13 +85,15 @@ try:
     from .image_preprocess import decode_jpeg_to_rgb_float_chw, RESIZE_HW
     from . import zmq_protocol as proto
     from .ensemble_sampler import EnsembleSampler
-    from .ensemble_logger import EnsembleLogger
+    from .ensemble_logger import EnsembleLogger, collect_normalization, hash_checkpoint
 except ImportError:  # pragma: no cover - fallback for direct-path execution
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from image_preprocess import decode_jpeg_to_rgb_float_chw, RESIZE_HW  # type: ignore
     import zmq_protocol as proto  # type: ignore
     from ensemble_sampler import EnsembleSampler  # type: ignore
-    from ensemble_logger import EnsembleLogger  # type: ignore
+    from ensemble_logger import (  # type: ignore
+        EnsembleLogger, collect_normalization, hash_checkpoint,
+    )
 
 
 # =============================================================================
@@ -199,6 +201,15 @@ class DiffusionInferenceEngine:
         self._last_action_normalized = None  # first (popped) action of the chunk
         if ensemble_k > 0:
             cfg = self.policy.config
+            # Provenance so the HDF5 stays analyzable if this checkpoint is later
+            # lost/retrained: identity of the weights + the normalization stats the
+            # logged (normalized-space) arrays are expressed in. Best-effort only --
+            # collect_normalization/hash_checkpoint swallow their own errors.
+            try:
+                import lerobot  # local: version string only
+                _lerobot_version = getattr(lerobot, "__version__", "")
+            except Exception:  # noqa: BLE001
+                _lerobot_version = ""
             self.ensemble_logger = EnsembleLogger(
                 ensemble_dir,
                 k=ensemble_k,
@@ -207,6 +218,15 @@ class DiffusionInferenceEngine:
                 n_action_steps=cfg.n_action_steps,
                 n_obs_steps=cfg.n_obs_steps,
                 state_dim=cfg.robot_state_feature.shape[0],
+                provenance={
+                    "checkpoint_path": os.path.abspath(checkpoint),
+                    "checkpoint_hash": hash_checkpoint(checkpoint),
+                    "lerobot_version": _lerobot_version,
+                    "torch_version": torch.__version__,
+                    "num_inference_steps": cfg.num_inference_steps,
+                    "noise_scheduler_type": cfg.noise_scheduler_type,
+                },
+                normalization=collect_normalization(self.preprocessor),
             )
             self.ensemble_sampler = EnsembleSampler(
                 self.policy, k=ensemble_k, callback=self._on_ensemble_result

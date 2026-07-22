@@ -69,6 +69,8 @@
 # #    DIFFUSION_N_ACTION_STEPS (default 32)                                 #
 # #    DIFFUSION_ENSEMBLE_K (default unset/empty -> ensemble side-channel OFF;#
 # #        set 16 to log a 16-sample ensemble per refill for offline research)#
+# #    DIFFUSION_ENSEMBLE_DIR (default empty -> server auto-derives           #
+# #        <GELLO_REPO_ROOT>/ros2_ur_ws/diffusion_ensembles)                 #
 # #    GELLO_REPO_ROOT (default <ros2_ur_ws>/..)                             #
 # ############################################################################
 set -e
@@ -96,6 +98,10 @@ DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER:-DDIM}"
 # Optional ensemble side-channel: empty (default) means --ensemble-k is NOT passed
 # at all, preserving the server's own default of 0 (feature fully OFF).
 DIFFUSION_ENSEMBLE_K="${DIFFUSION_ENSEMBLE_K:-}"
+# Optional custom output dir for the ensemble h5 (empty -> server auto-derives
+# <GELLO_REPO_ROOT>/ros2_ur_ws/diffusion_ensembles). Declared here so it is threaded
+# explicitly to the server below rather than relying on ambient env inheritance.
+DIFFUSION_ENSEMBLE_DIR="${DIFFUSION_ENSEMBLE_DIR:-}"
 RUN_DIFFUSION_SERVER="$SCRIPT_DIR/src/gello_policy/scripts/run_diffusion_server.sh"
 
 if [ -z "${DIFFUSION_CHECKPOINT}" ]; then
@@ -144,6 +150,7 @@ DIFFUSION_VENV="${DIFFUSION_VENV}" DIFFUSION_HOST="${DIFFUSION_HOST}" DIFFUSION_
     DIFFUSION_NUM_INFERENCE_STEPS="${DIFFUSION_NUM_INFERENCE_STEPS}" \
     DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER}" \
     DIFFUSION_ENSEMBLE_K="${DIFFUSION_ENSEMBLE_K}" \
+    DIFFUSION_ENSEMBLE_DIR="${DIFFUSION_ENSEMBLE_DIR}" \
     bash "${RUN_DIFFUSION_SERVER}" &
 DIFFUSION_SERVER_PID=$!
 # Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).

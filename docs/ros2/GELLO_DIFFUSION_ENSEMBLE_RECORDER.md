@@ -92,6 +92,83 @@ launch_cameras.sh (cameras up)
 click SUCCESS or FAIL       -> label.json written, ready for next take
 ```
 
+## 5b. How to run it (real-robot recording)
+
+> This section is the **online / real-robot** recipe. It is written so it is ready to use the
+> moment the two preconditions below are met — it is **not** runnable on the build PC, and the
+> ensemble side-channel is **not** cleared for the current robot PC. Read the preconditions first.
+
+### Two independent reasons the online path is not running "right now"
+
+These are orthogonal — satisfying one does not satisfy the other:
+
+1. **No robot hardware on this build PC.** The online leader/bridge/arm/gripper/camera stack needs a
+   physical UR7e + Robotiq 2F-85 + two RealSense cameras. That rig lives on the **robot PC**
+   (`/home/laptop3/gello_software`; `diffusion_server.py:554` falls back to exactly that path when
+   `GELLO_REPO_ROOT` is unset). This machine is the build PC and has none of it, so the pipeline has
+   nothing to attach to here regardless of GPU.
+2. **The ensemble benchmark FAILs on the robot PC's GPU.** The robot PC is an **RTX 3060 Mobile/Max-Q,
+   6GB** (`GELLO_UR7E_ACT_DEPLOY.md:215`) — a weaker part than this build PC's 12GB desktop 3060. There,
+   even `K=1` fails the §6 safety gate (contended p99 545ms vs a 600ms `act_timeout_s`). This is a
+   compute-saturation problem, not a hardware-presence one. Re-benchmarking on *this* 12GB card proves
+   nothing about the robot PC — the benchmark must run **on the robot PC itself** (§9).
+
+So "enable online recording" = get onto the robot PC **and** pass the benchmark there. Until both hold,
+keep `DIFFUSION_ENSEMBLE_K=0`. (As of 2026-07-20 the offline study also recommends K=0 on its own merits
+regardless of hardware — see [GELLO_DIFFUSION_ENSEMBLE_OFFLINE.md](GELLO_DIFFUSION_ENSEMBLE_OFFLINE.md) §7.)
+
+### The launch chain (on the robot PC, once both preconditions hold)
+
+Three processes, in this order. Cameras must be up before the GUI (a runtime gate, not a hard
+dependency: `policy_run_gui` only *subscribes* to camera topics, it never launches its own).
+
+```bash
+# 0. one-time: point env at the robot PC's repo + fetch the checkpoint (gitignored)
+export GELLO_REPO_ROOT=/home/laptop3/gello_software   # publisher imports the gello driver from here
+cd "$GELLO_REPO_ROOT/ros2_ur_ws"
+CKPT=$(src/gello_policy/scripts/download_diffusion_checkpoint.sh | tail -1)
+
+# 1. cameras (two RealSense drivers + a visual-check viewer)
+./launch_cameras.sh
+
+# 2. diffusion server + arm driver, WITH the ensemble side-channel on (K=16)
+#    Method A (default): press Play on the pendant's External Control program.
+#    Method B (HEADLESS=true): pendant in REMOTE mode, no Play needed. Do NOT mix A and B.
+#    NOTE the script name: run_ur7e_DIFFUSION_real.sh (autonomous diffusion). Do NOT confuse
+#    it with run_ur7e_GELLO_real.sh, which is the physical-GELLO teleop launcher.
+DIFFUSION_CHECKPOINT="$CKPT" DIFFUSION_ENSEMBLE_K=16 ./run_ur7e_diffusion_real.sh
+#   -> without DIFFUSION_ENSEMBLE_K, the --ensemble-k flag is never passed and the feature stays OFF.
+#   -> h5 auto-lands at $GELLO_REPO_ROOT/ros2_ur_ws/diffusion_ensembles/ensemble_<timestamp>.h5,
+#      one file per server lifetime. Override with DIFFUSION_ENSEMBLE_DIR=/custom/path (now threaded
+#      through the wrapper explicitly).
+
+# 3. the recorder GUI (per-take video + vectors.h5 + SUCCESS/FAIL label)
+ros2 run gello_recorder policy_run_gui
+```
+
+> **Launcher env vars** (`run_ur7e_diffusion_real.sh`): `DIFFUSION_CHECKPOINT` (required),
+> `DIFFUSION_ENSEMBLE_K` (empty→OFF), `DIFFUSION_ENSEMBLE_DIR` (empty→auto-derive), `HEADLESS`
+> (Method A/B), `DIFFUSION_PORT` (default 5592), `DIFFUSION_VENV` (default `ros2_ur_ws/act_venv`).
+
+### What the GUI records and how it joins the ensemble file
+
+`policy_run_gui` (env-configured: `CAM1_NAME`/`CAM2_NAME`, `CAMERA_FPS`, `POLICY_RUN_OUTPUT_ROOT`
+default `$GELLO_REPO_ROOT/ros2_ur_ws/gello_logs/policy_runs`) drives one take per episode:
+
+```
+[START EXECUTION] -> calls /policy_leader_node/start_execution; on success auto-starts recording
+[HOLD]            -> calls /policy_leader_node/hold; never touches recording (won't drop a grasp)
+[Stop Recording]  -> stops the take, then FORCES a [SUCCESS]/[FAIL] click before the next take
+[SUCCESS]/[FAIL]  -> writes label.json atomically (tempfile + os.replace) into the take dir
+```
+
+Per take (via the unmodified `gello_recorder`): `cam1.mp4`, `cam2.mp4`, and `vectors.h5` (the same 9
+tables teleop records). The **ensemble** `ensemble_<timestamp>.h5` is written separately by the server,
+and the two are joined **by wall-clock only** (`t_wall` + `metadata.json` `start_wall`/`stop_wall`) at
+the take/episode level — not tick-accurate (§4 alignment caveat). Two GUIs can run at once without a
+node-name clash (`policy_run_gui_node` vs `gello_recorder_gui_node`), and `camera_viewer.py` stays
+usable alongside it — all three are pure topic subscribers.
+
 ## 6. Safety benchmark results (this machine, 2026-07-09)
 
 `scripts/benchmark_ensemble_batch16.py` measures the real single-sample refill latency (`select_action()`, DDIM-10) while the production `EnsembleSampler.run_batch()` code path runs **continuously** in the background (worst-case stress test, not average-case) on its own CUDA stream. PASS requires contended p99 < 500ms (margin under the real 600ms `act_timeout_s`).

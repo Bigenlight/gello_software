@@ -27,7 +27,8 @@
 | 안전 | 속도는 브리지의 0.625 rad/s slew ceiling(불변), 위치는 `policy_leader_node`의 1.2x envelope 클램프 + live-pose 0.5rad 클램프. **diffusion 신규**: 리더가 refill 틱의 DDIM 샘플링 동안 발행을 **블로킹**(+단일 스레드라 obs도 프리즈)하므로 `act_timeout_s=0.6` < `obs_timeout_s=0.7` < `staleness_timeout_s=0.8`로 리더의 ZMQ 타임아웃을 true primary fault owner로 배치 (§6) |
 | 오프라인 검증됨 (개발 PC, CPU) | diffusion_server 로드 + RESET + 1회 ACT ZMQ 라운드트립이 finite (7,) 액션 반환 (엔드투엔드) |
 | **아직 안 됨** | **실제 UR7e 팔 구동, 로봇 PC colcon build, GPU 레이턴시 벤치마크** — §8 |
-| 실기 전 필수 | `scripts/benchmark_diffusion_latency.py`를 로봇 PC에서 **첫 팔 구동 전에** 반드시 실행 (§6) |
+| 실기 전 필수 (**게이트 A**, K=0) | `scripts/benchmark_diffusion_latency.py`를 로봇 PC에서 **첫 팔 구동 전에** 반드시 실행 (§6) — 이 배포의 기본(K=0) 경로에 적용, 앙상블 녹화 여부와 무관 |
+| 앙상블 녹화(`DIFFUSION_ENSEMBLE_K>0`) 켤 때만 추가 필수 (**게이트 B**) | `scripts/benchmark_ensemble_batch16.py` — 게이트 A와 **독립적**인 별개 게이트 (§6). **현재 로봇 PC(6GB)에서 FAIL** — 녹화를 원할 때만 관련, 팔 구동 자체와는 무관 |
 
 ### 목차
 
@@ -270,6 +271,25 @@ DIFFUSION_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_diffusion_real.sh
   DIFFUSION_CHECKPOINT=/path/... DIFFUSION_NUM_INFERENCE_STEPS=5 ./run_ur7e_diffusion_real.sh
   ```
 
+### ⚠️ 게이트 A vs 게이트 B — 앙상블 녹화(ensemble side-channel)와의 관계 (반드시 구분할 것)
+
+이 배포 문서가 지금까지 다룬 것은 **게이트 A뿐**이다 — `DIFFUSION_ENSEMBLE_K`(기본 `0`, 즉 앙상블 side-channel 완전 OFF)로 팔을 구동하는 **기본 K=0 경로**의 안전 게이트다. 만약 실기에서 **[`GELLO_DIFFUSION_ENSEMBLE_RECORDER.md`](./GELLO_DIFFUSION_ENSEMBLE_RECORDER.md)**의 16-샘플 불확실성 앙상블 녹화 기능(`DIFFUSION_ENSEMBLE_K>0`)까지 켜고 싶다면, **완전히 별개의 두 번째 게이트**를 통과해야 한다. 둘을 혼동하면 안 된다 — 게이트 A는 로봇 팔을 구동하는 모든 diffusion 배포에 항상 필요하고, 게이트 B는 앙상블 녹화를 켤 때만 추가로 필요하다.
+
+| | **게이트 A** (K=0, 팔 구동 전 필수) | **게이트 B** (K>0, 앙상블 녹화 켤 때만) |
+|---|---|---|
+| 스크립트 | `scripts/benchmark_diffusion_latency.py` | `scripts/benchmark_ensemble_batch16.py` |
+| 언제 필요한가 | **모든** diffusion 배포 — 앙상블을 켜든 안 켜든, 이 게이트를 통과해야 팔을 움직일 수 있다 | `DIFFUSION_ENSEMBLE_K`를 `0`이 아닌 값으로 설정해 앙상블 녹화를 켜고 싶을 때만. 녹화 없이 K=0으로만 팔을 구동한다면 이 게이트는 불필요 |
+| 무엇을 재는가 | 실시간 제어가 의존하는 단일-샘플 DDIM-N refill의 레이턴시 (`select_action` 1회) | 배경 스레드에서 계속 도는 batch-16 앙상블 샘플링이 **그 실시간 refill을 지연시키는지** (contention) |
+| 정확한 명령 | `act_venv/bin/python src/gello_policy/scripts/benchmark_diffusion_latency.py --checkpoint "$CKPT" --device cuda --num-inference-steps 10 --iters 50` | `act_venv/bin/python src/gello_policy/scripts/benchmark_ensemble_batch16.py --checkpoint "$CKPT" --device cuda --num-inference-steps 10 --ensemble-k 16 --iters 50` |
+| PASS 기준 | 종료 코드 0 — 스크립트가 `VERDICT: OK`(p99 ≤ 400ms) 또는 `VERDICT: MARGINAL`(p99 ≤ 500ms 브리지 예산)을 출력. `VERDICT: TOO SLOW`(p99 > 500ms, 종료 코드 1)면 진행 금지 — 위 규칙대로 `DIFFUSION_NUM_INFERENCE_STEPS`를 줄이고 재측정 | 종료 코드 0 — 스크립트가 `VERDICT: PASS`를 출력 (contended p99 **< 500ms**, `act_timeout_s=0.6s` 아래 마진). `VERDICT: FAIL`(종료 코드 1)이면 그 GPU에서 `DIFFUSION_ENSEMBLE_K`를 절대 켜지 말 것 |
+| 현재 상태 | 로봇 PC에서 **아직 미실행** (§8 "아직 검증/수행 안 됨") | **현재 로봇 PC(RTX 3060 Laptop, 6GB)에서 FAIL** — K=16(contended p99 811ms)은 물론 **K=1조차 FAIL**(contended p99 545ms, baseline 210ms) — [`GELLO_DIFFUSION_ENSEMBLE_RECORDER.md`](./GELLO_DIFFUSION_ENSEMBLE_RECORDER.md) §6 |
+
+**두 게이트는 서로 독립이다.** 게이트 A를 통과했다고 게이트 B가 자동으로 통과되는 것이 아니고, 그 반대도 마찬가지다 — 검증하는 대상 자체가 다르다(A: 단일 realtime 추론이 안전 예산 안에 드는가, B: 배경 앙상블이 그 realtime 추론을 지연시키지 않는가). GPU/드라이버/체크포인트가 바뀌면 두 게이트 모두 다시 실행해야 한다(`GELLO_DIFFUSION_ENSEMBLE_RECORDER.md` §9).
+
+앙상블을 켜도 정책→ROS→팔의 실시간 제어 코드는 **한 줄도 바뀌지 않는다**(`diffusion_server.py`에만 additive-only 훅이 추가됨, `RECORDER.md` §3) — 그래서 앙상블을 켜기 위해 게이트 A를 다시 통과할 필요는 없지만, 게이트 B는 반드시 별도로 필요하다. **참고로 하드웨어 문제와 별개로**, K=64까지 스윕한 오프라인 연구(`GELLO_DIFFUSION_ENSEMBLE_OFFLINE.md` TL;DR/§7)도 자체 결론으로 `DIFFUSION_ENSEMBLE_K=0` 유지를 권고한다 — across-sample variance는 유용한 실기 불확실성 신호라기보다 photometric-corruption tripwire에 가깝다는 것이 결론이다.
+
+**앙상블 녹화를 실제로 켜는 법 (요약, 상세는 별도 문서).** 이 배포의 실행 명령(`run_ur7e_diffusion_real.sh`)에 `DIFFUSION_ENSEMBLE_K=16`을 추가하면 앙상블 side-channel이 켜지지만, **오직 위 게이트 B를 PASS한 뒤에만** 켤 것. 정확한 실행 절차(런처 순서, GUI, 파일 경로)는 이 문서의 범위가 아니다 — [`GELLO_DIFFUSION_ENSEMBLE_RECORDER.md`](./GELLO_DIFFUSION_ENSEMBLE_RECORDER.md) §5b "How to run it (real-robot recording)"를 참고할 것.
+
 - **오퍼레이터 게이트 + 워밍업.** 핸드셰이크만으로는 자율 모션이 시작되지 않으며 `~/start_execution`이 필수 게이트다. diffusion_server는 로드 시 더미 관측으로 2회 추론을 미리 돌려(→ 그 뒤 `reset()`) CUDA 커널을 워밍업하므로, 실제 첫 refill 틱이 `act_timeout_s`를 넘겨 가짜 FAULT를 내지 않는다.
 - **단일 그리퍼 writer.** `ur7e_diffusion_real.launch.py`는 `gello_gripper_bridge`를 launch하지 않는다 — `policy_leader_node`가 `/robotiq_gripper/command_percent`의 유일한 publisher다.
 
@@ -310,7 +330,16 @@ DIFFUSION_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_diffusion_real.sh
 - **GPU 레이턴시 벤치마크** — DDIM-10 refill의 p99가 이 로봇 PC의 GPU(예: RTX 3060 Mobile)에서 0.5s 예산 안에 드는지 **아직 측정 안 됨.** §6의 벤치마크를 **첫 팔 구동 전에 반드시** 돌려 `act_timeout_s=0.6`이 충분한지, 아니면 step을 줄여야 하는지 확정해야 한다.
 - **closed-loop 태스크 성공률** — open-loop MAE(§3)는 있으나 실기 grab/placement 성공률은 미측정.
 
-> **요약:** 지금 확실한 것은 **"diffusion_server가 유효한 액션을 dev PC에서 엔드투엔드로 반환한다"**는 것뿐이다. **"실기 파이프라인이 돈다"거나 "정책이 태스크를 푼다"는 아직 아니다.** 첫 실기 세션은 (1) 로봇 PC colcon build → (2) 레이턴시 벤치마크 → (3) 카메라/그리퍼 라이브 확인 → (4) 감독하에 `~/start_execution` 순서로 진행할 것.
+> **요약:** 지금 확실한 것은 **"diffusion_server가 유효한 액션을 dev PC에서 엔드투엔드로 반환한다"**는 것뿐이다. **"실기 파이프라인이 돈다"거나 "정책이 태스크를 푼다"는 아직 아니다.**
+
+### 실기 첫 구동 프리플라이트 체크리스트
+
+1. **하드웨어 존재 확인** — UR7e + Robotiq 2F-85 + RealSense 2대가 연결된 로봇 PC인지, cam1/cam2 시리얼 매핑과 물리 배치가 학습 리그와 일치하는지(§2).
+2. **로봇 PC에서 colcon build** — `gello_policy` + `ur_gello_bringup` (§4-1). dev PC에서의 검증은 이를 대체하지 못한다(위 "아직 검증/수행 안 됨" 참고).
+3. **게이트 A PASS (필수, 앙상블 여부와 무관)** — `benchmark_diffusion_latency.py`가 종료 코드 0(`VERDICT: OK`/`MARGINAL`)을 출력해야 팔을 구동할 수 있다(§6). `TOO SLOW`면 `DIFFUSION_NUM_INFERENCE_STEPS`를 줄이고 재측정.
+4. **E-STOP / 펜던트 대기, 감독자 배치** — 이 diffusion 경로는 실물 UR7e에서 **아직 한 번도** 구동된 적이 없다. 형제 ACT는 2026-07-08에 실기 검증됐지만, 그 검증은 ACT 서버 경로에 대한 것이지 이 diffusion 서버 경로에 대한 것이 아니다(위 요약, §8).
+5. **(선택) 앙상블 녹화(`DIFFUSION_ENSEMBLE_K>0`)를 켤 경우에만 — 게이트 B PASS + K 설정** — `benchmark_ensemble_batch16.py`가 `VERDICT: PASS`(종료 코드 0)를 출력해야 한다. 게이트 A 통과와 **완전히 독립**이며, **현재 로봇 PC(RTX 3060 Laptop, 6GB)에서는 K=1조차 FAIL**한다(§6 "게이트 A vs 게이트 B"). 녹화 없이 팔만 구동한다면 이 단계는 건너뛴다. 실행 상세는 [`GELLO_DIFFUSION_ENSEMBLE_RECORDER.md`](./GELLO_DIFFUSION_ENSEMBLE_RECORDER.md) §5b.
+6. **카메라/그리퍼 라이브 확인** → **감독하에 `~/start_execution`**(§5).
 
 ## 9. 트러블슈팅
 

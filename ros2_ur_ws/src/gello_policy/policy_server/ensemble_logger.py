@@ -22,6 +22,39 @@ Layout (all growable along axis 0):
         over successful refills; align to meta via the refill_idx column (gaps at
         dropped ticks are expected).
 
+SELF-DESCRIBING PROVENANCE (added; all optional, absent -> attrs simply omitted)
+
+Every number in trajectories/committed_chunk/obs_state lives in lerobot's
+NORMALIZED space. Without the normalization stats those arrays cannot be mapped
+back to radians, so the file used to be uninterpretable the moment the checkpoint
+moved or changed. Both of the following make it self-contained:
+
+  /ensemble_trajectories attrs (provenance, written only when supplied):
+      checkpoint_path, checkpoint_hash, lerobot_version, torch_version,
+      num_inference_steps, noise_scheduler_type
+    checkpoint_hash is computed by `hash_checkpoint()`: sha256 over the raw bytes
+    of config.json plus, for each *.safetensors sorted by name, the tuple
+    (name, size_bytes, mtime_ns). Deterministic and O(config size) -- deliberately
+    NOT a content hash of the weights, which would cost seconds of disk I/O at
+    server start. It detects "different checkpoint" and "weights rewritten", not
+    bit-identical duplicates copied with preserved mtimes.
+
+  /ensemble_trajectories/norm_stats  (group, a few hundred bytes)
+      one subgroup per normalized feature, each holding the raw stat arrays as
+      float64 datasets, e.g.
+          norm_stats/action/{mean,std}          (or {min,max}, {q01,q99}, ...)
+          norm_stats/observation.state/{mean,std}
+      Feature keys containing '/' are sanitized to '|' in the group name; the
+      original key is kept in the JSON below.
+      norm_stats.attrs["json"] = {
+          "features": {orig_key: {"type": ..., "shape": [...]}},
+          "norm_map": {FEATURE_TYPE: NORMALIZATION_MODE},   # MEAN_STD / MIN_MAX /
+                                                            # QUANTILES / ...
+          "mode_by_key": {orig_key: NORMALIZATION_MODE},    # resolved per feature
+          "group_names": {orig_key: sanitized_group_name},
+      }
+    so an analysis script can unnormalize with no checkpoint and no lerobot import.
+
 Flush policy: the file is flushed every FLUSH_EVERY successful log_refill calls
 (and on close), so a crash loses at most a few refills.
 
@@ -31,6 +64,7 @@ from the server (submit) thread on drops; a lock serializes all h5py access.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -42,6 +76,86 @@ import numpy as np
 GROUP_NAME = "ensemble_trajectories"
 META_COLUMNS = ["t_rel_s", "t_wall", "refill_idx", "ensemble_ms", "dropped_flag"]
 FLUSH_EVERY = 8  # flush to disk every N log_refill calls (plus on close)
+
+# Provenance attrs written (when present) on the top-level group. Order fixed so
+# files are diffable; int-valued keys are stored as int64, the rest as strings.
+PROVENANCE_KEYS = (
+    "checkpoint_path",
+    "checkpoint_hash",
+    "lerobot_version",
+    "torch_version",
+    "num_inference_steps",
+    "noise_scheduler_type",
+)
+_PROVENANCE_INT_KEYS = frozenset({"num_inference_steps"})
+
+
+# ---------------------------------------------------------------- provenance helpers
+def hash_checkpoint(checkpoint_path: str) -> str:
+    """Cheap, deterministic identity hash of a lerobot checkpoint directory.
+
+    sha256( config.json bytes || for each *.safetensors sorted by name:
+            name + size_bytes + mtime_ns ).
+    Chosen over hashing the weights themselves because the weights are hundreds of
+    MB and this runs during server startup; size+mtime is enough to notice that the
+    checkpoint was retrained/overwritten, while config.json bytes capture every
+    architectural/scheduler knob. Returns "" if the path is unreadable -- provenance
+    must never be able to stop the server from starting.
+    """
+    try:
+        h = hashlib.sha256()
+        cfg = os.path.join(checkpoint_path, "config.json")
+        if os.path.isfile(cfg):
+            with open(cfg, "rb") as f:
+                h.update(f.read())
+        for root, _dirs, files in sorted(os.walk(checkpoint_path)):
+            for name in sorted(files):
+                if not name.endswith(".safetensors"):
+                    continue
+                p = os.path.join(root, name)
+                st = os.stat(p)
+                rel = os.path.relpath(p, checkpoint_path)
+                h.update(f"{rel}:{st.st_size}:{st.st_mtime_ns}".encode())
+        return h.hexdigest()
+    except Exception:  # noqa: BLE001 - provenance is best-effort, never fatal
+        return ""
+
+
+def _enum_value(x) -> str:
+    """FeatureType.STATE / NormalizationMode.MEAN_STD (str-Enums) -> 'STATE'."""
+    return str(getattr(x, "name", None) or getattr(x, "value", None) or x)
+
+
+def collect_normalization(processor) -> dict | None:
+    """Extract {'stats','features','norm_map'} from a lerobot processor pipeline.
+
+    Walks `processor.steps` for the first step exposing both `stats` and `norm_map`
+    (NormalizerProcessorStep). Returns None if nothing matches or anything raises --
+    the logger then simply omits the norm_stats group.
+    """
+    try:
+        for step in getattr(processor, "steps", []) or []:
+            stats = getattr(step, "stats", None)
+            norm_map = getattr(step, "norm_map", None)
+            if not stats or norm_map is None:
+                continue
+            features = {}
+            for key, ft in (getattr(step, "features", None) or {}).items():
+                features[str(key)] = {
+                    "type": _enum_value(getattr(ft, "type", "")),
+                    "shape": [int(s) for s in getattr(ft, "shape", ()) or ()],
+                }
+            return {
+                "stats": stats,
+                "features": features,
+                "norm_map": {
+                    _enum_value(ft_type): _enum_value(mode)
+                    for ft_type, mode in norm_map.items()
+                },
+            }
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 class EnsembleLogger:
@@ -56,7 +170,13 @@ class EnsembleLogger:
         n_action_steps: int,
         n_obs_steps: int,
         state_dim: int,
+        provenance: dict | None = None,
+        normalization: dict | None = None,
     ) -> None:
+        """provenance: optional subset of PROVENANCE_KEYS; unknown keys ignored.
+        normalization: optional dict as returned by collect_normalization(); the
+        stats arrays are embedded so the file needs no checkpoint to be read.
+        Both default to None -> the file is byte-for-byte the old layout."""
         self._h5 = None  # set last; close() must tolerate partial construction
         self._lock = threading.Lock()
         self._calls = 0
@@ -75,6 +195,11 @@ class EnsembleLogger:
         grp.attrs["n_obs_steps"] = int(n_obs_steps)
         grp.attrs["state_dim"] = int(state_dim)
         grp.attrs["t0_wall"] = float(self.t0)
+
+        # Provenance + embedded stats are best-effort: a malformed dict must never
+        # prevent the ensemble file (or the server) from coming up.
+        self._write_provenance(grp, provenance)
+        self._write_norm_stats(grp, normalization)
 
         # meta: one growable float64 1-D dataset per column (hdf5_writer.py pattern).
         meta = grp.create_group("meta")
@@ -103,6 +228,76 @@ class EnsembleLogger:
 
         self._h5 = h5
         print(f"[ensemble_logger] logging ensembles to {self.path}", flush=True)
+
+    # -------------------------------------------------------- provenance (init only)
+    @staticmethod
+    def _write_provenance(grp, provenance: dict | None) -> None:
+        if not provenance:
+            return
+        for key in PROVENANCE_KEYS:
+            if key not in provenance:
+                continue
+            value = provenance[key]
+            if value is None:
+                continue
+            try:
+                if key in _PROVENANCE_INT_KEYS:
+                    grp.attrs[key] = int(value)
+                else:
+                    grp.attrs[key] = str(value)
+            except Exception:  # noqa: BLE001 - skip the bad key, keep the rest
+                continue
+
+    @staticmethod
+    def _write_norm_stats(grp, normalization: dict | None) -> None:
+        """Embed the raw normalization stat arrays + a JSON description of which
+        normalization mode applies to which feature."""
+        if not normalization:
+            return
+        try:
+            stats = normalization.get("stats") or {}
+            features = normalization.get("features") or {}
+            norm_map = normalization.get("norm_map") or {}
+            if not stats:
+                return
+
+            ns = grp.create_group("norm_stats")
+            group_names: dict[str, str] = {}
+            mode_by_key: dict[str, str] = {}
+            for key, stat_dict in stats.items():
+                key = str(key)
+                gname = key.replace("/", "|")
+                sub = ns.create_group(gname)
+                wrote = False
+                for stat_name, arr in (stat_dict or {}).items():
+                    try:
+                        # torch tensors, numpy arrays and lists all land here.
+                        value = np.asarray(
+                            arr.detach().cpu().numpy() if hasattr(arr, "detach") else arr,
+                            dtype=np.float64,
+                        )
+                        sub.create_dataset(str(stat_name), data=value)
+                        wrote = True
+                    except Exception:  # noqa: BLE001 - skip one stat, keep the rest
+                        continue
+                if not wrote:
+                    continue
+                group_names[key] = gname
+                ft_type = (features.get(key) or {}).get("type")
+                if ft_type in norm_map:
+                    mode_by_key[key] = norm_map[ft_type]
+
+            ns.attrs["json"] = json.dumps(
+                {
+                    "features": features,
+                    "norm_map": norm_map,
+                    "mode_by_key": mode_by_key,
+                    "group_names": group_names,
+                },
+                sort_keys=True,
+            )
+        except Exception:  # noqa: BLE001 - never block the logger on provenance
+            pass
 
     # ------------------------------------------------------------------ write
     def log_refill(
