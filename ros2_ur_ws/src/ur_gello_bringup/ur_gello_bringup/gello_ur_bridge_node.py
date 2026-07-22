@@ -35,12 +35,13 @@ Safety / deployment notes
   the watchdog measures real elapsed wall time regardless of clock config.
 """
 
-import math
+import json
 import time
 from collections import deque
 
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
@@ -49,6 +50,15 @@ from ur_gello_bringup.angle_utils import (
     circular_dist,
     leader_quasi_still,
     wrapped_nearest,
+)
+# Pure, rclpy-independent command-pipeline stages + the 1-Euro filter. Keeping
+# them in a separate module lets the venv test-suite prove the joint path is
+# bit-identical to the legacy interleaved loop (the code tested IS the code run).
+# NOTE: ur_kin / eef_delta are imported LAZILY (only when control_mode=="eef")
+# so joint mode boots without the analytic-IK dependency stack.
+from ur_gello_bringup.bridge_stages import (
+    OneEuro,
+    command_pipeline,
 )
 
 # Output index order expected by the UR forward_position_controller.
@@ -68,71 +78,6 @@ UR_JOINT_SHORT = ["pan", "lift", "elbow", "w1", "w2", "w3"]
 _WARN_THROTTLE_S = 2.0
 
 
-class _OneEuro:
-    """Scalar 1-Euro filter (Casiez, Roussel & Vogel 2012) at a FIXED period.
-
-    Adaptive low-pass tuned for teleop input jitter: it low-passes the signal
-    with a cutoff that RISES with the (low-passed) signal speed. So when the
-    GELLO joint is nearly still it smooths HARD (kills hand tremor + Dynamixel
-    encoder/motor noise), and when you move it fast the cutoff opens up so the
-    robot tracks with little lag. This beats a fixed EMA, which must trade lag
-    for smoothing on *every* sample.
-
-    Tuning: ``min_cutoff`` (Hz) sets the at-rest smoothing — LOWER = smoother /
-    less jitter (more lag when slow). ``beta`` sets how fast the cutoff opens
-    with speed — HIGHER = snappier on fast moves (less smoothing). ``d_cutoff``
-    low-passes the internal speed estimate so jitter does not inflate the cutoff.
-
-    GELLO samples arrive at ~30 Hz while this bridge publishes at 250 Hz. The
-    speed estimate must therefore be updated at the GELLO sample cadence, not on
-    every publish tick, otherwise each 30 Hz sample step is interpreted as a
-    much faster 250 Hz jump and the filter opens up in visible pulses.
-    """
-
-    def __init__(self, dt: float, min_cutoff: float, beta: float,
-                 d_cutoff: float) -> None:
-        self._dt = dt
-        self._min_cutoff = min_cutoff
-        self._beta = beta
-        self._d_cutoff = d_cutoff
-        self._x_prev: float | None = None
-        self._raw_prev: float | None = None
-        self._dx_prev = 0.0
-
-    @staticmethod
-    def _alpha(cutoff: float, dt: float) -> float:
-        # Smoothing factor of a 1st-order low-pass at the given cutoff (Hz).
-        tau = 1.0 / (2.0 * math.pi * cutoff)
-        return 1.0 / (1.0 + tau / dt)
-
-    def seed(self, x: float) -> None:
-        """Preload the filter state (e.g. from the robot's actual pose)."""
-        self._x_prev = x
-        self._raw_prev = x
-        self._dx_prev = 0.0
-
-    def update_input(self, x: float, dt: float | None) -> None:
-        """Update the low-passed input-speed estimate at the source cadence."""
-        if self._raw_prev is None or dt is None or dt <= 1e-6:
-            self._raw_prev = x
-            return
-        dx = (x - self._raw_prev) / dt
-        a_d = self._alpha(self._d_cutoff, dt)
-        self._dx_prev = a_d * dx + (1.0 - a_d) * self._dx_prev
-        self._raw_prev = x
-
-    def __call__(self, x: float) -> float:
-        if self._x_prev is None:
-            self.seed(x)
-            return x
-        # Speed-adaptive cutoff: faster motion -> higher cutoff -> less lag.
-        cutoff = self._min_cutoff + self._beta * abs(self._dx_prev)
-        a = self._alpha(cutoff, self._dt)
-        x_hat = a * x + (1.0 - a) * self._x_prev
-        self._x_prev = x_hat
-        return x_hat
-
-
 class GelloUrBridge(Node):
     """Bridge GELLO joint states to UR forward_position_controller commands."""
 
@@ -140,6 +85,14 @@ class GelloUrBridge(Node):
         super().__init__("gello_ur_bridge")
 
         # --- Parameters --------------------------------------------------
+        # CONTROL MODE (launch/yaml, NOT a runtime service): "joint" (default)
+        # keeps the legacy joint-passthrough teleop bit-identical; "eef" enables
+        # the end-effector delta-control path (needs the config/*_eef.yaml
+        # overlay). The eef_* params below are ALWAYS declared (so the overlay
+        # can set them) but are only consumed in eef mode.
+        self.control_mode = str(
+            self.declare_parameter("control_mode", "joint").value
+        ).lower()
         self.ema_alpha = float(
             self.declare_parameter("ema_alpha", 0.5).value
         )
@@ -208,6 +161,79 @@ class GelloUrBridge(Node):
         self.state_chase_done_tol = float(
             self.declare_parameter("state_chase_done_tol", 0.10).value
         )
+
+        # --- EEF-mode parameters (declared ALWAYS; consumed only in eef mode) --
+        # engage gate G4: max_i|_last_published - _actual_pose| must be <= this
+        # (the two chains must already agree, else engaging would snap).
+        self.anchor_agree_tol = float(
+            self.declare_parameter("anchor_agree_tol", 0.02).value
+        )
+        # engage gate G6: max_i|q_lead_f - _raw_target| must be < this (the EEF
+        # leader 1-Euro filter must have positively CONVERGED before we anchor).
+        self.filter_settled_tol = float(
+            self.declare_parameter("filter_settled_tol", 0.005).value
+        )
+        # ~/eef/state publish rate (Hz).
+        self.eef_state_rate_hz = float(
+            self.declare_parameter("eef_state_rate_hz", 10.0).value
+        )
+        # HOLD -> DISENGAGED latch (s): a continuous HOLD longer than this
+        # auto-disengages + invalidates the anchor (anti permanent saturation).
+        self.hold_latch_s = float(
+            self.declare_parameter("hold_latch_s", 2.0).value
+        )
+        # Per-tick EEF-stage time budget (us). N consecutive overruns => fail
+        # closed to DISENGAGED (timer overrun -> command jitter -> protective stop).
+        self.tick_budget_us = float(
+            self.declare_parameter("tick_budget_us", 1000.0).value
+        )
+        self.tick_overrun_limit = int(
+            self.declare_parameter("tick_overrun_limit", 5).value
+        )
+        # EefDeltaController cfg keys (numeric-only; unused in joint mode). Kept
+        # as declared params so the eef overlay yaml drives them 1:1.
+        self.pos_scale = float(self.declare_parameter("pos_scale", 1.0).value)
+        self.r_align_rpy = list(
+            self.declare_parameter("r_align_rpy", [0.0, 0.0, 0.0]).value
+        )
+        self.tool_l_xyz_rpy = list(
+            self.declare_parameter(
+                "tool_l_xyz_rpy", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            ).value
+        )
+        self.tool_r_xyz_rpy = list(
+            self.declare_parameter(
+                "tool_r_xyz_rpy", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            ).value
+        )
+        self.eef_v_max = float(self.declare_parameter("v_max", 0.08).value)
+        self.eef_w_max = float(self.declare_parameter("w_max", 0.5).value)
+        self.sigma_warn = float(self.declare_parameter("sigma_warn", 0.10).value)
+        self.sigma_stop = float(self.declare_parameter("sigma_stop", 0.03).value)
+        self.gamma_min = float(self.declare_parameter("gamma_min", 0.05).value)
+        self.char_length = float(self.declare_parameter("char_length", 0.30).value)
+        self.branch_tol = float(self.declare_parameter("branch_tol", 0.25).value)
+        self.branch_weights = list(
+            self.declare_parameter(
+                "branch_weights", [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+            ).value
+        )
+        self.limit_margin_rad = float(
+            self.declare_parameter("limit_margin_rad", 0.05).value
+        )
+        self.s_floor = float(self.declare_parameter("s_floor", 0.02).value)
+        self.lag_max_pose = list(
+            self.declare_parameter("lag_max_pose", [0.05, 0.3]).value
+        )
+        self.max_excursion_m = float(
+            self.declare_parameter("max_excursion_m", 0.5).value
+        )
+        self.ik_backend = str(
+            self.declare_parameter("ik_backend", "analytic").value
+        )
+        # keepout is a nested dict; ROS2 params are flat, so accept a JSON string.
+        self.keepout_json = str(self.declare_parameter("keepout_json", "{}").value)
+
         # Wall-clock (monotonic) of the last (re)seed, for the soft-start ramp.
         self._seed_time: float | None = None
         # Set when the staleness watchdog trips; forces a re-seed (and thus a
@@ -239,12 +265,12 @@ class GelloUrBridge(Node):
             self.declare_parameter("one_euro_d_cutoff", 1.0).value
         )
         # Per-joint 1-Euro filters (None when filter_type != "one_euro").
-        self._euro: list[_OneEuro] | None = None
+        self._euro: list[OneEuro] | None = None
         if self.filter_type == "one_euro":
             _dt = 1.0 / self.publish_rate_hz
             self._euro = [
-                _OneEuro(_dt, self.one_euro_min_cutoff, self.one_euro_beta,
-                         self.one_euro_d_cutoff)
+                OneEuro(_dt, self.one_euro_min_cutoff, self.one_euro_beta,
+                        self.one_euro_d_cutoff)
                 for _ in range(len(UR_JOINT_ORDER))
             ]
 
@@ -317,6 +343,107 @@ class GelloUrBridge(Node):
             1.0 / _state_hz, self._on_state_timer
         )
 
+        # --- EEF mode setup ----------------------------------------------
+        # State machine string: BOOTSTRAP (pre-engage, joint passthrough) /
+        # ENGAGED (eef delta control) / DISENGAGED (== _paused, anchor void).
+        # In joint mode this stays "BOOTSTRAP" and is never used.
+        self._eef_state = "BOOTSTRAP"
+        # EefDeltaController instance and its q_lead 1-Euro filter bank + the
+        # lazily-imported ur_kin / numpy handles. All None in joint mode.
+        self._eef = None
+        self._euro_lead: list[OneEuro] | None = None
+        self._ur_kin = None
+        self._np = None
+        # Latest EefDeltaController.step() info dict (for ~/eef/state + poses).
+        self._eef_info: dict | None = None
+        # Latest smoothed leader joint vector (for the ~/eef/leader_pose diag).
+        self._eef_leader_q: list[float] | None = None
+        # Monotonic ts the current continuous HOLD started (None if not holding).
+        self._hold_since: float | None = None
+        # Last auto-transition reason string (for the ~/eef/state diagnostic).
+        self._eef_auto_reason: str | None = None
+        # Consecutive EEF-stage time-budget overruns (fail-closed at the limit).
+        self._tick_overruns = 0
+        # Publish-tick counter for decimating the PoseStamped diagnostics.
+        self._eef_tick = 0
+        self._eef_pose_decim = max(1, int(round(self.publish_rate_hz / 30.0)))
+
+        if self.control_mode == "eef":
+            # LAZY IMPORT: ur_kin / eef_delta (and their analytic-IK dependency
+            # stack) are imported ONLY here, so joint mode never needs them.
+            import numpy as np
+            from ur_gello_bringup import ur_kin as _ur_kin
+            from ur_gello_bringup.eef_delta import EefDeltaController
+            self._np = np
+            self._ur_kin = _ur_kin
+            try:
+                keepout = json.loads(self.keepout_json) if self.keepout_json else {}
+            except (ValueError, TypeError):
+                self.get_logger().warn(
+                    f"keepout_json is not valid JSON ({self.keepout_json!r}); "
+                    "using empty keepout"
+                )
+                keepout = {}
+            eef_cfg = {
+                "pos_scale": self.pos_scale,
+                "r_align_rpy": self.r_align_rpy,
+                "tool_l_xyz_rpy": self.tool_l_xyz_rpy,
+                "tool_r_xyz_rpy": self.tool_r_xyz_rpy,
+                "v_max": self.eef_v_max,
+                "w_max": self.eef_w_max,
+                "sigma_warn": self.sigma_warn,
+                "sigma_stop": self.sigma_stop,
+                "gamma_min": self.gamma_min,
+                "char_length": self.char_length,
+                "branch_tol": self.branch_tol,
+                "branch_weights": self.branch_weights,
+                "limit_margin_rad": self.limit_margin_rad,
+                "s_floor": self.s_floor,
+                "lag_max_pose": self.lag_max_pose,
+                "max_excursion_m": self.max_excursion_m,
+                "dt": 1.0 / self.publish_rate_hz,
+                "keepout": keepout,
+                "ik_backend": self.ik_backend,
+            }
+            self._eef = EefDeltaController(eef_cfg)
+            # DEDICATED q_lead 1-Euro bank (separate from the joint self._euro):
+            # always fed / seeded from _raw_target so engage-time filter
+            # convergence is checked against the live leader (gate G6).
+            _dt = 1.0 / self.publish_rate_hz
+            self._euro_lead = [
+                OneEuro(_dt, self.one_euro_min_cutoff, self.one_euro_beta,
+                        self.one_euro_d_cutoff)
+                for _ in range(len(UR_JOINT_ORDER))
+            ]
+            # Clutch services (fail-closed Trigger, mirror the ~/resume skeleton).
+            self._eef_engage_srv = self.create_service(
+                Trigger, "~/eef_engage", self._on_eef_engage
+            )
+            self._eef_disengage_srv = self.create_service(
+                Trigger, "~/eef_disengage", self._on_eef_disengage
+            )
+            self._eef_reclutch_srv = self.create_service(
+                Trigger, "~/eef_reclutch", self._on_eef_reclutch
+            )
+            self._eef_to_joint_srv = self.create_service(
+                Trigger, "~/eef_to_joint", self._on_eef_to_joint
+            )
+            # Diagnostic topics.
+            self._eef_state_pub = self.create_publisher(String, "~/eef/state", 10)
+            self._eef_leader_pub = self.create_publisher(
+                PoseStamped, "~/eef/leader_pose", 10
+            )
+            self._eef_desired_pub = self.create_publisher(
+                PoseStamped, "~/eef/desired_pose", 10
+            )
+            self._eef_commanded_pub = self.create_publisher(
+                PoseStamped, "~/eef/commanded_pose", 10
+            )
+            _eef_hz = self.eef_state_rate_hz if self.eef_state_rate_hz > 0.0 else 10.0
+            self._eef_state_timer = self.create_timer(
+                1.0 / _eef_hz, self._on_eef_state_timer
+            )
+
         # --- Startup log -------------------------------------------------
         if self._euro is not None:
             _filt = (
@@ -327,6 +454,7 @@ class GelloUrBridge(Node):
             _filt = f"filter=ema(alpha={self.ema_alpha} deadband_rad={self.deadband_rad})"
         self.get_logger().info(
             "gello_ur_bridge started | "
+            f"control_mode={self.control_mode} "
             f"{_filt} "
             f"max_step_rad={self.max_step_rad} "
             f"soft_start_s={self.soft_start_s} "
@@ -374,10 +502,16 @@ class GelloUrBridge(Node):
 
         now = time.monotonic()
         prev_time = self._last_good_msg_time
+        _dt = None if prev_time is None else now - prev_time
         if self._euro is not None:
-            dt = None if prev_time is None else now - prev_time
             for i in range(len(UR_JOINT_ORDER)):
-                self._euro[i].update_input(unwrapped[i], dt)
+                self._euro[i].update_input(unwrapped[i], _dt)
+        # DEDICATED EEF leader filter (eef mode only): fed the SAME unwrapped
+        # leader stream at the source cadence, kept independent of the joint
+        # self._euro so the joint path stays bit-identical.
+        if self._euro_lead is not None:
+            for i in range(len(UR_JOINT_ORDER)):
+                self._euro_lead[i].update_input(unwrapped[i], _dt)
         self._raw_target = unwrapped
         self._last_good_msg_time = now
         # Record the UNWRAPPED pose for the resume_chase quasi-still gate.
@@ -423,6 +557,16 @@ class GelloUrBridge(Node):
             self._filtered = None
             self._last_published = None
             self._was_stale = True
+            # EEF: a stale leader invalidates the anchor — during the outage the
+            # operator may have moved GELLO, so reusing the old anchor would mean
+            # a large accumulated delta. Fail closed via the shared helper so this
+            # path matches the other auto-disengage paths (hold-latch / tick-
+            # overrun / exception): it sets _paused=True, honouring the
+            # DISENGAGED==_paused invariant and the plan's "re-engage required
+            # after recovery" fail-safe. Without _paused=True the label would say
+            # DISENGAGED while the arm silently resumed joint-passthrough chasing.
+            if self.control_mode == "eef" and self._eef_state == "ENGAGED":
+                self._eef_autodisengage("leader_stale")
             return
 
         # First valid target: seed filter + last-published to the ROBOT'S ACTUAL
@@ -457,6 +601,11 @@ class GelloUrBridge(Node):
             if self._euro is not None:
                 for i in range(len(UR_JOINT_ORDER)):
                     self._euro[i].seed(self._actual_pose[i])
+            # EEF leader filter ALWAYS seeds from the (anchored) raw leader pose,
+            # NOT from the arm's actual pose: it tracks the leader, not the robot.
+            if self._euro_lead is not None:
+                for i in range(len(UR_JOINT_ORDER)):
+                    self._euro_lead[i].seed(anchored[i])
             self._seed_time = time.monotonic()  # start the soft-start ramp
             if self._was_stale:
                 self.get_logger().info("GELLO stream recovered; re-seeded from "
@@ -465,7 +614,6 @@ class GelloUrBridge(Node):
             self._publish(self._last_published)
             return
 
-        alpha = self.ema_alpha
         # SOFT-START: ramp the effective slew clamp from ~15% up to full over
         # soft_start_s after the last (re)seed, so gap closure eases in instead of
         # snapping to full slew from a standstill. After the ramp, step == max.
@@ -474,43 +622,101 @@ class GelloUrBridge(Node):
             frac = (time.monotonic() - self._seed_time) / self.soft_start_s
             if frac < 1.0:
                 step = self.max_step_rad * (0.15 + 0.85 * max(0.0, frac))
-        deadband = self.deadband_rad
-        use_euro = self._euro is not None
-        out: list[float] = []
-        for i in range(len(UR_JOINT_ORDER)):
-            if use_euro:
-                # 1-EURO adaptive low-pass on the GELLO joint value directly:
-                # smooths hard when nearly still (kills tremor / Dynamixel noise),
-                # opens up when moving fast (low lag). The speed estimate is
-                # updated only when new GELLO samples arrive, so 30 Hz sample
-                # edges do not look like 250 Hz velocity spikes. No separate
-                # deadband needed.
-                self._filtered[i] = self._euro[i](self._raw_target[i])
-            else:
-                # DEADBAND NOISE GATE: only update the held target when GELLO moved
-                # more than deadband_rad, so hand tremor / Dynamixel encoder noise
-                # is ignored while holding still (0.0 => gate off).
-                if abs(self._raw_target[i] - self._gated_target[i]) > deadband:
-                    self._gated_target[i] = self._raw_target[i]
-                # EMA low-pass per joint toward the (gated) target.
-                self._filtered[i] = (
-                    (1.0 - alpha) * self._filtered[i] + alpha * self._gated_target[i]
-                )
-            # MAX-STEP CLAMP relative to the last PUBLISHED value (slew limit).
-            delta = self._filtered[i] - self._last_published[i]
-            if delta > step:
-                delta = step
-            elif delta < -step:
-                delta = -step
-            out.append(self._last_published[i] + delta)
+
+        # ---- THREE-STAGE PIPELINE (bridge_stages, pure + venv-tested) ----
+        # (1) filter stage: fill _filtered with the per-joint joint-mode math
+        #     (one_euro or ema+deadband) — IDENTICAL arithmetic to the legacy
+        #     interleaved loop. (2) eef stage: only in eef mode + ENGAGED, run
+        #     the EefDeltaController and OVERWRITE _filtered with its slew-limited
+        #     q_cmd (or hold). (3) clamp stage: the legacy slew clamp.
+        # In joint mode stage (2) is a no-op, so the output is bit-identical to
+        # the old loop (proven in test/test_bridge_stages.py).
+        eef_command = None
+        if self.control_mode == "eef" and self._eef_state == "ENGAGED":
+            # EEF stage runs inside the same try/except so any overrun/exception
+            # fails CLOSED to DISENGAGED rather than killing the timer callback.
+            try:
+                t0 = time.monotonic()
+                # DEDICATED leader filter (never the joint self._euro): the eef
+                # controller consumes the SMOOTHED leader joint vector.
+                q_lead_f = [
+                    self._euro_lead[i](self._raw_target[i])
+                    for i in range(len(UR_JOINT_ORDER))
+                ]
+                # step_eff carries the soft-start-ramped clamp so the downstream
+                # slew clamp does not additionally bind the eef increment.
+                q_cmd, info = self._eef.step(q_lead_f, step)
+                self._eef_info = info
+                self._eef_leader_q = q_lead_f
+                if q_cmd is not None:
+                    eef_command = [float(v) for v in q_cmd]
+                # HOLD latch: a continuous HOLD longer than hold_latch_s
+                # auto-disengages (anti permanent saturation).
+                if info.get("state") == "HOLD":
+                    if self._hold_since is None:
+                        self._hold_since = t0
+                    elif (t0 - self._hold_since) > self.hold_latch_s:
+                        self._eef_autodisengage("hold_latched "
+                                                f"(reason={info.get('reject_reason')})")
+                        eef_command = None
+                else:
+                    self._hold_since = None
+                # Time-budget watchdog: N consecutive overruns => fail closed.
+                elapsed_us = (time.monotonic() - t0) * 1e6
+                if elapsed_us > self.tick_budget_us:
+                    self._tick_overruns += 1
+                    if self._tick_overruns >= self.tick_overrun_limit:
+                        self._eef_autodisengage(
+                            f"tick_budget exceeded {self.tick_overrun_limit}x "
+                            f"(last {elapsed_us:.0f}us > {self.tick_budget_us:.0f}us)"
+                        )
+                        eef_command = None
+                else:
+                    self._tick_overruns = 0
+            except Exception as exc:  # noqa: BLE001 fail-closed on ANY eef fault
+                self._eef_autodisengage(f"exception: {exc}")
+                eef_command = None
+
+        # FAIL-CLOSED: if the EEF stage auto-disengaged this tick it also PAUSED
+        # the bridge. Hold the current pose exactly and stop; the next tick's
+        # top-level paused check keeps it held (operator must ~/resume / re-engage).
+        if self._paused:
+            if self._last_published is not None:
+                self._publish(self._last_published)
+            return
+
+        out = command_pipeline(
+            self.control_mode,
+            self._eef_state == "ENGAGED",
+            self._raw_target,
+            self._filtered,
+            self._gated_target,
+            self._euro,
+            self.ema_alpha,
+            self.deadband_rad,
+            self._last_published,
+            step,
+            eef_command=eef_command,
+        )
 
         self._last_published = out
         self._publish(out)
+        # Decimated EEF diagnostic poses (leader / desired / commanded).
+        if self.control_mode == "eef" and self._eef_state == "ENGAGED":
+            self._eef_tick += 1
+            if self._eef_tick % self._eef_pose_decim == 0:
+                self._publish_eef_poses()
 
     # ---------------------------------------------------------------------
     def _on_pause(self, request, response):
         """'2) 정지': stop following; robot holds its last commanded pose."""
         self._paused = True
+        # A pause carries an automatic EEF disengage (anchor invalidated): the
+        # same immediate-stop path used by ~/eef_disengage.
+        if self.control_mode == "eef" and self._eef is not None:
+            self._eef.disengage()
+            self._eef_state = "DISENGAGED"
+            self._hold_since = None
         response.success = True
         response.message = "Following PAUSED — robot holds position. Resume with proceed."
         self.get_logger().warn("Following PAUSED by operator (robot holds pose).")
@@ -588,6 +794,10 @@ class GelloUrBridge(Node):
         self._paused = False
         self._filtered = None
         self._last_published = None
+        # EEF: resume returns to BOOTSTRAP (joint passthrough); a fresh
+        # ~/eef_engage is required to re-enter delta control.
+        if self.control_mode == "eef":
+            self._eef_state = "BOOTSTRAP"
         response.success = True
         response.message = (
             f"Following RESUMED — aligned (max {max_gap:.3f} rad <= "
@@ -692,6 +902,9 @@ class GelloUrBridge(Node):
         self._paused = False
         self._filtered = None
         self._last_published = None
+        # EEF: resume_chase also returns to BOOTSTRAP (joint passthrough).
+        if self.control_mode == "eef":
+            self._eef_state = "BOOTSTRAP"
         # Estimated glide time: gap closed at the sustained slew rate
         # (max_step_rad * publish_rate_hz), plus the soft-start ease-in.
         slew_rate = self.max_step_rad * self.publish_rate_hz
@@ -733,6 +946,298 @@ class GelloUrBridge(Node):
         msg = String()
         msg.data = state
         self._state_pub.publish(msg)
+
+    # =====================================================================
+    # EEF mode: automatic transitions, clutch services, diagnostics
+    # =====================================================================
+    def _eef_autodisengage(self, reason: str) -> None:
+        """Fail-closed auto-disengage from within the tick (anchor invalidated).
+
+        Mirrors ~/eef_disengage: PAUSE the bridge (immediate hold on the next
+        tick), void the controller anchor, and record the reason for ~/eef/state.
+        """
+        if self._eef is not None:
+            self._eef.disengage()
+        self._eef_state = "DISENGAGED"
+        self._paused = True
+        self._hold_since = None
+        self._tick_overruns = 0
+        self._eef_auto_reason = reason
+        self.get_logger().warn(
+            f"EEF auto-disengaged ({reason}); bridge PAUSED (holds pose).",
+            throttle_duration_sec=_WARN_THROTTLE_S,
+        )
+
+    def _eef_leader_age(self):
+        return (
+            None if self._last_good_msg_time is None
+            else time.monotonic() - self._last_good_msg_time
+        )
+
+    def _eef_selftest(self, q_anchor) -> bool:
+        """G7: internal IK(FK(q))==q round-trip identity (solver-integrity check).
+
+        Uses OUR fk + OUR ik only, so it is independent of the real robot's DH /
+        factory calibration; it catches a coding error or solver-backend mismatch,
+        NOT a vendor-DH discrepancy (that is an offline P-1/P6 procedure).
+        """
+        np = self._np
+        uk = self._ur_kin
+        try:
+            qa = np.asarray(q_anchor, dtype=float).reshape(6)
+            T = uk.fk(qa)
+            if self.ik_backend == "analytic":
+                sols = uk.ik_analytic(T)
+                cand = [uk.wrapped_nearest(np.asarray(s, float), qa) for s in sols]
+                cand = [c for c in cand if bool(np.all(np.isfinite(c)))]
+                if not cand:
+                    return False
+                best = min(cand, key=lambda c: float(np.max(np.abs(c - qa))))
+            else:
+                best = uk.ik_numeric(T, qa)
+                if best is None:
+                    return False
+                best = np.asarray(best, dtype=float).reshape(6)
+            if float(np.max(np.abs(best - qa))) >= 1e-6:
+                return False
+            # Pose round-trip: FK(IK(FK(q))) must match FK(q).
+            T2 = uk.fk(best)
+            xi = uk.se3_log(np.linalg.inv(T2) @ T)
+            if float(np.linalg.norm(xi[:3])) >= 1e-4:
+                return False
+            if float(np.linalg.norm(xi[3:])) >= 1e-4:
+                return False
+            return True
+        except Exception:  # noqa: BLE001 any solver fault -> selftest fails closed
+            return False
+
+    def _run_eef_gates(self, run_baseline: bool):
+        """Ordered engage/reclutch acceptance gates (fail-closed).
+
+        run_baseline=True  -> full engage sequence G1..G9.
+        run_baseline=False -> reclutch: G2,G5,G6,G7,G8,G9 (G3/G4 skipped; the
+                              anchor is the frozen command pose _last_published).
+
+        Returns (ok, key, detail, q_anchor, q_lead_f). On failure key is the
+        rejection string and q_anchor/q_lead_f are None.
+        """
+        np = self._np
+        uk = self._ur_kin
+        n = len(UR_JOINT_ORDER)
+
+        # G1: control mode.
+        if self.control_mode != "eef":
+            return False, "not_eef_mode", "control_mode != eef", None, None
+        # G2: fresh leader sample.
+        age = self._eef_leader_age()
+        if self._raw_target is None or age is None or age > self.staleness_timeout_s:
+            a = "n/a" if age is None else f"{age:.2f}s"
+            return False, "leader_stale", f"age={a} > {self.staleness_timeout_s:.2f}s", None, None
+        # G3: a command baseline must exist (also the reclutch anchor).
+        if self._last_published is None:
+            return False, "no_command_baseline", "no _last_published yet", None, None
+        # G4 (engage only): actual pose known AND both chains already agree.
+        if run_baseline:
+            if self._actual_pose is None:
+                return False, "chains_disagree", "actual pose unknown", None, None
+            agree = max(
+                abs(self._last_published[i] - self._actual_pose[i]) for i in range(n)
+            )
+            if agree > self.anchor_agree_tol:
+                return (False, "chains_disagree",
+                        f"max|cmd-actual|={agree:.4f} > {self.anchor_agree_tol:.4f}",
+                        None, None)
+        q_anchor = list(self._last_published)
+        # G5: leader quasi-still (shared fail-closed util; reuse chase params).
+        if not leader_quasi_still(
+            self._gello_history,
+            self.resume_chase_still_window_s,
+            self.resume_chase_still_speed,
+        ):
+            return False, "leader_moving", "leader not demonstrably still", None, None
+        # G6: EEF leader filter converged (positive proof). One filter step here
+        # advances _euro_lead exactly as a tick would; the value is the anchor's
+        # q_lead_f.
+        q_lead_f = [self._euro_lead[i](self._raw_target[i]) for i in range(n)]
+        settle = max(abs(q_lead_f[i] - self._raw_target[i]) for i in range(n))
+        if settle >= self.filter_settled_tol:
+            return (False, "filter_not_settled",
+                    f"max|q_lead_f-raw|={settle:.5f} >= {self.filter_settled_tol:.5f}",
+                    None, None)
+        # G7: kinematics self-test.
+        if not self._eef_selftest(q_anchor):
+            return False, "kinematics_selftest", "IK(FK(q))!=q round-trip failed", None, None
+        # G8: not singular.
+        sig = float(uk.sigma_min(np.asarray(q_anchor, dtype=float), self.char_length))
+        if sig <= self.sigma_warn:
+            return (False, "singular_anchor",
+                    f"sigma_min={sig:.4f} <= sigma_warn={self.sigma_warn:.4f}",
+                    None, None)
+        # G9: keepout geometry.
+        if not uk.keepout_ok(np.asarray(q_anchor, dtype=float), self._eef.keepout):
+            return False, "keepout", "anchor pose violates keepout", None, None
+        return True, "ok", "", q_anchor, q_lead_f
+
+    def _on_eef_engage(self, request, response):
+        """Engage EEF delta control (gates G1..G9). Robot does not move on any
+        refusal. On success the anchor is latched (zero-jump)."""
+        ok, key, detail, q_anchor, q_lead_f = self._run_eef_gates(run_baseline=True)
+        if not ok:
+            response.success = False
+            response.message = f"eef_engage REFUSED [{key}] — {detail}. Robot did not move."
+            self.get_logger().warn(response.message)
+            return response
+        summary = self._eef.engage(q_anchor, q_lead_f)
+        # DO NOT touch _seed_time (§3.5). Anchor is the command chain, not actual.
+        self._eef_state = "ENGAGED"
+        self._hold_since = None
+        self._tick_overruns = 0
+        self._eef_auto_reason = None
+        p = summary["T_r_anchor"][:3, 3]
+        response.success = True
+        response.message = (
+            f"ENGAGED — anchor p_r0=({p[0]:.3f},{p[1]:.3f},{p[2]:.3f}) "
+            f"branch={summary['branch0']} sigma_min={summary['sigma_min']:.3f} "
+            f"pos_scale={self.pos_scale:.2f}. EEF delta control live."
+        )
+        self.get_logger().warn(response.message)
+        return response
+
+    def _on_eef_disengage(self, request, response):
+        """Release EEF control — ALWAYS immediate, no gate. Same path as ~/pause:
+        pause + void anchor; the next tick (<=1 period) stops publishing."""
+        self._paused = True
+        if self._eef is not None:
+            self._eef.disengage()
+        self._eef_state = "DISENGAGED"
+        self._hold_since = None
+        self._eef_auto_reason = None
+        response.success = True
+        response.message = "DISENGAGED — anchor discarded; robot holds (immediate)."
+        self.get_logger().warn("EEF DISENGAGED by operator (robot holds pose).")
+        return response
+
+    def _on_eef_reclutch(self, request, response):
+        """Re-anchor at the current leader/command pose (zero delta) WITHOUT
+        going through pause. Re-checks G2,G5,G6,G7,G8,G9."""
+        if self._eef_state != "ENGAGED":
+            response.success = False
+            response.message = "eef_reclutch REFUSED — not ENGAGED (call ~/eef_engage first)."
+            self.get_logger().warn(response.message)
+            return response
+        ok, key, detail, q_anchor, q_lead_f = self._run_eef_gates(run_baseline=False)
+        if not ok:
+            response.success = False
+            response.message = f"eef_reclutch REFUSED [{key}] — {detail}. Robot holds."
+            self.get_logger().warn(response.message)
+            return response
+        # Anchor T_r at the CURRENT command pose so the delta restarts at zero.
+        self._eef.reclutch(q_lead_now=q_lead_f, q_cmd_now=self._last_published)
+        self._eef_state = "ENGAGED"
+        self._hold_since = None
+        self._tick_overruns = 0
+        self._eef_auto_reason = None
+        response.success = True
+        response.message = "RE-CLUTCHED — anchor reset at current pose (zero delta)."
+        self.get_logger().warn(response.message)
+        return response
+
+    def _on_eef_to_joint(self, request, response):
+        """Return to joint mode: pause, discard anchor, go to BOOTSTRAP (joint
+        passthrough). The operator then physically re-aligns GELLO and calls
+        ~/resume (or ~/resume_chase). Reports the per-joint gap to close."""
+        self._paused = True
+        if self._eef is not None:
+            self._eef.disengage()
+        self._eef_state = "BOOTSTRAP"
+        self._hold_since = None
+        self._eef_auto_reason = None
+        gap = self._eef_joint_gap()
+        if gap is not None:
+            per = ", ".join(
+                f"{UR_JOINT_SHORT[i]}={gap[i]:.3f}" for i in range(len(gap))
+            )
+            gap_str = f"per-joint gap (leader vs arm): {per}"
+        else:
+            gap_str = "per-joint gap unavailable (missing leader/arm pose)"
+        response.success = True
+        response.message = (
+            "EEF->JOINT — paused, anchor discarded (state=BOOTSTRAP, joint "
+            "passthrough). Physically align the GELLO leader to the robot pose, "
+            f"then call ~/resume or ~/resume_chase. {gap_str}"
+        )
+        self.get_logger().warn(response.message)
+        return response
+
+    def _eef_joint_gap(self):
+        """Per-joint circular gap (rad) between the live leader and the arm's
+        actual pose — what ~/resume must see within resume_align_tol. None if
+        either pose is missing."""
+        if self._raw_target is None or self._actual_pose is None:
+            return None
+        return [
+            circular_dist(self._raw_target[i], self._actual_pose[i])
+            for i in range(len(UR_JOINT_ORDER))
+        ]
+
+    def _on_eef_state_timer(self) -> None:
+        """Publish the ~/eef/state JSON diagnostic (eef mode only, read-only)."""
+        info = self._eef_info or {}
+        gap = self._eef_joint_gap()
+        payload = {
+            "mode": "eef",
+            "state": self._eef_state,
+            "reject_reason": info.get("reject_reason"),
+            "auto_reason": getattr(self, "_eef_auto_reason", None),
+            "sigma_min": info.get("sigma_min"),
+            "gamma": info.get("gamma"),
+            "ls_scale": info.get("ls_scale"),
+            "ik_residual": info.get("ik_residual"),
+            "lag_pos": info.get("lag_pos"),
+            "lag_rot": info.get("lag_rot"),
+            "excursion_m": info.get("excursion"),
+            "branch_id": info.get("branch_id"),
+            "n_ik_solutions": info.get("n_ik_solutions"),
+            "pos_scale": self.pos_scale,
+            "joint_gap": gap,
+        }
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._eef_state_pub.publish(msg)
+
+    def _mat_to_posestamped(self, T) -> PoseStamped:
+        ps = PoseStamped()
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.header.frame_id = "base_link"
+        ps.pose.position.x = float(T[0, 3])
+        ps.pose.position.y = float(T[1, 3])
+        ps.pose.position.z = float(T[2, 3])
+        q = self._ur_kin.mat_to_quat_xyzw(T[:3, :3])
+        ps.pose.orientation.x = float(q[0])
+        ps.pose.orientation.y = float(q[1])
+        ps.pose.orientation.z = float(q[2])
+        ps.pose.orientation.w = float(q[3])
+        return ps
+
+    def _publish_eef_poses(self) -> None:
+        """Publish leader / desired / commanded PoseStamped diagnostics (base
+        frame). Called decimated from the tick, ENGAGED only."""
+        info = self._eef_info
+        if info is None or self._eef_leader_q is None:
+            return
+        try:
+            np = self._np
+            T_g = self._ur_kin.fk(np.asarray(self._eef_leader_q, dtype=float)) @ self._eef.T_tool_L
+            self._eef_leader_pub.publish(self._mat_to_posestamped(T_g))
+            if "T_des" in info:
+                self._eef_desired_pub.publish(self._mat_to_posestamped(info["T_des"]))
+            if "T_cmd" in info:
+                self._eef_commanded_pub.publish(self._mat_to_posestamped(info["T_cmd"]))
+        except Exception as exc:  # noqa: BLE001 diagnostics must never break the tick
+            self.get_logger().warn(
+                f"EEF pose publish skipped: {exc}",
+                throttle_duration_sec=_WARN_THROTTLE_S,
+            )
 
     # ---------------------------------------------------------------------
     def _publish(self, positions: list[float]) -> None:

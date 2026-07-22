@@ -1,0 +1,48 @@
+# UR7e kinematic parameters for ur_gello_bringup/ur_kin.py
+#
+# SOURCE: UR7e nominal DH == UR5e nominal DH, taken from
+#   ur_description/config/ur5e/default_kinematics.yaml (Universal Robots ROS2
+#   driver). The UR7e shares the UR5e link geometry.
+#
+# !!! RE-CONFIRM ON THE REAL ROBOT PC !!!
+#   Every UR ships with a per-unit calibrated kinematics file
+#   (/root/.local/... or the driver's calibration.yaml). These NOMINAL values
+#   are correct to ~mm but NOT the factory-calibrated values of the specific
+#   arm. Before trusting Cartesian accuracy on hardware, pull the real unit's
+#   calibration and replace the values below. The joint/velocity limits below
+#   are also nominal and MUST be re-verified against the controller.
+
+# Standard (distal) Denavit-Hartenberg, per joint, UR joint order
+# [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3].
+# A_i = Rot_z(theta_i) . Trans_z(d_i) . Trans_x(a_i) . Rot_x(alpha_i)
+dh:
+  d:     [0.1625, 0.0,    0.0,     0.1333, 0.0997, 0.0996]  # metres
+  a:     [0.0,   -0.425, -0.3922,  0.0,    0.0,    0.0]      # metres
+  alpha: [1.5707963267948966, 0.0, 0.0, 1.5707963267948966, -1.5707963267948966, 0.0]  # rad
+  # Approx reach radius = |a2| + |a3| = 0.8172 m.
+
+# Joint position limits [lo, hi] in rad, UR joint order.
+#   - elbow (index 2) is PHYSICALLY +/-pi: shoulder_lift interference
+#     (ros-industrial/universal_robot#265). DO NOT unwrap elbow past +/-pi.
+#   - the other five joints are +/-2pi.
+#   RE-CONFIRM on the real robot PC (some deployments soft-limit further).
+joint_limits:
+  - [-6.283185307179586, 6.283185307179586]   # shoulder_pan  +/-2pi
+  - [-6.283185307179586, 6.283185307179586]   # shoulder_lift +/-2pi
+  - [-3.141592653589793, 3.141592653589793]   # elbow         +/-pi  (physical)
+  - [-6.283185307179586, 6.283185307179586]   # wrist_1       +/-2pi
+  - [-6.283185307179586, 6.283185307179586]   # wrist_2       +/-2pi
+  - [-6.283185307179586, 6.283185307179586]   # wrist_3       +/-2pi
+
+# Velocity limits (rad/s), UR joint order. Nominal pi rad/s (180 deg/s) each.
+# RE-CONFIRM on the real robot PC.
+velocity_limits: [3.141592653589793, 3.141592653589793, 3.141592653589793,
+                  3.141592653589793, 3.141592653589793, 3.141592653589793]
+
+# Branch-selection weighting W = diag(...), penalises motion of the big proximal
+# joints so the IK branch chooser prefers wrist-led corrections (grounding).
+branch_weights: [2.0, 2.0, 1.5, 1.0, 1.0, 0.5]
+
+# Characteristic length (m) used to non-dimensionalise the Jacobian for
+# conditioning: J_w = diag(1/L,1/L,1/L,1,1,1) . J_geom ; sigma_min = min svd.
+char_length: 0.30

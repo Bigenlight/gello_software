@@ -16,6 +16,10 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <!-- numpy: used by the EEF-mode kinematics (ur_kin / eef_delta), imported
+       lazily so joint mode does not require it at import time. Has a rosdep key. -->
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ur_robot_driver</exec_depend>
   <exec_depend>ur_description</exec_depend>
   <exec_depend>ur_controllers</exec_depend>

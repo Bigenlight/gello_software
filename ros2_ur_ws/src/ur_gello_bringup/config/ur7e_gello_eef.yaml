@@ -1,0 +1,138 @@
+# ur7e_gello_eef.yaml — EEF (end-effector delta-control) OVERLAY for the
+# GELLO -> UR7e teleop pipeline.
+#
+# This file is NOT standalone: it overlays config/ur7e_gello.yaml (load both,
+# this one LAST, e.g. two --params-file args) and only touches the
+# gello_ur_bridge node's eef-specific parameters. Every other node
+# (gello_publisher, gello_move_to_start, robotiq_gripper, gello_gripper_bridge)
+# and every joint-mode parameter (filter_type, max_step_rad, publish_rate_hz,
+# staleness_timeout_s, soft_start_s, resume_align_tol, ...) is left untouched
+# by loading ur7e_gello.yaml underneath — this file must never duplicate them.
+#
+# control_mode: "eef" switches gello_ur_bridge from joint passthrough to the
+# EefDeltaController-driven end-effector delta path (see ur_gello_bringup.eef_delta,
+# ur_gello_bringup.ur_kin). BOOTSTRAP (pre-engage) still runs plain joint
+# passthrough regardless of this file, so gello_move_to_start's handshake is
+# unaffected.
+#
+# ALL numeric values below are FIRST-CUT placeholders carried over from the
+# EefDeltaController defaults / plan — none have been validated on the real
+# UR7e arm yet. Anything marked "실기 튜닝/실측 필요" MUST be re-measured or
+# re-tuned against the real robot + real GELLO/tool geometry before this
+# overlay is trusted for real teleop.
+
+gello_ur_bridge:
+  ros__parameters:
+    # Switch gello_ur_bridge into the end-effector delta-control path.
+    control_mode: "eef"
+
+    # POSITION SCALE (leader delta -> commanded EEF delta, dimensionless gain).
+    # 1.0 = 1:1 (robot EEF moves the same distance the GELLO EEF moves).
+    # 실기 튜닝/실측 필요: pick k by feel on the real arm (typically <=1.0 for a
+    # 1:1 or reduced-gain feel; >1.0 amplifies leader motion into the follower).
+    pos_scale: 1.0
+
+    # Rotational alignment offset (roll, pitch, yaw; rad) between the GELLO
+    # leader's wrist frame and the UR tool frame, applied once at the FK/IK
+    # boundary so "leader rotates this way" maps onto "tool rotates this way"
+    # consistently for this physical rig. 0,0,0 = frames assumed already
+    # aligned (placeholder). 실기 튜닝/실측 필요: measure the actual leader-wrist
+    # vs UR-tool frame offset on the real hardware.
+    r_align_rpy: [0.0, 0.0, 0.0]
+
+    # Tool transform (xyz meters, rpy rad) for the LEFT-branch / primary IK
+    # solution path (UR flange -> actual tool tip, e.g. Robotiq 2F-85 fingertip).
+    # All zeros = flange-frame placeholder (no tool offset applied).
+    # 실기 튜닝/실측 필요: measure the real gripper/tool offset from the flange.
+    tool_l_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Tool transform (xyz meters, rpy rad) for the RIGHT-branch / alternate IK
+    # solution path. Same placeholder as tool_l_xyz_rpy above until measured;
+    # keep IDENTICAL to tool_l_xyz_rpy unless the two IK branches genuinely
+    # need different tool geometry (they normally don't — same physical tool).
+    # 실기 튜닝/실측 필요.
+    tool_r_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Max commanded EEF linear speed (m/s). Field-proven default from the plan.
+    # NOTE: param name MUST be v_max (maps 1:1 to EefDeltaController cfg key and
+    # the node's declare_parameter("v_max")); an eef_ prefix is silently dropped.
+    v_max: 0.08
+    # Max commanded EEF angular speed (rad/s). Field-proven default from the plan.
+    w_max: 0.5
+
+    # Manipulability (sigma_min) WARN threshold: below this the controller
+    # starts shaping speed down / reporting a warning state as the arm nears
+    # a singularity, but still moves.
+    sigma_warn: 0.10
+    # Manipulability (sigma_min) STOP threshold: below this the controller
+    # refuses further motion toward the singularity (SINGULAR_ANCHOR-style
+    # reject) rather than letting sigma_min collapse further.
+    sigma_stop: 0.03
+    # Minimum velocity-scaling gamma the singularity-avoidance law is allowed
+    # to shrink commanded velocity to (floor, never fully stops mid-motion on
+    # its own — sigma_stop is what hard-stops).
+    gamma_min: 0.05
+    # Characteristic length (m) used to non-dimensionalize the Jacobian for
+    # sigma_min / manipulability scaling. 0.30 matches the UR7e's rough
+    # forearm+wrist reach scale used elsewhere in ur_kin.
+    char_length: 0.30
+    # Branch-jump distance tolerance (weighted joint-space) beyond which a new
+    # IK solution is considered a different kinematic branch and rejected
+    # (BRANCH_JUMP) rather than silently flipping elbow/wrist configuration.
+    branch_tol: 0.25
+    # Per-joint weights used in the branch-distance metric above. Larger
+    # weight on the base/shoulder/elbow joints (pan, lift, elbow) than the
+    # wrist joints, matching the plan's default emphasis on avoiding
+    # base-side configuration flips over wrist-side ones.
+    branch_weights: [2.0, 2.0, 1.5, 1.0, 1.0, 0.5]
+    # Joint-limit safety margin (rad) kept clear of the hard URDF limits when
+    # validating an IK candidate (JOINT_LIMIT reject inside this margin).
+    limit_margin_rad: 0.05
+    # Floor on the velocity-scaling factor "s" (parallel to gamma_min) so the
+    # controller never fully zeroes commanded speed except via an explicit
+    # reject/HOLD.
+    s_floor: 0.02
+    # Max allowed [position(m), rotation(rad)] lag between desired and
+    # commanded EEF pose before the controller treats the follower as having
+    # fallen too far behind the leader.
+    lag_max_pose: [0.05, 0.3]
+    # Max EEF excursion (m) from the engage-time anchor pose before the
+    # controller rejects further motion (EXCURSION) as a safety backstop
+    # against runaway/aliased leader input.
+    max_excursion_m: 0.5
+
+    # ENGAGE GATE G4 (chains_disagree): max allowed |_last_published -
+    # _actual_pose| per joint (rad) at engage time between the command chain
+    # and the robot's actual measured pose.
+    anchor_agree_tol: 0.02
+    # ENGAGE GATE G6 (filter_not_settled): max allowed |q_lead_f - _raw_target|
+    # per joint (rad) at engage time — the EEF-dedicated one-euro filter
+    # (_euro_lead) must have settled onto the live leader before anchoring.
+    filter_settled_tol: 0.005
+    # Minimum time (s) a HOLD state (eef_delta internal reject/latch) is held
+    # before the controller will attempt to resume motion, so a single-tick
+    # transient reject doesn't flicker the arm in and out of HOLD.
+    hold_latch_s: 2.0
+    # Per-tick compute budget (microseconds) for the eef stage of _on_timer;
+    # exceeding this is treated as a tick-budget overrun and fails closed to
+    # DISENGAGED (see the node's try/except safety net).
+    tick_budget_us: 1000.0
+
+    # GEOMETRIC KEEPOUT (keepout_ok in ur_kin). The node reads this as a flat
+    # JSON *string* param `keepout_json` (ROS2 params can't be nested dicts),
+    # then json.loads()es it into the keepout cfg. "{}" = no keepout regions
+    # enforced (G9 always passes). 실기 튜닝/실측 필요: populate with the real
+    # workcell's exclusion geometry before relying on G9 for real-robot safety.
+    # Example (single-line JSON string — floor + one cylinder):
+    #   keepout_json: '{"floor_z": 0.0, "margin": 0.02, "cylinder": {"point": [0.4,0.0,0.0], "axis": [0,0,1], "radius": 0.05}}'
+    keepout_json: "{}"
+
+    # IK BACKEND. "analytic" = ik_analytic, the from-scratch pure-numpy closed-
+    # form UR solver vendored in ur_kin.py (NOT the PyPI ur_analytic_ik package;
+    # no extra install). It enumerates all 8 branches, which the branch-lock
+    # safety layer (L4) needs; it is the default in both the node and
+    # EefDeltaController and is covered by the pytest suite. "numeric"
+    # (ik_numeric, DLS iterative, single seeded solution) is the fallback —
+    # simpler but gives weaker branch-lock. Keep "analytic" unless a specific
+    # issue is found on the real PC.
+    ik_backend: "analytic"

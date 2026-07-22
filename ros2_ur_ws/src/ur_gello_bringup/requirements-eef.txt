@@ -1,0 +1,21 @@
+# EEF-mode (control_mode:=eef) Python requirements.
+#
+# These are NOT needed for the default joint-passthrough teleop
+# (control_mode:=joint), which is why they are split out of package.xml: the
+# node imports ur_kin / eef_delta LAZILY, only when control_mode == "eef", so a
+# joint-mode deployment boots without any of this installed.
+#
+# Install into the ROS2 environment only for EEF teleop:
+#     pip install -r requirements-eef.txt
+
+# Linear algebra backing the analytic UR kinematics + SE(3) governor. Has a
+# rosdep key (python3-numpy, also declared in package.xml); pinned here for
+# non-rosdep / venv installs.
+numpy>=1.24
+
+# OPTIONAL, NOT REQUIRED. ur_kin.py ships a from-scratch numpy vendoring of the
+# closed-form UR inverse kinematics, so the analytic backend runs WITHOUT this
+# package. ur_analytic_ik is a faster C++-backed drop-in some setups prefer; it
+# has NO rosdep key (not in the ROS index), hence it lives here rather than in
+# package.xml. Leave commented unless you have wired ur_kin to use it.
+# ur_analytic_ik

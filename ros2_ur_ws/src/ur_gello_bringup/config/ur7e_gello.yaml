@@ -27,6 +27,11 @@ gello_publisher:
 
 gello_ur_bridge:
   ros__parameters:
+    # CONTROL MODE. "joint" = existing joint-passthrough teleop (bit-identical to
+    # pre-eef behaviour). "eef" (see config/ur7e_gello_eef.yaml overlay) enables
+    # the end-effector delta-control path. Explicit here so this file's behaviour
+    # is pinned regardless of code defaults.
+    control_mode: "joint"
     # SMOOTHING FILTER (anti-vibration). "one_euro" = speed-adaptive low-pass
     # applied to the GELLO joint values: smooths HARD when the leader is nearly
     # still (kills hand tremor + Dynamixel motor noise) but opens up when you

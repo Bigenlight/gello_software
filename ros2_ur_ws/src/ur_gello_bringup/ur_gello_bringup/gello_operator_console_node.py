@@ -13,15 +13,25 @@ Menu
     1) 진행 (proceed)        -> /gello_move_to_start/proceed
     2) 정지 (abort)          -> /gello_move_to_start/abort
     3) 강제 진행 (override)  -> /gello_move_to_start/override_follow
+    7) eef 인게이지           -> /gello_ur_bridge/eef_engage
+    8) eef 디스인게이지       -> /gello_ur_bridge/eef_disengage (로봇 즉시 정지)
+    9) eef 리클러치           -> /gello_ur_bridge/eef_reclutch
+   10) joint 복귀             -> /gello_ur_bridge/eef_to_joint
     q) quit the console (does NOT stop the robot; use Ctrl-C / E-STOP for that)
 
 This console is READ/authorize-only: it never commands the robot or GELLO
 directly; it only relays the operator's explicit authorization to the
-move-to-start node, which owns all safety checks.
+move-to-start / bridge nodes, which own all safety checks. In "joint"
+control_mode the eef_* services simply don't exist yet, so items 7-10 print
+the same harmless "service not available" notice as every other missing
+service here -- joint-mode console behaviour is unchanged.
 """
+
+import json
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 # Node names whose services we drive: the handshake node (gates) and the
@@ -38,8 +48,13 @@ MENU = """
   4) UR 홈으로   — 로봇을 init pose 로 다시 이동 (핸드셰이크)
   5) 차이 계산   — GELLO↔홈 관절별 오차만 보고 (핸드셰이크)
   6) 재개(글라이드) — 팔로잉 재개, 팔이 GELLO 로 미끄러지듯 이동 (간격 제한/정지 게이트)
-  7) 그리퍼 일시정지 — 그리퍼 출력 정지 (Robotiq 현재 위치 유지)
-  8) 그리퍼 재개   — 실제 위치에서 시드→램프 (신선/실제위치 게이트, 실패시 정지 유지)
+  7) eef 인게이지     — joint 패스스루 -> eef 델타 제어로 전환 (게이트 G1~G9)
+  8) eef 디스인게이지 — 즉시 정지/유지 (게이트 없음, ~/pause 와 동일 경로)
+  9) eef 리클러치    — 현재 포즈에서 앵커 재설정 (게이트 재검사)
+ 10) joint 복귀      — eef_to_joint (앵커 폐기 + BOOTSTRAP, GELLO를 로봇 자세로
+                        맞춘 뒤 1번으로 재개)
+ 11) 그리퍼 일시정지 — 그리퍼 출력 정지 (Robotiq 현재 위치 유지)
+ 12) 그리퍼 재개    — 실제 위치에서 시드→램프 (신선/실제위치 게이트, 실패시 정지 유지)
   q) 콘솔 종료 (로봇은 안 멈춤 — 급정지는 Ctrl-C / E-STOP)
 ============================================
 선택 > """
@@ -80,7 +95,76 @@ class OperatorConsole(Node):
             "gripper_resume": self.create_client(
                 Trigger, f"/{GRIPPER}/resume"
             ),
+            # EEF control-mode services (bridge, ~/ namespace). Absent entirely
+            # while control_mode=="joint" -- calling them then just hits the
+            # normal "service not available" notice below, same as any other
+            # not-yet-reached-phase service in this console.
+            "eef_engage": self.create_client(Trigger, f"/{BRIDGE}/eef_engage"),
+            "eef_disengage": self.create_client(Trigger, f"/{BRIDGE}/eef_disengage"),
+            "eef_reclutch": self.create_client(Trigger, f"/{BRIDGE}/eef_reclutch"),
+            "eef_to_joint": self.create_client(Trigger, f"/{BRIDGE}/eef_to_joint"),
         }
+
+        # Latest ~/eef/state summary (std_msgs/String, JSON), for the header
+        # printed above the menu. None until the first message ever arrives
+        # (e.g. joint control_mode never publishes it -- header says so).
+        self._eef_state: dict | None = None
+        self._eef_state_sub = self.create_subscription(
+            String, f"/{BRIDGE}/eef/state", self._on_eef_state, 10
+        )
+
+    def _on_eef_state(self, msg: String) -> None:
+        try:
+            self._eef_state = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            # Malformed payload must never crash the console -- just skip it,
+            # keeping whatever summary we already had.
+            pass
+
+    def _pump(self, timeout_sec: float = 0.2) -> None:
+        """Best-effort drain of pending callbacks (esp. ~/eef/state) before
+        printing the menu. This console is otherwise a blocking input() loop
+        that only spins while waiting on a service call, so without this the
+        header could go stale between menu prints."""
+        end = self.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
+        while self.get_clock().now().nanoseconds < end:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def eef_status_line(self) -> str:
+        """One-line ~/eef/state summary for the console header.
+
+        Shows state / sigma_min / gamma / last reject_reason / max|joint_gap|
+        when available; a short "no data yet" notice otherwise (joint mode,
+        or the eef bridge hasn't published yet).
+        """
+        st = self._eef_state
+        if not st:
+            return "[eef/state] (아직 수신 없음 — joint 모드이거나 브리지 미기동)"
+
+        def fmt(key, spec="{:.3f}"):
+            v = st.get(key)
+            if v is None:
+                return "-"
+            try:
+                return spec.format(float(v))
+            except (TypeError, ValueError):
+                return str(v)
+
+        gap = st.get("joint_gap")
+        if isinstance(gap, (list, tuple)) and gap:
+            try:
+                gap_max = f"{max(abs(float(v)) for v in gap):.4f}"
+            except (TypeError, ValueError):
+                gap_max = "-"
+        else:
+            gap_max = "-"
+
+        reason = st.get("reject_reason") or "-"
+        return (
+            f"[eef/state] state={st.get('state', '-')} "
+            f"sigma_min={fmt('sigma_min')} gamma={fmt('gamma')} "
+            f"reject={reason} joint_gap_max={gap_max}"
+        )
 
     def call_first(self, names: list[str]) -> None:
         """Call the FIRST available service among ``names`` (phase-aware routing).
@@ -139,6 +223,8 @@ def main(args=None) -> None:
     )
     try:
         while rclpy.ok():
+            node._pump(0.2)  # drain any pending ~/eef/state before printing the header
+            print(node.eef_status_line())
             try:
                 choice = input(MENU).strip().lower()
             except EOFError:
@@ -159,11 +245,19 @@ def main(args=None) -> None:
             elif choice == "6":
                 node.call("resume_chase")   # 재개(글라이드) — 간격 제한 게이트
             elif choice == "7":
-                node.call("gripper_pause")  # 그리퍼 일시정지 (출력 정지)
+                node.call("eef_engage")     # eef 인게이지 (게이트 G1~G9)
             elif choice == "8":
+                node.call("eef_disengage")  # eef 디스인게이지 (즉시 정지, 게이트 없음)
+            elif choice == "9":
+                node.call("eef_reclutch")   # eef 리클러치 (앵커 재설정)
+            elif choice == "10":
+                node.call("eef_to_joint")   # joint 복귀 (앵커 폐기 + BOOTSTRAP)
+            elif choice == "11":
+                node.call("gripper_pause")  # 그리퍼 일시정지 (출력 정지)
+            elif choice == "12":
                 node.call("gripper_resume")  # 그리퍼 재개 (시드→램프, 실패시 정지)
             else:
-                print("1, 2, 3, 4, 5, 6, 7, 8, q 중에서 입력하세요.")
+                print("1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, q 중에서 입력하세요.")
     except KeyboardInterrupt:
         pass
     finally:

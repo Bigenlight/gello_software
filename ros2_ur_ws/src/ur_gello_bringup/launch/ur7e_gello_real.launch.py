@@ -98,6 +98,14 @@ Example:
         headless_mode:=true
     ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
         robot_ip:=127.0.0.1 use_fake_hardware:=true   # MOCK validation, no real robot/gripper
+    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
+        robot_ip:=192.168.10.11 control_mode:=eef     # EEF delta-pose control
+
+control_mode:=eef layers config/ur7e_gello_eef.yaml on top of params_file for the
+gello_ur_bridge node ONLY (move-to-start, publisher, and gripper nodes are
+unaffected). control_mode:=joint (default) is byte-for-byte the existing
+behaviour -- no eef overlay is loaded and the bridge lazy-imports no eef
+dependencies.
 
 With use_fake_hardware:=true AND a real physical GELLO leader attached, the
 arm-side handshake/bridge pipeline (move-to-start convergence gate, controller
@@ -117,6 +125,7 @@ from launch.actions import (
     RegisterEventHandler,
     TimerAction,
 )
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
@@ -227,6 +236,22 @@ def generate_launch_description():
                 "streaming (safer first motion)."
             ),
         ),
+        DeclareLaunchArgument(
+            "control_mode",
+            default_value="joint",
+            choices=["joint", "eef"],
+            description=(
+                "gello_ur_bridge control mode. 'joint' (default): existing "
+                "per-joint passthrough, UNCHANGED behaviour -- the bridge does "
+                "not import any eef (ur_kin/eef_delta) dependency in this mode. "
+                "'eef': the bridge additionally loads "
+                "config/ur7e_gello_eef.yaml (layered on top of params_file) and "
+                "drives an end-effector delta-pose controller gated behind the "
+                "eef_engage/eef_disengage/eef_reclutch/eef_to_joint services. "
+                "Only the gello_ur_bridge node is affected; move-to-start, the "
+                "GELLO publisher, and the gripper nodes are unchanged."
+            ),
+        ),
     ]
 
     # ------------------------------------------------------------------ #
@@ -239,6 +264,7 @@ def generate_launch_description():
     launch_rviz = LaunchConfiguration("launch_rviz")
     kinematics_params_file = LaunchConfiguration("kinematics_params_file")
     params_file = LaunchConfiguration("params_file")
+    control_mode = LaunchConfiguration("control_mode")
 
     # ------------------------------------------------------------------ #
     # (1) Official UR driver bring-up (REAL hardware, ros2_control).
@@ -375,14 +401,49 @@ def generate_launch_description():
     #     the actual /joint_states and soft-starts the slew clamp, so the
     #     residual gap eases in rather than snapping.
     # ------------------------------------------------------------------ #
-    bridge_node = Node(
+    # control_mode:=eef layers config/ur7e_gello_eef.yaml on TOP of params_file
+    # (later entries in the `parameters` list win on key conflicts). This is
+    # ONLY consulted when control_mode=="eef" (IfCondition below); the
+    # control_mode=="joint" node is built with params_file alone, so the joint
+    # code path is completely untouched by the presence of this overlay.
+    eef_overlay_file = PathJoinSubstitution(
+        [
+            FindPackageShare("ur_gello_bringup"),
+            "config",
+            "ur7e_gello_eef.yaml",
+        ]
+    )
+    is_joint_mode = IfCondition(
+        PythonExpression(["'", control_mode, "' == 'joint'"])
+    )
+    is_eef_mode = IfCondition(
+        PythonExpression(["'", control_mode, "' == 'eef'"])
+    )
+
+    # Two conditioned Node actions (rather than branching Python logic) so the
+    # control_mode=="joint" path is byte-for-byte the pre-existing behaviour:
+    # same params_file, same overrides, no eef overlay anywhere near it.
+    bridge_node_joint = Node(
         package="ur_gello_bringup",
         executable="gello_ur_bridge",
         # start_paused override kept here (not in yaml) so ONLY this integrated
         # launch starts the bridge held; other launches loading the same params
         # file are unaffected.
-        parameters=[params_file, {"start_paused": True}],
+        parameters=[params_file, {"start_paused": True, "control_mode": control_mode}],
         output="screen",
+        condition=is_joint_mode,
+    )
+
+    bridge_node_eef = Node(
+        package="ur_gello_bringup",
+        executable="gello_ur_bridge",
+        parameters=[
+            params_file,
+            eef_overlay_file,
+            {"start_paused": True, "control_mode": control_mode},
+        ],
+        output="screen",
+        condition=is_eef_mode,
     )
 
     # ------------------------------------------------------------------ #
@@ -463,7 +524,10 @@ def generate_launch_description():
     )
     bridge_paused_delayed = TimerAction(
         period=6.0,
-        actions=[bridge_node],
+        # Both entries are IfCondition-gated on control_mode; exactly one
+        # spawns at runtime (the other's condition evaluates false and it is
+        # never launched).
+        actions=[bridge_node_joint, bridge_node_eef],
     )
     move_to_start_delayed = TimerAction(
         period=8.0,
