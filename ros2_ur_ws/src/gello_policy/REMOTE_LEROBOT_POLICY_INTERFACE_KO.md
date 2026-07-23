@@ -463,8 +463,9 @@ docker compose --env-file .env --profile generic stop policy-server
    `multi-task-dit` extra를 설치하도록 수정했다.
 2. MultiTaskDiT가 초기화 중 CLIP encoder/tokenizer를 `from_pretrained()`로
    생성하지만 컨테이너 캐시가 `/tmp`라 재시작마다 사라지는 문제가 있었다.
-   `HF_CACHE_DIR`를 read-only로 마운트하고 `HF_HUB_OFFLINE=1`,
-   `TRANSFORMERS_OFFLINE=1`로 실행하도록 수정했다.
+   `HF_CACHE_DIR/hub`만 read-only로 마운트하고 `HF_HUB_OFFLINE=1`,
+   `TRANSFORMERS_OFFLINE=1`로 실행하도록 수정했다. 호스트의 Hugging Face
+   token은 offline 추론에 필요하지 않으므로 컨테이너에 마운트하지 않는다.
 3. 프로토콜 입력 오류와 policy/후처리 `ValueError`가 구분되지 않았다. action
    queue가 변경된 뒤 오류가 발생했을 가능성이 있는 추론 오류는 서버를
    restart-required 상태로 전환하고, policy 호출 전 검출한 프로토콜·세션 오류만

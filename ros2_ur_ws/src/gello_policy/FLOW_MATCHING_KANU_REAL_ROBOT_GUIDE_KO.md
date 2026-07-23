@@ -199,6 +199,10 @@ EXTERNAL_IMAGE_SIZE=native
 
 주의할 점:
 
+- `HF_CACHE_DIR`는 `hub/models--...`를 포함하는 Hugging Face cache 루트다.
+  Compose는 공개 모델의 offline 추론에 필요한 `hub` 하위 폴더만 read-only로
+  마운트하며 호스트의 `token` 파일은 컨테이너에 전달하지 않는다.
+
 - `GPU_DEVICE`는 실행 직전 빈 GPU를 확인한 후 선택한다.
 - `POLICY_TASK=put the cube in the cup`은 예시다. 실제 학습 문구가 다르면 반드시
   실제 문구로 바꾼다.

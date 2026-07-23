@@ -77,13 +77,17 @@ services:
       GRPC_MAX_MESSAGE_BYTES: ${GRPC_MAX_MESSAGE_BYTES:-16777216}
       MAX_JPEG_BYTES: ${MAX_JPEG_BYTES:-4194304}
       HF_HOME: /cache/huggingface
+      # The server runs offline and does not need a Hugging Face credential.
+      # Point token discovery at an absent tmpfs path as defense in depth.
+      HF_TOKEN_PATH: /tmp/huggingface-token-disabled
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     volumes:
       - "${CHECKPOINT_DIR:?Set CHECKPOINT_DIR to the pretrained_model directory}:/models/checkpoint:ro"
-      # MultiTaskDiT constructs its CLIP encoders with from_pretrained() before
-      # loading policy weights. Keep that cache across read-only container runs.
-      - "${HF_CACHE_DIR:-./hf-cache}:/cache/huggingface:ro"
+      # Mount only Hub model data, not the host HF root. In particular, never
+      # expose the host token file to the unprivileged offline container.
+      - "${HF_CACHE_DIR:-./hf-cache}/hub:/cache/huggingface/hub:ro"
     shm_size: "2gb"
     deploy:
       resources:
