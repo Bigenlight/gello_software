@@ -178,6 +178,8 @@ INFERENCE_BIND_IP=127.0.0.1
 POLICY_INFERENCE_PORT=50052
 
 LEROBOT_EXTRAS=multi-task-dit
+TRANSFORMERS_VERSION=5.13.0
+HUGGINGFACE_HUB_VERSION=1.22.0
 EXPECTED_POLICY_TYPE=multi_task_dit
 EXPECTED_CHECKPOINT_REVISION=sha256:사전에_계산한_manifest_해시
 
@@ -187,6 +189,10 @@ POLICY_WARMUP_STATE=[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]
 POLICY_CONFIG_OVERRIDES={"num_integration_steps":10,"n_action_steps":24}
 EXTERNAL_IMAGE_SIZE=native
 ```
+
+`TRANSFORMERS_VERSION`과 `HUGGINGFACE_HUB_VERSION`은 checkpoint를 생성한
+학습 환경과 일치시킨다. 이 값은 generic `policy-server` image에만 적용되어
+기존 Diffusion 전용 image의 dependency resolution에는 영향을 주지 않는다.
 
 manifest는 서버 시작 전에 `gello_policy` 디렉터리에서 계산한다.
 

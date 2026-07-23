@@ -187,6 +187,8 @@ POLICY_INFERENCE_PORT=50052
 
 IMAGE_TAG=flow-matching-070000
 LEROBOT_EXTRAS=multi-task-dit
+TRANSFORMERS_VERSION=5.13.0
+HUGGINGFACE_HUB_VERSION=1.22.0
 EXPECTED_POLICY_TYPE=multi_task_dit
 EXPECTED_CHECKPOINT_REVISION=sha256:아래_명령으로_계산한_manifest
 
@@ -202,6 +204,10 @@ EXTERNAL_IMAGE_SIZE=native
 - `HF_CACHE_DIR`는 `hub/models--...`를 포함하는 Hugging Face cache 루트다.
   Compose는 공개 모델의 offline 추론에 필요한 `hub` 하위 폴더만 read-only로
   마운트하며 호스트의 `token` 파일은 컨테이너에 전달하지 않는다.
+- 위 Transformers/Hugging Face Hub 버전은 이 FM checkpoint의 학습 환경과
+  일치한다. 다른 checkpoint를 배포할 때는 해당 학습 환경 버전을 확인해 바꾼다.
+  이 pin은 generic `policy-server`에만 적용되며 기존 Diffusion 전용 image의
+  dependency 해석은 변경하지 않는다.
 
 - `GPU_DEVICE`는 실행 직전 빈 GPU를 확인한 후 선택한다.
 - `POLICY_TASK=put the cube in the cup`은 예시다. 실제 학습 문구가 다르면 반드시

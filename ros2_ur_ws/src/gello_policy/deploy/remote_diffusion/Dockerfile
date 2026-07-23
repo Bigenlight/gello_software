@@ -9,6 +9,12 @@ ARG TORCH_VERSION=2.11.0
 ARG TORCHVISION_VERSION=0.26.0
 ARG LEROBOT_COMMIT=8a74e0ac6d01706d67fddfed682a09d694d9c8c0
 ARG LEROBOT_EXTRAS=multi-task-dit
+# Optional compatibility pins for checkpoints produced with a particular
+# Transformers stack. They are passed only by the generic policy profile so a
+# rebuild of the proven diffusion-server keeps its historical dependency
+# resolution unless an operator explicitly opts in.
+ARG TRANSFORMERS_VERSION=
+ARG HUGGINGFACE_HUB_VERSION=
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -43,6 +49,13 @@ RUN python -m pip install -r /tmp/requirements.lock \
        else \
          python -m pip install \
            "lerobot @ git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"; \
+       fi \
+    && if [ -n "${TRANSFORMERS_VERSION}" ] || [ -n "${HUGGINGFACE_HUB_VERSION}" ]; then \
+         test -n "${TRANSFORMERS_VERSION}" \
+         && test -n "${HUGGINGFACE_HUB_VERSION}" \
+         && python -m pip install \
+              "transformers==${TRANSFORMERS_VERSION}" \
+              "huggingface-hub==${HUGGINGFACE_HUB_VERSION}"; \
        fi
 
 COPY proto/ /app/proto/

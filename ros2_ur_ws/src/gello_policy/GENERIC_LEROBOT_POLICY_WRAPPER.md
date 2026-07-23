@@ -53,6 +53,8 @@ On Kanu, copy `.env.example` to an untracked `.env` and set:
 CHECKPOINT_DIR=/absolute/path/to/pretrained_model
 GPU_DEVICE=0
 LEROBOT_EXTRAS=multi-task-dit
+TRANSFORMERS_VERSION=5.13.0
+HUGGINGFACE_HUB_VERSION=1.22.0
 EXPECTED_POLICY_TYPE=multi_task_dit
 EXPECTED_CHECKPOINT_REVISION=sha256:...
 POLICY_INFERENCE_PORT=50052
@@ -62,6 +64,11 @@ POLICY_WARMUP_STATE=[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]
 POLICY_CONFIG_OVERRIDES={"num_integration_steps":10,"n_action_steps":24}
 EXTERNAL_IMAGE_SIZE=native
 ```
+
+`TRANSFORMERS_VERSION` and `HUGGINGFACE_HUB_VERSION` must match the environment
+that produced the checkpoint. They affect only the generic `policy-server`
+image; the proven `diffusion-server` build keeps its existing dependency
+resolution.
 
 Examples of policy-specific config, still using the same wrapper:
 

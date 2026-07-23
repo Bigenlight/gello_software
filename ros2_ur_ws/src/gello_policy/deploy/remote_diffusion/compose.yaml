@@ -53,6 +53,10 @@ services:
       args:
         LEROBOT_COMMIT: ${LEROBOT_COMMIT:-8a74e0ac6d01706d67fddfed682a09d694d9c8c0}
         LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-multi-task-dit}
+        # Match the environment that produced the deployed checkpoint. These
+        # args intentionally apply only to the generic policy image.
+        TRANSFORMERS_VERSION: ${TRANSFORMERS_VERSION:-5.13.0}
+        HUGGINGFACE_HUB_VERSION: ${HUGGINGFACE_HUB_VERSION:-1.22.0}
     image: gello-remote-policy:${IMAGE_TAG:-dev}
     container_name: ${POLICY_CONTAINER_NAME:-gello-remote-policy}
     init: true
