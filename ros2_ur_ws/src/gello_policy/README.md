@@ -3,8 +3,11 @@
 For the policy-class-independent checkpoint wrapper and remote gRPC server, see
 [`GENERIC_LEROBOT_POLICY_WRAPPER.md`](GENERIC_LEROBOT_POLICY_WRAPPER.md).
 
-Kanu GPU 서버부터 로봇 PC client까지의 한국어 실행 절차는
-[`REMOTE_LEROBOT_POLICY_INTERFACE_KO.md`](REMOTE_LEROBOT_POLICY_INTERFACE_KO.md)를 참고한다.
+자신의 LeRobot checkpoint를 준비해 Kanu GPU 서버부터 로봇 PC와 실물 UR7e까지
+처음부터 배포하는 한국어 end-to-end 절차는
+[`GENERIC_LEROBOT_REMOTE_GPU_E2E_GUIDE_KO.md`](GENERIC_LEROBOT_REMOTE_GPU_E2E_GUIDE_KO.md)를
+참고한다. 인터페이스 내부 구조와 기존 검증 기록은
+[`REMOTE_LEROBOT_POLICY_INTERFACE_KO.md`](REMOTE_LEROBOT_POLICY_INTERFACE_KO.md)에 있다.
 70,000-step cube-in-cup Flow Matching checkpoint를 Kanu에서 추론하고 UR7e 실물에
 연결하는 절차는
 [`FLOW_MATCHING_KANU_REAL_ROBOT_GUIDE_KO.md`](FLOW_MATCHING_KANU_REAL_ROBOT_GUIDE_KO.md)를 참고한다.
