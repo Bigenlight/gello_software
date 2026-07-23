@@ -31,6 +31,24 @@ def positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def nonnegative_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}")
+    return value
+
+
+def boolean_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "1" if default else "0")
+    if raw not in ("0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, got {raw!r}")
+    return raw == "1"
+
+
 def percentile(values: list[float], percent: float) -> float:
     """Return a linearly interpolated percentile (NumPy's default convention)."""
     if not values:
@@ -89,6 +107,8 @@ def main() -> int:
     if timeout_s <= 0:
         raise ValueError("ROUNDTRIP_TIMEOUT_S must be positive")
     request_count = positive_int_env("ROUNDTRIP_REQUESTS", 1)
+    warmup_count = nonnegative_int_env("ROUNDTRIP_WARMUP_REQUESTS", 0)
+    include_requests = boolean_env("ROUNDTRIP_INCLUDE_REQUESTS", True)
 
     worker = create_worker(
         target,
@@ -112,8 +132,8 @@ def main() -> int:
         if len(state) != 7 or not all(np.isfinite(state)):
             raise ValueError("ROUNDTRIP_STATE must be a JSON array of 7 finite values")
         jpeg = make_black_jpeg(height, width)
-        records = []
-        for sequence in range(1, request_count + 1):
+
+        def send_one(sequence: int, total: int, phase: str) -> dict:
             stamp_ns = time.monotonic_ns()
             cam1 = ImageSnapshot(stamp_ns, width, height, jpeg)
             cam2 = ImageSnapshot(stamp_ns, width, height, jpeg)
@@ -132,28 +152,37 @@ def main() -> int:
                 time.sleep(0.01)
             if result is None:
                 raise TimeoutError(
-                    f"no action received for request {sequence}/{request_count} "
+                    f"no action received for {phase} request {sequence}/{total} "
                     f"within {timeout_s:g}s"
                 )
             action = [float(value) for value in result.action]
             if len(action) != 7 or not all(math.isfinite(value) for value in action):
                 raise RuntimeError(
-                    f"request {sequence}/{request_count} returned an invalid action"
+                    f"{phase} request {sequence}/{total} returned an invalid action"
                 )
-            records.append(
-                {
-                    "action": action,
-                    "chunk_refill": result.chunk_refill,
-                    "inference_ms": result.inference_ms,
-                    "observation_age_ms": result.observation_age_s * 1000.0,
-                    "preprocess_ms": result.preprocess_ms,
-                    "remaining_chunk_actions": result.remaining_chunk_actions,
-                    "request_id": result.request_id,
-                    "round_trip_ms": (time.perf_counter() - request_started) * 1000.0,
-                    "sequence": sequence,
-                    "total_server_ms": result.total_server_ms,
-                }
-            )
+            return {
+                "action": action,
+                "chunk_refill": result.chunk_refill,
+                "inference_ms": result.inference_ms,
+                "observation_age_ms": result.observation_age_s * 1000.0,
+                "preprocess_ms": result.preprocess_ms,
+                "remaining_chunk_actions": result.remaining_chunk_actions,
+                "request_id": result.request_id,
+                "round_trip_ms": (time.perf_counter() - request_started) * 1000.0,
+                "sequence": sequence,
+                "total_server_ms": result.total_server_ms,
+            }
+
+        # Warm-up requests exercise the exact same transport, policy queue, and
+        # action validation path, but are intentionally omitted from records and
+        # latency statistics.
+        for sequence in range(1, warmup_count + 1):
+            send_one(sequence, warmup_count, "warm-up")
+
+        records = [
+            send_one(sequence, request_count, "measured")
+            for sequence in range(1, request_count + 1)
+        ]
 
         contract = {
             "scheduler": info.scheduler,
@@ -161,7 +190,7 @@ def main() -> int:
             "n_action_steps": info.n_action_steps,
             "resize": [info.resize_height, info.resize_width],
         }
-        if request_count == 1:
+        if request_count == 1 and warmup_count == 0 and include_requests:
             # Preserve the original one-line/default result contract.  The two
             # chunk fields expose useful server metadata without changing the
             # existing keys or their meaning.
@@ -189,17 +218,20 @@ def main() -> int:
                 )
             )
         else:
+            output = {
+                "checkpoint_revision": info.checkpoint_revision,
+                "model_id": info.model_id,
+                "policy_contract": contract,
+                "request_count": request_count,
+                "session_id": session_id,
+                "summary": latency_summary(records),
+                "warmup_request_count": warmup_count,
+            }
+            if include_requests:
+                output["requests"] = records
             print(
                 json.dumps(
-                    {
-                        "checkpoint_revision": info.checkpoint_revision,
-                        "model_id": info.model_id,
-                        "policy_contract": contract,
-                        "request_count": request_count,
-                        "requests": records,
-                        "session_id": session_id,
-                        "summary": latency_summary(records),
-                    },
+                    output,
                     sort_keys=True,
                 )
             )

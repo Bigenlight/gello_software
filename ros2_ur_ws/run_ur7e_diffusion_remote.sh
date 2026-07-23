@@ -155,7 +155,7 @@ if [ "${ROUNDTRIP_ONLY:-0}" = "1" ]; then
     PYTHONPATH="$SCRIPT_DIR/src/gello_policy:${PYTHONPATH}" \
         ROUNDTRIP_TARGET="127.0.0.1:${LOCAL_GRPC_PORT}" \
         "$SYSTEM_PYTHON" "$SCRIPT_DIR/remote_diffusion_roundtrip_smoke.py"
-    echo "### ROUNDTRIP_ONLY PASS: received one 7-D action; skipping ROS launch."
+    echo "### ROUNDTRIP_ONLY PASS: received ${ROUNDTRIP_REQUESTS:-1} measured 7-D action(s); skipping ROS launch."
     exit 0
 fi
 
