@@ -17,8 +17,11 @@ def main() -> int:
             grpc.channel_ready_future(channel).result(timeout=2.0)
             stub = remote_diffusion_pb2_grpc.RemoteDiffusionStub(channel)
             reply = stub.Health(remote_diffusion_pb2.HealthRequest(), timeout=2.0)
-        if not reply.alive:
-            print(f"service replied alive=false: {reply.detail}", file=sys.stderr)
+        if not reply.alive or not reply.ready:
+            print(
+                f"service unhealthy: alive={reply.alive} ready={reply.ready}: {reply.detail}",
+                file=sys.stderr,
+            )
             return 1
         return 0
     except Exception as exc:  # health checks must convert every failure to nonzero

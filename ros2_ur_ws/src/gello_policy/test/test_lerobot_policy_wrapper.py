@@ -166,3 +166,57 @@ def test_n_action_steps_must_be_positive(wrapper_module, monkeypatch):
     monkeypatch.setattr(FakeConfig, "n_action_steps", 0)
     with pytest.raises(ValueError, match="must be positive"):
         wrapper_module.LeRobotPolicyWrapper("checkpoint", device="cpu")
+
+
+def test_explicit_task_modes(wrapper_module, monkeypatch):
+    wrapper = wrapper_module.LeRobotPolicyWrapper(
+        "checkpoint", device="cpu", task_mode="required"
+    )
+    assert wrapper.task_required
+    with pytest.raises(wrapper_module.PolicyInputError, match="non-empty task"):
+        wrapper.act(np.zeros(7), _jpeg(), _jpeg())
+    monkeypatch.setattr(FakeConfig, "type", "multi_task_dit")
+    with pytest.raises(ValueError, match="conflicts"):
+        wrapper_module.LeRobotPolicyWrapper(
+            "checkpoint", device="cpu", task_mode="disabled"
+        )
+    with pytest.raises(ValueError, match="auto, required, or disabled"):
+        wrapper_module.LeRobotPolicyWrapper(
+            "checkpoint", device="cpu", task_mode="sometimes"
+        )
+
+
+def test_contract_feature_kinds_camera_shapes_and_resize(wrapper_module, monkeypatch):
+    monkeypatch.setitem(
+        FakeConfig.input_features,
+        "observation.state",
+        Feature("action", (7,)),
+    )
+    with pytest.raises(ValueError, match="state feature"):
+        wrapper_module.LeRobotPolicyWrapper("checkpoint", device="cpu")
+    monkeypatch.setitem(
+        FakeConfig.input_features,
+        "observation.state",
+        Feature("state", (7,)),
+    )
+    monkeypatch.setitem(
+        FakeConfig.input_features,
+        "observation.images.cam2",
+        Feature("visual", (1, 8, 8)),
+    )
+    with pytest.raises(ValueError, match="CHW"):
+        wrapper_module.LeRobotPolicyWrapper("checkpoint", device="cpu")
+    monkeypatch.setitem(
+        FakeConfig.input_features,
+        "observation.images.cam2",
+        Feature("visual", (3, 8, 8)),
+    )
+    with pytest.raises(ValueError, match="positive"):
+        wrapper_module.LeRobotPolicyWrapper(
+            "checkpoint", device="cpu", external_image_size=(0, 224)
+        )
+    wrapper = wrapper_module.LeRobotPolicyWrapper(
+        "checkpoint", device="cpu", external_image_size=None
+    )
+    assert wrapper.external_image_size is None
+    assert wrapper._resize is None

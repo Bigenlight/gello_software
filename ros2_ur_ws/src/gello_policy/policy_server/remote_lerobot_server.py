@@ -34,7 +34,10 @@ def _image_size(value: str):
         return None
     try:
         height, width = value.split("x", 1)
-        return int(height), int(width)
+        result = int(height), int(width)
+        if min(result) <= 0:
+            raise ValueError
+        return result
     except Exception as exc:
         raise SystemExit("EXTERNAL_IMAGE_SIZE must be auto, native, or HxW") from exc
 
@@ -66,12 +69,25 @@ def _warmup(wrapper, task: str, state: np.ndarray) -> None:
 
 def main() -> int:
     from .lerobot_policy_wrapper import LeRobotPolicyWrapper, PolicyInputError
+    from .checkpoint_identity import compute_checkpoint_identity, verify_expected_identity
     from .remote_diffusion_server import RequestValidationError
 
     checkpoint = _required_env("CHECKPOINT_PATH")
     bind_address = os.environ.get("GRPC_BIND_ADDRESS", DEFAULT_BIND_ADDRESS)
     device = os.environ.get("POLICY_DEVICE", "cuda")
     task = os.environ.get("POLICY_TASK", "")
+    task_mode = os.environ.get("POLICY_TASK_MODE", "auto")
+    expected_policy_type = _required_env("EXPECTED_POLICY_TYPE")
+    expected_revision = _required_env("EXPECTED_CHECKPOINT_REVISION")
+    try:
+        identity = compute_checkpoint_identity(checkpoint)
+        verify_expected_identity(
+            identity,
+            expected_policy_type=expected_policy_type,
+            expected_revision=expected_revision,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"checkpoint identity verification failed: {exc}") from exc
     try:
         overrides = json.loads(os.environ.get("POLICY_CONFIG_OVERRIDES", "{}"))
     except json.JSONDecodeError as exc:
@@ -84,19 +100,8 @@ def main() -> int:
         device=device,
         config_overrides=overrides,
         external_image_size=_image_size(os.environ.get("EXTERNAL_IMAGE_SIZE", "auto")),
+        task_mode=task_mode,
     )
-    expected_inputs = {
-        "observation.state", "observation.images.cam1", "observation.images.cam2",
-    }
-    if set(wrapper.input_contract) != expected_inputs:
-        raise SystemExit(
-            "checkpoint is incompatible with robot protocol inputs: "
-            f"expected {sorted(expected_inputs)}, got {sorted(wrapper.input_contract)}"
-        )
-    if wrapper.input_contract["observation.state"]["shape"] != (7,):
-        raise SystemExit("checkpoint observation.state must have shape (7,)")
-    if wrapper.output_contract.get("action", {}).get("shape") != (7,):
-        raise SystemExit("checkpoint action must have shape (7,)")
     if wrapper.task_required and not task:
         raise SystemExit("POLICY_TASK is required by the checkpoint tokenizer")
 
@@ -139,8 +144,8 @@ def main() -> int:
     engine = TaskEngine()
     service = RemoteDiffusionService(
         engine,
-        model_id=os.environ.get("MODEL_ID", str(wrapper.config.type)),
-        checkpoint_revision=os.environ.get("CHECKPOINT_REVISION", "unknown"),
+        model_id=identity.policy_type,
+        checkpoint_revision=identity.revision,
         scheduler=sampling_method,
         num_inference_steps=sampling_steps,
         n_action_steps=n_action_steps,
@@ -157,7 +162,13 @@ def main() -> int:
     if server.add_insecure_port(bind_address) == 0:
         raise SystemExit(f"failed to bind {bind_address}")
     server.start()
-    print(json.dumps(wrapper.describe(), indent=2, default=list), flush=True)
+    description = wrapper.describe()
+    description["checkpoint_identity"] = {
+        "policy_type": identity.policy_type,
+        "checkpoint_revision": identity.revision,
+        "files": [{"path": path, "sha256": digest} for path, digest in identity.files],
+    }
+    print(json.dumps(description, indent=2, default=list), flush=True)
     print(f"[remote_lerobot] ready at {bind_address}; sampling={sampling_method}/{sampling_steps}", flush=True)
     try:
         server.wait_for_termination()

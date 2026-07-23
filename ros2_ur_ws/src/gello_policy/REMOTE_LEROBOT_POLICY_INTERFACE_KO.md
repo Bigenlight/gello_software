@@ -177,14 +177,26 @@ GPU_DEVICE=0
 INFERENCE_BIND_IP=127.0.0.1
 POLICY_INFERENCE_PORT=50052
 
-MODEL_ID=Bigenlight/cube_flow_matching
-CHECKPOINT_REVISION=sha256:실제_체크포인트_해시
+LEROBOT_EXTRAS=multi-task-dit
+EXPECTED_POLICY_TYPE=multi_task_dit
+EXPECTED_CHECKPOINT_REVISION=sha256:사전에_계산한_manifest_해시
 
 POLICY_TASK=put the cube in the cup
+POLICY_TASK_MODE=required
 POLICY_WARMUP_STATE=[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]
 POLICY_CONFIG_OVERRIDES={"num_integration_steps":10,"n_action_steps":24}
 EXTERNAL_IMAGE_SIZE=native
 ```
+
+manifest는 서버 시작 전에 `gello_policy` 디렉터리에서 계산한다.
+
+```bash
+python3 -m policy_server.checkpoint_identity "$CHECKPOINT_DIR"
+```
+
+출력의 `policy_type`과 `revision`을 각각 `EXPECTED_POLICY_TYPE`,
+`EXPECTED_CHECKPOINT_REVISION`에 넣는다. 두 값이 실제 checkpoint와 다르거나
+비어 있으면 generic 서버는 시작하지 않는다.
 
 ### Diffusion 예시
 
@@ -205,6 +217,8 @@ EXTERNAL_IMAGE_SIZE=360x640
 주의 사항:
 
 - `POLICY_TASK`는 학습 데이터에 사용한 문구와 정확히 같아야 한다.
+- `POLICY_TASK_MODE`는 `auto|required|disabled` 중 하나다. 새로운
+  task-conditioned policy에는 `required`를 권장한다.
 - saved preprocessor에 tokenizer가 있는데 task가 비어 있으면 서버가 시작되지 않는다.
 - MultiTaskDiT는 policy weight를 읽기 전에 CLIP encoder를 `from_pretrained()`로
   생성한다. `HF_CACHE_DIR`에는 checkpoint config의 encoder 이름에 해당하는
@@ -310,8 +324,8 @@ ROUNDTRIP_ONLY=1 \
 
 로컬 client는 잘못된 모델에 로봇을 연결하지 않도록 다음 값을 엄격하게 비교한다.
 
-- `MODEL_ID`
-- `CHECKPOINT_REVISION`
+- checkpoint `config.json`에서 읽은 실제 policy type
+- config, weight shard, processor 파일들로 계산한 실제 manifest SHA-256
 - policy type/objective에 해당하는 sampling method
 - sampling/integration step 수
 - `n_action_steps`
@@ -344,8 +358,8 @@ resize_height/width   = 0/0
 ```yaml
 policy_leader_node:
   ros__parameters:
-    expected_model_id: "Bigenlight/cube_flow_matching"
-    expected_checkpoint_revision: "sha256:실제_체크포인트_해시"
+    expected_model_id: "multi_task_dit"
+    expected_checkpoint_revision: "sha256:사전에_계산한_manifest_해시"
     expected_scheduler: "multi_task_dit:flow_matching"
     expected_inference_steps: 10
     expected_action_steps: 24
@@ -406,6 +420,7 @@ docker compose --env-file .env --profile generic stop policy-server
 
 - [ ] LeRobot `get_policy_class(config.type)`가 policy를 지원한다.
 - [ ] Kanu Docker 이미지에 새 policy의 Python dependency가 있다.
+- [ ] `LEROBOT_EXTRAS`를 해당 policy에 맞춰 지정하고 이미지를 다시 build했다.
 - [ ] 외부 encoder/tokenizer가 필요한 policy는 `HF_CACHE_DIR`에 파일이 준비돼 있다.
 - [ ] checkpoint에 config, model, preprocessor, postprocessor 파일이 있다.
 - [ ] observation key와 shape가 현재 7D·2-camera 계약과 일치한다.

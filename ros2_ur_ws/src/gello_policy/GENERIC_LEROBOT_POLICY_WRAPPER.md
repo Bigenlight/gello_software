@@ -52,10 +52,12 @@ On Kanu, copy `.env.example` to an untracked `.env` and set:
 ```dotenv
 CHECKPOINT_DIR=/absolute/path/to/pretrained_model
 GPU_DEVICE=0
-MODEL_ID=Bigenlight/example_model
-CHECKPOINT_REVISION=sha256:...
+LEROBOT_EXTRAS=multi-task-dit
+EXPECTED_POLICY_TYPE=multi_task_dit
+EXPECTED_CHECKPOINT_REVISION=sha256:...
 POLICY_INFERENCE_PORT=50052
 POLICY_TASK=put the cube in the cup
+POLICY_TASK_MODE=required
 POLICY_WARMUP_STATE=[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]
 POLICY_CONFIG_OVERRIDES={"num_integration_steps":10,"n_action_steps":24}
 EXTERNAL_IMAGE_SIZE=native

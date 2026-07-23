@@ -121,8 +121,9 @@ sha256sum "$FM_CHECKPOINT/model.safetensors"
 - 학습에 사용한 정확한 task 문구
 - 실제 `n_action_steps`와 encoder 이름
 
-`sha256sum` 결과는 뒤의 `CHECKPOINT_REVISION`과 로컬
-`expected_checkpoint_revision`에 동일하게 사용한다.
+서버가 출력하는 checkpoint manifest SHA-256을 뒤의
+`EXPECTED_CHECKPOINT_REVISION`과 로컬 `expected_checkpoint_revision`에
+동일하게 사용한다.
 
 ## 5. 양쪽 머신에 코드 준비
 
@@ -185,10 +186,12 @@ INFERENCE_BIND_IP=127.0.0.1
 POLICY_INFERENCE_PORT=50052
 
 IMAGE_TAG=flow-matching-070000
-MODEL_ID=flow_matching_cube_in_cup/070000
-CHECKPOINT_REVISION=sha256:MODEL_SAFETENSORS의_실제_SHA256
+LEROBOT_EXTRAS=multi-task-dit
+EXPECTED_POLICY_TYPE=multi_task_dit
+EXPECTED_CHECKPOINT_REVISION=sha256:아래_명령으로_계산한_manifest
 
 POLICY_TASK=put the cube in the cup
+POLICY_TASK_MODE=required
 POLICY_WARMUP_STATE=[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]
 POLICY_CONFIG_OVERRIDES={"num_integration_steps":10,"n_action_steps":24}
 EXTERNAL_IMAGE_SIZE=native
@@ -199,6 +202,11 @@ EXTERNAL_IMAGE_SIZE=native
 - `GPU_DEVICE`는 실행 직전 빈 GPU를 확인한 후 선택한다.
 - `POLICY_TASK=put the cube in the cup`은 예시다. 실제 학습 문구가 다르면 반드시
   실제 문구로 바꾼다.
+- `EXPECTED_CHECKPOINT_REVISION`은 단일 weight 파일 해시가 아니다. 배포
+  디렉터리의 상위 `gello_policy`에서 다음 명령으로 먼저 계산한 값을 사용한다.
+  `python3 -m policy_server.checkpoint_identity "$CHECKPOINT_DIR"`
+  서버는 이 값이 실제 config, 모든 weight shard/index, preprocessor 및
+  postprocessor 파일의 manifest와 다르면 시작하지 않는다.
 - `n_action_steps`도 checkpoint 및 기존 offline 평가 설정과 일치시킨다.
 - `num_integration_steps=10`은 기존 프로젝트의 offline 평가/latency 설정을
   따르는 값이다. 다른 step 수를 사용하려면 먼저 reference action과 latency를
@@ -273,23 +281,15 @@ ssh kanu 'hostname'
 
 ## 10. 로컬 실물 배포 YAML 만들기
 
-기존 Flow Matching 안전 설정을 복사한다.
-
-```bash
-cd "$GELLO_REPO/ros2_ur_ws"
-cp src/gello_policy/config/fm_deploy.yaml \
-   src/gello_policy/config/fm_remote_deploy.yaml
-```
-
-`fm_remote_deploy.yaml`의 기존 `policy_leader_node.ros__parameters` 안에 다음 값을
-추가한다. 같은 node key를 파일 끝에 새로 만들지 말고 기존 block을 편집한다.
+저장소에 포함된 `config/fm_remote_deploy.yaml`을 사용한다. 다음 contract 값 중
+placeholder revision만 Kanu 서버가 출력한 실제 manifest 값으로 교체한다.
 
 ```yaml
     inference_transport: "grpc"
     grpc_port: 50052
 
-    expected_model_id: "flow_matching_cube_in_cup/070000"
-    expected_checkpoint_revision: "sha256:MODEL_SAFETENSORS의_실제_SHA256"
+    expected_model_id: "multi_task_dit"
+    expected_checkpoint_revision: "sha256:사전에_계산한_manifest_해시"
     expected_scheduler: "multi_task_dit:flow_matching"
     expected_inference_steps: 10
     expected_action_steps: 24

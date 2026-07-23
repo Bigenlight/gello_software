@@ -56,7 +56,11 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
         self._resize_height = resize_height
         self._resize_width = resize_width
         self._max_jpeg_bytes = max_jpeg_bytes
-        self._lock = threading.Lock()
+        # Stateful policy execution/reset is serialized independently from the
+        # small status/session fields. Health/GetServerInfo must remain responsive
+        # while a slow chunk refill owns the inference lock.
+        self._state_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
         self._active_client_id = ""
         self._active_session_id = ""
         self._last_request_id = 0
@@ -64,13 +68,13 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
         self._ready = True
 
     def Health(self, request, context):  # noqa: N802 - generated gRPC API
-        with self._lock:
+        with self._state_lock:
             ready = self._ready
         detail = "model warm and ready" if ready else "inference failed; restart required"
         return pb.HealthReply(alive=True, ready=ready, detail=detail)
 
     def GetServerInfo(self, request, context):  # noqa: N802
-        with self._lock:
+        with self._state_lock:
             ready = self._ready
         return pb.ServerInfoReply(
             ready=ready,
@@ -90,32 +94,35 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
     def ResetEpisode(self, request, context):  # noqa: N802
         if not request.client_id or not request.session_id:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "client_id and session_id are required")
-        with self._lock:
-            if not self._ready:
-                context.abort(grpc.StatusCode.FAILED_PRECONDITION, "server restart required")
-            if self._stream_active:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "cannot reset while an action stream is active",
-                )
+        with self._inference_lock:
+            with self._state_lock:
+                if not self._ready:
+                    context.abort(grpc.StatusCode.FAILED_PRECONDITION, "server restart required")
+                if self._stream_active:
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "cannot reset while an action stream is active",
+                    )
             try:
                 self._engine.reset()
             except Exception as exc:
-                self._ready = False
-                self._active_client_id = ""
-                self._active_session_id = ""
-                self._last_request_id = 0
+                with self._state_lock:
+                    self._ready = False
+                    self._active_client_id = ""
+                    self._active_session_id = ""
+                    self._last_request_id = 0
                 context.abort(
                     grpc.StatusCode.INTERNAL,
                     f"policy reset failed; server restart required: {type(exc).__name__}",
                 )
-            self._active_client_id = request.client_id
-            self._active_session_id = request.session_id
-            self._last_request_id = 0
+            with self._state_lock:
+                self._active_client_id = request.client_id
+                self._active_session_id = request.session_id
+                self._last_request_id = 0
         return pb.ResetEpisodeReply(ok=True, detail="policy queues reset")
 
     def StreamActions(self, request_iterator, context):  # noqa: N802
-        with self._lock:
+        with self._state_lock:
             if not self._ready:
                 context.abort(grpc.StatusCode.FAILED_PRECONDITION, "server restart required")
             if self._stream_active:
@@ -139,7 +146,7 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
                     # The stateful policy queue may be partially changed after an
                     # unexpected inference failure. Refuse all further work until
                     # the process is restarted and warmed from a clean state.
-                    with self._lock:
+                    with self._state_lock:
                         self._ready = False
                         self._active_client_id = ""
                         self._active_session_id = ""
@@ -148,33 +155,33 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
                         f"inference failed; server restart required: {type(exc).__name__}",
                     )
         finally:
-            with self._lock:
+            with self._state_lock:
                 self._stream_active = False
 
     def _infer_one(self, request) -> pb.ActionReply:
         self._validate_request(request)
         state = np.asarray(request.state, dtype=np.float64)
 
-        # One lock owns both the active session and the stateful Diffusion queues.
-        # It also prevents a second client from interleaving select_action calls.
-        with self._lock:
-            if (
-                request.client_id != self._active_client_id
-                or request.session_id != self._active_session_id
-            ):
-                raise RequestValidationError(
-                    "session is not active; ResetEpisode must succeed first"
-                )
-            expected_request_id = self._last_request_id + 1
-            if request.request_id != expected_request_id:
-                raise RequestValidationError(
-                    f"request_id must be {expected_request_id}, got {request.request_id}"
-                )
+        with self._inference_lock:
+            with self._state_lock:
+                if (
+                    request.client_id != self._active_client_id
+                    or request.session_id != self._active_session_id
+                ):
+                    raise RequestValidationError(
+                        "session is not active; ResetEpisode must succeed first"
+                    )
+                expected_request_id = self._last_request_id + 1
+                if request.request_id != expected_request_id:
+                    raise RequestValidationError(
+                        f"request_id must be {expected_request_id}, got {request.request_id}"
+                    )
             action = self._engine.act(state, bytes(request.cam1.data), bytes(request.cam2.data))
             metadata = dict(self._engine.last_act_metadata)
             if action.shape != (dimensions.ACTION_DIM,) or not np.all(np.isfinite(action)):
                 raise RuntimeError("policy returned an invalid action")
-            self._last_request_id = request.request_id
+            with self._state_lock:
+                self._last_request_id = request.request_id
 
         return pb.ActionReply(
             protocol_version=PROTOCOL_VERSION,
@@ -213,6 +220,13 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
                 raise RequestValidationError(
                     f"{name} JPEG exceeds {self._max_jpeg_bytes} byte limit"
                 )
+            if frame.width <= 0 or frame.height <= 0:
+                raise RequestValidationError(f"{name} width and height must be positive")
+        if (
+            request.cam1.width != request.cam2.width
+            or request.cam1.height != request.cam2.height
+        ):
+            raise RequestValidationError("cam1/cam2 JPEG metadata dimensions must match")
 
 
 def _required_env(name: str) -> str:

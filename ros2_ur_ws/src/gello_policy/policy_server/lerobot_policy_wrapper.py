@@ -67,6 +67,7 @@ class LeRobotPolicyWrapper:
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
         external_image_size: tuple[int, int] | None | str = "auto",
+        task_mode: str = "auto",
     ) -> None:
         if device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA was requested but is unavailable; CPU fallback is not implicit")
@@ -105,6 +106,14 @@ class LeRobotPolicyWrapper:
             self.external_image_size = tuple(map(int, configured)) if configured else None
         else:
             self.external_image_size = external_image_size
+        if self.external_image_size is not None:
+            if len(self.external_image_size) != 2 or any(
+                int(size) <= 0 for size in self.external_image_size
+            ):
+                raise ValueError(
+                    "external_image_size must contain two positive integers"
+                )
+            self.external_image_size = tuple(map(int, self.external_image_size))
         self._resize = v2.Resize(list(self.external_image_size)) if self.external_image_size else None
         self.device = device
         self.checkpoint = source
@@ -117,10 +126,22 @@ class LeRobotPolicyWrapper:
             key: {"kind": _kind(feature), "shape": _shape(feature)}
             for key, feature in config.output_features.items()
         }
-        self.task_required = any(
+        detected_task_required = any(
             "token" in type(step).__name__.lower()
             for step in getattr(self.preprocessor, "steps", ())
         ) or self._config_requires_task(config)
+        task_mode = task_mode.strip().lower()
+        if task_mode not in {"auto", "required", "disabled"}:
+            raise ValueError("task_mode must be auto, required, or disabled")
+        if task_mode == "disabled" and detected_task_required:
+            raise ValueError(
+                "task_mode=disabled conflicts with a task-conditioned checkpoint"
+            )
+        self.task_mode = task_mode
+        self.task_required = (
+            detected_task_required if task_mode == "auto" else task_mode == "required"
+        )
+        self._validate_robot_contract()
         self._validate_action_horizon(config)
         self.last_act_metadata = {
             "preprocess_ms": 0.0,
@@ -152,6 +173,35 @@ class LeRobotPolicyWrapper:
                     f"horizon - n_obs_steps + 1 ({available})"
                 )
 
+    def _validate_robot_contract(self) -> None:
+        expected_inputs = {
+            "observation.state", "observation.images.cam1", "observation.images.cam2",
+        }
+        if set(self.input_contract) != expected_inputs:
+            raise ValueError(
+                "checkpoint inputs must be exactly "
+                f"{sorted(expected_inputs)}, got {sorted(self.input_contract)}"
+            )
+        state = self.input_contract["observation.state"]
+        if state["kind"] != "state" or state["shape"] != (7,):
+            raise ValueError("observation.state must be a state feature with shape (7,)")
+        camera_shapes = []
+        for key in ("observation.images.cam1", "observation.images.cam2"):
+            camera = self.input_contract[key]
+            if camera["kind"] != "visual":
+                raise ValueError(f"{key} must be a visual feature")
+            shape = camera["shape"]
+            if len(shape) != 3 or shape[0] != 3 or min(shape[1:]) <= 0:
+                raise ValueError(f"{key} must have positive CHW shape (3,H,W), got {shape}")
+            camera_shapes.append(shape)
+        if camera_shapes[0] != camera_shapes[1]:
+            raise ValueError(f"cam1/cam2 shapes must match, got {camera_shapes}")
+        if set(self.output_contract) != {"action"}:
+            raise ValueError("checkpoint outputs must contain exactly the action feature")
+        action = self.output_contract["action"]
+        if action["kind"] != "action" or action["shape"] != (7,):
+            raise ValueError("action must be an action feature with shape (7,)")
+
     def describe(self) -> dict[str, Any]:
         return {
             "policy_type": str(self.config.type),
@@ -160,6 +210,7 @@ class LeRobotPolicyWrapper:
             "input_features": self.input_contract,
             "output_features": self.output_contract,
             "task_required": self.task_required,
+            "task_mode": self.task_mode,
             "external_image_size": self.external_image_size,
         }
 
@@ -244,9 +295,11 @@ class LeRobotPolicyWrapper:
 
     def act(self, state: np.ndarray, cam1_jpeg: bytes, cam2_jpeg: bytes, task: str = "") -> np.ndarray:
         """Adapter for the existing remote gRPC service's fixed robot contract."""
-        return self.select_action({
+        observation = {
             "observation.state": state,
             "observation.images.cam1": cam1_jpeg,
             "observation.images.cam2": cam2_jpeg,
-            "task": task,
-        })
+        }
+        if self.task_mode != "disabled":
+            observation["task"] = task
+        return self.select_action(observation)

@@ -8,6 +8,7 @@ FROM python:3.12.10-slim-bookworm
 ARG TORCH_VERSION=2.11.0
 ARG TORCHVISION_VERSION=0.26.0
 ARG LEROBOT_COMMIT=8a74e0ac6d01706d67fddfed682a09d694d9c8c0
+ARG LEROBOT_EXTRAS=multi-task-dit
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -33,8 +34,16 @@ RUN python -m pip install --upgrade pip \
 
 COPY policy_server/requirements-remote-diffusion.lock /tmp/requirements.lock
 RUN python -m pip install -r /tmp/requirements.lock \
-    && python -m pip install \
-      "lerobot[multi-task-dit] @ git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
+    && case "${LEROBOT_EXTRAS}" in \
+         (*[!A-Za-z0-9,_-]*) echo "invalid LEROBOT_EXTRAS=${LEROBOT_EXTRAS}" >&2; exit 2;; \
+       esac \
+    && if [ -n "${LEROBOT_EXTRAS}" ]; then \
+         python -m pip install \
+           "lerobot[${LEROBOT_EXTRAS}] @ git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"; \
+       else \
+         python -m pip install \
+           "lerobot @ git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"; \
+       fi
 
 COPY proto/ /app/proto/
 COPY policy_server/ /app/policy_server/

@@ -1,5 +1,7 @@
 import numpy as np
 import sys
+import threading
+import time
 import types
 
 from gello_policy import remote_diffusion_pb2 as pb
@@ -45,7 +47,7 @@ class FakeContext:
 
 
 def _request(request_id=1):
-    frame = pb.ImageFrame(encoding="jpeg", data=b"jpeg")
+    frame = pb.ImageFrame(encoding="jpeg", data=b"jpeg", width=8, height=8)
     return pb.ObservationRequest(
         protocol_version="1", client_id="client", session_id="session",
         request_id=request_id, state=[0.0] * 7, cam1=frame, cam2=frame,
@@ -150,3 +152,49 @@ def test_reset_failure_clears_session_and_requires_restart():
     assert not service._active_client_id
     assert not service._active_session_id
     assert service._last_request_id == 0
+
+
+def test_health_does_not_wait_for_slow_inference():
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowEngine(FakeEngine):
+        def act(self, state, cam1, cam2):
+            started.set()
+            assert release.wait(2.0)
+            return super().act(state, cam1, cam2)
+
+    service = _service(SlowEngine())
+    thread = threading.Thread(
+        target=lambda: service._infer_one(_request()),
+        daemon=True,
+    )
+    thread.start()
+    assert started.wait(1.0)
+    before = time.monotonic()
+    health = service.Health(pb.HealthRequest(), None)
+    elapsed = time.monotonic() - before
+    release.set()
+    thread.join(1.0)
+    assert health.ready
+    assert elapsed < 0.1
+
+
+def test_jpeg_metadata_must_be_positive_and_match():
+    service = _service(FakeEngine())
+    request = _request()
+    request.cam1.width = 0
+    try:
+        service._validate_request(request)
+    except RequestValidationError as exc:
+        assert "positive" in str(exc)
+    else:
+        raise AssertionError("zero JPEG width must be rejected")
+    request = _request()
+    request.cam2.width = 9
+    try:
+        service._validate_request(request)
+    except RequestValidationError as exc:
+        assert "must match" in str(exc)
+    else:
+        raise AssertionError("mismatched camera dimensions must be rejected")

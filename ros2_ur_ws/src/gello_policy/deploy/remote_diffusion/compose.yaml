@@ -50,6 +50,9 @@ services:
     build:
       context: ../..
       dockerfile: deploy/remote_diffusion/Dockerfile
+      args:
+        LEROBOT_COMMIT: ${LEROBOT_COMMIT:-8a74e0ac6d01706d67fddfed682a09d694d9c8c0}
+        LEROBOT_EXTRAS: ${LEROBOT_EXTRAS:-multi-task-dit}
     image: gello-remote-policy:${IMAGE_TAG:-dev}
     container_name: ${POLICY_CONTAINER_NAME:-gello-remote-policy}
     init: true
@@ -59,11 +62,15 @@ services:
       - "${INFERENCE_BIND_IP:-127.0.0.1}:${POLICY_INFERENCE_PORT:-50052}:50051"
     environment:
       CHECKPOINT_PATH: /models/checkpoint
-      MODEL_ID: ${MODEL_ID:-unknown}
-      CHECKPOINT_REVISION: ${CHECKPOINT_REVISION:-unknown}
+      # Keep interpolation optional so the inactive generic profile cannot
+      # break the proven diffusion-server deployment. The generic entrypoint
+      # itself rejects either value when blank, before loading the checkpoint.
+      EXPECTED_POLICY_TYPE: ${EXPECTED_POLICY_TYPE:-}
+      EXPECTED_CHECKPOINT_REVISION: ${EXPECTED_CHECKPOINT_REVISION:-}
       GRPC_BIND_ADDRESS: 0.0.0.0:50051
       POLICY_DEVICE: cuda
       POLICY_TASK: ${POLICY_TASK:-}
+      POLICY_TASK_MODE: ${POLICY_TASK_MODE:-auto}
       POLICY_WARMUP_STATE: '${POLICY_WARMUP_STATE:-[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]}'
       POLICY_CONFIG_OVERRIDES: '${POLICY_CONFIG_OVERRIDES:-{}}'
       EXTERNAL_IMAGE_SIZE: ${EXTERNAL_IMAGE_SIZE:-auto}
