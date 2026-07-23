@@ -34,7 +34,7 @@ RUN python -m pip install --upgrade pip \
 COPY policy_server/requirements-remote-diffusion.lock /tmp/requirements.lock
 RUN python -m pip install -r /tmp/requirements.lock \
     && python -m pip install \
-      "git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
+      "lerobot[multi-task-dit] @ git+https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
 
 COPY proto/ /app/proto/
 COPY policy_server/ /app/policy_server/

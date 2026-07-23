@@ -42,3 +42,51 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=1g,mode=1777
+
+  # Policy-class-independent alternative. Start explicitly with:
+  #   docker compose --profile generic up policy-server
+  policy-server:
+    profiles: ["generic"]
+    build:
+      context: ../..
+      dockerfile: deploy/remote_diffusion/Dockerfile
+    image: gello-remote-policy:${IMAGE_TAG:-dev}
+    container_name: ${POLICY_CONTAINER_NAME:-gello-remote-policy}
+    init: true
+    restart: "no"
+    entrypoint: ["python", "-m", "policy_server.remote_lerobot_server"]
+    ports:
+      - "${INFERENCE_BIND_IP:-127.0.0.1}:${POLICY_INFERENCE_PORT:-50052}:50051"
+    environment:
+      CHECKPOINT_PATH: /models/checkpoint
+      MODEL_ID: ${MODEL_ID:-unknown}
+      CHECKPOINT_REVISION: ${CHECKPOINT_REVISION:-unknown}
+      GRPC_BIND_ADDRESS: 0.0.0.0:50051
+      POLICY_DEVICE: cuda
+      POLICY_TASK: ${POLICY_TASK:-}
+      POLICY_WARMUP_STATE: '${POLICY_WARMUP_STATE:-[3.106,-1.817,1.653,-1.618,-1.628,-3.195,0.0]}'
+      POLICY_CONFIG_OVERRIDES: '${POLICY_CONFIG_OVERRIDES:-{}}'
+      EXTERNAL_IMAGE_SIZE: ${EXTERNAL_IMAGE_SIZE:-auto}
+      GRPC_MAX_MESSAGE_BYTES: ${GRPC_MAX_MESSAGE_BYTES:-16777216}
+      MAX_JPEG_BYTES: ${MAX_JPEG_BYTES:-4194304}
+      HF_HOME: /cache/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - "${CHECKPOINT_DIR:?Set CHECKPOINT_DIR to the pretrained_model directory}:/models/checkpoint:ro"
+      # MultiTaskDiT constructs its CLIP encoders with from_pretrained() before
+      # loading policy weights. Keep that cache across read-only container runs.
+      - "${HF_CACHE_DIR:-./hf-cache}:/cache/huggingface:ro"
+    shm_size: "2gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777

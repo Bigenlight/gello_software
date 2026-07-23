@@ -35,7 +35,7 @@ import threading
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage, JointState
-from std_msgs.msg import Float32, Float64MultiArray
+from std_msgs.msg import Float32, Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 import zmq
@@ -43,7 +43,7 @@ import zmq
 from gello_policy import obs_assembler
 from gello_policy.joint_angles import angular_deviations, positions_near_reference
 from gello_policy.obs_assembler import UR_JOINT_ORDER
-from gello_policy.remote_diffusion_client import (
+from gello_policy.remote_policy_client import (
     ImageSnapshot,
     ObservationSnapshot,
     ServerContract,
@@ -171,6 +171,11 @@ class PolicyLeaderNode(Node):
         # --- Publishers (EXACT synthetic-leader contract) ----------------
         # Plain depth-10 publishers (default QoS), matching gello_publisher_node.
         self._js_pub = self.create_publisher(JointState, "/gello/joint_states", 10)
+        # Public, read-only state used by robotless integration validation and
+        # operator diagnostics.  In particular, command values alone cannot
+        # distinguish asynchronous gRPC ARMING from EXECUTE when a policy
+        # legitimately returns the held start pose.
+        self._state_pub = self.create_publisher(String, "~/state", 10)
         self._grip_pub = self.create_publisher(
             Float32, "/robotiq_gripper/command_percent", 10
         )
@@ -430,6 +435,7 @@ class PolicyLeaderNode(Node):
 
     # ---- timer / state machine -----------------------------------------
     def _on_timer(self):
+        self._state_pub.publish(String(data=self._state))
         if self._state == HOLD:
             self._tick_hold()
         elif self._state == ARMING:

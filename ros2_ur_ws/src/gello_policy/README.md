@@ -1,5 +1,14 @@
 # gello_policy
 
+For the policy-class-independent checkpoint wrapper and remote gRPC server, see
+[`GENERIC_LEROBOT_POLICY_WRAPPER.md`](GENERIC_LEROBOT_POLICY_WRAPPER.md).
+
+Kanu GPU 서버부터 로봇 PC client까지의 한국어 실행 절차는
+[`REMOTE_LEROBOT_POLICY_INTERFACE_KO.md`](REMOTE_LEROBOT_POLICY_INTERFACE_KO.md)를 참고한다.
+70,000-step cube-in-cup Flow Matching checkpoint를 Kanu에서 추론하고 UR7e 실물에
+연결하는 절차는
+[`FLOW_MATCHING_KANU_REAL_ROBOT_GUIDE_KO.md`](FLOW_MATCHING_KANU_REAL_ROBOT_GUIDE_KO.md)를 참고한다.
+
 Real-robot deploy package for the trained ACT "put right banana in pot" policy on the
 UR7e. A `rclpy` node impersonates the physical GELLO leader arm — it publishes the
 exact same `/gello/joint_states` + gripper contract `gello_publisher_node` does — so
@@ -32,9 +41,11 @@ GPU server over gRPC. Nothing in the layout distinguishes them, so this is the l
 
 **REMOTE / WIP — opt-in only, has never driven the physical arm:**
 
-- `gello_policy/remote_diffusion_client.py`, `gello_policy/remote_diffusion_pb2.py`,
+- `gello_policy/remote_policy_client.py`, `gello_policy/remote_diffusion_client.py`,
+  `gello_policy/remote_diffusion_pb2.py`,
   `gello_policy/remote_diffusion_pb2_grpc.py`
-- `policy_server/remote_diffusion_server.py`,
+- `policy_server/lerobot_policy_wrapper.py`, `policy_server/remote_lerobot_server.py`,
+  `policy_server/remote_diffusion_server.py`,
   `policy_server/requirements-remote-diffusion.lock`
 - [`../../run_ur7e_diffusion_remote.sh`](../../run_ur7e_diffusion_remote.sh),
   [`../../setup_remote_client_venv.sh`](../../setup_remote_client_venv.sh)

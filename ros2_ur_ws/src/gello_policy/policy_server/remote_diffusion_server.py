@@ -16,7 +16,6 @@ from typing import Iterator
 import grpc
 import numpy as np
 
-from .diffusion_server import DiffusionInferenceEngine, resolve_device
 from . import remote_diffusion_pb2 as pb
 from . import remote_diffusion_pb2_grpc as pb_grpc
 from . import zmq_protocol as dimensions
@@ -26,6 +25,10 @@ PROTOCOL_VERSION = "1"
 DEFAULT_BIND_ADDRESS = "0.0.0.0:50051"
 DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_JPEG_BYTES = 4 * 1024 * 1024
+
+
+class RequestValidationError(ValueError):
+    """Recoverable protocol/session error raised before policy state is changed."""
 
 
 class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
@@ -41,6 +44,8 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
         num_inference_steps: int,
         n_action_steps: int,
         max_jpeg_bytes: int,
+        resize_height: int = 360,
+        resize_width: int = 640,
     ) -> None:
         self._engine = engine
         self._model_id = model_id
@@ -48,6 +53,8 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
         self._scheduler = scheduler
         self._num_inference_steps = num_inference_steps
         self._n_action_steps = n_action_steps
+        self._resize_height = resize_height
+        self._resize_width = resize_width
         self._max_jpeg_bytes = max_jpeg_bytes
         self._lock = threading.Lock()
         self._active_client_id = ""
@@ -76,8 +83,8 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
             state_dim=dimensions.STATE_DIM,
             action_dim=dimensions.ACTION_DIM,
             device=self._engine.device,
-            resize_height=360,
-            resize_width=640,
+            resize_height=self._resize_height,
+            resize_width=self._resize_width,
         )
 
     def ResetEpisode(self, request, context):  # noqa: N802
@@ -91,7 +98,17 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
                     grpc.StatusCode.FAILED_PRECONDITION,
                     "cannot reset while an action stream is active",
                 )
-            self._engine.reset()
+            try:
+                self._engine.reset()
+            except Exception as exc:
+                self._ready = False
+                self._active_client_id = ""
+                self._active_session_id = ""
+                self._last_request_id = 0
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"policy reset failed; server restart required: {type(exc).__name__}",
+                )
             self._active_client_id = request.client_id
             self._active_session_id = request.session_id
             self._last_request_id = 0
@@ -108,9 +125,9 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
             for request in request_iterator:
                 try:
                     yield self._infer_one(request)
-                except ValueError as exc:
-                    # Invalid observation data is a per-request failure and does
-                    # not consume an action or advance the request sequence.
+                except RequestValidationError as exc:
+                    # Protocol/session validation finishes before engine.act(),
+                    # so these failures cannot consume an action or mutate queues.
                     yield pb.ActionReply(
                         protocol_version=PROTOCOL_VERSION,
                         session_id=request.session_id,
@@ -145,10 +162,12 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
                 request.client_id != self._active_client_id
                 or request.session_id != self._active_session_id
             ):
-                raise ValueError("session is not active; ResetEpisode must succeed first")
+                raise RequestValidationError(
+                    "session is not active; ResetEpisode must succeed first"
+                )
             expected_request_id = self._last_request_id + 1
             if request.request_id != expected_request_id:
-                raise ValueError(
+                raise RequestValidationError(
                     f"request_id must be {expected_request_id}, got {request.request_id}"
                 )
             action = self._engine.act(state, bytes(request.cam1.data), bytes(request.cam2.data))
@@ -172,24 +191,26 @@ class RemoteDiffusionService(pb_grpc.RemoteDiffusionServicer):
 
     def _validate_request(self, request) -> None:
         if request.protocol_version != PROTOCOL_VERSION:
-            raise ValueError(
+            raise RequestValidationError(
                 f"protocol_version must be {PROTOCOL_VERSION!r}, got {request.protocol_version!r}"
             )
         if not request.client_id or not request.session_id:
-            raise ValueError("client_id and session_id are required")
+            raise RequestValidationError("client_id and session_id are required")
         if request.request_id == 0:
-            raise ValueError("request_id must be non-zero")
+            raise RequestValidationError("request_id must be non-zero")
         if len(request.state) != dimensions.STATE_DIM:
-            raise ValueError(f"state must contain {dimensions.STATE_DIM} floats")
+            raise RequestValidationError(
+                f"state must contain {dimensions.STATE_DIM} floats"
+            )
         if not all(math.isfinite(value) for value in request.state):
-            raise ValueError("state contains a non-finite value")
+            raise RequestValidationError("state contains a non-finite value")
         for name, frame in (("cam1", request.cam1), ("cam2", request.cam2)):
             if frame.encoding.lower() not in ("jpeg", "jpg"):
-                raise ValueError(f"{name} encoding must be jpeg")
+                raise RequestValidationError(f"{name} encoding must be jpeg")
             if not frame.data:
-                raise ValueError(f"{name} JPEG is empty")
+                raise RequestValidationError(f"{name} JPEG is empty")
             if len(frame.data) > self._max_jpeg_bytes:
-                raise ValueError(
+                raise RequestValidationError(
                     f"{name} JPEG exceeds {self._max_jpeg_bytes} byte limit"
                 )
 
@@ -202,6 +223,8 @@ def _required_env(name: str) -> str:
 
 
 def main() -> int:
+    from .diffusion_server import DiffusionInferenceEngine, resolve_device
+
     checkpoint = _required_env("CHECKPOINT_PATH")
     bind_address = os.environ.get("GRPC_BIND_ADDRESS", DEFAULT_BIND_ADDRESS)
     device = resolve_device(os.environ.get("DIFFUSION_DEVICE", "cuda"))

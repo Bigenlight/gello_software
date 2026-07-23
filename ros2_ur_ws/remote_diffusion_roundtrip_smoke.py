@@ -8,33 +8,18 @@ import time
 import cv2
 import numpy as np
 
-from gello_policy.remote_diffusion_client import (
+from gello_policy.remote_policy_client import (
     ImageSnapshot,
     ObservationSnapshot,
-    ServerContract,
     create_worker,
 )
 
 
-EXPECTED_CONTRACT = ServerContract(
-    model_id="Bigenlight/diffusion_banana_in_pot_joint",
-    checkpoint_revision=(
-        "sha256:d4722b60caee5d76d004a37e16b2d7adecc1668f79703259ea7260fc9c723c57"
-    ),
-    scheduler="DDIM",
-    num_inference_steps=10,
-    n_action_steps=32,
-    resize_height=360,
-    resize_width=640,
-)
 START_STATE = (3.106, -1.817, 1.653, -1.618, -1.628, -3.195, 0.0)
 
 
-def make_black_jpeg() -> bytes:
-    image = np.zeros(
-        (EXPECTED_CONTRACT.resize_height, EXPECTED_CONTRACT.resize_width, 3),
-        dtype=np.uint8,
-    )
+def make_black_jpeg(height: int, width: int) -> bytes:
+    image = np.zeros((height, width, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", image)
     if not ok:
         raise RuntimeError("failed to encode synthetic black JPEG")
@@ -55,16 +40,25 @@ def main() -> int:
     )
     started = time.perf_counter()
     try:
-        info = worker.get_server_info(EXPECTED_CONTRACT)
+        # This smoke test discovers the effective policy contract. The real ROS
+        # launch still checks every expected_* field before it can arm the robot.
+        info = worker.get_server_info()
         session_id = worker.reset_episode()
         worker.start()
 
-        jpeg = make_black_jpeg()
+        height = int(info.resize_height or os.environ.get("ROUNDTRIP_IMAGE_HEIGHT", "360"))
+        width = int(info.resize_width or os.environ.get("ROUNDTRIP_IMAGE_WIDTH", "640"))
+        state = tuple(float(value) for value in json.loads(
+            os.environ.get("ROUNDTRIP_STATE", json.dumps(START_STATE))
+        ))
+        if len(state) != 7 or not all(np.isfinite(state)):
+            raise ValueError("ROUNDTRIP_STATE must be a JSON array of 7 finite values")
+        jpeg = make_black_jpeg(height, width)
         stamp_ns = time.monotonic_ns()
-        cam1 = ImageSnapshot(stamp_ns, 640, 360, jpeg)
-        cam2 = ImageSnapshot(stamp_ns, 640, 360, jpeg)
+        cam1 = ImageSnapshot(stamp_ns, width, height, jpeg)
+        cam2 = ImageSnapshot(stamp_ns, width, height, jpeg)
         worker.submit(
-            ObservationSnapshot(stamp_ns, START_STATE, cam1, cam2)
+            ObservationSnapshot(stamp_ns, state, cam1, cam2)
         )
 
         deadline = time.monotonic() + timeout_s
@@ -87,6 +81,12 @@ def main() -> int:
                     "checkpoint_revision": info.checkpoint_revision,
                     "inference_ms": result.inference_ms,
                     "model_id": info.model_id,
+                    "policy_contract": {
+                        "scheduler": info.scheduler,
+                        "num_inference_steps": info.num_inference_steps,
+                        "n_action_steps": info.n_action_steps,
+                        "resize": [info.resize_height, info.resize_width],
+                    },
                     "observation_age_ms": result.observation_age_s * 1000.0,
                     "preprocess_ms": result.preprocess_ms,
                     "request_id": result.request_id,
