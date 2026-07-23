@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_ur7e.sh — build helper for ur_gello_bringup (UR7e GELLO teleop)
+# build_ur7e.sh — build helper for UR7e GELLO teleop and remote policy validation
 #
 # Usage:
 #   chmod +x build_ur7e.sh   # (one-time)
@@ -16,11 +16,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ROS 2 setup scripts may read optional environment variables before assigning
+# them (for example AMENT_TRACE_SETUP_FILES). Temporarily disable nounset only
+# while sourcing the setup, then restore the script's strict mode.
+set +u
 source /opt/ros/humble/setup.bash
+set -u
 
 rosdep install --from-paths src --ignore-src -r -y --skip-keys dynamixel_sdk
 
-colcon build --packages-select ur_gello_bringup
+colcon build --packages-select ur_gello_bringup gello_policy
 
 echo ""
 echo "Build complete. To verify (fake/mock hardware, no GELLO serial needed):"

@@ -19,11 +19,38 @@ if ! [[ $grpc_port =~ ^[0-9]+$ ]] || (( grpc_port < 1 || grpc_port > 65535 )); t
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+workspace_dir=$(cd -- "$script_dir/../../.." && pwd)
+system_python=${SYSTEM_PYTHON:-/usr/bin/python3}
+remote_client_venv=${REMOTE_CLIENT_VENV:-"$workspace_dir/.venv-remote-client"}
 roundtrip_smoke="$script_dir/../../../remote_diffusion_roundtrip_smoke.py"
 if [[ ! -f $roundtrip_smoke ]]; then
   echo "ERROR: roundtrip smoke not found in source workspace: $roundtrip_smoke" >&2
   exit 2
 fi
+if [[ ! -x $remote_client_venv/bin/python ]]; then
+  echo "ERROR: remote-client environment is missing: $remote_client_venv" >&2
+  echo "Run $workspace_dir/setup_remote_client_venv.sh first." >&2
+  exit 1
+fi
+if [[ ! -x $system_python ]]; then
+  echo "ERROR: system Python is not executable: $system_python" >&2
+  exit 1
+fi
+
+remote_client_site=$("$remote_client_venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+export PYTHONPATH="${remote_client_site}${PYTHONPATH:+:${PYTHONPATH}}"
+
+"$system_python" - <<'PY'
+import grpc
+
+expected = "1.74.0"
+print(f"gRPC client preflight: grpcio={grpc.__version__}")
+if grpc.__version__ != expected:
+    raise SystemExit(
+        f"ERROR: expected grpcio {expected}, loaded {grpc.__version__}; "
+        "rerun setup_remote_client_venv.sh"
+    )
+PY
 
 echo "Preflight: waiting for TCP endpoint $grpc_host:$grpc_port"
 if ! timeout 5 bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$grpc_host" "$grpc_port"; then
@@ -34,7 +61,7 @@ fi
 echo "Inference gate: running one real gRPC roundtrip"
 ROUNDTRIP_TARGET="$grpc_host:$grpc_port" \
   ROUNDTRIP_TIMEOUT_S="${ROUNDTRIP_TIMEOUT_S:-15}" \
-  python3 "$roundtrip_smoke"
+  "$system_python" "$roundtrip_smoke"
 
 echo "ROS gate: launching mock UR7e validation (server lifecycle remains external)"
 exec ros2 launch gello_policy remote_policy_fake_ur7e_validation.launch.py \
