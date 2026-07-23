@@ -2,7 +2,9 @@
 """Exercise the laptop's production RemoteDiffusionWorker without starting ROS."""
 
 import json
+import math
 import os
+import statistics
 import time
 
 import cv2
@@ -18,6 +20,61 @@ from gello_policy.remote_policy_client import (
 START_STATE = (3.106, -1.817, 1.653, -1.618, -1.628, -3.195, 0.0)
 
 
+def positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def percentile(values: list[float], percent: float) -> float:
+    """Return a linearly interpolated percentile (NumPy's default convention)."""
+    if not values:
+        raise ValueError("cannot compute a percentile of an empty sequence")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percent / 100.0
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return float(ordered[lower])
+    fraction = position - lower
+    return float(ordered[lower] + (ordered[upper] - ordered[lower]) * fraction)
+
+
+def latency_summary(records: list[dict]) -> dict:
+    fields = (
+        "round_trip_ms",
+        "preprocess_ms",
+        "inference_ms",
+        "total_server_ms",
+        "observation_age_ms",
+    )
+
+    def summarize(samples: list[dict]) -> dict:
+        result = {"count": len(samples)}
+        for field in fields:
+            values = [float(sample[field]) for sample in samples]
+            result[field] = {
+                "mean": statistics.fmean(values) if values else None,
+                "p50": percentile(values, 50) if values else None,
+                "p95": percentile(values, 95) if values else None,
+                "p99": percentile(values, 99) if values else None,
+            }
+        return result
+
+    refill = [record for record in records if record["chunk_refill"]]
+    non_refill = [record for record in records if not record["chunk_refill"]]
+    return {
+        "all": summarize(records),
+        "refill": summarize(refill),
+        "non_refill": summarize(non_refill),
+    }
+
+
 def make_black_jpeg(height: int, width: int) -> bytes:
     image = np.zeros((height, width, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", image)
@@ -31,6 +88,7 @@ def main() -> int:
     timeout_s = float(os.environ.get("ROUNDTRIP_TIMEOUT_S", "15"))
     if timeout_s <= 0:
         raise ValueError("ROUNDTRIP_TIMEOUT_S must be positive")
+    request_count = positive_int_env("ROUNDTRIP_REQUESTS", 1)
 
     worker = create_worker(
         target,
@@ -54,49 +112,97 @@ def main() -> int:
         if len(state) != 7 or not all(np.isfinite(state)):
             raise ValueError("ROUNDTRIP_STATE must be a JSON array of 7 finite values")
         jpeg = make_black_jpeg(height, width)
-        stamp_ns = time.monotonic_ns()
-        cam1 = ImageSnapshot(stamp_ns, width, height, jpeg)
-        cam2 = ImageSnapshot(stamp_ns, width, height, jpeg)
-        worker.submit(
-            ObservationSnapshot(stamp_ns, state, cam1, cam2)
-        )
+        records = []
+        for sequence in range(1, request_count + 1):
+            stamp_ns = time.monotonic_ns()
+            cam1 = ImageSnapshot(stamp_ns, width, height, jpeg)
+            cam2 = ImageSnapshot(stamp_ns, width, height, jpeg)
+            request_started = time.perf_counter()
+            worker.submit(ObservationSnapshot(stamp_ns, state, cam1, cam2))
 
-        deadline = time.monotonic() + timeout_s
-        result = None
-        while time.monotonic() < deadline:
-            error = worker.error()
-            if error is not None:
-                raise RuntimeError(f"remote worker failed: {error}")
-            result = worker.take_result(max_age_s=timeout_s)
-            if result is not None:
-                break
-            time.sleep(0.01)
-        if result is None:
-            raise TimeoutError(f"no action received within {timeout_s:g}s")
-
-        print(
-            json.dumps(
+            deadline = time.monotonic() + timeout_s
+            result = None
+            while time.monotonic() < deadline:
+                error = worker.error()
+                if error is not None:
+                    raise RuntimeError(f"remote worker failed: {error}")
+                result = worker.take_result(max_age_s=timeout_s)
+                if result is not None:
+                    break
+                time.sleep(0.01)
+            if result is None:
+                raise TimeoutError(
+                    f"no action received for request {sequence}/{request_count} "
+                    f"within {timeout_s:g}s"
+                )
+            action = [float(value) for value in result.action]
+            if len(action) != 7 or not all(math.isfinite(value) for value in action):
+                raise RuntimeError(
+                    f"request {sequence}/{request_count} returned an invalid action"
+                )
+            records.append(
                 {
-                    "action": list(result.action),
-                    "checkpoint_revision": info.checkpoint_revision,
+                    "action": action,
+                    "chunk_refill": result.chunk_refill,
                     "inference_ms": result.inference_ms,
-                    "model_id": info.model_id,
-                    "policy_contract": {
-                        "scheduler": info.scheduler,
-                        "num_inference_steps": info.num_inference_steps,
-                        "n_action_steps": info.n_action_steps,
-                        "resize": [info.resize_height, info.resize_width],
-                    },
                     "observation_age_ms": result.observation_age_s * 1000.0,
                     "preprocess_ms": result.preprocess_ms,
+                    "remaining_chunk_actions": result.remaining_chunk_actions,
                     "request_id": result.request_id,
-                    "round_trip_ms": (time.perf_counter() - started) * 1000.0,
-                    "session_id": session_id,
+                    "round_trip_ms": (time.perf_counter() - request_started) * 1000.0,
+                    "sequence": sequence,
                     "total_server_ms": result.total_server_ms,
-                },
-                sort_keys=True,
+                }
             )
-        )
+
+        contract = {
+            "scheduler": info.scheduler,
+            "num_inference_steps": info.num_inference_steps,
+            "n_action_steps": info.n_action_steps,
+            "resize": [info.resize_height, info.resize_width],
+        }
+        if request_count == 1:
+            # Preserve the original one-line/default result contract.  The two
+            # chunk fields expose useful server metadata without changing the
+            # existing keys or their meaning.
+            record = records[0]
+            print(
+                json.dumps(
+                    {
+                        "action": record["action"],
+                        "checkpoint_revision": info.checkpoint_revision,
+                        "chunk_refill": record["chunk_refill"],
+                        "inference_ms": record["inference_ms"],
+                        "model_id": info.model_id,
+                        "policy_contract": contract,
+                        "observation_age_ms": record["observation_age_ms"],
+                        "preprocess_ms": record["preprocess_ms"],
+                        "remaining_chunk_actions": record["remaining_chunk_actions"],
+                        "request_id": record["request_id"],
+                        # Retain legacy behavior: default one-shot timing includes
+                        # contract discovery and ResetEpisode.
+                        "round_trip_ms": (time.perf_counter() - started) * 1000.0,
+                        "session_id": session_id,
+                        "total_server_ms": record["total_server_ms"],
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                json.dumps(
+                    {
+                        "checkpoint_revision": info.checkpoint_revision,
+                        "model_id": info.model_id,
+                        "policy_contract": contract,
+                        "request_count": request_count,
+                        "requests": records,
+                        "session_id": session_id,
+                        "summary": latency_summary(records),
+                    },
+                    sort_keys=True,
+                )
+            )
         return 0
     finally:
         worker.close()
