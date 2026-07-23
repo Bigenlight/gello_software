@@ -243,7 +243,7 @@ docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.S
 로컬 저장소의 현재 실제 위치는 다음과 같다.
 
 ```text
-/home/laptop3/youngwoong_ws/gello_software_ur7e_humble
+/home/laptop3/youngwoong_ws/gello_software
 ```
 
 다른 노트북에서는 자신의 checkout 경로로 바꾼다. 이후 명령에서는 이를
@@ -251,7 +251,7 @@ docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.S
 package를 빌드한다.
 
 ```bash
-export GELLO_REPO=/home/laptop3/youngwoong_ws/gello_software_ur7e_humble
+export GELLO_REPO=/home/laptop3/youngwoong_ws/gello_software
 cd "$GELLO_REPO"
 git branch --show-current
 git rev-parse HEAD
