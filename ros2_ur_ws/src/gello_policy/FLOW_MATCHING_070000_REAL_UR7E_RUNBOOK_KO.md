@@ -64,7 +64,10 @@ cam2는 작업 공간 close-up이어야 한다.
 - 두 RealSense serial: 저장소 기본 예시는 cam1 `147122072740`, cam2
   `243222072700`이다. 실제 학습 촬영에 사용한 장치와 일치해야 한다.
 - cam1/cam2 물리 배치와 순서: cam1=scene, cam2=close-up인지 화면으로 본다.
-- UR External Control 프로그램, 로컬 PC IP, Robotiq tool communication 설정.
+- pendant에서 Remote Control이 활성화되어 있고 현재 모드가 `Remote`,
+  우측 하단이 `Real Robot`인지 확인한다. 이 장비는 External Control
+  URCap/program을 사용하지 않고 기존 headless UR 제어 stack을 재사용한다.
+- 로컬 PC의 로봇망 IP, Robotiq tool communication 설정.
 - cup, cube, 카메라, 로봇 base의 실제 배치가 학습 데이터 수집 때와 같은지.
 - 시작 자세 `[3.106, -1.817, 1.653, -1.618, -1.628, -3.195]`가 현재
   공간에서 충돌 없이 도달 가능한지.
@@ -324,6 +327,12 @@ action step 24가 출력되어야 한다.
 
 입력 위치: 로컬 PC `/home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws`
 
+새 terminal을 열어 아래 **현재 workspace만** 사용한다. 예전
+`gello_software_ur7e_humble` 또는 다른 ROS workspace의 `install/setup.bash`를
+먼저 source한 shell은 사용하지 않는다. `AMENT_PREFIX_PATH`,
+`COLCON_PREFIX_PATH`, `CMAKE_PREFIX_PATH`, `PYTHONPATH`에 이전 workspace가
+남아 있으면 terminal을 닫고 새 shell에서 다시 시작한다.
+
 ```bash
 cd /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws
 ```
@@ -335,6 +344,14 @@ cd /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws
 ```bash
 ./build_ur7e.sh
 ```
+
+현재 install의 package가 옛 workspace를 가리키지 않는지 확인한다.
+
+```bash
+set +u; source /opt/ros/humble/setup.bash; source /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws/install/setup.bash; set -u; test "$(ros2 pkg prefix gello_policy)" = "/home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws/install/gello_policy" && test "$(ros2 pkg prefix ur_gello_bringup)" = "/home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws/install/ur_gello_bringup" && echo 'CURRENT WORKSPACE OVERLAY OK' || { echo 'OLD OR WRONG OVERLAY - STOP'; false; }
+```
+
+`CURRENT WORKSPACE OVERLAY OK`가 아니면 실물 절차를 중단한다.
 
 ```bash
 mkdir -p /home/laptop3/youngwoong_ws/runtime/remote-gpu-server
@@ -394,7 +411,9 @@ SSH_HOST=kanu REMOTE_GRPC_PORT=50052 LOCAL_GRPC_PORT=50052 ROUNDTRIP_TIMEOUT_S=3
 - [ ] Kanu container가 `running/healthy`이고 smoke와 로컬 왕복이 통과했다.
 - [ ] 로컬과 Kanu의 Git SHA가 같다.
 - [ ] UR7e IP와 해당 로봇의 calibration 파일을 확인했다.
-- [ ] UR External Control 프로그램과 Robotiq 연결을 확인했다.
+- [ ] pendant에서 Remote Control이 활성화되고 `Remote`·`Real Robot` 상태임을 확인했다.
+- [ ] External Control program을 Play하지 않았고 headless 방식 하나만 사용한다.
+- [ ] Robotiq 연결과 tool communication 설정을 확인했다.
 - [ ] 시작 자세로 이동할 전체 경로에 충돌물이 없다.
 - [ ] cup/cube와 두 카메라의 위치가 학습 배치와 같다.
 - [ ] pendant 속도 slider를 낮췄다.
@@ -437,6 +456,14 @@ viewer의 왼쪽이 전체 scene(cam1), 오른쪽이 close-up(cam2)인지 확인
 먼저 실제 값을 지정한다. 아래 robot IP는 반드시 현장에서 재확인한다.
 calibration 파일을 확인했다면 그 절대 경로를 `CALIB`에 입력한다.
 
+이 장비의 검증된 방식은 기존 `gello_software/ros2_ur_ws`의
+`headless_mode:=true` UR 제어 stack이다. External Control URCap/program을
+만들거나 Play하지 않는다. pendant에서 최초 한 번
+`Settings > System > Remote Control > Enable`을 설정한 뒤 헤더를 `Remote`로
+전환하고, 우측 하단이 `Real Robot`인지 확인한다. Remote 상태에서 pendant의
+Load/Play/Stop 버튼이 회색인 것은 정상이다. headless와 External Control
+Play를 한 실행에서 섞지 않는다.
+
 ```bash
 cd /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws
 ```
@@ -467,11 +494,22 @@ test -f "$CALIB" && echo 'CALIBRATION FILE OK' || { echo 'CALIBRATION FILE MISSI
 Kanu 비밀번호를 입력한다.
 
 ```bash
-SSH_HOST=kanu REMOTE_GRPC_PORT=50052 LOCAL_GRPC_PORT=50052 ROBOT_IP="$ROBOT_IP" CALIB="$CALIB" HEADLESS=false ./run_ur7e_diffusion_remote.sh params_file:=/home/laptop3/youngwoong_ws/runtime/remote-gpu-server/fm-070000-deploy.yaml launch_rviz:=false
+SSH_HOST=kanu REMOTE_GRPC_PORT=50052 LOCAL_GRPC_PORT=50052 ROBOT_IP="$ROBOT_IP" CALIB="$CALIB" HEADLESS=true ./run_ur7e_diffusion_remote.sh params_file:=/home/laptop3/youngwoong_ws/runtime/remote-gpu-server/fm-070000-deploy.yaml launch_rviz:=false
 ```
 
-launch 직후 자율 policy는 HOLD지만 move-to-start는 시작될 수 있다. 다음을
-확인할 때까지 `start_execution`을 호출하지 않는다.
+launch 직후 headless driver가 URScript를 직접 보내므로 pendant Play는 필요
+없다. policy leader는 HOLD라 자율 추론을 시작하지 않지만, 기존 로봇 제어
+stack의 move-to-start는 launch 직후 실제 start pose로 로봇을 움직인다.
+`start_execution`은 **policy 자율 추론만** gate하며 move-to-start를 막지
+않는다. 따라서 이 명령을 입력하기 전에 이미 전체 이동 경로를 비우고 pendant와
+비상정지를 잡고 있어야 한다. 다음을 확인할 때까지 `start_execution`을 호출하지
+않는다.
+
+runner의 `UR7e remains operator-gated` 문구에서 gate되는 것은 policy 자율
+실행뿐이다. 또한 handshake 실패 로그가 External Control Play를 확인하라고
+표시할 수 있지만 이는 공용 legacy 안내다. 이 headless 실행에서는 External
+Control을 Play하지 말고, Remote/Real Robot 상태, 네트워크, calibration 및
+driver 오류를 확인한 뒤 전체 stack을 종료하고 다시 시작한다.
 
 1. UR driver와 Robotiq가 오류 없이 연결된다.
 2. move-to-start가 안전하게 끝나고 controller handover가 완료된다.

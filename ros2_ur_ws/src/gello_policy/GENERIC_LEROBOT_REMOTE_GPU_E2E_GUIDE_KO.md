@@ -7,7 +7,8 @@
 > **실물 안전:** 이 코드는 policy가 반환한 목표 관절값으로 실제 UR7e를 움직인다.
 > 반드시 로봇 없는 왕복 검사를 먼저 통과하고, 최초 실물 실행은 작업 공간을
 > 비운 뒤 teach pendant와 비상정지에 즉시 접근할 수 있는 상태에서 저속으로 한다.
-> `start_execution` 전까지 정책 자율 동작은 시작되지 않는다.
+> `start_execution` 전까지 정책 자율 동작은 시작되지 않지만, launch 직후
+> 기존 UR 제어 stack의 move-to-start가 실제 로봇을 움직인다.
 
 ## 1. 이번에 구현한 것
 
@@ -472,6 +473,12 @@ docker compose -f "$POLICY_COMPOSE" --env-file "$POLICY_ENV" --profile generic e
 
 다음 명령의 입력 위치는 로컬 PC의 ROS workspace다.
 
+새 terminal에서 현재 workspace만 사용한다. 예전
+`gello_software_ur7e_humble` 또는 다른 ROS workspace를 source한 shell 위에
+현재 `install/setup.bash`를 겹쳐 source하지 않는다. `AMENT_PREFIX_PATH`,
+`COLCON_PREFIX_PATH`, `CMAKE_PREFIX_PATH`, `PYTHONPATH`에 이전 workspace가
+보이면 shell을 닫고 새 terminal에서 아래 절차를 시작한다.
+
 ```bash
 cd /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws
 ```
@@ -493,6 +500,14 @@ ROS package를 빌드한다.
 ```bash
 ./build_ur7e.sh
 ```
+
+현재 install의 두 package가 이 workspace에서 나온 것인지 확인한다.
+
+```bash
+set +u; source /opt/ros/humble/setup.bash; source /home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws/install/setup.bash; set -u; test "$(ros2 pkg prefix gello_policy)" = "/home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws/install/gello_policy" && test "$(ros2 pkg prefix ur_gello_bringup)" = "/home/laptop3/youngwoong_ws/gello_software/ros2_ur_ws/install/ur_gello_bringup" && echo 'CURRENT WORKSPACE OVERLAY OK' || { echo 'OLD OR WRONG OVERLAY - STOP'; false; }
+```
+
+`CURRENT WORKSPACE OVERLAY OK`가 아니면 실물 실행으로 넘어가지 않는다.
 
 SSH alias가 동작하는지 확인한다. 이 문서에서는 `~/.ssh/config`의 Kanu alias가
 `kanu`라고 가정한다.
@@ -588,7 +603,8 @@ parity를 확인한 뒤 실물로 진행한다.
 
 - Kanu container가 healthy이고 실제 왕복 검사가 통과했다.
 - cam1/cam2 topic, `/joint_states`, gripper feedback이 실제로 들어온다.
-- UR7e External Control 설정, robot IP, Robotiq 연결과 calibration을 확인했다.
+- pendant Remote Control 설정, `Remote`·`Real Robot` 상태, robot IP,
+  Robotiq 연결과 calibration을 확인했다.
 - runtime YAML의 start pose와 현재 로봇 자세가 안전하다.
 - runtime YAML의 `auto_start_on_stream`이 안전 기본값 `false`다.
 - 작업 공간을 비우고 pendant·비상정지를 잡은 운영자가 있다.
@@ -631,14 +647,29 @@ export POLICY_NAME=my_policy ROBOT_IP=192.168.10.11 CALIB=/absolute/path/to/ur7e
 ```
 
 ```bash
-SSH_HOST=kanu REMOTE_GRPC_PORT=50052 LOCAL_GRPC_PORT=50052 ROBOT_IP="$ROBOT_IP" HEADLESS=false CALIB="$CALIB" ./run_ur7e_diffusion_remote.sh params_file:="/home/laptop3/youngwoong_ws/runtime/remote-gpu-server/${POLICY_NAME}-deploy.yaml" launch_rviz:=true
+SSH_HOST=kanu REMOTE_GRPC_PORT=50052 LOCAL_GRPC_PORT=50052 ROBOT_IP="$ROBOT_IP" HEADLESS=true CALIB="$CALIB" ./run_ur7e_diffusion_remote.sh params_file:="/home/laptop3/youngwoong_ws/runtime/remote-gpu-server/${POLICY_NAME}-deploy.yaml" launch_rviz:=true
 ```
 
 이 script가 SSH tunnel을 만들고 gRPC preflight를 통과한 뒤 ROS launch를 시작한다.
-handshake 동안 policy leader는 YAML의 start pose를 HOLD하며 자율 추론을 시작하지
-않는다. pendant에서 External Control 프로그램이 필요한 구성이라면 launch 로그의
-안내에 맞춰 프로그램을 시작하고 move-to-start handshake가 성공할 때까지
-관찰한다.
+현재 실제 장비는 기존 로컬 UR 제어 stack의 headless 방식을 사용한다.
+pendant에서 최초 한 번 `Settings > System > Remote Control > Enable`을 설정하고
+헤더를 `Remote`, 우측 하단을 `Real Robot`으로 둔다. External Control
+URCap/program을 만들거나 Play하지 않는다. Remote에서 Load/Play/Stop 버튼이
+회색인 것은 정상이다. headless와 External Control Play를 동시에 사용하지 않는다.
+
+handshake 동안 policy leader는 YAML의 start pose를 HOLD해 policy inference를
+시작하지 않는다. 그러나 headless driver는 URScript를 직접 보내며 기존
+move-to-start가 launch 직후 실제 로봇을 start pose로 움직인다.
+`/policy_leader_node/start_execution`은 policy 자율 실행만 gate하고
+move-to-start는 gate하지 않는다. 따라서 Terminal B 명령을 입력하기 전에
+작업 공간과 전체 이동 경로를 비우고 저속 slider, pendant 및 비상정지를
+준비한 뒤 handshake를 관찰한다.
+
+runner가 출력하는 `UR7e remains operator-gated`는 policy 자율 실행만
+뜻한다. handshake 실패 시 External Control Play를 확인하라는 legacy 로그가
+나와도 현재 headless 장비에서는 Play하지 않는다. 전체 stack을 종료한 뒤
+Remote/Real Robot 상태, 네트워크, calibration 및 driver 오류를 확인하고
+처음부터 다시 시작한다.
 
 ### 13.3 Terminal C: observation과 handshake 확인 후 실행 허가
 

@@ -270,8 +270,7 @@ ros2 topic hz /cam2/cam2/color/image_raw/compressed
 **Then start the deploy:**
 
 ```bash
-cd gello_software/ros2_ur_ws
-ACT_CHECKPOINT="$CKPT" ./run_ur7e_act_real.sh
+cd gello_software/ros2_ur_ws && HEADLESS=true ACT_CHECKPOINT="$CKPT" ./run_ur7e_act_real.sh
 ```
 
 This starts the py3.12 ACT server in the background, waits for it to come up, then
@@ -280,10 +279,17 @@ This starts the py3.12 ACT server in the background, waits for it to come up, th
 
 Operator procedure:
 
-1. Confirm the pendant's External Control program is **Play**ing (or set
-   `HEADLESS=true` for Method B — requires the robot in REMOTE mode).
+1. On the current real setup, use `HEADLESS=true`; confirm the pendant is in
+   **Remote** and **Real Robot** mode. Do not Play an External Control program at
+   the same time. The URCap/Play path is only a fallback for a separately
+   configured site.
 2. Wait for the move-to-start handshake to converge — the arm drives to the policy's
-   held `start_pose` and parks. **No autonomous motion happens yet.**
+   held `start_pose` and parks. This is real robot motion immediately after launch;
+   `start_execution` does not gate it. **No autonomous policy motion happens yet.**
+   The runner's `UR7e remains operator-gated` banner refers only to autonomous
+   policy execution. In this headless setup, ignore the legacy handshake-failure
+   hint to Play External Control; stop the full stack and diagnose Remote/Real
+   Robot mode, network, calibration, and driver errors instead.
 3. Explicitly begin autonomous execution:
    ```bash
    ros2 service call /policy_leader_node/start_execution std_srvs/srv/Trigger
