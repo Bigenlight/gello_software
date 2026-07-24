@@ -56,7 +56,13 @@ class RvizHilConfig(DefaultUR7eEnvConfig):
     TCP_POSE_SOURCE = "fk"       # avoid depending on tcp_pose_broadcaster here
     DISPLAY_IMAGE = False        # RViz is the display; flip on to see fake cams
     IMAGE_STALE_S = 2.0          # fake camera node may publish slowly
-    RESET_JOINTS = np.array([0.0, -1.57, 1.57, -1.57, -1.57, 0.0])
+    # Forward-reaching start pose (tcp ~[+0.49, +0.13, 0.49], +x). The earlier
+    # [0,-1.57,...] pose reached BEHIND the base (tcp -x); the leader->robot
+    # base-frame mapping is identical either way (measured), but a backward arm
+    # makes a correct motion LOOK mirrored vs the real robot's forward posture.
+    # shoulder_pan = pi rotates the whole chain 180deg about base Z to match the
+    # real rig's forward reach. (Do NOT negate axes in code — see wrappers.py.)
+    RESET_JOINTS = np.array([np.pi, -1.57, 1.57, -1.57, -1.57, 0.0])
     # Mock hardware boots at all-zeros, farther than the real-robot guard
     # allows. Mock-only relaxation — do NOT copy into a real-robot config.
     RESET_MAX_DIST_RAD = 7.0

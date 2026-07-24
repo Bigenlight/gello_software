@@ -36,9 +36,15 @@ ros2_ur_ws/gello_logs/*
 MUJOCO_LOG.TXT
 
 #ros
+# stray colcon artifacts if you build from the repo root instead of ros2_ur_ws/
+/build/
+/install/
+/log/
 ros2/build/
 ros2/install/
 ros2/log/
+# ROS2 workspace build artifacts (ros2_ur_ws/.gitignore also covers build|install|log)
+ros2_ur_ws/act_venv/
 
 # robot packages
 third_party/i2rt/
