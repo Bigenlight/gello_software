@@ -45,6 +45,8 @@ from ur_gello_bringup.ur_kin import (
     se3_log,
     se3_exp,
     wrapped_nearest,
+    rpy_to_mat,
+    xyz_rpy_to_T,
     W_BRANCH,
     CHAR_LENGTH,
 )
@@ -58,11 +60,19 @@ except Exception:  # pragma: no cover
 
 
 REJECT_NO_IK = "NO_IK"
+# BRANCH_JUMP is now reserved for a GENUINE branch change: the accepted-by-IK
+# candidate carries a different closed-form branch id than the anchor.  The
+# large-but-same-branch case (the ||dq||_W > branch_tol size test) reports
+# JOINT_JUMP -- both come from the same gate, but an operator reading
+# reject_reason on the real robot must not be told "branch jump" when the truth
+# is "that step was too big".
 REJECT_BRANCH_JUMP = "BRANCH_JUMP"
+REJECT_JOINT_JUMP = "JOINT_JUMP"   # ||dq||_W > branch_tol on the anchor's OWN branch
 REJECT_JOINT_LIMIT = "JOINT_LIMIT"
 REJECT_GEOM_KEEPOUT = "GEOM_KEEPOUT"
 REJECT_EXCURSION = "EXCURSION"
 REJECT_STEP_FLOOR = "STEP_FLOOR"  # line-search collapsed below s_floor
+REJECT_STEP_CAP = "STEP_CAP"      # accepted s, but max|dq| still over step_eff
 REJECT_BAD_INPUT = "BAD_INPUT"    # non-finite (inf/nan) leader joints or step budget
 REJECT_ESTOP = "ESTOP"            # non-positive step budget -> hard stop (freeze)
 
@@ -90,28 +100,30 @@ _DEFAULTS = {
 
 _TWO_PI = 2.0 * math.pi
 
+# Budget-fitting iterations of the line search AFTER the solvable-scale probe.
+_LINE_SEARCH_ITERS = 3
+
+# --- sigma_min (SVD) decimation, see _sigma_min_cached ---------------------- #
+# Lipschitz bound of sigma_min w.r.t. max-norm joint travel. MEASURED max over
+# 30k random configurations x 4 step sizes: 3.502 per rad. 12.0 is a 3.4x
+# safety margin on that measurement.
+_SIGMA_LIPSCHITZ = 12.0
+# Hard cap on how many ticks a cached sigma_min may be reused, independent of
+# the travel bound (docs/ros2/GELLO_UR7E_EEF_TELEOP_PLAN.md 6.6 asks for ~10).
+_SIGMA_MAX_STALE_TICKS = 10
+
+# Re-test the asymmetric-gamma escape probe every N ticks while it keeps
+# failing (see step()). 8 ticks = 32 ms at 250 Hz.
+_ESCAPE_PROBE_PERIOD = 8
+
 
 # --------------------------------------------------------------------------- #
 # Small helpers                                                                #
 # --------------------------------------------------------------------------- #
-def _rpy_to_mat(rpy) -> np.ndarray:
-    """Fixed-axis roll-pitch-yaw (X,Y,Z) -> R = Rz(yaw) Ry(pitch) Rx(roll)."""
-    r, p, y = (float(v) for v in rpy)
-    cr, sr = math.cos(r), math.sin(r)
-    cp, sp = math.cos(p), math.sin(p)
-    cy, sy = math.cos(y), math.sin(y)
-    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=float)
-    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=float)
-    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=float)
-    return Rz @ Ry @ Rx
-
-
-def _xyz_rpy_to_T(vec6) -> np.ndarray:
-    v = np.asarray(vec6, dtype=float).reshape(6)
-    T = np.eye(4)
-    T[:3, :3] = _rpy_to_mat(v[3:])
-    T[:3, 3] = v[:3]
-    return T
+# Single source of truth for the rpy convention lives in ur_kin; these aliases
+# keep the historical private names working for anything importing them.
+_rpy_to_mat = rpy_to_mat
+_xyz_rpy_to_T = xyz_rpy_to_T
 
 
 def _inv_se3(T: np.ndarray) -> np.ndarray:
@@ -166,6 +178,13 @@ class EefDeltaController:
         self.max_excursion = float(g["max_excursion_m"])
         self.dt = float(g["dt"])
         self.keepout = dict(g["keepout"] or {})
+        # Teach the keepout check about the end effector.  link_origins() stops
+        # at the flange, so without this the 0.174 m Robotiq 2F-85 -- the part
+        # that actually reaches the table -- is invisible to floor_z & friends.
+        # Setting it on the dict (a private copy; the caller's cfg is never
+        # mutated) means every keepout_ok(q, ctrl.keepout) call site is
+        # tool-aware, not just this module's.  An operator-supplied tool wins.
+        self.keepout.setdefault("tool", self.T_tool_R.copy())
         self.backend = str(g["ik_backend"])
 
         # Anchor / running state. q_ik_prev / q_cmd are None until the first
@@ -182,6 +201,11 @@ class EefDeltaController:
         self.R_g_anchor = np.eye(3)
         self.p_g_anchor = np.zeros(3)
         self.branch0 = -1
+        self._last_ik_branch = -1
+        self._escape_skip = 0
+        self._sigma_cache: Optional[float] = None
+        self._sigma_stale_ticks = 0
+        self._sigma_stale_travel = 0.0
 
     # ------------------------------------------------------------------ #
     # Engage / reclutch / disengage                                      #
@@ -202,6 +226,11 @@ class EefDeltaController:
         self.q_ik_prev = q_anchor.copy()
         self.q_cmd = q_anchor.copy()
         self.branch0 = branch_id(q_anchor) if self.backend == "analytic" else -1
+        # A fresh anchor invalidates any decimated sigma_min / escape verdict.
+        self._escape_skip = 0
+        self._sigma_cache = None
+        self._sigma_stale_ticks = 0
+        self._sigma_stale_travel = 0.0
 
     def engage(self, q_anchor, q_lead_f_anchor) -> dict:
         """Latch the anchor at engage-time (t0).  Returns an anchor summary."""
@@ -242,9 +271,64 @@ class EefDeltaController:
     def _wnorm(self, dq: np.ndarray) -> float:
         return float(math.sqrt(np.sum(self.branch_w * (dq * dq))))
 
-    def _tagged(self, T_flange):
+    def _sigma_min_cached(self, q: np.ndarray) -> float:
+        """sigma_min(q), with the 6x6 SVD skipped while the cached value is
+        PROVABLY still above sigma_warn.
+
+        Why this is exact for the control decision, not merely "close enough":
+        the only use of sigma_min on the accepted path is gamma_thr, and
+        gamma_thr saturates at 1.0 for every sigma >= sigma_warn.  The cache is
+        reused only when
+
+            c - LIP * travel > sigma_warn
+
+        where `travel` is the accumulated max-norm joint motion since the SVD
+        was taken (a sum of per-tick max-norms, itself an upper bound on the
+        true max-norm displacement by the triangle inequality).  That inequality
+        certifies BOTH that the cached c and the true sigma exceed sigma_warn,
+        so gamma_thr is 1.0 either way and the emitted command is bit-identical
+        to the undecimated controller.  The escape probe (:gamma_thr < 1.0) is
+        likewise not entered in either case, so it cannot be skipped by
+        staleness.  Near the singularity -- where the value actually steers the
+        throttle -- the guard fails and the SVD runs every tick.
+
+        Only info['sigma_min'] is affected, and only as a diagnostic; the
+        companion field info['sigma_stale_ticks'] reports the staleness."""
+        c = self._sigma_cache
+        if (
+            c is not None
+            and self._sigma_stale_ticks < _SIGMA_MAX_STALE_TICKS
+            and c - _SIGMA_LIPSCHITZ * self._sigma_stale_travel > self.sigma_warn
+        ):
+            return c
+        s = sigma_min(q, self.char_length)
+        self._sigma_cache = s
+        self._sigma_stale_ticks = 0
+        self._sigma_stale_travel = 0.0
+        return s
+
+    def _jump_reason(self) -> str:
+        """Truthful reason for the ``||dq||_W > branch_tol`` refusal.
+
+        BRANCH_JUMP only if the candidate really is on a different closed-form
+        branch than the anchor; otherwise JOINT_JUMP (a same-branch step that is
+        simply too large).  With the numeric backend there is no branch label at
+        all (branch0 == -1), so it can only ever be JOINT_JUMP.
+
+        Uses the branch tag `_ik_branchlock` already carried out of the closed-
+        form enumeration, so this costs nothing: calling branch_id() here would
+        re-run a whole 8-branch analytic IK (measured +461 us) on a path that is
+        latency-sensitive precisely because it repeats every tick while the
+        operator holds against the gate."""
+        if self.branch0 < 0 or self._last_ik_branch < 0:
+            return REJECT_JOINT_JUMP
+        if self._last_ik_branch != self.branch0:
+            return REJECT_BRANCH_JUMP
+        return REJECT_JOINT_JUMP
+
+    def _tagged(self, T_flange, prefer_branch=None):
         if _tagged_solver is not None:
-            return _tagged_solver(T_flange)
+            return _tagged_solver(T_flange, prefer_branch)
         return [(branch_id(s), s) for s in ik_analytic(T_flange)]
 
     def _ik_branchlock(self, T_tcp: np.ndarray):
@@ -253,7 +337,13 @@ class EefDeltaController:
         Returns (q or None, n_solutions).  Order (grounding): analytic enumerate
         -> branch0 filter (suspended at an elbow/wrist merge point) -> re-anchor
         to q_ik_prev -> hard-limit filter -> argmin ||.||_W.  Acceptance vs
-        branch_tol is done by the caller."""
+        branch_tol is done by the caller.
+
+        Side channel: ``self._last_ik_branch`` is set to the closed-form branch
+        id of the returned candidate (-1 if none / numeric backend), so callers
+        can attribute a refusal without paying for a second analytic IK.  The
+        (q, n) return shape is deliberately unchanged."""
+        self._last_ik_branch = -1
         T_flange = T_tcp @ self.T_tool_R_inv
         seed = self.q_ik_prev
 
@@ -263,16 +353,21 @@ class EefDeltaController:
                 return None, 0
             return q, 1
 
-        tagged = self._tagged(T_flange)
-        if not tagged:
-            return None, 0
-        n = len(tagged)
-
         # Merge point: elbow (q3, idx2) ~ 0 or wrist_2 (q5, idx4) ~ 0.  There the
         # branch labels collapse, so suspend the branch filter and rely on
         # branch_tol alone.
         merge = (abs(math.remainder(float(seed[2]), _TWO_PI)) < 0.05
                  or abs(math.remainder(float(seed[4]), _TWO_PI)) < 0.05)
+
+        # Tell the solver which branch we are going to keep, so it can skip
+        # FK-verifying the 7 candidates this filter would discard anyway. It
+        # falls back to the full enumeration whenever that branch has no
+        # solution, so the outcome is unchanged (see _ik_analytic_tagged).
+        prefer = None if (merge or self.branch0 < 0) else self.branch0
+        tagged = self._tagged(T_flange, prefer)
+        if not tagged:
+            return None, 0
+        n = len(tagged)
 
         # Branch filter BEFORE unwrap (order matters).
         pool = tagged
@@ -281,17 +376,19 @@ class EefDeltaController:
             if on_branch:
                 pool = on_branch
 
-        # Re-anchor each candidate to the seed.
-        reanch = [self._reanchor(q, seed) for (_, q) in pool]
+        # Re-anchor each candidate to the seed, keeping its branch tag alongside
+        # (wrapped_nearest only adds 2*pi*k, which never changes the branch).
+        reanch = [(bid, self._reanchor(q, seed)) for (bid, q) in pool]
 
         # Hard-limit filter (margin 0). The 0.05 margin is applied later as an
         # acceptance test so that a marginal violation reports JOINT_LIMIT rather
         # than silently vanishing here.
-        limited = [q for q in reanch if within_joint_limits(q, margin=0.0)]
+        limited = [t for t in reanch if within_joint_limits(t[1], margin=0.0)]
         if limited:
             reanch = limited
 
-        best = min(reanch, key=lambda q: self._wnorm(q - seed))
+        best_bid, best = min(reanch, key=lambda t: self._wnorm(t[1] - seed))
+        self._last_ik_branch = int(best_bid)
         return best, n
 
     # ------------------------------------------------------------------ #
@@ -331,7 +428,8 @@ class EefDeltaController:
         info = {
             "state": self.state,
             "reject_reason": None,
-            "sigma_min": sigma_min(q_prev, self.char_length),
+            "sigma_min": self._sigma_min_cached(q_prev),
+            "sigma_stale_ticks": self._sigma_stale_ticks,
             "gamma": 1.0,
             "ls_scale": 0.0,
             "ik_residual": 0.0,
@@ -411,32 +509,114 @@ class EefDeltaController:
         # ---- asymmetric gamma: a move that *increases* sigma_min (escapes the
         #      singularity) is passed unthrottled (gamma=1), preventing a
         #      permanent lock-up at sigma_min < sigma_stop. ----
+        # The probe costs a full analytic IK + a second SVD, so it is entered
+        # only when gamma_thr < 1.0 -- i.e. only when sigma_min has already
+        # fallen into the warn band and the throttle is actually biting.  Above
+        # sigma_warn gamma_thr saturates at 1.0 and there is nothing to escape,
+        # so the probe never runs on the well-conditioned hot path.
+        # While the probe keeps FAILING the verdict is re-tested only every
+        # _ESCAPE_PROBE_PERIOD ticks. Skipping it leaves gamma_eff == gamma_thr,
+        # the THROTTLED value -- so a skipped probe can only ever make the arm
+        # slower, never faster: the optimisation is safety-monotone, and it
+        # cannot turn a HOLD into a motion. The only cost is up to
+        # (period-1) ticks = 28 ms at 250 Hz of extra throttling after the
+        # operator reverses out of the singularity. A probe that SUCCEEDS resets
+        # the counter, so an escape in progress is re-checked every tick (and is
+        # nearly free, since its solution is reused by the line search below).
         gamma_eff = gamma_thr
+        q_escape = None
+        n_escape = 0
         if gamma_thr < 1.0:
-            probe_target = self.T_cmd @ se3_exp(xi_raw * rate_scale(1.0))
-            q_probe, _ = self._ik_branchlock(probe_target)
-            if q_probe is not None and sigma_min(q_probe, self.char_length) > sigma_prev + 1e-9:
-                gamma_eff = 1.0
+            if self._escape_skip > 0:
+                self._escape_skip -= 1
+            else:
+                probe_target = self.T_cmd @ se3_exp(xi_raw * rate_scale(1.0))
+                q_probe, n_probe = self._ik_branchlock(probe_target)
+                if (q_probe is not None
+                        and sigma_min(q_probe, self.char_length) > sigma_prev + 1e-9):
+                    gamma_eff = 1.0
+                    # Escape accepted -> gamma_eff is 1.0, so the line search's
+                    # own full-scale probe below asks for exactly this same
+                    # target. Carry the solution over instead of re-solving it.
+                    q_escape, n_escape = q_probe, n_probe
+                    self._escape_skip = 0
+                else:
+                    self._escape_skip = _ESCAPE_PROBE_PERIOD - 1
         info["gamma"] = gamma_eff
 
         xi_lim = xi_raw * rate_scale(gamma_eff)
 
         # ---- analytic (continuous) line search for the step scale s ---- #
-        q_try0, n_sol = self._ik_branchlock(self.T_cmd @ se3_exp(xi_lim))
+        # Probe the FULL rate-limited increment first.  If it has no IK solution
+        # that is NOT grounds to give up: near a singularity the reachable set
+        # shrinks continuously, so a fraction of the very same increment is
+        # routinely solvable (measured: s=1.00 -> None, s=0.50 -> ok,
+        # s=0.10 -> ok and inside the step budget).  Returning NO_IK straight
+        # off the full-scale probe skipped the halving loop below entirely and
+        # dead-stopped the arm permanently (1936/2000 ticks rejected, 0.8 mm
+        # delivered of a requested 10 mm).  Halve down to s_floor looking for
+        # the largest solvable scale and let the normal budget line search take
+        # over from there.  Fail-closed is preserved: nothing solvable down to
+        # s_floor still HOLDs with NO_IK, and no acceptance gate is relaxed.
+        s_probe = 1.0
+        q_try0 = None
+        n_sol = 0
+        if q_escape is not None:
+            # Bit-identical target, already solved by the escape probe above.
+            q_try0, n_sol = q_escape, n_escape
+        while q_try0 is None:
+            q_try0, n_sol = self._ik_branchlock(self.T_cmd @ se3_exp(s_probe * xi_lim))
+            if q_try0 is not None:
+                break
+            if s_probe <= self.s_floor:
+                break
+            # Clamp the last halving to s_floor EXACTLY.  Plain halving steps
+            # 0.03125 -> 0.015625 and so jumps straight over s_floor=0.02 -- and
+            # 0.02 was measured to be the largest solvable scale at a real stall
+            # point, so the naive sequence declares NO_IK on a feasible target.
+            s_probe = max(self.s_floor, 0.5 * s_probe)
         info["n_ik_solutions"] = n_sol
+        info["ls_probe_scale"] = s_probe if q_try0 is not None else 0.0
         if q_try0 is None:
             return self._hold(info, REJECT_NO_IK)
 
         # step_eff > 0 is guaranteed here (A2 hard-stops non-positive budgets).
+        # max_dq0 is the joint cost of `s_probe * xi_lim`, so the budget-fitting
+        # scale extrapolates from s_probe (identical to the old expression when
+        # the full-scale probe succeeded and s_probe == 1.0).
         max_dq0 = float(np.max(np.abs(q_try0 - q_prev)))
         if max_dq0 > 1e-12:
-            s = min(1.0, 0.9 * step_eff / max_dq0)
+            s = min(s_probe, 0.9 * s_probe * step_eff / max_dq0)
         else:
-            s = 1.0
+            s = s_probe
 
+        # `s` is a FRACTION of an increment that the rate limiter and gamma have
+        # already shrunk (at gamma_min the full increment is v_max*dt*gamma_min
+        # = 32 um), so it is not a physical floor on anything.  Vetoing an
+        # otherwise-valid candidate just because that fraction landed under
+        # s_floor is what produced the second permanent stall: measured at the
+        # dead-stop, the search found a candidate costing 0.00136 rad of the
+        # 0.0025 rad budget -- on branch, in limits, keepout clear -- and threw
+        # it away because s was 0.0162 < 0.02.  s_floor now bounds how far the
+        # search may SHRINK (below); whether a candidate is safe is decided by
+        # the acceptance stack, which is unchanged and still runs on every
+        # candidate.  Fail-closed is kept for the two cases that really are
+        # failures: no IK anywhere (NO_IK) and an increment that still overshoots
+        # the joint budget once the search has shrunk to s_floor (STEP_FLOOR).
         q_try = None
-        for _ in range(3):
-            cand, n_sol = self._ik_branchlock(self.T_cmd @ se3_exp(s * xi_lim))
+        q_try_branch = -1
+        n_sol0 = n_sol
+        first = True
+        for _ in range(_LINE_SEARCH_ITERS):
+            if first and s == s_probe:
+                # The budget did not bind, so the first line-search target is
+                # BIT-IDENTICAL to the probe target already solved above.
+                # Re-solving it cost a second full 8-branch analytic IK (~760 us,
+                # ~40% of a moving tick) for a guaranteed-identical answer.
+                cand, n_sol = q_try0, n_sol0
+            else:
+                cand, n_sol = self._ik_branchlock(self.T_cmd @ se3_exp(s * xi_lim))
+            first = False
             if cand is None:
                 s *= 0.5
                 if s < self.s_floor:
@@ -444,6 +624,10 @@ class EefDeltaController:
                 continue
             max_dq = float(np.max(np.abs(cand - q_prev)))
             q_try = cand
+            # Pin the branch tag to THIS candidate: a later probe that returns
+            # None would otherwise reset the side channel to -1 while q_try still
+            # holds this (perfectly good) candidate.
+            q_try_branch = self._last_ik_branch
             if max_dq <= step_eff * (1.0 + 1e-9) or max_dq < 1e-12:
                 break
             # Overshoot from IK nonlinearity: shrink proportionally and retry.
@@ -452,8 +636,8 @@ class EefDeltaController:
                 q_try = None
                 break
 
-        if q_try is None or s < self.s_floor:
-            reason = REJECT_NO_IK if q_try is None and n_sol == 0 else REJECT_STEP_FLOOR
+        if q_try is None:
+            reason = REJECT_NO_IK if n_sol == 0 else REJECT_STEP_FLOOR
             return self._hold(info, reason)
         info["ls_scale"] = s
         info["n_ik_solutions"] = n_sol
@@ -461,11 +645,17 @@ class EefDeltaController:
         # ---- acceptance stack ---- #
         dq = q_try - q_prev
         if self._wnorm(dq) > self.branch_tol:
-            return self._hold(info, REJECT_BRANCH_JUMP)
+            # The gate itself is a weighted joint-STEP-SIZE test, not a branch
+            # test -- it fires just as readily on a large step that never left
+            # the anchor's branch.  The HOLD is right either way; only the
+            # attribution has to be honest, so report which of the two it was
+            # (free: the branch tag came out of the IK that produced q_try).
+            self._last_ik_branch = q_try_branch
+            return self._hold(info, self._jump_reason())
         if not within_joint_limits(q_try, margin=self.limit_margin):
             return self._hold(info, REJECT_JOINT_LIMIT)
         if float(np.max(np.abs(dq))) > step_eff * (1.0 + 1e-6):
-            return self._hold(info, REJECT_STEP_FLOOR)
+            return self._hold(info, REJECT_STEP_CAP)
         if not keepout_ok(q_try, self.keepout):
             return self._hold(info, REJECT_GEOM_KEEPOUT)
 
@@ -475,6 +665,11 @@ class EefDeltaController:
             return self._hold(info, REJECT_EXCURSION)
 
         # ---- commit (keep invariant  T_cmd == fk(q_ik_prev) @ T_tool_R) ---- #
+        # Accumulate the joint travel that the decimated sigma_min is now stale
+        # by (per-tick max-norms sum to an upper bound on the total).  A HOLD
+        # moves nothing, so only accepted steps age the cache.
+        self._sigma_stale_ticks += 1
+        self._sigma_stale_travel += float(np.max(np.abs(dq)))
         self.q_ik_prev = q_try.copy()
         self.q_cmd = q_try.copy()
         self.T_cmd = T_cmd_new

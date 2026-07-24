@@ -1,0 +1,176 @@
+# ur7e_gello_joint_delta.yaml — START-ANCHORED JOINT-DELTA OVERLAY for the
+# GELLO -> UR7e teleop pipeline.
+#
+# This file is NOT standalone: it overlays config/ur7e_gello.yaml (load both,
+# this one LAST, e.g. two --params-file args) and only touches the
+# gello_ur_bridge node's joint_delta-specific parameters. Every other node
+# (gello_publisher, gello_move_to_start, robotiq_gripper, gello_gripper_bridge)
+# and every joint-mode parameter (filter_type, one_euro_*, ema_alpha,
+# max_step_rad, deadband_rad, soft_start_s, publish_rate_hz,
+# staleness_timeout_s, actual_staleness_timeout_s, resume_align_tol,
+# resume_chase_*, state_*) is left untouched by loading ur7e_gello.yaml
+# underneath — this file must never duplicate them.
+#
+# control_mode: "joint_delta" switches gello_ur_bridge from ABSOLUTE joint
+# mirroring (q_cmd = q_leader) to START-ANCHORED joint delta (see
+# ur_gello_bringup.joint_delta):
+#
+#     engage:      q_lead_anchor, q_robot_anchor  latched, delta := 0
+#     every tick:  delta += wrap_to_pi(q_lead - q_lead_prev)
+#                  q_cmd  = q_robot_anchor + jd_gain * delta
+#
+# i.e. THE ARM FOLLOWS HOW MUCH GELLO MOVED, NOT WHERE GELLO IS.
+# (팔은 GELLO의 절대 위치가 아니라 '얼마나 움직였는지'를 따라간다.)
+#
+# READ docs/ros2/GELLO_UR7E_JOINT_DELTA_MODE.md BEFORE USING THIS FILE. The
+# mode deliberately BREAKS the property "where I hold the leader is where the
+# arm is", which is the single biggest operational difference from joint mode.
+#
+# Unless a value's own comment says otherwise, the numbers below are FIRST-CUT
+# defaults carried over from the plan and have NOT been validated on the real
+# UR7e arm. Anything marked "실기 튜닝 필요" MUST be re-tuned against the real
+# robot + real GELLO before this overlay is trusted for real teleop.
+#
+# jd_gain can be OVERRIDDEN FROM THE COMMAND LINE for the staged first-real-
+# robot bring-up without editing this file or rebuilding:
+#   ros2 launch ur_gello_bringup ur7e_gello_real.launch.py robot_ip:=<IP> \
+#       control_mode:=joint_delta jd_gain:=0.0
+# Omitting the argument leaves the value below in force.
+
+gello_ur_bridge:
+  ros__parameters:
+    # Switch gello_ur_bridge into the start-anchored joint-delta path.
+    control_mode: "joint_delta"
+
+    # LEADER -> ROBOT JOINT GAIN (dimensionless).
+    # 1.0 = 1:1, i.e. the arm reproduces the leader's joint travel exactly, so
+    # once engaged the FEEL is identical to joint mode — only the ORIGIN moved.
+    # That is why 1.0 is the shipped default rather than something timid: any
+    # other value changes the operator's learned hand->arm ratio, which is a
+    # bigger surprise than the anchor itself.
+    # 0.0 = the robot never moves at all — the P1/P4 staged bring-up stages.
+    # Hard-validated range in JointDeltaController.__init__: [0.0, 2.0].
+    jd_gain: 1.0
+
+    # Shrink (rad) applied to BOTH sides of ur_kin.JOINT_LIMITS before the
+    # per-tick saturating clamp. Same value and meaning as the eef overlay's
+    # limit_margin_rad but a SEPARATE knob, so the two modes' cages can be tuned
+    # independently. Note the elbow (index 2) limit is +-pi, NOT +-2pi
+    # (shoulder_lift interference) — the controller carries the real per-joint
+    # array, it does not assume a single symmetric bound.
+    jd_limit_margin_rad: 0.05
+
+    # PER-JOINT EXCURSION CAGE (rad) around q_robot_anchor. The command may
+    # never leave [anchor - this, anchor + this] on any joint, however far the
+    # leader travels.
+    #
+    # WHY THIS EXISTS AT ALL: in joint mode the command is implicitly bounded
+    # because q_cmd == q_leader and the leader is MECHANICALLY bounded. Start-
+    # anchored delta structurally loses that: q_robot_anchor + gain*delta has no
+    # implicit bound, so a near-limit anchor plus a few clutch/re-clutch cycles
+    # could otherwise walk the arm somewhere the raw GELLO reading never
+    # suggested. This cage is the replacement, and the joint-limit clamp above
+    # is the backstop behind it.
+    #
+    # 1.0 rad ~= 57 deg per joint. 실기 튜닝 필요 — the cage only ever REDUCES
+    # the arm's REACH, so an over-tight value is safe and VISIBLE (limited[i]
+    # goes true on ~/joint_delta/state); start tight and open it only with
+    # evidence.
+    #
+    # ⚠️ IT DOES NOT ONLY REDUCE MOTION — READ THIS BEFORE TIGHTENING IT.
+    # Saturating the cage BACK-PROJECTS into the accumulator (anti-windup), so
+    # the leader travel that went past the cage is DISCARDED. Consequence with
+    # jd_gain: 1.0 and this cage at 1.0: push a leader joint +1.5 rad out (the
+    # arm stops at +1.0, 0.5 rad discarded), bring the leader back EXACTLY to
+    # where you anchored it — and the arm settles at -0.5 rad (-28.6 deg) and
+    # STAYS there. The displacement is bounded by the cage and reported as
+    # clamp_discarded[i] on ~/joint_delta/state, and the remedy is
+    # ~/joint_delta_clutch -> reposition -> ~/joint_delta_reclutch (which
+    # re-anchors and zeroes it). A TIGHTER cage therefore means MORE frequent
+    # correspondence loss, not less risk. See the long discussion in
+    # ur_gello_bringup/joint_delta.py's module docstring.
+    jd_max_excursion_rad: 1.0
+
+    # LEADER TELEPORT CAP (rad per RAW GELLO sample). An increment larger than
+    # this is not a human gesture — it is a USB glitch, a dropped burst of
+    # samples, or an encoder multi-turn re-read.
+    #
+    # WHERE IT IS TESTED (this matters, and it used to be wrong): PRIMARILY on
+    # the RAW leader stream at the SOURCE (~30 Hz) cadence, in the bridge's
+    # _on_joint_state. On a hit the joint_delta stage HOLDS for
+    # jd_resync_hold_s and slides its accumulator reference along with the
+    # settling filter, so neither the head nor the tail of the glitch is ever
+    # accumulated and the arm does not move. The identical cap inside
+    # JointDeltaController.step() is only a BACKSTOP: step() is fed the 1-EURO-
+    # FILTERED leader, and a low-pass smears a raw teleport below the cap
+    # (measured: raw glitches up to ~1.2 rad produced ZERO filtered increments
+    # above 0.35 and were accumulated in full).
+    #
+    # 0.35 rad per 30 Hz sample ~= 10.5 rad/s of leader speed, well above a
+    # deliberate human motion. 실기 튜닝 필요 — the failure mode of a too-tight
+    # value is "the robot lags", NEVER "the robot lurches". Counters
+    # raw_jumps / jump_absorbed on ~/joint_delta/state make it measurable.
+    jd_leader_jump_max_rad: 0.35
+
+    # HOLD-AND-RESYNC WINDOW (s) after a RAW leader teleport: how long the
+    # 1-Euro leader filter is given to digest the glitch while the arm holds.
+    # Must comfortably exceed the filter's settling time; 0.30 s is ~9 GELLO
+    # samples / 75 publish ticks. Too long only costs lag; too short lets the
+    # filter's tail be accumulated as genuine leader travel. 실기 튜닝 필요.
+    jd_resync_hold_s: 0.30
+
+    # PER-TICK INCREMENT DEADBAND (rad). DELIBERATELY OFF (0.0) — do not
+    # "helpfully" turn this on.
+    #
+    # The increments TELESCOPE (sum of the per-tick increments IS the total
+    # leader travel), so the accumulator is DRIFT-FREE BY CONSTRUCTION *as long
+    # as no position clamp saturates*: go out and come back and the command
+    # returns to the anchor exactly. (Once the joint-limit or excursion clamp HAS
+    # bound, the discarded overtravel shifts the mapping — see
+    # jd_max_excursion_rad above; that is a clamp property, not an accumulator
+    # one, and a deadband would make it worse, not better.) A deadband
+    # is a nonlinearity ON THE INCREMENT, so it CREATES a systematic bias that
+    # integrates into drift instead of removing one — the precise opposite of
+    # what it does in joint mode, where it gates an ABSOLUTE value.
+    # (증분은 텔레스코핑되므로 누적 자체에는 드리프트가 없다. 여기에 데드밴드를
+    #  걸면 오히려 편향이 적분되어 드리프트가 생긴다.)
+    # Jitter is fought upstream (the leader 1-Euro filter, one_euro_* in
+    # ur7e_gello.yaml) and at the output (the position + slew clamps).
+    jd_delta_deadband_rad: 0.0
+
+    # ~/joint_delta/state JSON diagnostic publish rate (Hz).
+    jd_state_rate_hz: 10.0
+
+    # ------------------------------------------------------------------ #
+    # REUSED GENERIC GATE KNOBS.
+    # These parameter names are shared with eef mode (only one control mode is
+    # ever live in a process, and the overlay is per-mode), so they are set here
+    # rather than duplicated under a jd_ prefix. Values match the eef overlay.
+    # ------------------------------------------------------------------ #
+    # engage gate G4: max_i|_last_published - _actual_pose| must be <= this.
+    # Both sides are ROBOT-side — it proves the COMMAND chain still equals the
+    # arm before anchoring on the command chain. It never compares the leader to
+    # the robot (that comparison is meaningless in delta mode).
+    anchor_agree_tol: 0.02
+    # engage/reclutch gate G6: max_i|q_lead_f - _raw_target| must be < this, i.e.
+    # the leader 1-Euro filter must have positively converged before we anchor.
+    filter_settled_tol: 0.005
+    # A continuous controller HOLD longer than this (s) auto-disengages and
+    # voids the anchor. NOTE a saturated joint limit is NOT a HOLD in this mode
+    # (the position clamp saturates smoothly and keeps streaming), so this only
+    # latches on genuine faults: BAD_INPUT, or a leader that keeps teleporting
+    # (LEADER_JUMP / LEADER_RESYNC re-arming the window faster than it expires).
+    # ESTOP is a JointDeltaController-level guard that the bridge cannot reach —
+    # its soft-start ramp is max_step_rad*(0.15 + 0.85*frac), always > 0.
+    hold_latch_s: 2.0
+    # SOFT per-tick joint_delta-stage budget (us): warn-only performance signal.
+    tick_budget_us: 1000.0
+    # HARD-budget policy (twin of the eef stage): over hard, the tick DEGRADES —
+    # HOLDS the arm's frozen command for that one tick and feeds a leaky bucket;
+    # only SUSTAINED slowness (bucket reaches tick_overrun_limit ~= 1.0s @250Hz)
+    # fails closed. NOTE: JointDeltaController is an accumulator, so the first
+    # healthy step() after a degrade window folds the held-tick leader motion into
+    # one increment (bounded by max_step_rad) — another reason the threshold is ~1s.
+    tick_overrun_limit: 250
+    # Bucket drain per healthy tick (see eef yaml). 1.0 forgives transient spikes.
+    tick_overrun_leak: 1.0

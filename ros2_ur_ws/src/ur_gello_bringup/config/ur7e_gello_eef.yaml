@@ -11,15 +11,36 @@
 #
 # control_mode: "eef" switches gello_ur_bridge from joint passthrough to the
 # EefDeltaController-driven end-effector delta path (see ur_gello_bringup.eef_delta,
-# ur_gello_bringup.ur_kin). BOOTSTRAP (pre-engage) still runs plain joint
-# passthrough regardless of this file, so gello_move_to_start's handshake is
-# unaffected.
+# ur_gello_bringup.ur_kin).
 #
-# ALL numeric values below are FIRST-CUT placeholders carried over from the
-# EefDeltaController defaults / plan — none have been validated on the real
-# UR7e arm yet. Anything marked "실기 튜닝/실측 필요" MUST be re-measured or
-# re-tuned against the real robot + real GELLO/tool geometry before this
-# overlay is trusted for real teleop.
+# OPERATING FRAMING (2026-07-22): "GELLO AS A 3D PEN". The leader and the
+# robot live PERMANENTLY in different joint configurations; only EEF deltas
+# cross between them. Nothing in this file (or anywhere else) forces the two
+# joint vectors to agree, and the delta math is proven pose-independent
+# (test/test_eef_pose_independence.py). The pre-engage bring-up path is being
+# reworked to match this (no-motion switch instead of joint passthrough) —
+# see docs/ros2/GELLO_UR7E_EEF_MODE.md for the current, verified behaviour.
+#
+# Unless a value's own comment says otherwise, the numbers below are FIRST-CUT
+# placeholders carried over from the EefDeltaController defaults / plan and
+# have NOT been validated on the real UR7e arm. Anything marked
+# "실기 튜닝/실측 필요" MUST be re-measured or re-tuned against the real robot +
+# real GELLO/tool geometry before this overlay is trusted for real teleop.
+#
+# STATUS OF THE THREE VALUES THAT ARE NOT ORDINARY PLACEHOLDERS:
+#   * tool_r_xyz_rpy / tool_l_xyz_rpy z = 0.174 m — MEASURED (Robotiq 2F-85
+#     endpoint, matches the pendant's TCP_2f85). See the tool-transform block.
+#   * pos_scale = 1.0 — DECIDED, do not re-open. See its own block.
+#   * r_align_rpy = [0,0,0] — NEITHER measured NOR decided. It is an
+#     UNVERIFIED ASSUMPTION and is the most likely thing to be wrong on this
+#     rig. Measure it (docs MODE.md §1.6) before trusting EEF direction.
+#
+# v_max / w_max / pos_scale can be OVERRIDDEN FROM THE COMMAND LINE for the
+# staged first-real-robot bring-up (P6/P7/P9) without editing this file or
+# rebuilding:
+#   ros2 launch ur_gello_bringup ur7e_gello_real.launch.py robot_ip:=<IP> \
+#       control_mode:=eef pos_scale:=0.0 v_max:=0.01 w_max:=0.05
+# Omitting an argument leaves the value below in force.
 
 gello_ur_bridge:
   ros__parameters:
@@ -27,31 +48,182 @@ gello_ur_bridge:
     control_mode: "eef"
 
     # POSITION SCALE (leader delta -> commanded EEF delta, dimensionless gain).
-    # 1.0 = 1:1 (robot EEF moves the same distance the GELLO EEF moves).
-    # 실기 튜닝/실측 필요: pick k by feel on the real arm (typically <=1.0 for a
-    # 1:1 or reduced-gain feel; >1.0 amplifies leader motion into the follower).
+    # DECIDED 2026-07-22 — LEAVE AT 1.0. Not a placeholder, not "tune by feel".
+    #
+    # It is 1:1 in VIRTUAL-UR7e space, NOT in the operator's hand space. The
+    # leader EEF is q_gello fed through the SAME full-size UR7e fk() used for
+    # the robot (T_g = fk(q_lead_f) @ T_tool_L), so p_g - p_g_anchor is already a full-size
+    # displacement. 1.0 therefore reproduces the EEF travel that joint mode
+    # would have produced for the same leader joints — the familiar baseline.
+    # The operator's HAND moves ~k times LESS than the robot TCP (k = the GELLO
+    # reduction ratio, DELIBERATELY NEVER MEASURED — plan Q1 / P-1 item 5).
+    # So this is an AMPLIFIED pen by choice: "my hand goes exactly where the
+    # tool goes" is NOT what this configuration delivers, and 5 cm of hand
+    # motion producing >5 cm of TCP motion is CORRECT, not a bug.
+    # 손 이동량 ≠ 로봇 이동량이다(로봇이 더 크게 간다). joint 모드와 같은 감각을
+    # 유지하려고 의도적으로 고른 값이며, 버그가 아니다. 다시 열지 말 것.
+    #
+    # *** pos_scale SCALES ONLY THE POSITION TERM. ***
+    #   p_des = p_r_anchor + pos_scale * R_align @ (p_g - p_g_anchor)
+    #   R_des = R_delta @ R_r_anchor          <-- no pos_scale anywhere
+    # (both in EefDeltaController.step(), eef_delta.py)
+    # The rotation channel has NO scale factor and is NOT gated by this value.
+    # pos_scale = 0.0 pins the TCP POSITION only; the arm still rotates the
+    # tool in place and the elbow/shoulder still swing. See docs MODE.md P6.
+    # pos_scale=0.0 은 "무동작"이 아니라 "TCP 위치 고정"이다. 회전은 살아 있다.
     pos_scale: 1.0
 
-    # Rotational alignment offset (roll, pitch, yaw; rad) between the GELLO
-    # leader's wrist frame and the UR tool frame, applied once at the FK/IK
-    # boundary so "leader rotates this way" maps onto "tool rotates this way"
-    # consistently for this physical rig. 0,0,0 = frames assumed already
-    # aligned (placeholder). 실기 튜닝/실측 필요: measure the actual leader-wrist
-    # vs UR-tool frame offset on the real hardware.
+    # BASE-TO-BASE alignment rotation (roll, pitch, yaw; rad).
+    #
+    # CORRECTED 2026-07-22 — earlier text here said this was the offset between
+    # "the GELLO leader's WRIST frame and the UR TOOL frame". THAT WAS WRONG.
+    # It is a BASE-to-BASE rotation:
+    #     R_align = R_{UR base_link  <-  virtual-leader base_link}
+    # i.e. "how is the GELLO's base yawed relative to the UR's base_link".
+    # It has nothing to do with wrists or tools — the tool frames are handled
+    # by tool_l_xyz_rpy / tool_r_xyz_rpy below. (plan §3.3 always had it right.)
+    # 리더 손목↔UR 툴 오프셋이 아니라 **베이스↔베이스** 회전이다.
+    #
+    # HOW IT ENTERS THE MATH (EefDeltaController.step(), eef_delta.py):
+    #     R_delta = R_align @ (R_g @ R_g_anchor^T) @ R_align^T
+    #     p_des   = p_r_anchor + pos_scale * R_align @ (p_g - p_g_anchor)
+    # It rotates the DIRECTION of the commanded displacement and leaves the
+    # MAGNITUDE untouched. Numerically confirmed, and independent of the
+    # robot's joint configuration.
+    #
+    # *** [0,0,0] IS AN UNVERIFIED ASSERTION, NOT A MEASUREMENT. ***
+    # It asserts "the GELLO base frame IS the UR base_link frame". Nobody has
+    # ever measured that. Worse, scripts/gello_get_offset.py snaps every joint
+    # offset to a multiple of pi/2 (linspace(-8pi, 8pi, 33)), which bakes in a
+    # 4-way 0/90/180/270 deg ambiguity on the base joint. Under the "GELLO as
+    # a 3D pen" framing this is a LATENT BUG and is probably wrong.
+    # (측정된 적이 없는 가정값이다. gello_get_offset.py 가 오프셋을 pi/2 배수로
+    #  스냅하므로 90도 단위 모호성이 그대로 남아 있다.)
+    #
+    # WHY THE OLD JUSTIFICATION NO LONGER APPLIES: under the retired "EEF mode
+    # should reproduce joint mode" framing, R_align = I was the UNIQUELY
+    # correct value (identical joints on both sides => identical bases). The
+    # 3D-pen framing retires that argument. R_align must now be MEASURED.
+    #
+    # THE SYMPTOM IS NASTY: magnitude is always right, only DIRECTION is wrong.
+    # A 10-20 deg error just feels like "the arm is a bit crabbed" and gets
+    # rationalised away. A 90 deg error gives ZERO motion in the intended
+    # direction (unmistakable). Accuracy needed, lateral error on a 10 cm move:
+    #     2 deg -> 0.35 cm | 5 deg -> 0.87 cm | 10 deg -> 1.74 cm
+    #    20 deg -> 3.42 cm | 45 deg -> 7.07 cm        =>  <= 5 deg is PLENTY.
+    #
+    # MEASUREMENT PROCEDURE (robot-free, beginner-doable): docs/ros2/
+    # GELLO_UR7E_EEF_MODE.md §1.6. Key identity: with both arms at the SAME
+    # joint vector, psi = (GELLO world bearing) - (UR world bearing), and the
+    # pose-dependent term cancels exactly, so the chosen pose does not matter.
+    #
+    # NOT a launch argument (unlike v_max / w_max / pos_scale): edit this file
+    # and rebuild (./build_ur7e.sh) for a change here to take effect.
     r_align_rpy: [0.0, 0.0, 0.0]
 
-    # Tool transform (xyz meters, rpy rad) for the LEFT-branch / primary IK
-    # solution path (UR flange -> actual tool tip, e.g. Robotiq 2F-85 fingertip).
-    # All zeros = flange-frame placeholder (no tool offset applied).
-    # 실기 튜닝/실측 필요: measure the real gripper/tool offset from the flange.
-    tool_l_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # ---------------------------------------------------------------------- #
+    # TOOL TRANSFORMS — _l / _r are LEADER / ROBOT, *NOT* "left/right IK branch".
+    #
+    # (Earlier revisions of this file mislabelled these as two IK solution
+    # branches. That was wrong. They are two different SIDES of the teleop
+    # mapping, and eef_delta.py applies them on opposite sides of the anchor
+    # delta — see eef_delta.py: the module docstring, __init__ (T_tool_L /
+    # T_tool_R), _set_anchor() and step().)
+    #
+    #     T_g = fk(q_lead_f) @ T_tool_L     # LEADER side (GELLO), tool_l_xyz_rpy
+    #     T_r = fk(q_r)      @ T_tool_R     # ROBOT  side (UR7e),  tool_r_xyz_rpy
+    #
+    # _l / _r 는 IK 좌/우 분기가 아니라 **리더(GELLO) / 로봇(UR7e)** 쪽 툴
+    # 변환이다. 각각 자기 쪽 EEF의 "회전 중심"을 정의한다.
+    #
+    # WHAT ACTUALLY MATTERS IN THE MATH (EefDeltaController.step(), eef_delta.py):
+    #     R_delta = R_align @ (R_g @ R_g_anchor^T) @ R_align^T
+    #     p_des   = p_r_anchor + pos_scale * R_align @ (p_g - p_g_anchor)
+    #   * The ROTATION part of T_tool_L CANCELS EXACTLY in the delta
+    #     (R_toolL @ R_toolL^T = I), so only its TRANSLATION part has any effect.
+    #   * That translation only shows up WHEN THE LEADER ROTATES:
+    #     p_g - p_g_anchor = (p_f - p_f_anchor) + (R_f - R_f_anchor) @ t_toolL.
+    #     Under pure leader translation the tool term drops out entirely.
+    #   => tool offsets are IRRELEVANT to stages P6 (no motion) and P7 (pure
+    #      translation); they first matter at P8 (pure rotation).
+    #   회전 단계(P8) 전까지는 이 값이 결과에 영향을 주지 않는다.
+    #
+    # WHY WE SET THEM EQUAL (the default below):
+    #   The leader EEF is NOT computed from the small physical GELLO's geometry.
+    #   q_gello is fed into the SAME full-size UR7e fk() used for the robot
+    #   (ur_kin.fk) — the leader is treated as a "virtual full-size UR7e".
+    #   tool_l == tool_r then means "the virtual leader robot wears the SAME
+    #   gripper as the real one", so a leader wrist rotation pivots about the
+    #   same point on its tool that the robot's TCP pivots about on its own.
+    #   리더 EEF도 동일한 풀사이즈 UR7e FK로 계산하므로, 두 값을 같게 두는 것이
+    #   자기일관적이다.
+    #
+    #   CORRECTED 2026-07-22 — the stronger claim that used to be written here,
+    #   "at engage q_lead ~= q_robot (BOOTSTRAP is joint passthrough and gate G4
+    #   enforces agreement), so the tool term cancels and EEF mode reduces
+    #   exactly to joint mode", IS RETIRED ON BOTH HALVES:
+    #     * G4 DOES NOT COMPARE THE LEADER TO THE ROBOT. It compares
+    #       _last_published to _actual_pose — BOTH ROBOT-SIDE (see
+    #       anchor_agree_tol below, gello_ur_bridge_node.py `_run_eef_gates()`).
+    #       NOTHING ANYWHERE compares leader joints to robot joints at engage.
+    #     * The q_lead ~= q_robot property came ONLY from BOOTSTRAP being joint
+    #       passthrough, and under the "GELLO as a 3D pen" framing the leader
+    #       and the robot are DELIBERATELY in different joint configurations.
+    #   So do NOT expect the tool term to cancel. It does not have to: the
+    #   delta math is PROVEN POSE-INDEPENDENT (22 tests in
+    #   test/test_eef_pose_independence.py; worst error 8.8e-13 m / 2.7e-13 rad
+    #   across joint mismatches up to 5.62 rad). tool_l == tool_r stands as the
+    #   default; its empirical check is the P8 parasitic-translation criterion.
+    #   (G4는 리더와 로봇을 비교하지 않는다. 3D 펜 운용에서는 두 팔의 관절이
+    #    일부러 다르며, 델타 수식은 그것과 무관하게 성립함이 증명되어 있다.)
+    #
+    # RESOLVED 2026-07-22 — the "grip point" framing is NOT an equal alternative:
+    #   Older text (and earlier revisions of docs §1.1) described tool_l as "the
+    #   point the human physically grips on the GELLO handle". That is a FRAME
+    #   ERROR, not a competing convention. tool_l is applied AFTER the full-size
+    #   UR7e fk(), so it is an offset from a VIRTUAL UR7e FLANGE — not from the
+    #   physical GELLO's flange. A grip distance measured on the real (smaller)
+    #   GELLO would first have to be divided by the GELLO reduction ratio k to
+    #   be expressed in this parameter, and measuring k is exactly the P-1 item
+    #   that was deliberately skipped (same decision as pos_scale = 1.0).
+    #   So tool_l == tool_r stands. docs §1.1 has been corrected to match.
+    #   (그립점 해석은 프레임이 다르다 — 이 값은 가상 UR7e 플랜지 기준이며,
+    #    물리 GELLO 기준 거리를 쓰려면 축소비 k 환산이 필요하다. k는 측정하지
+    #    않기로 했으므로 tool_l == tool_r 유지.)
+    #
+    #   Trap worth knowing: tool_l = 0 with tool_r = 0.174 is NOT a safe
+    #   "conservative" middle ground — the leader delta would then be a virtual
+    #   FLANGE displacement applied to the robot's TCP, which diverges from
+    #   joint-mode behaviour exactly during rotation (P8), the hardest stage to
+    #   debug. Keep them equal.
+    # ---------------------------------------------------------------------- #
 
-    # Tool transform (xyz meters, rpy rad) for the RIGHT-branch / alternate IK
-    # solution path. Same placeholder as tool_l_xyz_rpy above until measured;
-    # keep IDENTICAL to tool_l_xyz_rpy unless the two IK branches genuinely
-    # need different tool geometry (they normally don't — same physical tool).
-    # 실기 튜닝/실측 필요.
-    tool_r_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # LEADER tool transform (xyz meters, rpy rad), applied as fk(q_lead_f) @ T.
+    # Set EQUAL to tool_r_xyz_rpy per the "virtual full-size UR7e" reasoning
+    # above (NOT because "it's the same physical tool" — the GELLO leader has no
+    # Robotiq gripper on it). The grip-point framing is NOT an alternative
+    # convention that would change this value; it is a frame error, see the
+    # RESOLVED block above.
+    tool_l_xyz_rpy: [0.0, 0.0, 0.174, 0.0, 0.0, 0.0]
+
+    # ROBOT tool transform (xyz meters, rpy rad), applied as fk(q_r) @ T:
+    # UR7e FLANGE (tool0) -> the real TCP.
+    # 0.174 m along +Z = MEASURED Robotiq 2F-85 endpoint from the flange, and
+    # matches the TCP configured on the UR teach pendant as "TCP_2f85".
+    # UNITS ARE METERS (0.174 m = 174 mm) — do not write 174 here.
+    #
+    #   *** THE PENDANT'S TCP SETTING DOES NOT PROPAGATE INTO THIS CODE. ***
+    #   The EEF path runs its own FK to tool0/flange (ur_kin.fk) and applies
+    #   THIS offset itself; it never reads the pendant/driver TCP. The number
+    #   must be copied into this yaml BY HAND and kept in sync manually — if
+    #   TCP_2f85 is re-taught on the pendant, update this value too.
+    #   펜던트 TCP 설정은 이 코드로 자동 전달되지 않는다 — 손으로 옮겨 적어야 하고,
+    #   펜던트에서 TCP를 다시 잡으면 여기도 같이 고쳐야 한다.
+    #
+    # A wrong tool_r turns a pure wrist rotation into several cm of PARASITIC
+    # TRANSLATION of the TCP (plan §3.1 property 3 / P8 criterion (b): parasitic
+    # translation must stay < 1 cm).
+    tool_r_xyz_rpy: [0.0, 0.0, 0.174, 0.0, 0.0, 0.0]
 
     # Max commanded EEF linear speed (m/s). Field-proven default from the plan.
     # NOTE: param name MUST be v_max (maps 1:1 to EefDeltaController cfg key and
@@ -64,13 +236,28 @@ gello_ur_bridge:
     # starts shaping speed down / reporting a warning state as the arm nears
     # a singularity, but still moves.
     sigma_warn: 0.10
-    # Manipulability (sigma_min) STOP threshold: below this the controller
-    # refuses further motion toward the singularity (SINGULAR_ANCHOR-style
-    # reject) rather than letting sigma_min collapse further.
+    # Manipulability (sigma_min) lower knee of the speed-shaping ramp.
+    #
+    # CORRECTED 2026-07-22 — this comment used to say "below this the
+    # controller refuses further motion". IT DOES NOT REFUSE ANYTHING.
+    # sigma_stop has exactly ONE use in the code (the gamma block inside step()):
+    #     gamma_thr = (sigma_prev - sigma_stop) / (sigma_warn - sigma_stop)
+    #     gamma_thr = clamp(gamma_thr, gamma_min, 1.0)
+    # So sigma_min below sigma_stop does NOT stop the arm — gamma just floors
+    # at gamma_min, and the arm keeps moving at gamma_min * v_max
+    #   = 0.05 * 0.08 m/s = 0.004 m/s = 4 mm/s.
+    # On top of that, an increment that INCREASES sigma_min (escapes the
+    # singularity) is passed unthrottled at gamma = 1.0 (asymmetric-gamma block, same function).
+    # Both behaviours are DELIBERATE ANTI-LOCKUP design (plan §6.3), not bugs;
+    # only this yaml's old wording was wrong.
+    # sigma_stop 아래에서도 팔은 멈추지 않는다. 4 mm/s 로 계속 움직이고,
+    # 특이점에서 "빠져나오는" 방향은 감속조차 하지 않는다(의도된 설계).
     sigma_stop: 0.03
-    # Minimum velocity-scaling gamma the singularity-avoidance law is allowed
-    # to shrink commanded velocity to (floor, never fully stops mid-motion on
-    # its own — sigma_stop is what hard-stops).
+    # Floor on the singularity-avoidance velocity scale gamma. NOTE this floor
+    # is what makes the arm creep instead of stopping below sigma_stop (above).
+    # Nothing in the singularity path is a hard stop; the hard stops are the
+    # acceptance-stack rejects (NO_IK / BRANCH_JUMP / JOINT_LIMIT /
+    # GEOM_KEEPOUT / EXCURSION / STEP_FLOOR), which HOLD.
     gamma_min: 0.05
     # Characteristic length (m) used to non-dimensionalize the Jacobian for
     # sigma_min / manipulability scaling. 0.30 matches the UR7e's rough
@@ -88,9 +275,17 @@ gello_ur_bridge:
     # Joint-limit safety margin (rad) kept clear of the hard URDF limits when
     # validating an IK candidate (JOINT_LIMIT reject inside this margin).
     limit_margin_rad: 0.05
-    # Floor on the velocity-scaling factor "s" (parallel to gamma_min) so the
-    # controller never fully zeroes commanded speed except via an explicit
-    # reject/HOLD.
+    # Floor on the line-search step scale "s".
+    #
+    # CORRECTED 2026-07-22 — this comment used to say s_floor keeps the
+    # controller from "fully zeroing commanded speed". It is the OPPOSITE:
+    # s_floor IS a reject. The analytic line search halves/shrinks s until the
+    # IK candidate fits the per-tick step budget; if s falls below s_floor the
+    # tick is REJECTED as STEP_FLOOR and the arm HOLDS (line search + acceptance stack in step()).
+    # s_floor 아래로 내려가면 그 틱은 거부되고 팔은 HOLD 한다 — 최소 속도를
+    # 보장하는 값이 아니라, 포기 임계값이다.
+    # Raising it makes the controller give up sooner (more HOLD, more "the arm
+    # keeps stopping"); lowering it lets it grind through harder poses.
     s_floor: 0.02
     # Max allowed [position(m), rotation(rad)] lag between desired and
     # commanded EEF pose before the controller treats the follower as having
@@ -99,24 +294,70 @@ gello_ur_bridge:
     # Max EEF excursion (m) from the engage-time anchor pose before the
     # controller rejects further motion (EXCURSION) as a safety backstop
     # against runaway/aliased leader input.
+    #
+    # IT BOUNDS ONE CLUTCH SEGMENT, NOT TOTAL TRAVEL. The measurement is
+    # ||p_cmd - p_r_anchor|| (acceptance stack at the end of step()), and EVERY
+    # engage/reclutch re-snapshots p_r_anchor (_set_anchor()), resetting the
+    # budget to zero. Ten reclutches of 0.4 m each walk the TCP anywhere in the
+    # cell without ever tripping this.
+    # 재클러치 때마다 앵커가 갱신되어 이 예산이 0으로 초기화된다 — 한 구간의
+    # 상한일 뿐 누적 이동거리의 상한이 아니다.
     max_excursion_m: 0.5
 
     # ENGAGE GATE G4 (chains_disagree): max allowed |_last_published -
-    # _actual_pose| per joint (rad) at engage time between the command chain
-    # and the robot's actual measured pose.
+    # _actual_pose| per joint (rad) at engage time.
+    #
+    # *** BOTH SIDES OF THIS COMPARISON ARE ROBOT-SIDE. ***
+    # _last_published = what WE last commanded; _actual_pose = what the robot
+    # actually measured (gello_ur_bridge_node.py `_run_eef_gates()`). G4 only proves the
+    # command chain has not drifted away from the real arm — i.e. that the
+    # anchor we are about to snapshot is trustworthy.
+    # IT SAYS NOTHING ABOUT THE LEADER. There is NO gate anywhere that compares
+    # GELLO joints to robot joints at engage, and under the "3D pen" framing
+    # there must not be one — the two are deliberately different.
+    # 이 게이트는 로봇 명령체인 vs 로봇 실측을 비교할 뿐, 리더와 로봇을 비교하지
+    # 않는다. 리더-로봇 관절 일치를 강제하는 게이트는 코드 어디에도 없다.
     anchor_agree_tol: 0.02
     # ENGAGE GATE G6 (filter_not_settled): max allowed |q_lead_f - _raw_target|
     # per joint (rad) at engage time — the EEF-dedicated one-euro filter
     # (_euro_lead) must have settled onto the live leader before anchoring.
     filter_settled_tol: 0.005
-    # Minimum time (s) a HOLD state (eef_delta internal reject/latch) is held
-    # before the controller will attempt to resume motion, so a single-tick
-    # transient reject doesn't flicker the arm in and out of HOLD.
+    # MAXIMUM time (s) a continuous HOLD is tolerated before the bridge gives
+    # up and AUTO-DISENGAGES (fail-closed, anti permanent saturation).
+    #
+    # CORRECTED 2026-07-22 — this comment used to describe it as a MINIMUM hold
+    # before resuming (debounce). It is the opposite: the controller resumes
+    # the instant the reject clears, and this value is the DEADLINE
+    # (gello_ur_bridge_node.py `_on_timer()`):
+    #     if state == HOLD and (now - hold_since) > hold_latch_s:
+    #         _eef_autodisengage("hold_latched ...")
+    # After that the operator must re-engage; the arm holds its pose.
+    # 최소 유지시간이 아니라 **최대 허용시간**이다. 이 시간을 넘겨 HOLD가 계속되면
+    # 자동 disengage 된다.
+    # LOWERING it makes the session drop out of teleop more eagerly; RAISING it
+    # lets the arm sit inert-but-armed for longer.
     hold_latch_s: 2.0
-    # Per-tick compute budget (microseconds) for the eef stage of _on_timer;
-    # exceeding this is treated as a tick-budget overrun and fails closed to
-    # DISENGAGED (see the node's try/except safety net).
+    # Per-tick compute budget (microseconds) for the eef stage of _on_timer.
+    # TWO-TIER watchdog:
+    #   SOFT (tick_budget_us): performance target. Over it only WARNS (throttled)
+    #     and counts; NEVER disengages. Real-HW baseline is ~1000-1400us, so the
+    #     shipped 1000 warns often — that is expected noise, not a fault.
+    #   HARD (tick_hard_budget_us, default 0 => 80% of the publish period = 3200us
+    #     @250Hz): over it the tick DEGRADES — it HOLDS the arm for that one tick
+    #     (anchor retained, still ENGAGED, NOT paused) and feeds a LEAKY BUCKET.
+    #     Only SUSTAINED slowness — the bucket reaching tick_overrun_limit ticks
+    #     — fails closed to DISENGAGED. A transient CPU spike near a singularity
+    #     (the analytic-IK halving loop firing for a few ticks) no longer tears
+    #     down a healthy session, which was the real-HW nuisance-disengage.
     tick_budget_us: 1000.0
+    # Leaky-bucket size: ticks of SUSTAINED over-hard before fail-closed.
+    # 250 @ 250Hz ~= 1.0s of unbroken slowness. Was effectively 5 (consecutive).
+    # All three watchdog knobs are LIVE-retunable: ros2 param set /gello_ur_bridge
+    #   tick_overrun_limit 250   (also tick_hard_budget_us / tick_overrun_leak)
+    tick_overrun_limit: 250
+    # Bucket drain per healthy tick. 1.0 forgives any non-monotonic spike pattern
+    # (recommended); < 1.0 (e.g. 0.5) also trips chronic intermittent slowness.
+    tick_overrun_leak: 1.0
 
     # GEOMETRIC KEEPOUT (keepout_ok in ur_kin). The node reads this as a flat
     # JSON *string* param `keepout_json` (ROS2 params can't be nested dicts),

@@ -100,12 +100,83 @@ Example:
         robot_ip:=127.0.0.1 use_fake_hardware:=true   # MOCK validation, no real robot/gripper
     ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
         robot_ip:=192.168.10.11 control_mode:=eef     # EEF delta-pose control
+    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
+        robot_ip:=192.168.10.11 control_mode:=eef \
+        pos_scale:=0.0 v_max:=0.01 w_max:=0.05        # staged bring-up stage P6
+
+STAGED EEF BRING-UP OVERRIDES (pos_scale / v_max / w_max):
+    docs/ros2/GELLO_UR7E_EEF_MODE.md §3 prescribes a low-gain, gated first
+    real-robot bring-up (P6: pos_scale=0.0, v_max=0.01, w_max=0.05;
+    P7: v_max 0.02 -> 0.05; P9: v_max=0.08). Those three values used to live
+    ONLY in config/ur7e_gello_eef.yaml, so stepping through the stages meant
+    editing the yaml AND re-running `colcon build` every time (colcon COPIES
+    config into install/, it does not symlink it). They are now real launch
+    arguments.
+
+    Semantics: each defaults to the EMPTY STRING = "not overridden", in which
+    case the yaml value wins exactly as it does today (no duplicated default is
+    hardcoded here that could silently drift from the yaml). Supplying a value
+    overrides the yaml for the EEF bridge node ONLY; control_mode:=joint is
+    completely unaffected (the joint bridge node never sees these).
 
 control_mode:=eef layers config/ur7e_gello_eef.yaml on top of params_file for the
-gello_ur_bridge node ONLY (move-to-start, publisher, and gripper nodes are
-unaffected). control_mode:=joint (default) is byte-for-byte the existing
-behaviour -- no eef overlay is loaded and the bridge lazy-imports no eef
+gello_ur_bridge node ONLY. control_mode:=joint (default) is byte-for-byte the
+existing behaviour -- no eef overlay is loaded and the bridge lazy-imports no eef
 dependencies.
+
+control_mode:=joint_delta layers config/ur7e_gello_joint_delta.yaml the same way
+(START-ANCHORED JOINT DELTA: the arm follows how much GELLO MOVED since an
+anchor, not where GELLO is). Its BRING-UP IS NO-MOTION, exactly like eef mode
+(see below): start_mode / bridge_resume_service auto-derive to 'switch_only' and
+/gello_ur_bridge/joint_delta_start (NOT the joint-mode 'gello' chase). The driver
+comes up on scaled_joint_trajectory_controller, gello_move_to_start performs a
+STRICT controller switch to forward_position_controller IN PLACE (no trajectory
+is built or sent, the arm does not move), and then calls
+/gello_ur_bridge/joint_delta_start, which anchors at the arm's ACTUAL current
+pose and releases the PAUSED bridge into ENGAGED delta streaming WITHOUT any
+chase. From the first tick the arm holds its own pose and moves ONLY by the
+leader's delta thereafter. The first published command equals the arm's actual
+pose ALGEBRAICALLY (zero jump, not within a tolerance), so no protective stop can
+occur. No manual ~/joint_delta_engage call is needed to start delta control;
+~/joint_delta_engage remains the manual RE-anchor for an already-streaming
+bridge. The joint_delta bridge is spawned with jd_start_allow_unstreamed:=True so
+joint_delta_start accepts the never-streamed switch_only startup (the switch-
+first ordering makes the ~/joint_delta_start _has_streamed gate redundant -- the
+controller is already ACTIVE before the service is called, exactly as eef_resume
+relies on with no such gate). Staged bring-up: control_mode:=joint_delta
+jd_gain:=0.0 first -- with gain 0 the arm must not move at all.
+    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \\
+        robot_ip:=192.168.10.11 control_mode:=joint_delta jd_gain:=0.0
+
+EEF BRING-UP IS NO-MOTION (start_mode / bridge_resume_service auto-derive):
+    control_mode:=eef ALSO changes how gello_move_to_start brings the arm up,
+    because the joint-mode handshake is actively wrong there. In eef mode the
+    bridge drives an end-effector DELTA and the delta math is pose-independent:
+    only the leader's CHANGE since the anchor matters. The operator therefore
+    holds GELLO as a free-floating "3D pen", permanently in a different joint
+    configuration from the robot. The default start_mode:=gello would open
+    bring-up by dragging the arm all the way to that unrelated leader joint pose
+    (observed on the real UR7e: "Chasing live GELLO: gap 0.623 rad at pan ->
+    1.25s catch-up") -- a large, unwanted motion that then has to be undone.
+
+    So with control_mode:=eef the move-to-start node now defaults to
+    start_mode:=switch_only (STRICT controller switch in place; NO trajectory is
+    ever built or sent, the arm does not move) and bridge_resume_service
+    defaults to /gello_ur_bridge/eef_resume (the bridge's re-arm WITHOUT the
+    joint-alignment gate, which in eef mode would refuse forever while
+    protecting nothing).
+
+    Both remain plain defaults: start_mode:=gello / start_mode:=init_align and
+    an explicit bridge_resume_service:=... still override them, so the old
+    behaviour is one CLI argument away. control_mode:=joint is untouched
+    (start_mode 'gello' + /gello_ur_bridge/resume, exactly as before).
+
+    The arm HOLDING across a switch_only switch is not an assumption: the
+    outgoing scaled_joint_trajectory_controller holds position from activation
+    onward, so the position command interfaces already carry the current pose,
+    and forward_position_controller (a ForwardCommandController) writes nothing
+    until its first /forward_position_controller/commands message. Verified
+    against ros2_control mock hardware.
 
 With use_fake_hardware:=true AND a real physical GELLO leader attached, the
 arm-side handshake/bridge pipeline (move-to-start convergence gate, controller
@@ -122,6 +193,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     LogInfo,
+    OpaqueFunction,
     RegisterEventHandler,
     TimerAction,
 )
@@ -135,6 +207,211 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+
+
+# --------------------------------------------------------------------------- #
+# Staged EEF bring-up overrides (see module docstring): launch args that
+# override config/ur7e_gello_eef.yaml for the EEF bridge node only.
+#
+# Every name here is declared on gello_ur_bridge with a FLOAT default
+# (declare_parameter("v_max", 0.08) etc., see gello_ur_bridge_node.py), i.e.
+# ROS type PARAMETER_DOUBLE.
+# --------------------------------------------------------------------------- #
+_EEF_DOUBLE_OVERRIDES = ("v_max", "w_max", "pos_scale")
+
+# Staged JOINT_DELTA bring-up overrides: launch args that override
+# config/ur7e_gello_joint_delta.yaml for the joint_delta bridge node only.
+# Same DOUBLE-parameter / int-coercion trap as the eef ones above -- and jd_gain
+# is EXACTLY the parameter an operator types as `jd_gain:=0` and `jd_gain:=1`
+# while stepping through the staged bring-up, so it must go through the same
+# .perform(context) + float() treatment. See _eef_bridge_parameter_overrides().
+_JD_DOUBLE_OVERRIDES = ("jd_gain",)
+
+
+# --------------------------------------------------------------------------- #
+# control_mode-derived handshake defaults.
+#
+# WHY: `control_mode:=joint` and `control_mode:=eef` want OPPOSITE bring-up
+# behaviour, and until now both got the joint one.
+#
+#   joint -> the bridge is a per-joint passthrough, so the robot's joint pose
+#            MUST match the leader's before streaming. start_mode:=gello chases
+#            the live leader until it does. Unchanged, forever.
+#   eef   -> the bridge drives an end-effector DELTA, and the delta math is
+#            pose-independent: only the leader's *change* since the anchor
+#            matters, never its absolute joint pose. The operator therefore uses
+#            GELLO as a free-floating "3D pen", permanently in a different joint
+#            configuration from the robot. Dragging the arm to the leader's joint
+#            pose at bring-up (what start_mode:=gello does) is then not a safety
+#            step at all — it is a large, unwanted autonomous motion that has to
+#            be undone before eef teleop is usable. start_mode:=switch_only does
+#            the STRICT controller switch in place, moving nothing.
+#            For the same reason the resume must NOT go through the bridge's
+#            joint-alignment-gated ~/resume (it would refuse forever while
+#            protecting nothing) but through ~/eef_resume, which re-arms without
+#            that gate.
+#   joint_delta -> START-ANCHORED joint delta: the arm follows the leader's
+#            *change* since an anchor, and the operator wants the robot to STAY AT
+#            ITS OWN CURRENT POSE at bring-up (never chase to the leader). This is
+#            the same no-motion requirement as eef, so joint_delta takes the same
+#            switch_only path, but through the joint_delta-specific re-arm service
+#            ~/joint_delta_start (which anchors at the arm's ACTUAL pose and
+#            releases the paused bridge into ENGAGED delta streaming without any
+#            chase) rather than ~/eef_resume.
+#
+# Both are DEFAULTS ONLY: the start_mode / bridge_resume_service launch
+# arguments still win when supplied, so forcing the old behaviour in eef or
+# joint_delta mode (start_mode:=gello) remains possible.
+# --------------------------------------------------------------------------- #
+def _auto_start_mode(control_mode):
+    """start_mode launch arg, or the control_mode-derived default when empty."""
+    return PythonExpression(
+        [
+            "'", LaunchConfiguration("start_mode"), "'.strip() or ",
+            "('switch_only' if '", control_mode, "' in ('eef', 'joint_delta') else 'gello')",
+        ]
+    )
+
+
+def _auto_resume_service(control_mode):
+    """bridge_resume_service launch arg, or the control_mode-derived default."""
+    return PythonExpression(
+        [
+            "'", LaunchConfiguration("bridge_resume_service"), "'.strip() or ",
+            "('/gello_ur_bridge/eef_resume' if '", control_mode, "' == 'eef' ",
+            "else '/gello_ur_bridge/joint_delta_start' if '", control_mode,
+            "' == 'joint_delta' else '/gello_ur_bridge/resume')",
+        ]
+    )
+
+
+def _eef_bridge_parameter_overrides(context):
+    """Build the EEF bridge's launch-level parameter dict.
+
+    Returns the dict of parameter overrides that is layered LAST (after
+    params_file and the eef overlay yaml) on the eef bridge node.
+
+    ############################################################################
+    # WHY THIS IS AN OpaqueFunction AND NOT `{"v_max": LaunchConfiguration(..)}`
+    #
+    # Known repo-wide gotcha (already bit us once as the tick_budget_us
+    # param-type mismatch in 2905925): launch_ros does NOT pass substitution-
+    # valued parameters through as strings. In
+    #   launch_ros/utilities/evaluate_parameters.py::evaluate_parameter_dict()
+    # a substitution value is performed to a string and then run through
+    # `yaml.safe_load()`, and whatever Python type that yields becomes the ROS
+    # parameter type. So an operator typing
+    #       v_max:=1        -> yaml.safe_load("1")   -> int   -> INTEGER
+    #       pos_scale:=0    -> yaml.safe_load("0")   -> int   -> INTEGER
+    # would hand gello_ur_bridge an INTEGER for a parameter it declared as a
+    # DOUBLE -> rclpy InvalidParameterTypeException at startup -> the bridge
+    # dies mid-bring-up on the real robot. `v_max:=1.0` would work and
+    # `v_max:=1` would not, which is exactly the trap to remove.
+    #
+    # Fix: resolve the LaunchConfiguration to a string OURSELVES here
+    # (`.perform(context)`) and convert with an explicit Python `float()`. The
+    # dict we return therefore holds real Python floats, and
+    #   launch_ros/utilities/normalize_parameters.py::normalize_parameter_dict()
+    # keeps `(float, bool, int)` values "as is" -- no yaml re-parsing, no type
+    # inference. `v_max:=1`, `v_max:=1.0`, `pos_scale:=0` and `pos_scale:=0.0`
+    # all arrive as PARAMETER_DOUBLE.
+    #
+    # Empty string (the declared default) means NOT SUPPLIED: the key is simply
+    # omitted from the dict, so the yaml value wins exactly as it does today.
+    # No yaml default is duplicated in this file.
+    ############################################################################
+    """
+    overrides = {
+        # Pre-existing launch-level overrides, unchanged.
+        "start_paused": True,
+        "control_mode": LaunchConfiguration("control_mode").perform(context),
+    }
+    for name in _EEF_DOUBLE_OVERRIDES:
+        raw = LaunchConfiguration(name).perform(context).strip()
+        if not raw:
+            # Not supplied -> do NOT set the parameter -> yaml value wins.
+            continue
+        try:
+            overrides[name] = float(raw)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Launch argument {name}:={raw!r} is not a number. It overrides "
+                f"the '{name}' double parameter in config/ur7e_gello_eef.yaml; "
+                f"pass a numeric value (e.g. {name}:=0.01) or omit the argument "
+                f"to keep the yaml value."
+            ) from exc
+    return overrides
+
+
+def _joint_delta_bridge_parameter_overrides(context):
+    """Build the JOINT_DELTA bridge's launch-level parameter dict.
+
+    Structural copy of _eef_bridge_parameter_overrides() above, against
+    _JD_DOUBLE_OVERRIDES and config/ur7e_gello_joint_delta.yaml. The whole
+    int-coercion rationale documented there applies VERBATIM here: `jd_gain:=0`
+    (the "the robot must not move at all" stage of the staged bring-up) would
+    otherwise reach the node as an INTEGER against a parameter declared DOUBLE
+    and kill the bridge mid-bring-up. Resolving the LaunchConfiguration
+    ourselves and applying an explicit float() is what makes `jd_gain:=0`,
+    `jd_gain:=0.0`, `jd_gain:=1` and `jd_gain:=1.0` all arrive as
+    PARAMETER_DOUBLE.
+
+    Empty string (the declared default) means NOT SUPPLIED: the key is omitted
+    so the yaml value wins, and no yaml default is duplicated in this file.
+    """
+    # The _has_streamed gate opt-in is scoped to the SWITCH_ONLY no-motion
+    # bring-up ONLY. In that path gello_move_to_start does a STRICT switch IN
+    # PLACE and then calls ~/joint_delta_start; that switch-first ordering makes
+    # the gate redundant (the "controller must already be active" invariant the
+    # _has_streamed latch proxies is guaranteed structurally, identical to how
+    # ~/eef_resume ships with no such gate). But start_mode is a supported
+    # override: an operator can force start_mode:=gello to restore the old chase,
+    # and in that path the chase runs BEFORE the switch, so the gate must stay
+    # live to refuse a mis-sequenced manual ~/joint_delta_start streaming into
+    # the still-inactive controller. We therefore derive the opt-in from the
+    # SAME resolved start_mode the move_to_start node will use, not from the
+    # control_mode alone. Default (empty start_mode) resolves to switch_only, so
+    # the ordinary no-motion bring-up keeps the opt-in.
+    resolved_start_mode = (
+        LaunchConfiguration("start_mode").perform(context).strip() or "switch_only"
+    )
+    overrides = {
+        "start_paused": True,
+        "control_mode": LaunchConfiguration("control_mode").perform(context),
+        # True only for the switch_only no-motion path (see rationale above).
+        # This override dict is built ONLY on the is_joint_delta_mode branch, so
+        # the joint and eef bridges never receive this parameter at all.
+        "jd_start_allow_unstreamed": (resolved_start_mode == "switch_only"),
+    }
+    for name in _JD_DOUBLE_OVERRIDES:
+        raw = LaunchConfiguration(name).perform(context).strip()
+        if not raw:
+            continue
+        try:
+            overrides[name] = float(raw)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Launch argument {name}:={raw!r} is not a number. It overrides "
+                f"the '{name}' double parameter in "
+                f"config/ur7e_gello_joint_delta.yaml; pass a numeric value "
+                f"(e.g. {name}:=0.0) or omit the argument to keep the yaml value."
+            ) from exc
+    # RANGE-CHECK HERE, AT LAUNCH TIME, not at node construction. JointDeltaController
+    # raises ValueError for a gain outside [0.0, 2.0] — correct for the module, but if
+    # that raise happens inside GelloUrBridge.__init__ the bridge simply never appears,
+    # and gello_move_to_start's resume then fires at t=8s against a service that does
+    # not exist: a confusing half-started bring-up, which is the exact failure class the
+    # int-coercion comment above was written to prevent. Failing HERE aborts the launch
+    # before anything spawns, with a message that names the offending argument.
+    gain = overrides.get("jd_gain")
+    if gain is not None and not (0.0 <= gain <= 2.0):
+        raise RuntimeError(
+            f"Launch argument jd_gain:={gain} is out of range — it must be in "
+            "[0.0, 2.0] (0.0 = the robot never moves, the first stage of the "
+            "staged bring-up; 1.0 = 1:1 with the leader's travel). Nothing was "
+            "started."
+        )
+    return overrides
 
 
 def generate_launch_description():
@@ -226,20 +503,49 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "start_mode",
-            default_value="gello",
+            # Empty == AUTO: derived from control_mode (joint -> 'gello',
+            # eef -> 'switch_only'). See _START_MODE_FOR_CONTROL_MODE below.
+            # Any explicit value still wins, so an operator can force the old
+            # chase behaviour in eef mode with start_mode:=gello.
+            default_value="",
             description=(
-                "Handshake style for gello_move_to_start. 'gello' (default): the "
-                "arm CHASES the live leader (gap-sized catch-ups) and streams only "
-                "once caught up within chase_tol, sustained chase_dwell_s. "
-                "'init_align': the arm moves to a fixed init_pose (from the params "
-                "file), then waits for you to align the GELLO leader to it before "
-                "streaming (safer first motion)."
+                "Handshake style for gello_move_to_start. Empty (default) = AUTO: "
+                "control_mode:=joint -> 'gello', control_mode:=eef -> "
+                "'switch_only'. Explicit values: 'gello' -- the arm CHASES the "
+                "live leader (gap-sized catch-ups) and streams only once caught up "
+                "within chase_tol, sustained chase_dwell_s. 'init_align' -- the arm "
+                "moves to a fixed init_pose (from the params file), then waits for "
+                "you to align the GELLO leader to it before streaming (safer first "
+                "motion). 'switch_only' -- the arm NEVER MOVES during bring-up: no "
+                "trajectory is built or sent, the STRICT controller switch happens "
+                "in place and the bridge is resumed immediately. Intended for "
+                "control_mode:=eef, where the leader is used as a free-floating '3D "
+                "pen' and is DELIBERATELY in a different joint configuration from "
+                "the robot, so joint alignment is meaningless (the eef delta math "
+                "is pose-independent) and both moving modes would only produce an "
+                "unwanted large motion."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "bridge_resume_service",
+            # Empty == AUTO: derived from control_mode (joint -> ~/resume,
+            # eef -> ~/eef_resume). Escape hatch: point it back at
+            # /gello_ur_bridge/resume if the eef_resume service is unavailable.
+            default_value="",
+            description=(
+                "Service gello_move_to_start calls after a successful STRICT "
+                "switch to release the pre-spawned paused bridge. Empty (default) "
+                "= AUTO: control_mode:=joint -> '/gello_ur_bridge/resume' (the "
+                "joint-alignment-gated re-arm), control_mode:=eef -> "
+                "'/gello_ur_bridge/eef_resume' (re-arms WITHOUT that gate, which in "
+                "eef mode would refuse forever while protecting nothing). Override "
+                "explicitly to pin one of them."
             ),
         ),
         DeclareLaunchArgument(
             "control_mode",
             default_value="joint",
-            choices=["joint", "eef"],
+            choices=["joint", "eef", "joint_delta"],
             description=(
                 "gello_ur_bridge control mode. 'joint' (default): existing "
                 "per-joint passthrough, UNCHANGED behaviour -- the bridge does "
@@ -248,8 +554,83 @@ def generate_launch_description():
                 "config/ur7e_gello_eef.yaml (layered on top of params_file) and "
                 "drives an end-effector delta-pose controller gated behind the "
                 "eef_engage/eef_disengage/eef_reclutch/eef_to_joint services. "
+                "'joint_delta': START-ANCHORED JOINT DELTA -- the bridge loads "
+                "config/ur7e_gello_joint_delta.yaml (layered on top of "
+                "params_file) and commands "
+                "q_robot_anchor + jd_gain * (leader travel since the anchor), "
+                "gated behind the joint_delta_engage / joint_delta_clutch / "
+                "joint_delta_reclutch / joint_delta_disengage / "
+                "joint_delta_to_joint / joint_delta_start services. The arm "
+                "follows how much GELLO MOVES, not where it is, so the operator "
+                "can 'mouse lift' (clutch, reposition the leader, reclutch) and "
+                "leader drift stops mattering. Bring-up is NO-MOTION in this "
+                "mode, exactly like eef: start_mode auto-derives to "
+                "'switch_only' and bridge_resume_service to "
+                "'/gello_ur_bridge/joint_delta_start', so gello_move_to_start "
+                "does a STRICT controller switch IN PLACE (no chase, the arm "
+                "does not move) and the bridge anchors at the arm's actual pose "
+                "and starts delta streaming -- no manual ~/joint_delta_engage is "
+                "needed to begin. "
                 "Only the gello_ur_bridge node is affected; move-to-start, the "
                 "GELLO publisher, and the gripper nodes are unchanged."
+            ),
+        ),
+        # ---------------------------------------------------------------- #
+        # STAGED EEF BRING-UP OVERRIDES (see module docstring).
+        #
+        # Default "" == NOT OVERRIDDEN: the value from
+        # config/ur7e_gello_eef.yaml is used, byte-for-byte as before. We
+        # deliberately do NOT repeat the yaml numbers as defaults here -- a
+        # duplicated default would silently drift from the yaml.
+        #
+        # These are consumed ONLY by bridge_node_eef (control_mode:=eef).
+        # ---------------------------------------------------------------- #
+        DeclareLaunchArgument(
+            "v_max",
+            default_value="",
+            description=(
+                "EEF MODE ONLY. Max commanded EEF linear speed (m/s), "
+                "overriding v_max in config/ur7e_gello_eef.yaml. Empty "
+                "(default) = use the yaml value. Staged bring-up: P6 0.01, "
+                "P7 0.02 -> 0.05, P9 0.08. Ignored in control_mode:=joint."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "w_max",
+            default_value="",
+            description=(
+                "EEF MODE ONLY. Max commanded EEF angular speed (rad/s), "
+                "overriding w_max in config/ur7e_gello_eef.yaml. Empty "
+                "(default) = use the yaml value. Staged bring-up: P6 0.05. "
+                "Ignored in control_mode:=joint."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "pos_scale",
+            default_value="",
+            description=(
+                "EEF MODE ONLY. Leader->follower position gain (dimensionless), "
+                "overriding pos_scale in config/ur7e_gello_eef.yaml. Empty "
+                "(default) = use the yaml value. Staged bring-up: P6 0.0 (the "
+                "robot must not move at all). Ignored in control_mode:=joint."
+            ),
+        ),
+        # ---------------------------------------------------------------- #
+        # STAGED JOINT_DELTA BRING-UP OVERRIDE. Same semantics as the three
+        # above: default "" == NOT OVERRIDDEN (the joint_delta overlay yaml
+        # wins), and a supplied value is coerced to a real Python float before
+        # it reaches the node.
+        # ---------------------------------------------------------------- #
+        DeclareLaunchArgument(
+            "jd_gain",
+            default_value="",
+            description=(
+                "JOINT_DELTA MODE ONLY. Leader->robot joint gain "
+                "(dimensionless), overriding jd_gain in "
+                "config/ur7e_gello_joint_delta.yaml. Empty (default) = use the "
+                "yaml value. Staged bring-up: P4 0.0 (the arm must not move at "
+                "all after engage), P5 0.25, P6 0.5, P7 1.0. Ignored in "
+                "control_mode:=joint / control_mode:=eef."
             ),
         ),
     ]
@@ -377,10 +758,16 @@ def generate_launch_description():
         # the bridge never streams into an inactive controller; the bridge's own
         # ~/resume is alignment-gated + soft-started. Kept a launch override (not
         # in yaml) so standalone move_to_start runs do not try to poke a bridge.
+        # start_mode + bridge_resume_service are AUTO-derived from control_mode
+        # when their launch arguments are left empty (see _auto_start_mode /
+        # _auto_resume_service above): joint keeps 'gello' + ~/resume exactly as
+        # before, eef gets 'switch_only' + ~/eef_resume so bring-up never drags
+        # the arm to the leader's (deliberately different) joint pose.
         parameters=[
             params_file,
             {
-                "start_mode": LaunchConfiguration("start_mode"),
+                "start_mode": _auto_start_mode(control_mode),
+                "bridge_resume_service": _auto_resume_service(control_mode),
                 "resume_bridge": True,
             },
         ],
@@ -413,11 +800,23 @@ def generate_launch_description():
             "ur7e_gello_eef.yaml",
         ]
     )
+    # control_mode:=joint_delta layers config/ur7e_gello_joint_delta.yaml the
+    # same way, and is likewise ONLY consulted under its own IfCondition.
+    joint_delta_overlay_file = PathJoinSubstitution(
+        [
+            FindPackageShare("ur_gello_bringup"),
+            "config",
+            "ur7e_gello_joint_delta.yaml",
+        ]
+    )
     is_joint_mode = IfCondition(
         PythonExpression(["'", control_mode, "' == 'joint'"])
     )
     is_eef_mode = IfCondition(
         PythonExpression(["'", control_mode, "' == 'eef'"])
+    )
+    is_joint_delta_mode = IfCondition(
+        PythonExpression(["'", control_mode, "' == 'joint_delta'"])
     )
 
     # Two conditioned Node actions (rather than branching Python logic) so the
@@ -434,16 +833,59 @@ def generate_launch_description():
         condition=is_joint_mode,
     )
 
-    bridge_node_eef = Node(
-        package="ur_gello_bringup",
-        executable="gello_ur_bridge",
-        parameters=[
-            params_file,
-            eef_overlay_file,
-            {"start_paused": True, "control_mode": control_mode},
-        ],
-        output="screen",
+    # The eef bridge is built inside an OpaqueFunction so the staged-bring-up
+    # launch args (v_max / w_max / pos_scale) can be resolved to real Python
+    # floats before they are handed to the Node -- see
+    # _eef_bridge_parameter_overrides() above for why that matters (int
+    # coercion of all-digit CLI values). The OpaqueFunction carries the same
+    # is_eef_mode condition the Node used to, so in control_mode:=joint it is
+    # never even evaluated and the joint path is untouched.
+    def _make_bridge_node_eef(context):
+        return [
+            Node(
+                package="ur_gello_bringup",
+                executable="gello_ur_bridge",
+                parameters=[
+                    params_file,
+                    eef_overlay_file,
+                    # Layered LAST -> wins over both yaml files. Contains an
+                    # entry for v_max / w_max / pos_scale ONLY if the operator
+                    # actually passed that launch argument.
+                    _eef_bridge_parameter_overrides(context),
+                ],
+                output="screen",
+            )
+        ]
+
+    bridge_node_eef = OpaqueFunction(
+        function=_make_bridge_node_eef,
         condition=is_eef_mode,
+    )
+
+    # The joint_delta bridge is built the same way and for the same reason (the
+    # jd_gain staged-bring-up arg must be a real Python float, not an int). It
+    # carries is_joint_delta_mode, so in control_mode:=joint / :=eef it is never
+    # even evaluated and neither of those paths is touched.
+    def _make_bridge_node_joint_delta(context):
+        return [
+            Node(
+                package="ur_gello_bringup",
+                executable="gello_ur_bridge",
+                parameters=[
+                    params_file,
+                    joint_delta_overlay_file,
+                    # Layered LAST -> wins over both yaml files. Contains an
+                    # entry for jd_gain ONLY if the operator actually passed
+                    # that launch argument.
+                    _joint_delta_bridge_parameter_overrides(context),
+                ],
+                output="screen",
+            )
+        ]
+
+    bridge_node_joint_delta = OpaqueFunction(
+        function=_make_bridge_node_joint_delta,
+        condition=is_joint_delta_mode,
     )
 
     # ------------------------------------------------------------------ #
@@ -524,10 +966,10 @@ def generate_launch_description():
     )
     bridge_paused_delayed = TimerAction(
         period=6.0,
-        # Both entries are IfCondition-gated on control_mode; exactly one
-        # spawns at runtime (the other's condition evaluates false and it is
+        # All three entries are IfCondition-gated on control_mode; exactly one
+        # spawns at runtime (the others' conditions evaluate false and they are
         # never launched).
-        actions=[bridge_node_joint, bridge_node_eef],
+        actions=[bridge_node_joint, bridge_node_eef, bridge_node_joint_delta],
     )
     move_to_start_delayed = TimerAction(
         period=8.0,
@@ -565,6 +1007,9 @@ def generate_launch_description():
                 gripper_modbus_node,
                 gello_gripper_bridge_node,
             ]
+        # Quote the SAME resume service the handshake would have called, so the
+        # manual-recovery hint is correct in eef mode (~/eef_resume) too.
+        resume_svc = _auto_resume_service(control_mode).perform(context)
         return [
             LogInfo(
                 msg=(
@@ -574,7 +1019,7 @@ def generate_launch_description():
                     "The robot will stay put. Check that the External Control "
                     "program is PLAYING on the pendant, then re-launch. Manual "
                     "recovery once aligned: re-align the leader and call "
-                    "'ros2 service call /gello_ur_bridge/resume "
+                    f"'ros2 service call {resume_svc} "
                     "std_srvs/srv/Trigger' after switching to "
                     "forward_position_controller."
                 )

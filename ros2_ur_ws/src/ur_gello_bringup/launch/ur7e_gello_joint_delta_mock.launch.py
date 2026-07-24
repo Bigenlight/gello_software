@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Bring up a UR7e in RViz with mock/fake hardware, driven via the EEF
-(end-effector delta-pose) bridge control mode. NO REAL ROBOT REQUIRED.
+"""Bring up a UR7e in RViz with mock/fake hardware, driven via the JOINT_DELTA
+(start-anchored joint-space delta) bridge control mode. NO REAL ROBOT REQUIRED.
 
-This is the turnkey validation entrypoint for `control_mode:=eef` on
-`gello_ur_bridge`. It mirrors `ur7e_gello_rviz.launch.py` (mock ros2_control +
-GELLO source + bridge + RViz) but forces the bridge into eef mode and layers
-`config/ur7e_gello_eef.yaml` on top of `params_file`, so the full engage/
-reclutch/disengage gate stack (G1-G9), the eef delta controller, and the
-zero-jump BOOTSTRAP -> ENGAGED state machine can be exercised end-to-end
-against safe, undamageable mock hardware:
+This is the turnkey validation entrypoint for `control_mode:=joint_delta` on
+`gello_ur_bridge`. It mirrors `ur7e_gello_eef_mock.launch.py` (mock ros2_control
++ GELLO source + bridge + RViz) but forces the bridge into joint_delta mode and
+layers `config/ur7e_gello_joint_delta.yaml` on top of `params_file`, so the full
+engage/clutch/reclutch gate stack (G0-G7), the delta accumulator, the joint-limit
+and excursion clamps, and the
+JOINT_BOOTSTRAP -> ENGAGED -> CLUTCHED -> ENGAGED state machine can be exercised
+end-to-end against safe, undamageable mock hardware:
 
   1. Includes the official ``ur_control.launch.py`` from ``ur_robot_driver``
      with ``ur_type:=ur7e`` and ``use_fake_hardware:=true``. The ros2_control
@@ -16,82 +17,81 @@ against safe, undamageable mock hardware:
      so any command sent to the ``forward_position_controller`` makes the
      RViz model move -- nothing here can be damaged.
   2. A few seconds later, starts our ``gello_ur_bridge`` node with
-     ``control_mode:=eef``, parameters layered as
-     ``[params_file, ur7e_gello_eef.yaml, {control_mode: eef}]`` so the eef
-     overlay always wins on key conflicts. The bridge boots in BOOTSTRAP
-     (joint passthrough) until ``~/eef_engage`` is called; use
-     ``~/eef_engage``, ``~/eef_reclutch``, ``~/eef_disengage``,
-     ``~/eef_to_joint`` (all std_srvs/Trigger) to drive the state machine and
-     watch ``~/eef/state`` (std_msgs/String, JSON) plus
-     ``~/eef/{leader,desired,commanded}_pose`` (PoseStamped) for the reject
-     reasons / gate failures (NO_IK, BRANCH_JUMP, JOINT_LIMIT, GEOM_KEEPOUT,
-     EXCURSION, ESTOP, BAD_INPUT) without ever risking real hardware.
+     ``control_mode:=joint_delta``, parameters layered as
+     ``[params_file, ur7e_gello_joint_delta.yaml, {control_mode: joint_delta}]``
+     so the joint_delta overlay always wins on key conflicts. The bridge boots
+     in JOINT_BOOTSTRAP (ordinary absolute joint passthrough -- NOT the eef
+     3D-pen HOLD) until ``~/joint_delta_engage`` is called. Drive the state
+     machine with ``~/joint_delta_engage``, ``~/joint_delta_clutch``,
+     ``~/joint_delta_reclutch``, ``~/joint_delta_disengage``,
+     ``~/joint_delta_to_joint``, ``~/joint_delta_start`` (all std_srvs/Trigger)
+     and watch ``~/joint_delta/state`` (std_msgs/String, JSON) for the gate
+     failures and reject reasons (BAD_INPUT, ESTOP, LEADER_JUMP) plus the
+     per-joint ``delta`` / ``limited`` / ``slewed`` / ``excursion_rad`` /
+     ``jump_absorbed`` telemetry, without ever risking real hardware.
   3. Also starts the GELLO source:
        * ``source:=fake``  -> ``fake_gello`` (synthetic joint stream, no
-         hardware). Exposes ``pattern`` (forwarded to fake_gello's
-         ``pattern`` parameter) so a reviewer can pick which synthetic motion
-         drives the eef gates (e.g. a held-still pose to pass the
-         leader-quasi-still gate G5, or a sweep to exercise HOLD/reject
-         paths). Consult fake_gello's own parameter docs for the exact set of
-         supported values; this launch only forwards whatever string you
-         pass through unmodified.
+         hardware). ``pattern`` is forwarded to fake_gello's ``pattern``
+         parameter, which is the whole point of using this launch for
+         joint_delta validation:
+             pattern:=hold           -> a genuinely still leader; satisfies the
+                                        leader-quasi-still gate G5 so an engage
+                                        can actually be accepted.
+             pattern:=step           -> repeated discrete leader jumps; exercises
+                                        jd_leader_jump_max_rad (absorbed jumps)
+                                        and the slew clamp.
+             pattern:=full_rotation  -> wrist_3 through +2*pi with no cap; this
+                                        is THE regression rehearsal for the
+                                        accumulate-past-pi property (a naive
+                                        wrap-against-the-anchor implementation
+                                        would fold and drive the arm backwards).
        * ``source:=gello`` -> ``gello_publisher`` (reads the real, PASSIVE
          GELLO leader arm; still no real UR robot is involved).
   4. Optionally the Robotiq gripper node (harmless logging by default,
      ``connect_on_start:=false``) -- the gripper path is unchanged by
-     control_mode and is included here only for structural parity with
-     ``ur7e_gello_rviz.launch.py``.
+     control_mode and is included here only for structural parity.
 
 By default this mock launch does NOT run the gello_move_to_start handshake (mock
 hardware cannot be damaged by a first-command jump); that safety step is only
 mandatory on real HW, in ur7e_gello_real.launch.py.
 
-handshake:=true MIRRORS THE REAL EEF BRING-UP (no real robot needed):
+handshake:=true MIRRORS THE REAL JOINT_DELTA BRING-UP (no real robot needed):
     Pass ``handshake:=true`` to reproduce ur7e_gello_real.launch.py's
-    control_mode:=eef bring-up sequence here, so the NO-MOTION start path can be
-    exercised and observed before it is ever used on the real UR7e. It changes
-    three things and nothing else:
+    control_mode:=joint_delta bring-up here. Like eef mode, that bring-up is now a
+    NO-MOTION one: the driver comes up on ``scaled_joint_trajectory_controller``
+    (so forward_position_controller is loaded INACTIVE), the bridge is pre-spawned
+    PAUSED (with ``jd_start_allow_unstreamed:=True``), and ``gello_move_to_start``
+    runs with ``start_mode:=switch_only`` (a STRICT controller switch IN PLACE --
+    no trajectory is built or sent, the arm does not move) +
+    ``bridge_resume_service:=/gello_ur_bridge/joint_delta_start`` (anchor at the
+    arm's ACTUAL current pose and release into ENGAGED delta streaming, WITHOUT
+    any chase). From the first tick the arm holds its own pose and thereafter
+    moves ONLY by the leader's delta; with ``jd_gain:=0.0`` it does not move at
+    all. No manual ``~/joint_delta_engage`` call is needed to start delta control;
+    that service remains the manual RE-anchor for an already-streaming bridge.
 
-      * the driver is brought up on ``scaled_joint_trajectory_controller``
-        (ACTIVE) instead of ``forward_position_controller``, so
-        forward_position_controller is loaded INACTIVE and there is a real
-        controller switch to perform;
-      * the bridge is pre-spawned PAUSED (``start_paused:=True``), exactly as the
-        real launch does;
-      * ``gello_move_to_start`` runs at t=8s with the same control_mode-derived
-        defaults the real launch uses in eef mode: ``start_mode:=switch_only``
-        (STRICT switch in place -- NO trajectory is built or sent and the arm
-        does not move) and ``bridge_resume_service:=/gello_ur_bridge/eef_resume``
-        (the re-arm that skips the joint-alignment gate, which is meaningless in
-        eef mode). Both are overridable via the ``start_mode`` /
-        ``bridge_resume_service`` launch arguments.
-
-    What to watch while it runs (the interesting question is whether
-    forward_position_controller holds the arm's pose when it is STRICT-activated
-    with NO prior trajectory):
-        ros2 topic echo /joint_states
-        ros2 topic echo /forward_position_controller/commands
-
-    handshake:=false (the default) leaves this launch byte-for-byte as it was.
+    handshake:=false (the default) starts forward_position_controller active and
+    the bridge unpaused, which is the fastest way to exercise the state machine.
 
 SAFETY: GELLO is ALWAYS a passive, read-only leader. The driver never applies
 torque to the GELLO Dynamixels; it only reads their joint angles.
 
-Staged-bring-up overrides (v_max / w_max / pos_scale) are accepted here with
-exactly the same semantics as in ur7e_gello_real.launch.py, so the mock can
-exercise the same code path before it is used on the real arm: each defaults to
-the EMPTY STRING = "not overridden" (config/ur7e_gello_eef.yaml wins), and a
-supplied value is coerced to a real Python float before it reaches the node.
+Staged-bring-up override (jd_gain) is accepted here with exactly the same
+semantics as in ur7e_gello_real.launch.py, so the mock can exercise the same code
+path before it is used on the real arm: it defaults to the EMPTY STRING = "not
+overridden" (config/ur7e_gello_joint_delta.yaml wins), and a supplied value is
+coerced to a real Python float before it reaches the node.
 
 Example:
-    ros2 launch ur_gello_bringup ur7e_gello_eef_mock.launch.py
-    ros2 launch ur_gello_bringup ur7e_gello_eef_mock.launch.py source:=gello
-    ros2 launch ur_gello_bringup ur7e_gello_eef_mock.launch.py \
+    ros2 launch ur_gello_bringup ur7e_gello_joint_delta_mock.launch.py
+    ros2 launch ur_gello_bringup ur7e_gello_joint_delta_mock.launch.py \\
         source:=fake pattern:=hold launch_rviz:=false
-    ros2 launch ur_gello_bringup ur7e_gello_eef_mock.launch.py \
-        pos_scale:=0.0 v_max:=0.01 w_max:=0.05     # mock rehearsal of stage P6
-    ros2 launch ur_gello_bringup ur7e_gello_eef_mock.launch.py \
-        handshake:=true launch_rviz:=false pattern:=hold  # NO-MOTION bring-up
+    ros2 launch ur_gello_bringup ur7e_gello_joint_delta_mock.launch.py \\
+        pattern:=hold jd_gain:=0.0            # mock rehearsal of the P1 stage
+    ros2 launch ur_gello_bringup ur7e_gello_joint_delta_mock.launch.py \\
+        pattern:=full_rotation launch_rviz:=false   # accumulate-past-pi check
+    ros2 launch ur_gello_bringup ur7e_gello_joint_delta_mock.launch.py \\
+        handshake:=true launch_rviz:=false pattern:=hold
 """
 
 from launch import LaunchDescription
@@ -112,26 +112,27 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
-# Staged-bring-up overrides. Same three names, same semantics and the same
-# float-coercion handling as ur7e_gello_real.launch.py -- see the long comment
-# in _eef_bridge_parameter_overrides() there for the full rationale. Short
-# version: gello_ur_bridge declares these as DOUBLE parameters, but launch_ros
-# runs substitution-valued parameters through yaml.safe_load(), so an all-digit
-# CLI value like `v_max:=1` would become an INTEGER and crash the node with a
-# parameter-type mismatch. We therefore .perform() the LaunchConfiguration
-# ourselves and apply an explicit float(); normalize_parameter_dict() keeps a
-# real Python float as-is, so the node always receives a DOUBLE.
-_EEF_DOUBLE_OVERRIDES = ("v_max", "w_max", "pos_scale")
+# Staged-bring-up override. Same semantics and the same float-coercion handling
+# as ur7e_gello_real.launch.py -- see the long comment in
+# _eef_bridge_parameter_overrides() there for the full rationale. Short version:
+# gello_ur_bridge declares jd_gain as a DOUBLE parameter, but launch_ros runs
+# substitution-valued parameters through yaml.safe_load(), so the all-digit CLI
+# value `jd_gain:=0` (the first staged bring-up stage!) would become an INTEGER
+# and crash the node with a parameter-type mismatch. We therefore .perform() the
+# LaunchConfiguration ourselves and apply an explicit float();
+# normalize_parameter_dict() keeps a real Python float as-is, so the node always
+# receives a DOUBLE.
+_JD_DOUBLE_OVERRIDES = ("jd_gain",)
 
 
-def _eef_double_overrides(context):
+def _jd_double_overrides(context):
     """Return {name: float} for every staged-bring-up arg actually supplied.
 
     An empty value (the declared default) means NOT SUPPLIED -> the key is
-    omitted -> the eef overlay yaml value wins, unchanged.
+    omitted -> the joint_delta overlay yaml value wins, unchanged.
     """
     overrides = {}
-    for name in _EEF_DOUBLE_OVERRIDES:
+    for name in _JD_DOUBLE_OVERRIDES:
         raw = LaunchConfiguration(name).perform(context).strip()
         if not raw:
             continue
@@ -140,10 +141,19 @@ def _eef_double_overrides(context):
         except ValueError as exc:
             raise RuntimeError(
                 f"Launch argument {name}:={raw!r} is not a number. It overrides "
-                f"the '{name}' double parameter in config/ur7e_gello_eef.yaml; "
-                f"pass a numeric value (e.g. {name}:=0.01) or omit the argument "
-                f"to keep the yaml value."
+                f"the '{name}' double parameter in "
+                f"config/ur7e_gello_joint_delta.yaml; pass a numeric value "
+                f"(e.g. {name}:=0.0) or omit the argument to keep the yaml value."
             ) from exc
+    # Same launch-time range check as ur7e_gello_real.launch.py: an out-of-range
+    # gain makes JointDeltaController's constructor raise, which would kill the
+    # bridge silently mid-bring-up instead of failing the launch outright.
+    gain = overrides.get("jd_gain")
+    if gain is not None and not (0.0 <= gain <= 2.0):
+        raise RuntimeError(
+            f"Launch argument jd_gain:={gain} is out of range — it must be in "
+            "[0.0, 2.0]. Nothing was started."
+        )
     return overrides
 
 
@@ -167,10 +177,12 @@ def generate_launch_description():
             default_value="sweep",
             description=(
                 "Forwarded verbatim to fake_gello's 'pattern' parameter "
-                "(only consulted when source:=fake). Lets a reviewer pick "
-                "which synthetic leader motion drives the eef engage gates "
-                "(e.g. a still pose to satisfy the leader-quasi-still gate, "
-                "or a sweep to exercise HOLD / reject paths). See "
+                "(only consulted when source:=fake). For joint_delta the "
+                "interesting values are 'hold' (still leader -> gate G5 can "
+                "pass, so an engage is actually accepted), 'step' (discrete "
+                "jumps -> exercises jd_leader_jump_max_rad and the slew clamp) "
+                "and 'full_rotation' (wrist_3 through +2*pi -> the "
+                "accumulate-past-pi regression rehearsal). See "
                 "fake_gello_node.py for the supported values."
             ),
         ),
@@ -213,85 +225,63 @@ def generate_launch_description():
             description="Base YAML parameter file for the GELLO bridge / publisher.",
         ),
         DeclareLaunchArgument(
-            "eef_params_file",
+            "joint_delta_params_file",
             default_value=PathJoinSubstitution(
                 [
                     FindPackageShare("ur_gello_bringup"),
                     "config",
-                    "ur7e_gello_eef.yaml",
+                    "ur7e_gello_joint_delta.yaml",
                 ]
             ),
             description=(
-                "EEF overlay YAML, layered on TOP of params_file for the "
-                "bridge only (later entries in a Node's `parameters` list "
-                "win on key conflicts)."
-            ),
-        ),
-        # ---------------------------------------------------------------- #
-        # Staged EEF bring-up overrides (mirror of ur7e_gello_real.launch.py).
-        # Default "" == NOT OVERRIDDEN -> the eef overlay yaml value is used.
-        # No yaml default is duplicated here.
-        # ---------------------------------------------------------------- #
-        DeclareLaunchArgument(
-            "v_max",
-            default_value="",
-            description=(
-                "Max commanded EEF linear speed (m/s), overriding v_max in the "
-                "eef overlay yaml. Empty (default) = use the yaml value. "
-                "Staged bring-up: P6 0.01, P7 0.02 -> 0.05, P9 0.08."
+                "JOINT_DELTA overlay YAML, layered on TOP of params_file for the "
+                "bridge only (later entries in a Node's `parameters` list win on "
+                "key conflicts)."
             ),
         ),
         DeclareLaunchArgument(
-            "w_max",
+            "jd_gain",
             default_value="",
             description=(
-                "Max commanded EEF angular speed (rad/s), overriding w_max in "
-                "the eef overlay yaml. Empty (default) = use the yaml value. "
-                "Staged bring-up: P6 0.05."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "pos_scale",
-            default_value="",
-            description=(
-                "Leader->follower position gain (dimensionless), overriding "
-                "pos_scale in the eef overlay yaml. Empty (default) = use the "
-                "yaml value. Staged bring-up: P6 0.0 (robot must not move)."
+                "Leader->robot joint gain (dimensionless), overriding jd_gain in "
+                "the joint_delta overlay yaml. Empty (default) = use the yaml "
+                "value. Staged bring-up: P1/P4 0.0 (the arm must not move at all "
+                "after engage), then 0.25 / 0.5 / 1.0."
             ),
         ),
         # ---------------------------------------------------------------- #
-        # Mirror of the real launch's eef bring-up path (see module docstring).
-        # Default 'false' keeps this launch exactly as it was.
+        # Mirror of the real launch's joint_delta bring-up path (see module
+        # docstring). Default 'false' = the fast state-machine rehearsal.
         # ---------------------------------------------------------------- #
         DeclareLaunchArgument(
             "handshake",
             default_value="false",
             choices=["true", "false"],
             description=(
-                "If true, reproduce ur7e_gello_real.launch.py's control_mode:=eef "
-                "bring-up against mock hardware: bring the driver up on "
-                "scaled_joint_trajectory_controller (so forward_position_controller "
-                "is loaded INACTIVE), pre-spawn the bridge PAUSED, and run "
-                "gello_move_to_start at t=8s with start_mode:=switch_only + "
-                "bridge_resume_service:=/gello_ur_bridge/eef_resume. Lets the "
-                "NO-MOTION start path (and whether forward_position_controller holds "
-                "pose across a switch with no prior trajectory) be observed without "
-                "hardware. Default 'false' = this launch's original behaviour "
-                "(forward_position_controller active from the start, no handshake, "
-                "bridge unpaused)."
+                "If true, reproduce ur7e_gello_real.launch.py's "
+                "control_mode:=joint_delta bring-up against mock hardware: bring "
+                "the driver up on scaled_joint_trajectory_controller (so "
+                "forward_position_controller is loaded INACTIVE), pre-spawn the "
+                "bridge PAUSED (jd_start_allow_unstreamed:=True), and run "
+                "gello_move_to_start with start_mode:=switch_only (a STRICT "
+                "controller switch IN PLACE -- no trajectory, the arm does not "
+                "move) + bridge_resume_service:=/gello_ur_bridge/joint_delta_start "
+                "(anchor at the arm's ACTUAL current pose and release into ENGAGED "
+                "delta streaming, no chase) -- i.e. the NO-MOTION bring-up, "
+                "matching eef mode. Default 'false' = forward_position_controller "
+                "active from the start, no handshake, bridge unpaused."
             ),
         ),
         DeclareLaunchArgument(
             "start_mode",
-            # Empty == AUTO. This launch is always control_mode:=eef, so the
-            # derived default is 'switch_only' -- same rule as the real launch.
+            # Empty == AUTO. joint_delta uses the SAME derived default as eef mode
+            # ('switch_only'), NOT joint mode's 'gello' chase.
             default_value="",
             description=(
                 "handshake:=true ONLY. Handshake style for gello_move_to_start. "
-                "Empty (default) = AUTO -> 'switch_only' (this launch is always "
-                "control_mode:=eef): the STRICT controller switch happens in place, "
-                "no trajectory is built or sent and the arm never moves. Explicit "
-                "'gello' / 'init_align' force the joint-alignment bring-up styles."
+                "Empty (default) = AUTO -> 'switch_only' (the STRICT switch IN "
+                "PLACE, no motion), which is what control_mode:=joint_delta uses "
+                "on real hardware too. Explicit 'gello' / 'init_align' still win."
             ),
         ),
         DeclareLaunchArgument(
@@ -300,9 +290,9 @@ def generate_launch_description():
             description=(
                 "handshake:=true ONLY. Service gello_move_to_start calls after a "
                 "successful STRICT switch. Empty (default) = AUTO -> "
-                "'/gello_ur_bridge/eef_resume' (re-arm WITHOUT the joint-alignment "
-                "gate, which is meaningless in eef mode). Set it to "
-                "'/gello_ur_bridge/resume' to use the gated one instead."
+                "'/gello_ur_bridge/joint_delta_start' (anchor at the arm's actual "
+                "pose and release into ENGAGED delta streaming without any chase), "
+                "matching the real joint_delta bring-up."
             ),
         ),
     ]
@@ -317,12 +307,9 @@ def generate_launch_description():
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     launch_rviz = LaunchConfiguration("launch_rviz")
     params_file = LaunchConfiguration("params_file")
-    eef_params_file = LaunchConfiguration("eef_params_file")
+    joint_delta_params_file = LaunchConfiguration("joint_delta_params_file")
     handshake = LaunchConfiguration("handshake")
 
-    # handshake:=true runs the real launch's eef bring-up here. Gate for the
-    # move_to_start node; the driver/bridge tweaks below are the same condition
-    # expressed as PythonExpression/perform() where a Node condition won't do.
     is_handshake = IfCondition(handshake)
 
     # ------------------------------------------------------------------ #
@@ -352,10 +339,7 @@ def generate_launch_description():
             # start. With handshake:=true we instead mirror the real launch and
             # come up on scaled_joint_trajectory_controller -- which leaves
             # forward_position_controller loaded INACTIVE, so gello_move_to_start
-            # has a genuine STRICT switch to perform (that switch is the whole
-            # thing switch_only exists to exercise). Equivalent to:
-            #     'scaled_joint_trajectory_controller' if handshake=='true'
-            #     else 'forward_position_controller'
+            # has a genuine STRICT switch to perform.
             "initial_joint_controller": PythonExpression(
                 [
                     "'scaled_joint_trajectory_controller' if '", handshake,
@@ -370,32 +354,37 @@ def generate_launch_description():
     )
 
     # ------------------------------------------------------------------ #
-    # GELLO -> UR bridge, forced into control_mode:=eef. The eef overlay
+    # GELLO -> UR bridge, forced into control_mode:=joint_delta. The overlay
     # yaml is layered AFTER params_file so it wins on any key overlap; the
-    # trailing dict override guarantees control_mode is "eef" regardless of
-    # what either yaml file says.
+    # trailing dict override guarantees control_mode is "joint_delta"
+    # regardless of what either yaml file says.
     # ------------------------------------------------------------------ #
-    # Built inside an OpaqueFunction so the staged-bring-up args can be
-    # resolved to real Python floats before the Node is constructed (see
-    # _eef_double_overrides above).
+    # Built inside an OpaqueFunction so jd_gain can be resolved to a real Python
+    # float before the Node is constructed (see _jd_double_overrides above).
     def _make_bridge_node(context):
-        overrides = {"control_mode": "eef", **_eef_double_overrides(context)}
+        overrides = {
+            "control_mode": "joint_delta",
+            **_jd_double_overrides(context),
+        }
         # handshake:=true mirrors the real launch: the bridge is PRE-SPAWNED
         # PAUSED so its services exist at handover but it publishes nothing until
         # gello_move_to_start releases it AFTER the STRICT switch. Without the
-        # handshake there is nothing to wait for, so it starts unpaused as before.
+        # handshake there is nothing to wait for, so it starts unpaused.
         if LaunchConfiguration("handshake").perform(context) == "true":
             overrides["start_paused"] = True
+            # Mirror the real launch's no-motion bring-up: gello_move_to_start
+            # does a STRICT switch IN PLACE (start_mode:=switch_only) and then
+            # calls ~/joint_delta_start, which would otherwise refuse because the
+            # bridge has never streamed. The switch-first ordering makes that gate
+            # redundant, so opt in here exactly as the real launch does.
+            overrides["jd_start_allow_unstreamed"] = True
         return [
             Node(
                 package="ur_gello_bringup",
                 executable="gello_ur_bridge",
                 parameters=[
                     params_file,
-                    eef_params_file,
-                    # Layered LAST -> wins over both yaml files. control_mode is
-                    # forced to "eef" here regardless of yaml; v_max / w_max /
-                    # pos_scale appear ONLY if the operator passed them.
+                    joint_delta_params_file,
                     overrides,
                 ],
                 output="screen",
@@ -405,11 +394,15 @@ def generate_launch_description():
     bridge_node = OpaqueFunction(function=_make_bridge_node)
 
     # ------------------------------------------------------------------ #
-    # NO-MOTION eef handshake (handshake:=true only).
+    # NO-MOTION handshake (handshake:=true only).
     #
-    # Same node, same parameter shape as ur7e_gello_real.launch.py's
-    # move_to_start_node, with the same control_mode-derived defaults -- except
-    # that control_mode is a constant "eef" here, so the derivation collapses to
+    # Same node and parameter shape as ur7e_gello_real.launch.py's
+    # move_to_start_node. control_mode is a constant "joint_delta" here, and its
+    # AUTO-derived defaults mirror the real launch's joint_delta bring-up:
+    # start_mode:=switch_only (STRICT switch IN PLACE, no trajectory, arm does not
+    # move) and bridge_resume_service:=/gello_ur_bridge/joint_delta_start (anchor
+    # at the arm's actual pose and release into ENGAGED delta streaming, no
+    # chase). Because control_mode is a constant here the derivation collapses to
     # literals and no PythonExpression is needed.
     # ------------------------------------------------------------------ #
     def _make_move_to_start_node(context):
@@ -419,7 +412,7 @@ def generate_launch_description():
         )
         resume_service = (
             LaunchConfiguration("bridge_resume_service").perform(context).strip()
-            or "/gello_ur_bridge/eef_resume"
+            or "/gello_ur_bridge/joint_delta_start"
         )
         return [
             Node(
@@ -466,8 +459,9 @@ def generate_launch_description():
 
     # ------------------------------------------------------------------ #
     # Optional Robotiq gripper node (harmless; connect_on_start=false).
-    # Structural parity with ur7e_gello_rviz.launch.py; the eef control mode
-    # only affects the 6-DoF arm path, never the gripper.
+    # Structural parity with the other mock launches; the joint_delta control
+    # mode only affects the 6-DoF arm path, never the gripper (the gripper
+    # mapping stays ABSOLUTE).
     # ------------------------------------------------------------------ #
     gripper_node = Node(
         package="ur_gello_bringup",
@@ -490,9 +484,8 @@ def generate_launch_description():
     )
 
     # Handshake AFTER the bridge + GELLO source exist (mirrors the real launch's
-    # 6s bridge / 8s move_to_start stagger), so ~/eef_resume is already up and a
-    # live leader pose is available when the handshake runs. Inert when
-    # handshake:=false (the OpaqueFunction's condition yields no actions).
+    # 6s bridge / 8s move_to_start stagger). Inert when handshake:=false (the
+    # OpaqueFunction's condition yields no actions).
     move_to_start_delayed = TimerAction(
         period=8.0,
         actions=[move_to_start_node],

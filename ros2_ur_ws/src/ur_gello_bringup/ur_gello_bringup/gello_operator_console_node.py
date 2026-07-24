@@ -17,13 +17,14 @@ Menu
     8) eef 디스인게이지       -> /gello_ur_bridge/eef_disengage (로봇 즉시 정지)
     9) eef 리클러치           -> /gello_ur_bridge/eef_reclutch
    10) joint 복귀             -> /gello_ur_bridge/eef_to_joint
+   13) eef 재무장             -> /gello_ur_bridge/eef_resume
     q) quit the console (does NOT stop the robot; use Ctrl-C / E-STOP for that)
 
 This console is READ/authorize-only: it never commands the robot or GELLO
 directly; it only relays the operator's explicit authorization to the
 move-to-start / bridge nodes, which own all safety checks. In "joint"
-control_mode the eef_* services simply don't exist yet, so items 7-10 print
-the same harmless "service not available" notice as every other missing
+control_mode the eef_* services simply don't exist yet, so items 7-10 and 13
+print the same harmless "service not available" notice as every other missing
 service here -- joint-mode console behaviour is unchanged.
 """
 
@@ -55,6 +56,8 @@ MENU = """
                         맞춘 뒤 1번으로 재개)
  11) 그리퍼 일시정지 — 그리퍼 출력 정지 (Robotiq 현재 위치 유지)
  12) 그리퍼 재개    — 실제 위치에서 시드→램프 (신선/실제위치 게이트, 실패시 정지 유지)
+ 13) eef 재무장     — eef_resume (관절 정렬 게이트 없이 재무장; GELLO를 로봇 자세로
+                        맞출 필요 없음 — start_mode:=switch_only 기동/8번 이후 사용)
   q) 콘솔 종료 (로봇은 안 멈춤 — 급정지는 Ctrl-C / E-STOP)
 ============================================
 선택 > """
@@ -103,6 +106,12 @@ class OperatorConsole(Node):
             "eef_disengage": self.create_client(Trigger, f"/{BRIDGE}/eef_disengage"),
             "eef_reclutch": self.create_client(Trigger, f"/{BRIDGE}/eef_reclutch"),
             "eef_to_joint": self.create_client(Trigger, f"/{BRIDGE}/eef_to_joint"),
+            # EEF re-arm. Unlike ~/resume this does NOT enforce the joint-
+            # alignment gate, which is the point: in eef mode the leader is a
+            # free-floating "3D pen" deliberately in a different joint
+            # configuration from the robot, so ~/resume would refuse forever.
+            # This is what start_mode:=switch_only bring-up calls.
+            "eef_resume": self.create_client(Trigger, f"/{BRIDGE}/eef_resume"),
         }
 
         # Latest ~/eef/state summary (std_msgs/String, JSON), for the header
@@ -256,8 +265,12 @@ def main(args=None) -> None:
                 node.call("gripper_pause")  # 그리퍼 일시정지 (출력 정지)
             elif choice == "12":
                 node.call("gripper_resume")  # 그리퍼 재개 (시드→램프, 실패시 정지)
+            elif choice == "13":
+                node.call("eef_resume")     # eef 재무장 (정렬 게이트 없음)
             else:
-                print("1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, q 중에서 입력하세요.")
+                print(
+                    "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, q 중에서 입력하세요."
+                )
     except KeyboardInterrupt:
         pass
     finally:

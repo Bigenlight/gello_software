@@ -223,20 +223,83 @@ def quat_xyzw_to_mat(q: np.ndarray) -> np.ndarray:
     )
 
 
+def rpy_to_mat(rpy) -> np.ndarray:
+    """Fixed-axis roll-pitch-yaw (X, Y, Z) -> R = Rz(yaw) Ry(pitch) Rx(roll).
+
+    Shared by eef_delta (R_align / tool transforms) and by the keepout tool
+    resolution below, so there is exactly ONE rpy convention in the package."""
+    r, p, y = (float(v) for v in rpy)
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(p), math.sin(p)
+    cy, sy = math.cos(y), math.sin(y)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=float)
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=float)
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=float)
+    return Rz @ Ry @ Rx
+
+
+def xyz_rpy_to_T(vec6) -> np.ndarray:
+    """[x, y, z, roll, pitch, yaw] -> 4x4 homogeneous transform."""
+    v = np.asarray(vec6, dtype=float).reshape(6)
+    T = np.eye(4)
+    T[:3, :3] = rpy_to_mat(v[3:])
+    T[:3, 3] = v[:3]
+    return T
+
+
 # --------------------------------------------------------------------------- #
 # Forward kinematics, link origins, Jacobian, conditioning                    #
 # --------------------------------------------------------------------------- #
-def _dh(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
+# cos/sin of the (constant) DH twist angles, hoisted out of the hot path.
+_CA = np.cos(ALPHA)
+_SA = np.sin(ALPHA)
+
+
+def _dh_into(M: np.ndarray, theta: float, d: float, a: float,
+             ca: float, sa: float) -> np.ndarray:
+    """Fill `M` (4x4) with the standard-DH link transform. Element-wise stores
+    into a preallocated buffer: np.array() on a nested list was ~15% of the
+    whole control tick, and this is called 6x per FK and ~28x per analytic IK."""
     ct, st = math.cos(theta), math.sin(theta)
-    ca, sa = math.cos(alpha), math.sin(alpha)
-    return np.array(
-        [
-            [ct, -st * ca, st * sa, a * ct],
-            [st, ct * ca, -ct * sa, a * st],
-            [0.0, sa, ca, d],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-    )
+    M[0, 0] = ct
+    M[0, 1] = -st * ca
+    M[0, 2] = st * sa
+    M[0, 3] = a * ct
+    M[1, 0] = st
+    M[1, 1] = ct * ca
+    M[1, 2] = -ct * sa
+    M[1, 3] = a * st
+    M[2, 0] = 0.0
+    M[2, 1] = sa
+    M[2, 2] = ca
+    M[2, 3] = d
+    M[3, 0] = 0.0
+    M[3, 1] = 0.0
+    M[3, 2] = 0.0
+    M[3, 3] = 1.0
+    return M
+
+
+def _dh(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
+    """Standard-DH link transform (kept as the general-alpha public form)."""
+    return _dh_into(np.empty((4, 4)), theta, d, a, math.cos(alpha), math.sin(alpha))
+
+
+def _inv_rigid(T: np.ndarray) -> np.ndarray:
+    """Inverse of a HOMOGENEOUS (rigid) 4x4: [[R^T, -R^T p], [0, 1]].
+
+    Mathematically identical to np.linalg.inv for a rigid transform but ~2x
+    cheaper (no LU): the analytic IK below inverts 28 such matrices per call,
+    which measured as ~23% of a moving control tick."""
+    R = T[:3, :3]
+    Ti = np.empty((4, 4))
+    Ti[:3, :3] = R.T
+    Ti[:3, 3] = -(R.T @ T[:3, 3])
+    Ti[3, 0] = 0.0
+    Ti[3, 1] = 0.0
+    Ti[3, 2] = 0.0
+    Ti[3, 3] = 1.0
+    return Ti
 
 
 def _fk_frames(q: np.ndarray) -> List[np.ndarray]:
@@ -244,22 +307,42 @@ def _fk_frames(q: np.ndarray) -> List[np.ndarray]:
     q = np.asarray(q, dtype=float).reshape(6)
     frames = [np.eye(4)]
     T = np.eye(4)
+    M = np.empty((4, 4))
     for i in range(6):
-        T = T @ _dh(q[i], D[i], A[i], ALPHA[i])
-        frames.append(T.copy())
+        T = T @ _dh_into(M, q[i], D[i], A[i], _CA[i], _SA[i])
+        frames.append(T)
     return frames
 
 
 def fk(q: np.ndarray) -> np.ndarray:
-    """base_link -> tool0 (flange) homogeneous transform, 4x4."""
-    return _fk_frames(q)[-1]
+    """base_link -> tool0 (flange) homogeneous transform, 4x4.
+
+    Does not build the intermediate frame list (this is the single most-called
+    function on the control path -- ~34 calls per tick through the analytic IK's
+    verify step)."""
+    q = np.asarray(q, dtype=float).reshape(6)
+    T = np.eye(4)
+    M = np.empty((4, 4))
+    for i in range(6):
+        T = T @ _dh_into(M, q[i], D[i], A[i], _CA[i], _SA[i])
+    return T
 
 
-def link_origins(q: np.ndarray) -> List[np.ndarray]:
+def link_origins(q: np.ndarray, T_tool: Optional[np.ndarray] = None) -> List[np.ndarray]:
     """Origins (base frame, 3-vectors) of frames 1..6:
-    shoulder, elbow, wrist_1, wrist_2, wrist_3, TCP(tool0)."""
+    shoulder, elbow, wrist_1, wrist_2, wrist_3, flange(tool0).
+
+    NOTE the last entry is the FLANGE, not the tool centre point: with a
+    Robotiq 2F-85 the actual endpoint is another ~0.174 m along the flange +Z,
+    and that is precisely the part that reaches the table.  Pass ``T_tool``
+    (flange -> TCP, 4x4) to append the TCP origin as a 7th point; ``None``
+    (the default) preserves the historical 6-point flange-only behaviour."""
     frames = _fk_frames(q)
-    return [frames[i][:3, 3].copy() for i in range(1, 7)]
+    out = [frames[i][:3, 3].copy() for i in range(1, 7)]
+    if T_tool is not None:
+        T_tool = np.asarray(T_tool, dtype=float).reshape(4, 4)
+        out.append((frames[6] @ T_tool)[:3, 3].copy())
+    return out
 
 
 def jacobian(q: np.ndarray) -> np.ndarray:
@@ -301,63 +384,124 @@ def within_joint_limits(q: np.ndarray, margin: float = 0.0) -> bool:
 _KEEPOUT_SAMPLES_PER_LINK = 17
 
 
-def _link_segment_samples(q: np.ndarray, n: int = _KEEPOUT_SAMPLES_PER_LINK):
+def _link_segment_samples(
+    q: np.ndarray,
+    n: int = _KEEPOUT_SAMPLES_PER_LINK,
+    T_tool: Optional[np.ndarray] = None,
+):
     """Points sampled along every ARM link segment (shoulder->elbow->wrist_1->
-    wrist_2->wrist_3->TCP), including both endpoints and the midpoint.
+    wrist_2->wrist_3->flange), including both endpoints and the midpoint.
+
+    With ``T_tool`` given the flange->TCP segment (the gripper body) is swept
+    too, so a tool that dips into a keepout region is seen along its whole
+    length and not merely at its tip.
 
     The base->shoulder pedestal segment is deliberately excluded: it is the
     robot's own column and is expected to sit on the base axis (so it must not
     trip a base_cylinder pedestal-protection constraint)."""
-    origins = link_origins(q)  # frames 1..6: shoulder..TCP
+    origins = link_origins(q, T_tool)  # frames 1..6 (..TCP if a tool is given)
     ts = np.linspace(0.0, 1.0, n)
     samples = []
     for a, b in zip(origins[:-1], origins[1:]):
         seg = b - a
+        if float(np.dot(seg, seg)) < 1e-24:
+            # Degenerate (e.g. an identity tool transform): the endpoint is
+            # already in the list via the previous segment.
+            samples.append(a.copy())
+            continue
         for t in ts:
             samples.append(a + t * seg)
     return samples
 
 
-def keepout_ok(q: np.ndarray, cfg: dict) -> bool:
+def _resolve_tool(cfg: dict, T_tool: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """flange->TCP transform for a keepout check, or None.
+
+    Precedence: explicit ``T_tool`` argument, then ``cfg['tool']`` (4x4), then
+    ``cfg['tool_xyz_rpy']`` (6-vector).  Absent everywhere -> None (flange-only,
+    the historical behaviour)."""
+    if T_tool is not None:
+        return np.asarray(T_tool, dtype=float).reshape(4, 4)
+    if isinstance(cfg, dict):
+        if cfg.get("tool") is not None:
+            return np.asarray(cfg["tool"], dtype=float).reshape(4, 4)
+        if cfg.get("tool_xyz_rpy") is not None:
+            return xyz_rpy_to_T(cfg["tool_xyz_rpy"])
+    return None
+
+
+# Keys that actually impose a constraint. Anything else in the cfg (tool,
+# margin, link_radius, ...) only *modifies* a constraint, so a cfg holding none
+# of these is a no-op no matter what else it carries.
+_KEEPOUT_CONSTRAINT_KEYS = ("floor_z", "base_cylinder", "cylinder", "halfplane")
+
+
+def keepout_ok(q: np.ndarray, cfg: dict, T_tool: Optional[np.ndarray] = None) -> bool:
     """Geometric keepout check.
 
     For cylinder / base_cylinder / halfplane constraints the whole arm link
-    *segments* are sampled (not just the 6 link origins): a link that pierces a
+    *segments* are sampled (not just the link origins): a link that pierces a
     keepout cylinder with both endpoints outside would otherwise read as a false
-    "safe". floor_z stays an origins-only check because z is linear along a
+    "safe". floor_z stays an endpoints-only check because z is linear along a
     segment, so an endpoint is always the extremum.
 
-    cfg keys (all optional; absent -> that constraint is not enforced):
-      floor_z   : float   -- every link origin must have z >= floor_z + margin.
+    THE TOOL.  ``link_origins`` stops at the flange (tool0).  A real end
+    effector (Robotiq 2F-85: ~0.174 m along flange +Z) hangs past it and is the
+    part that actually reaches the table, so the check is blind to it unless the
+    flange->TCP transform is supplied -- via the ``T_tool`` argument, or via
+    ``cfg['tool']`` / ``cfg['tool_xyz_rpy']``.  When supplied, the TCP point is
+    added to the checked set and the flange->TCP segment is swept.
+
+    LINK RADIUS.  All sampled points are link *centrelines*; a UR7e upper arm is
+    ~0.09 m in diameter and a gripper is wider still.  ``cfg['link_radius']``
+    inflates the arm by that amount inside every test, so an operator setting
+    ``floor_z`` states the physical table height rather than hand-computing
+    ``table + tool_length + link_radius`` (and getting it wrong).
+
+    cfg keys (all optional; absent -> that constraint is not enforced, so an
+    EMPTY cfg is always a no-op):
+      floor_z   : float   -- every checked point must have z >= floor_z + inflate.
       margin    : float   -- safety margin (default 0.0).
+      link_radius : float -- link/tool radius (default 0.0); added to `margin`
+                       in every test.  inflate = margin + link_radius.
+      tool / tool_xyz_rpy : flange->TCP transform (4x4 / [x,y,z,r,p,y]); see
+                       THE TOOL above.  Overridden by the `T_tool` argument.
       base_cylinder : {radius, height} -- no sampled arm point (up to `height`)
                        may lie inside the vertical cylinder of that radius around
                        the base z-axis (protects the pedestal).
       cylinder  : {point:[x,y,z], axis:[x,y,z], radius} -- keepout cylinder;
                        no sampled arm point may be within `radius` of that line.
       halfplane : {point:[x,y,z], normal:[x,y,z]} -- every sampled arm point must
-                       be on the +normal side: dot(pt-point, normal) >= margin.
+                       be on the +normal side: dot(pt-point, normal) >= inflate.
     """
+    if not cfg or not any(k in cfg for k in _KEEPOUT_CONSTRAINT_KEYS):
+        return True  # nothing to enforce -- never touch FK
+
     margin = float(cfg.get("margin", 0.0))
-    origins = link_origins(q)
+    radius = float(cfg.get("link_radius", 0.0))
+    inflate = margin + radius
+    tool = _resolve_tool(cfg, T_tool)
+    origins = link_origins(q, tool)
 
     if "floor_z" in cfg:
         fz = float(cfg["floor_z"])
         for o in origins:
-            if o[2] < fz + margin:
+            if o[2] < fz + inflate:
                 return False
 
     # The remaining constraints are non-linear (or vertex-sensitive) along a
     # link, so sweep sampled points down each arm segment.
     need_sweep = ("base_cylinder" in cfg) or ("cylinder" in cfg) or ("halfplane" in cfg)
-    samples = _link_segment_samples(q) if need_sweep else []
+    samples = _link_segment_samples(q, T_tool=tool) if need_sweep else []
 
     if "base_cylinder" in cfg:
         bc = cfg["base_cylinder"]
         r = float(bc["radius"])
         h = float(bc["height"])
         for o in samples:
-            if o[2] <= h and math.hypot(o[0], o[1]) < r + margin:
+            # The height test is inflated too: a centreline just above `h` still
+            # has material below it once the link has a radius.
+            if o[2] <= h + radius and math.hypot(o[0], o[1]) < r + inflate:
                 return False
 
     if "cylinder" in cfg:
@@ -369,7 +513,7 @@ def keepout_ok(q: np.ndarray, cfg: dict) -> bool:
         for o in samples:
             d = o - p
             perp = d - np.dot(d, axis) * axis
-            if np.linalg.norm(perp) < r + margin:
+            if np.linalg.norm(perp) < r + inflate:
                 return False
 
     if "halfplane" in cfg:
@@ -378,7 +522,7 @@ def keepout_ok(q: np.ndarray, cfg: dict) -> bool:
         n = np.asarray(hp["normal"], dtype=float)
         n = n / np.linalg.norm(n)
         for o in samples:
-            if np.dot(o - p, n) < margin:
+            if np.dot(o - p, n) < inflate:
                 return False
 
     return True
@@ -478,6 +622,8 @@ def _ik_analytic_raw(T: np.ndarray):
 
     for i1, t1 in enumerate(theta1_opts):
         s1, c1 = math.sin(t1), math.cos(t1)
+        # T01 depends only on theta1 -- hoisted out of the theta5 loop.
+        T01_inv = _inv_rigid(_dh(t1, D[0], A[0], ALPHA[0]))
 
         # ---- theta5 : two branches ----
         c5arg = _clamp_unit((p06x * s1 - p06y * c1 - d4) / d6)
@@ -496,10 +642,11 @@ def _ik_analytic_raw(T: np.ndarray):
                 t6 = math.atan2(num, den)
 
             # ---- theta2, theta3, theta4 from planar sub-problem ----
-            T01 = _dh(t1, D[0], A[0], ALPHA[0])
+            # All of these are rigid transforms, so _inv_rigid == np.linalg.inv
+            # (exactly, to float rounding) at half the cost.
             T45 = _dh(t5, D[4], A[4], ALPHA[4])
             T56 = _dh(t6, D[5], A[5], ALPHA[5])
-            T14 = np.linalg.inv(T01) @ T @ np.linalg.inv(T56) @ np.linalg.inv(T45)
+            T14 = T01_inv @ T @ _inv_rigid(T56) @ _inv_rigid(T45)
             p13 = T14 @ np.array([0.0, -d4, 0.0, 1.0])
             p13x, p13y = p13[0], p13[1]
             norm2 = p13x * p13x + p13y * p13y
@@ -517,14 +664,22 @@ def _ik_analytic_raw(T: np.ndarray):
                 # theta4 from T34 = inv(T23) inv(T12) T14
                 T12 = _dh(t2, D[1], A[1], ALPHA[1])
                 T23 = _dh(t3, D[2], A[2], ALPHA[2])
-                T34 = np.linalg.inv(T23) @ np.linalg.inv(T12) @ T14
+                T34 = _inv_rigid(T23) @ _inv_rigid(T12) @ T14
                 t4 = math.atan2(T34[1, 0], T34[0, 0])
                 q = np.array([t1, t2, t3, t4, t5, t6])
                 yield _branch_bits(i1, i5, i3), q
 
 
+_TWO_PI = 2.0 * math.pi
+
+
 def _wrap_pi(x):
-    return np.array([math.remainder(v, 2.0 * math.pi) for v in np.atleast_1d(x)])
+    """Wrap to (-pi, pi]. Vectorised form of [math.remainder(v, 2pi) ...];
+    verified bit-for-bit identical to the scalar loop over 2e5 random samples
+    plus the +/-pi, +/-3pi, +/-2pi and signed-zero edge cases (np.round is
+    round-half-to-even, matching IEEE remainder)."""
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    return x - _TWO_PI * np.round(x / _TWO_PI)
 
 
 # Verify tolerance for an accepted closed-form candidate. The raw closed form is
@@ -551,9 +706,14 @@ def _polish_verify(T_target: np.ndarray, q_raw: np.ndarray) -> Optional[np.ndarr
         # candidate in that case and let the final verify decide.
         if qp is not None and np.max(np.abs(_wrap_pi(qp - q))) <= 0.05:
             q2 = _wrap_pi(qp)
-            if float(np.linalg.norm(_pose_error(fk(q2), T_target))) < err:
-                q = q2
-    if float(np.linalg.norm(_pose_error(fk(q), T_target))) > _ANALYTIC_VERIFY_TOL:
+            err2 = float(np.linalg.norm(_pose_error(fk(q2), T_target)))
+            if err2 < err:
+                q, err = q2, err2
+    # `err` is already the pose error of the CURRENT q (the polish branch keeps
+    # it in step), so the final verify needs no second fk/_pose_error. The raw
+    # closed form lands ~1e-15, i.e. the polish branch is essentially never
+    # taken, so this removed a full duplicate FK per candidate (up to 8 per IK).
+    if err > _ANALYTIC_VERIFY_TOL:
         return None
     return q
 
@@ -562,24 +722,53 @@ def _dedup_by_branch(tagged):
     """Deduplicate (same physical pose from different nominal branches, e.g. at
     a singularity) keeping the lowest branch id; then order by branch id."""
     unique = []
+    if not tagged:
+        return unique
+    # One vectorised (n,6) compare against all accepted solutions instead of a
+    # Python loop of per-pair _wrap_pi calls (this was ~25% of an analytic IK).
+    seen = np.empty((len(tagged), 6))
+    n = 0
     for bid, q in sorted(tagged, key=lambda t: t[0]):
-        dup = False
-        for _, uq in unique:
-            if np.max(np.abs(_wrap_pi(q - uq))) < 1e-6:
-                dup = True
-                break
-        if not dup:
-            unique.append((bid, q))
+        if n and np.min(np.max(np.abs(_wrap_pi(seen[:n] - q)), axis=1)) < 1e-6:
+            continue
+        seen[n] = q
+        n += 1
+        unique.append((bid, q))
     return unique
 
 
-def _ik_analytic_tagged(T_target: np.ndarray):
+def _ik_analytic_tagged(T_target: np.ndarray, prefer_branch: Optional[int] = None):
     """All closed-form solutions as (branch_id, q), wrapped to (-pi, pi] and
     FK-verified. Deterministically ordered by branch id (theta1, theta5, theta3
-    selectors). Shared core of ik_analytic() and branch_id()."""
+    selectors). Shared core of ik_analytic() and branch_id().
+
+    `prefer_branch` is a pure COST optimisation for a branch-locked caller: the
+    closed form tags each candidate with its branch before any verification, so
+    when the caller is going to discard every off-branch solution anyway there
+    is no reason to FK-verify all 8 (the verify is ~40% of this function).  If
+    the preferred branch yields at least one verified solution, only those are
+    returned; otherwise the full enumeration is verified and returned exactly as
+    if `prefer_branch` had not been given.  The SOLUTION SET for the preferred
+    branch is identical either way -- only solutions the caller was going to
+    drop are skipped, and the not-found case falls back, so a caller can never
+    see fewer options than it would have acted on."""
     T_target = np.asarray(T_target, dtype=float)
+    raw = list(_ik_analytic_raw(T_target))
+
+    if prefer_branch is not None:
+        pref = []
+        for bid, q in raw:
+            if bid != prefer_branch:
+                continue
+            qv = _polish_verify(T_target, q)
+            if qv is not None:
+                pref.append((bid, qv))
+        if pref:
+            return _dedup_by_branch(pref)
+        # Preferred branch unavailable -> fall through to the full enumeration.
+
     tagged = []
-    for bid, q in _ik_analytic_raw(T_target):
+    for bid, q in raw:
         qv = _polish_verify(T_target, q)
         if qv is None:
             continue
@@ -604,13 +793,10 @@ def wrapped_nearest(q: np.ndarray, ref: np.ndarray) -> np.ndarray:
 
     The elbow (index 2) is NOT unwrapped: its physical range is +/-pi, so an
     unwrap there would leave the feasible set (and hide a real branch difference)."""
-    q = np.asarray(q, dtype=float).reshape(6).copy()
+    q = np.asarray(q, dtype=float).reshape(6)
     ref = np.asarray(ref, dtype=float).reshape(6)
-    out = q.copy()
-    for i in range(6):
-        if i == 2:  # elbow: never unwrap
-            continue
-        out[i] = q[i] + 2.0 * math.pi * round((ref[i] - q[i]) / (2.0 * math.pi))
+    out = q + _TWO_PI * np.round((ref - q) / _TWO_PI)
+    out[2] = q[2]  # elbow: never unwrap
     return out
 
 

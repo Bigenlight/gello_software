@@ -1,10 +1,21 @@
 # GELLO → UR7e **EEF(카테시안) 델타 텔레오퍼레이션 모드** — 설계·구현 계획서 (PLAN)
 
-> ⚠️ **이 문서는 계획서(PLAN)이며, 코드는 아직 한 줄도 구현되지 않았습니다.** 여기 적힌 수치·임계값은 대부분 **미검증 초기값**이며 실기 튜닝을 전제합니다. 실행 런북은 구현 완료 후 별도 문서(`GELLO_UR7E_EEF_MODE.md`)로 분리합니다.
+> 📌 **문서 상태 — 2026-07-22 갱신. 이 문서는 이제 "계획"이 아니라 설계·근거 아카이브다.**
+> 코드는 **이미 구현되어 리포에 들어와 있다**(커밋 `2905925` "feat(ur_gello_bringup): add EEF (Cartesian delta) teleop mode alongside joint mode"): `ur_gello_bringup/ur_kin.py`, `ur_gello_bringup/eef_delta.py`, `gello_ur_bridge_node.py`의 eef 분기 + 4종 Trigger 서비스, `config/ur7e_gello_eef.yaml`, `launch/ur7e_gello_eef_mock.launch.py`, `test/test_ur_kin.py` · `test/test_eef_delta.py`, `scripts/eef_replay.py`, 조작자 콘솔 메뉴 7~10번이 전부 존재한다. **mock 단계(P4/P5)까지 검증 완료, 실기 첫 투입은 아직**이다. 여기 적힌 수치·임계값은 여전히 대부분 **미검증 초기값**이며 실기 튜닝을 전제한다.
+>
+> ▶ **조작자는 이 문서가 아니라 실행 런북 [`GELLO_UR7E_EEF_MODE.md`](GELLO_UR7E_EEF_MODE.md)를 따른다.** 두 문서가 어긋나면 **런북이 최신이자 우선**이다. 이 문서에서 런북에 의해 대체된 서술은 본문에 `⛔ SUPERSEDED` 로 표시하고 원래 논거는 남겨 두었다(왜 그렇게 판단했는지가 나중에 다시 필요하기 때문).
 >
 > **안전 대전제 (변함없음, 절대 위반 불가)**: GELLO는 **항상 passive read-only** 입력 장치입니다. GELLO Dynamixel에는 **어떤 경우에도 토크를 인가하지 않습니다.** 이 계획서의 어떤 변경도 이 불변식을 건드리지 않습니다 — EEF 모드는 GELLO 관절각을 **읽는 방식**만 바꿉니다.
 >
 > **스코프 못박기.** 이 계획서의 범위는 **"기존 joint 미러링 모드 옆에 EEF 텔레오퍼 모드를 하나 추가한다"** 까지입니다. online RL 학습 루프, actor/learner, replay buffer, reward, 정책↔사람 자동 arbiter, intervention 자동 라벨링, `gello_policy` 통합은 **이번 범위 밖**이며 설계하지 않습니다(§12에 훅 위치만 한 문단 언급).
+>
+> ### 🔴 2026-07-22 프레이밍 전환 — **"GELLO = 3D 펜"** (이 문서 전반에 영향)
+>
+> 이 계획서는 원래 **"EEF 모드는 joint 모드 거동을 재현해야 한다"** 는 암묵 전제 위에 쓰였다(engage 시 `q_lead ≈ q_robot`, `R_align = I`, `tool_l = tool_r`이 전부 그 전제에서 따라왔다). **사용자 의도는 이제 명시적으로 다르다: 리더와 로봇은 영구히 다른 관절 자세로 있고, 오직 EEF 델타만 전달된다.**
+>
+> - **수식은 이미 준비되어 있었다.** 델타 사상의 **자세 무관성이 증명**되었다 — `test/test_eef_pose_independence.py`의 **22개 신규 테스트**(현재 전체 스위트 **342개**), 관절 불일치 **최대 5.62 rad**에서 최악 오차 **8.8e-13 m / 2.7e-13 rad**, 불일치 크기에 대한 **추세 없음**. 거부(reject)는 리더 불일치가 아니라 **로봇 쪽 조건수 `sigma_min`** 을 따라간다. 즉 **3D 펜 요구사항은 수학 차원에서 이미 충족**되어 있었고, 손봐야 했던 것은 **기동 경로**뿐이었다(§4.2 SUPERSEDED 박스).
+> - **폐기되는 논거들**: engage 시 `q_lead ≈ q_robot`(§4.2 / MODE §1.1), `R_align = I`가 유일한 정답(§3.3 박스), P7/P8의 채널 분리(§8 P7 박스).
+> - **아직 열려 있는 것**: `r_align_rpy`가 **측정된 적이 없다** — 3D 펜 프레이밍에서 이것은 잠재 버그이며 EEF 이동 **방향**의 정확도가 여기 걸려 있다([MODE.md §1.6](GELLO_UR7E_EEF_MODE.md)에 로봇 없이 하는 측정 절차).
 
 ## 요약 (TL;DR)
 
@@ -197,15 +208,37 @@ T_r(q_r) := FK_UR7e(q_r) · T_tool_R      로봇 TCP (동일 FK 함수)
 
 **성질 1 — 리더·로봇에 같은 FK를 쓰므로 기구학 모델 오차가 앵커 델타에서 상쇄된다.** `T_des = T_r_anchor` (델타 0)일 때 `IK(FK(q_anchor)) = q_anchor`가 **항등적으로** 성립한다(같은 DH 사용). 벤더 FK(`/tcp_pose_broadcaster/pose`)를 앵커로 쓰면 우리 IK와 기구학 모델이 달라 왕복 잔차가 그대로 engage 스텝이 된다 — 그래서 앵커 소스로 쓰지 않는다.
 
-**성질 2 — 스케일 계수를 수식에서 소거하지 않는다 (중요 정정).** "GELLO는 UR7e의 균일 축소 모델"이라는 배경 전제가 참이라면, 사람 손의 **물리** 변위는 `Δp_phys = k · Δp_g`이다(`k` = 축소비, `Δp_g`는 위 정의의 가상-UR 공간 변위). 즉 `pos_scale = 1.0`으로 두면 **손 → 로봇 게인이 1이 아니라 1/k**(예 `k≈0.4`면 2.5배 증폭)가 된다.
+**성질 2 — 리더 변위는 이미 "풀사이즈 UR7e 공간"의 변위다.** "GELLO는 UR7e의 균일 축소 모델"이라는 배경 전제가 참이라면, 사람 손의 **물리** 변위는 `Δp_phys = k · Δp_g`이다(`k` = 축소비, `Δp_g`는 위 정의의 가상-UR 공간 변위). 즉 `pos_scale = 1.0`이면 **손 물리 변위 → 로봇 변위 게인이 1이 아니라 1/k**(예 `k≈0.4`면 2.5배)가 된다.
+
+> ⛔ **SUPERSEDED (2026-07-22).** 아래 원본 대응책 (a)(b)는 **폐기**한다. 현행 결정은 **`pos_scale = 1.0` 유지, `k` 실측 불필요**이며, 근거와 운영 지침은 [`GELLO_UR7E_EEF_MODE.md` §1.2](GELLO_UR7E_EEF_MODE.md)가 정본이다.
+>
+> **한 줄 이유:** 리더 EEF는 GELLO 관절각을 **풀사이즈 UR7e FK**에 넣어 정의된다(`T_g = fk(q_lead_f) @ T_tool_L`, `eef_delta.py` 모듈 docstring). 따라서 `Δp_g`는 처음부터 풀사이즈 UR7e 공간의 변위이고, `pos_scale=1.0`은 **joint 모드의 EEF 이동량을 그대로 재현**한다 — EEF 모드를 joint 모드와 등가로 두는 값이 곧 1.0이다.
+>
+> **"손 5 cm ↔ 로봇 12.5 cm"는 여전히 물리적으로 참이다.** 다만 그것은 버그가 아니라 **joint 모드에서 이미 매일 겪고 있는, 축소 리더의 정상적이고 익숙한 성질**이다(작은 GELLO를 조금 움직이면 큰 로봇이 그 비율만큼 움직인다). EEF 모드가 새로 만들어내는 위험이 아니므로 "안전 이슈"로 분류하지 않는다. `pos_scale`을 `k`로 낮추면 오히려 **joint 모드보다 둔해져** 조작 감각이 두 모드 사이에서 달라진다.
+>
+> **살아남는 대응책:** (c) `1.0` 이외 값은 "의도적 증폭/감쇠"로 취급하고 기동 시 로그에 남긴다. (d) engage 이후 누적 변위 `‖p_cmd − p_r_anchor‖`에 상한(`max_excursion_m`, 기본 0.5 m)을 걸어 게인 오설정이 **속도가 아니라 거리로도** 막히게 한다 — 이건 `pos_scale`을 어떤 값으로 두든 유효한 백스톱이라 그대로 유지한다.
+
+<details><summary>원본 서술 (기록 보존용, 더 이상 따르지 말 것)</summary>
 
 > ❗ **이건 안전 이슈다.** 조작자가 손을 5 cm 뻗었는데 로봇이 12.5 cm 가는 상황은 각 틱 증분이 `v_max` 이하라서 **어떤 거부/홀드도 발동하지 않는다.** 속도 제한은 게인 오설정을 막지 못한다.
 >
 > **대응:** (a) `k`를 P-1에서 **1회 실측**한다(§8). (b) `pos_scale` 기본값을 `k`로 둔다(= 손 물리 변위 : 로봇 변위 = 1:1). (c) `1.0` 이외 값은 "의도적 증폭"으로 기동 시 경고 로그. (d) engage 이후 누적 변위 `‖p_cmd − p_r_anchor‖`에 상한(`max_excursion_m`, 기본 0.5 m)을 걸어 게인 오설정이 **속도가 아니라 거리로도** 막히게 한다.
 
+</details>
+
 **성질 3 — tool 오프셋을 반드시 명시해야 한다.** 회전 중심 문제 때문이다. 사람이 그립점 `c`를 중심으로 `ΔR` 회전시키면 flange 변위는 `Δp = (I−ΔR)·d`, `d = c − p_flange`이다. 리더와 로봇의 `d`가 다르면(앵커 자세가 어긋나 있으면 반드시 다르다) **순수 회전 입력에 기생 병진**이 붙는다. 최악의 경우 손목만 30° 비틀었는데 TCP가 10 cm 이상 예상 밖 방향으로 이동할 수 있고, 증상이 `R_align` 오정합과 구분 불가하다.
 
-`T_tool_L`(GELLO 손잡이 그립점, 가상-UR 스케일 = 물리 오프셋 / `k`)과 `T_tool_R`(Robotiq 2F-85 TCP, flange에서 약 0.16 m)을 명시적으로 도입하면 회전 중심이 각자의 tool 원점에 걸려 `d = d_r = 0`이 되고 기생항이 소멸한다. **두 값 모두 실측이 필요하다(§10-Q2).**
+`T_tool_L`과 `T_tool_R`을 명시적으로 도입하면 회전 중심이 각자의 tool 원점에 걸려 `d = d_r = 0`이 되고 기생항이 소멸한다.
+
+> ⛔ **SUPERSEDED (2026-07-22) — `T_tool_L`의 해석.** 위 원문은 `T_tool_L`을 "GELLO 손잡이 그립점(가상-UR 스케일 = 물리 오프셋 / `k`)"으로 정의했다. **이 해석은 채택하지 않는다.** 정본은 [MODE.md §1.1](GELLO_UR7E_EEF_MODE.md).
+>
+> **이유:** 리더 EEF는 GELLO 관절각을 **로봇과 동일한 UR7e `fk()`** 에 넣어 만든다(`T_g = fk(q_lead_f) @ T_tool_L`, `eef_delta.py`의 `step()`). GELLO 자체의 링크 기하는 코드 어디에도 없다. 따라서 `tool_l_xyz_rpy`는 **물리 GELLO flange가 아니라 "가상 풀사이즈 UR7e flange" 기준** 오프셋이다. 사람의 물리적 그립점을 이 파라미터로 표현하려면 먼저 `k`로 나눠 가상-UR 공간으로 환산해야 하는데, **`k` 실측은 생략하기로 결정된 항목**이다(§3.1 성질 2 SUPERSEDED, P-1 5번). 즉 그립점 해석은 "타이핑만 하면 되는 다른 규약"이 아니라 **하지 않기로 한 측정을 전제로 하는 방식**이다.
+>
+> **현행 설정(실측 반영):** `tool_l_xyz_rpy = tool_r_xyz_rpy = [0, 0, 0.174, 0, 0, 0]` — Robotiq 2F-85 끝점 flange +Z **174 mm** 실측, 펜던트 TCP `TCP_2f85`와 동일. 의미는 **"가상 리더 로봇도 실제 로봇과 같은 그리퍼를 단다"** 이고, 그 결과 리더=팔로워가 같은 로봇이 되어 델타 사상이 항등으로 환원된다. engage 시 `q_lead ≈ q_robot`(BOOTSTRAP joint 패스스루 + G4 `anchor_agree_tol = 0.02 rad`)이므로 **EEF 모드가 joint 모드 거동을 그대로 재현**한다.
+>
+> **참고 (수식):** `T_tool_L`의 **회전 성분은 델타에서 항등적으로 상쇄**된다(`R_g @ R_g_anchor.T`에서 `R_toolL @ R_toolL.T = I`, `eef_delta.py`의 `step()`). 효과가 있는 것은 **병진 성분뿐이며, 그마저도 리더가 회전할 때만** 나타난다. → **P6/P7(무동작·순수 병진)은 tool 값과 무관하게 진행 가능**하고, 검증 단계는 P8이다.
+>
+> **함정:** `tool_l = 0`, `tool_r = 0.174`로 두면 리더 델타가 **가상 flange 변위**인데 그것을 **로봇 TCP**에 적용하게 되어, 회전이 들어가는 순간(P8) 거동이 joint 모드에서 벗어난다.
 
 **DH 파라미터 소스.** 이 PC의 `/opt/ros/jazzy/share/ur_description/config/ur7e/default_kinematics.yaml`을 확인했고 UR5e와 **완전히 동일**하다(`d1=0.1625, a2=-0.425, a3=-0.3922, d4=0.1333, d5=0.0997, d6=0.0996`). 다만 실기 PC의 distro가 다를 수 있으므로 **이 값을 리포의 `config/ur7e_dh.yaml`에 상수로 커밋**하고 배포판 의존을 없앤다.
 
@@ -233,6 +266,18 @@ branch0    ← branch_id(q_anchor)
 ### 3.3 델타 적용 — 곱 순서와 좌표계 명시
 
 `R_align` = GELLO 베이스 → UR `base_link` 정렬 회전(순수 회전, 기본 `I`, yaml에 RPY로 노출).
+
+> ### ⚠️ 추가 (2026-07-22) — 이 정의는 **여기서만 맞게 적혀 있었다**
+>
+> `config/ur7e_gello_eef.yaml`의 주석은 이것을 *"리더 **손목** 프레임 ↔ UR **툴** 프레임 오프셋"* 이라고 잘못 설명하고 있었다(정정 완료). 위 문장이 옳다: **베이스 대 베이스** 회전 `R_align = R_{UR base_link ← 가상 리더 base_link}` 이다.
+>
+> **그리고 기본값 `I`는 측정된 적이 없다.** `I`는 "GELLO 베이스 프레임 = UR base_link 프레임"이라는 **단언**이며, `scripts/gello_get_offset.py`가 관절 오프셋을 **π/2 배수로 스냅**하므로(`np.linspace(-8π, 8π, 33)`) 베이스 관절에 **0/90/180/270° 4중 모호성**이 남아 있다.
+>
+> **옛 프레이밍에서는 `I`가 유일하게 옳은 값이었다** — "EEF는 joint 모드를 재현해야 한다"는 전제 하에서는 양쪽 관절이 같으니 베이스도 같다는 결론이 자동이었다. **"GELLO = 3D 펜" 프레이밍은 그 논거를 폐기한다.** 이제 측정해야 한다.
+>
+> 수치 확인: `r_align_rpy`를 바꾸면 로봇 TCP 변위의 **방향만 회전하고 크기는 보존**되며, 이 성질은 **로봇 자세와 무관**하다. 증상이 고약한 이유가 여기 있다 — **10~20° 오차는 "팔이 좀 비딱하다"로 합리화되고, 90° 오차라야 명백해진다.** 요구 정밀도는 **≤ 5°**.
+>
+> **로봇 없이 할 수 있는 측정 절차의 정본은 [MODE.md §1.6](GELLO_UR7E_EEF_MODE.md)** 이다. 핵심 항등식: 두 팔이 **같은 관절 벡터**에 있을 때 `ψ = (GELLO 세계 방위각) − (UR 세계 방위각)`이고 **자세 의존 항이 정확히 상쇄**되므로, 어떤 자세를 골라도 결과가 같다.
 
 ```
 ─ 회전 (world / left multiply) ───────────────────────────────
@@ -329,7 +374,12 @@ ros2 launch ur_gello_bringup ur7e_gello_real.launch.py robot_ip:=<IP> control_mo
                                                            ENGAGED
 ```
 
-- **BOOTSTRAP**: `control_mode:="eef"`로 떴지만 아직 한 번도 engage하지 않은 상태. **joint 패스스루로 동작**한다(§2.4). `gello_move_to_start` 핸드셰이크가 이 상태에서 정상 수행된다.
+- ⛔ ~~**BOOTSTRAP**: `control_mode:="eef"`로 떴지만 아직 한 번도 engage하지 않은 상태. **joint 패스스루로 동작**한다(§2.4). `gello_move_to_start` 핸드셰이크가 이 상태에서 정상 수행된다.~~
+  > **SUPERSEDED (2026-07-22) — 3D 펜 프레이밍으로 교체됨.** engage 전 상태가 joint 패스스루라는 것은, EEF 모드에서는 **첫 틱부터 팔이 리더 관절 형상을 향해 셀을 가로질러 스윙한다**는 뜻이었다. 3D 펜 운용(리더와 로봇이 영구히 다른 관절 자세)에서는 정반대로 틀린 동작이다.
+  >
+  > **현행 구현**: EEF 모드는 **`HOLD`로 부팅**한다(마지막 명령 포즈 유지, 리더 미러링 없음). joint 패스스루는 **`JOINT_BOOTSTRAP`** 이라는 별도 상태로 분리되었고, 거기로 들어가는 경로는 **정렬 게이트가 있는 3개 서비스뿐**(`~/resume`, `~/resume_chase`, `~/eef_to_joint`)이다. 기동은 `start_mode:=switch_only`(궤적 없음, 팔 무동작) + `~/eef_resume`(정렬 게이트 없이 `HOLD`로 재무장)로 이루어진다.
+  >
+  > 상태 4종·서비스·게이트의 정본은 **[MODE.md §3.5](GELLO_UR7E_EEF_MODE.md)** 다.
 - **ENGAGED**: EEF 델타 제어. 유일하게 카테시안 조작이 되는 상태.
 - **HOLD**: 수용 테스트가 거부되어 `T_cmd`가 동결된 상태. 로봇은 마지막 명령에 정지. 사람이 GELLO를 되돌리면 자동 복귀.
 - **DISENGAGED**: `_paused = True`. **기존 pause 경로와 물리적으로 동일** — 다음 250 Hz 틱에 발행 중단, 로봇 즉시 정지.
@@ -647,9 +697,23 @@ FK를 이미 갖고 있으므로 추가 의존 없이 수십 µs면 된다. 후�
 
 ### 6.8 speed scaling
 
-`forward_position_controller`는 펜던트 speed-scaling(감속 슬라이더, 안전 감속)을 **존중하지 않는다** — 기존 문서에 명시된 알려진 취약점이다. EEF 모드에서는 `v_max`/`ω_max`가 우리 손에 있으므로 **`/speed_scaling_state_broadcaster`를 구독해 `scale < 1`이면 `v_max`·`ω_max`에 그대로 곱한다.** 전 workspace를 허용하는 대가로 이번 범위에 포함한다.
+`forward_position_controller`는 펜던트 speed-scaling(감속 슬라이더, 안전 감속)을 **존중하지 않는다** — 기존 문서에 명시된 알려진 취약점이다.
 
-이 브로드캐스터는 `ur_robot_driver`의 `ur_controllers.yaml` 기본 로드 목록에 있어 활성일 가능성이 높지만, **P-1에서 `ros2 topic list`로 실측 확인**한다. 없으면 EEF 모드에서 `v_max`를 보수적으로(0.05 m/s) 고정하고 문서에 명시한다.
+> ## ⛔ SUPERSEDED (2026-07-22) — **구독은 구현되지 않았다**
+>
+> 아래 원문은 `/speed_scaling_state_broadcaster`를 구독해 `v_max`·`ω_max`에 곱하겠다고 적었다. **구현되지 않았다** — 브리지 소스 전수 grep 결과 `speed_scaling` 문자열이 **한 곳도 없다**.
+>
+> **운영상 의미: 펜던트 속도 슬라이더는 EEF 명령 속도에 아무 영향이 없다.** 슬라이더를 50%로 내려도 우리가 내보내는 EEF 속도는 그대로다. 감속 수단은 **`v_max` / `w_max` launch 인자뿐**이다. → [MODE.md (H5)](GELLO_UR7E_EEF_MODE.md)
+>
+> 브로드캐스터 자체는 `ur_robot_driver`의 기본 로드 목록에 있어 **토픽은 존재하지만 아무도 구독하지 않는다.** 구현하려면 별도 작업이다.
+
+<details><summary>원본 서술 (미구현, 참고용)</summary>
+
+> EEF 모드에서는 `v_max`/`ω_max`가 우리 손에 있으므로 **`/speed_scaling_state_broadcaster`를 구독해 `scale < 1`이면 `v_max`·`ω_max`에 그대로 곱한다.** 전 workspace를 허용하는 대가로 이번 범위에 포함한다.
+>
+> 이 브로드캐스터는 `ur_robot_driver`의 `ur_controllers.yaml` 기본 로드 목록에 있어 활성일 가능성이 높지만, **P-1에서 `ros2 topic list`로 실측 확인**한다. 없으면 EEF 모드에서 `v_max`를 보수적으로(0.05 m/s) 고정하고 문서에 명시한다.
+
+</details>
 
 ---
 
@@ -662,7 +726,7 @@ FK를 이미 갖고 있으므로 추가 의존 없이 수십 µs면 된다. 후�
 | `.../ur_gello_bringup/gello_ur_bridge_node.py` | **수정** | ① `control_mode` 파라미터 ② `_on_timer` per-joint 루프를 **필터 루프 / 클램프 루프로 분리** ③ eef 분기에서 `_euro_lead` + `eef_stage` 호출 ④ `~/eef_engage`/`~/eef_disengage`/`~/eef_reclutch`/`~/eef_to_joint` Trigger 서비스(기존 `~/resume` 골격 복제) ⑤ staleness 브랜치에 앵커 무효화 1줄 ⑥ `~/eef/state` + PoseStamped 3종 발행 ⑦ `/speed_scaling_state_broadcaster` 구독. **lazy import**: `control_mode=="joint"`이면 `ur_kin`/`eef_delta`를 임포트조차 하지 않음 |
 | `.../config/ur7e_dh.yaml` | **신규** | UR7e DH 상수를 리포에 커밋(배포판 의존 제거). Jazzy `ur_description`에서 확인한 값 + 출처 주석 |
 | `.../config/ur7e_gello.yaml` | **수정** | `gello_ur_bridge` 섹션에 `control_mode: "joint"` **명시**(= 기존 실행 동작 100% 불변을 설정 파일 자체로 보증) |
-| `.../config/ur7e_gello_eef.yaml` | **신규** | EEF 전용 오버레이(짧음): `pos_scale`(= 측정한 `k`), `r_align_rpy`, `tool_l_xyz_rpy`, `tool_r_xyz_rpy`, `v_max` 0.08, `w_max` 0.5, `sigma_warn` 0.10, `sigma_stop` 0.03, `gamma_min` 0.05, `char_length` 0.30, `branch_tol` 0.25, `branch_weights`, `limit_margin_rad` 0.05, `s_floor` 0.02, `lag_max_pose` [0.05, 0.3], `max_excursion_m` 0.5, `anchor_agree_tol` 0.02, `filter_settled_tol` 0.005, `hold_latch_s` 2.0, `tick_budget_us` 1000, `keepout` 블록, `ik_backend` |
+| `.../config/ur7e_gello_eef.yaml` | **신규** | EEF 전용 오버레이(짧음): `pos_scale`(**실제 커밋값 `1.0`** — `k` 아님, §3.1 성질 2 SUPERSEDED), `r_align_rpy`, `tool_l_xyz_rpy`, `tool_r_xyz_rpy`, `v_max` 0.08, `w_max` 0.5, `sigma_warn` 0.10, `sigma_stop` 0.03, `gamma_min` 0.05, `char_length` 0.30, `branch_tol` 0.25, `branch_weights`, `limit_margin_rad` 0.05, `s_floor` 0.02, `lag_max_pose` [0.05, 0.3], `max_excursion_m` 0.5, `anchor_agree_tol` 0.02, `filter_settled_tol` 0.005, `hold_latch_s` 2.0, `tick_budget_us` 1000, `keepout` 블록, `ik_backend` |
 | `.../launch/ur7e_gello_real.launch.py` | **수정** | `control_mode` LaunchArgument(기본 `"joint"`). `eef`일 때만 params 목록 뒤에 `ur7e_gello_eef.yaml` 추가. **분기는 `IfCondition` 두 개로 끝내고 joint 경로에 조건부 코드가 끼어들지 않게** |
 | `.../launch/ur7e_gello_eef_mock.launch.py` | **신규** | mock ros2_control + `fake_gello` + 브리지(`control_mode:=eef`) + RViz. 실기 없이 zero-jump/거부 로직을 눈으로 확인하는 1차 경로 |
 | `.../ur_gello_bringup/fake_gello_node.py` | **수정** | 재현 가능한 입력 패턴 추가(`pattern`: `hold` / `offset_hold`(로봇과 고의로 어긋난 정지) / `line_xyz` / `wrist_singularity` / `full_rotation`(0→360°) / `step`). 기본값은 기존 동작 유지 |
@@ -673,7 +737,7 @@ FK를 이미 갖고 있으므로 추가 의존 없이 수십 µs면 된다. 후�
 | `.../setup.py` | **수정** | (신규 console_script 없음 — 새 노드가 없으므로) `scripts/` 설치 항목만 |
 | `.../package.xml` | **수정** | `python3-numpy` exec_depend. `ur_analytic_ik`는 rosdep 키가 없으므로 **여기 넣지 않고** `requirements-eef.txt` + 문서 절차로 분리 |
 | `.../requirements-eef.txt` | **신규** | `ur_analytic_ik` 핀 버전. EEF 모드에만 필요한 pip 의존을 joint 모드와 파일 경계로 분리 |
-| `docs/ros2/GELLO_UR7E_EEF_MODE.md` | **신규**(구현 후) | 실행 런북: 설치 절차, 프리플라이트, clutch 조작 순서, 증상→원인 표, 복구 절차 |
+| `docs/ros2/GELLO_UR7E_EEF_MODE.md` | **존재함 — 현행 운영 문서** | 실행 런북: 실기 전 설정값, 빌드/배포, 단계적 브링업(P4~P9), Remote(headless) 기동, clutch 조작 순서, 조작자 위험 항목, 상태 확인. **조작자는 이 문서를 따른다** — 본 PLAN과 어긋나면 런북이 우선 |
 
 ### 7.1 joint 모드 무회귀 보장 — 4중 방어
 
@@ -701,12 +765,12 @@ FK를 이미 갖고 있으므로 추가 의존 없이 수십 µs면 된다. 후�
 2. `ls /opt/ros/$ROS_DISTRO/share/ur_description/config/ | grep ur7e` — 없으면 `config/ur7e_dh.yaml`의 커밋 상수를 그대로 사용(이미 그렇게 설계됨)
 3. `pip install ur_analytic_ik` 빌드 성공/실패. 실패 시 `numeric` 백엔드로 진행하고 그 성능을 P0에서 실측
 4. `ros2 topic list | grep -E "tcp_pose|speed_scaling"` — 브로드캐스터 활성 여부
-5. **GELLO 축소비 `k` 실측**: 관절 하나(예 `shoulder_lift`)를 알려진 각도만큼 돌리고 그립점 이동 거리를 자로 측정 → `k = 실측 거리 / FK 예측 거리`. 최소 2개 관절로 교차 확인
-6. **`T_tool_L` 실측**: GELLO flange 원점 → 손잡이 그립점 오프셋 (물리 실측 후 `/k`로 가상-UR 스케일 변환)
-7. **`T_tool_R` 확인**: Robotiq 2F-85 TCP 오프셋 (데이터시트 + 실측 대조)
+5. ~~**GELLO 축소비 `k` 실측**~~ — ⛔ **SUPERSEDED (2026-07-22): `pos_scale`을 위해서는 필요 없다.** `pos_scale = 1.0` 고정으로 결정되었기 때문이다(§3.1 성질 2 SUPERSEDED 박스, 정본은 [MODE.md §1.2](GELLO_UR7E_EEF_MODE.md)). 측정 절차 자체는 **Q1(균일 축소인가?) 판정용으로만** 선택적으로 남긴다: 관절 하나(예 `shoulder_lift`)를 알려진 각도만큼 돌리고 그립점 이동 거리를 자로 측정 → `k = 실측 거리 / FK 예측 거리`, 최소 2개 관절로 교차 확인. **실기 브링업의 선행 조건이 아니다.**
+6. ~~**`T_tool_L` 실측**: GELLO flange 원점 → 손잡이 그립점 오프셋 (물리 실측 후 `/k`로 가상-UR 스케일 변환)~~ → ⛔ **SUPERSEDED**: `tool_l_xyz_rpy = tool_r_xyz_rpy`로 확정(§3.1 성질 3 SUPERSEDED 박스, 정본 [MODE.md §1.1](GELLO_UR7E_EEF_MODE.md)). 별도 실측 없음
+7. **`T_tool_R` 확인**: Robotiq 2F-85 TCP 오프셋 — ✅ **완료(2026-07-22)**: flange +Z **0.174 m** 실측, 펜던트 TCP `TCP_2f85`와 일치, yaml 반영 완료. **펜던트 TCP는 코드로 자동 전파되지 않으므로 손으로 동기화한다**
 
-**완료 기준**: 위 7항목이 전부 문서화된 수치로 존재. `k`가 2개 관절에서 5% 이내 일치(= 균일 축소 가정 검증).
-**실패 시 구분**: `k`가 관절마다 크게 다르면 **비균일 축소**이며, 위치 델타가 방향 왜곡된다 → §10-Q1로 에스컬레이션.
+**완료 기준**: 위 항목 중 1~4, 6, 7이 전부 문서화된 수치로 존재(5번 `k`는 **선택**). `k`를 측정했다면 2개 관절에서 5% 이내 일치(= 균일 축소 가정 검증).
+**실패 시 구분**: `k`가 관절마다 크게 다르면 **비균일 축소**이며, 위치 델타가 방향 왜곡된다 → §10-Q1로 에스컬레이션. (이 왜곡은 `pos_scale` 값과 무관한 별개 현상이다 — `pos_scale`은 등방 스칼라라 방향 왜곡을 만들지도, 고치지도 못한다.)
 
 ---
 
@@ -807,36 +871,62 @@ FK를 이미 갖고 있으므로 추가 의존 없이 수십 µs면 된다. 후�
 
 ### P6 — 실기: 게인 0, 움직이지 않는 것을 확인 · 난이도 ★★☆
 
-실제 UR7e + 실제 GELLO. 기존 실기 절차(프리플라이트, 핸드셰이크, EC Play) 그대로 + `control_mode:=eef`. **`pos_scale = 0.0`, `v_max = 0.01`, `ω_max = 0.05`로 고정** — 이 단계에서 로봇은 원리상 **한 번도 움직이지 않아야 한다.**
+실제 UR7e + 실제 GELLO. 기존 실기 절차(프리플라이트, 핸드셰이크, EC Play) 그대로 + `control_mode:=eef`. **`pos_scale = 0.0`, `v_max = 0.01`, `ω_max = 0.05`로 고정.**
 
-**완료 기준**:
-- (a) engage/disengage 20회, 매번 `/forward_position_controller/commands` 스텝 = 0
-- (b) engage 후 60초간 GELLO를 마구 흔들어도 실기 팔 무동작
+> ## ⛔ SUPERSEDED (2026-07-22) — "이 단계에서 로봇은 원리상 한 번도 움직이지 않아야 한다"는 **거짓이었다**
+>
+> **`pos_scale`은 위치 항 하나만 곱한다**(`eef_delta.py`의 `step()`). 회전 채널 `R_des = R_delta @ R_r_anchor`(`step()`의 회전 항)에는 **스케일이 없다.** 따라서 `pos_scale = 0.0`은 **TCP 위치만 앵커에 고정**하고, 로봇은 공구를 제자리에서 회전시키며 어깨·팔꿈치·손목이 실제로 크게 스윙한다.
+>
+> 실기 컨트롤러 실측(`pos_scale = 0.0`):
+>
+> | 리더 입력 | TCP 위치 변화 | TCP 자세 변화 | 최대 관절 변화 |
+> |---|---|---|---|
+> | `wrist_3` +40° | 2.6e-16 m | **40.00°** | **0.698 rad** |
+> | 팔 전체 흔들기 | 2.7e-16 m | **60.29°** | **1.020 rad** |
+>
+> **왜 이것이 위험한 오류였나**: P6는 **실기** 단계이고 `keepout_json = "{}"`(충돌 인지 전무, §6.5/Q7)다. 아래 원래 기준 (b)는 조작자에게 **60초간 리더를 마구 흔들라**고 지시하는데, 그동안 팔꿈치는 예측 없이 최대 1 rad 가까이 스윙한다. 게다가 그 움직임을 본 조작자는 **정상 시스템을 FAIL로 기록**하게 된다.
+>
+> **정정된 기준과 절차의 정본은 [MODE.md §3.2 "P6에서 `pos_scale=0.0`이 하는 일"](GELLO_UR7E_EEF_MODE.md)이다.** 요지: 판정 대상은 **TCP 위치**(`~/eef/state`의 `excursion_m`)이며, **팔이 움직이는 것 자체는 PASS**다. 흔드는 동작은 천천히·작게, 팔꿈치 클리어런스 확보, 손은 E-STOP 위.
+
+**완료 기준** (아래 (a)(b)는 위 박스대로 정정됨):
+- (a) engage/disengage 20회, 매번 engage 순간 `/forward_position_controller/commands` 스텝 = 0 (zero-jump)
+- (b) ⛔ ~~engage 후 60초간 GELLO를 마구 흔들어도 실기 팔 무동작~~ → **정정: engage 후 GELLO를 천천히 움직여도 `excursion_m`이 계속 0**(TCP 위치 무동작). 팔의 회전 동작은 정상
 - (c) protective stop 0회
-- (d) **실기 DH 대조**(G7이 못 하는 것): `/tcp_pose_broadcaster/pose`가 활성이면 `‖FK_ours(q_actual) ⊖ T_vendor‖ < (5 mm, 5 mrad)`. 없으면 펜던트 TCP 표시와 3개 자세 수동 대조
-- (e) 틱 실행시간 p99 < 1.0 ms
+- (d) **실기 DH 대조**(G7이 못 하는 것): `/tcp_pose_broadcaster/pose`(펜던트 TCP `TCP_2f85`가 설정되어 있어 발행됨)와 `~/eef/commanded_pose`를 **3개 이상 자세**에서 비교, `< (5 mm, 5 mrad)`. 없으면 펜던트 TCP 표시와 3개 자세 수동 대조.
+  **이것이 잡아야 하는 실제 위험**: `ur_kin.py`의 DH는 **명목값**이며 이 개체의 공장 캘리브레이션이 아니다(`config/ur7e_dh.yaml` 주석). 게다가 `ur_kin.load_dh()`는 **정보용일 뿐 `fk`/`ik`/`jacobian`에 배선되어 있지 않다**(`ur_kin.load_dh()` docstring) — 캘리브레이션 yaml을 넣어도 자동 반영되지 않는다. 절차 상세는 [MODE.md §3.2 P6 (d)](GELLO_UR7E_EEF_MODE.md)
+- (e) 틱 실행시간 p99 < 1.0 ms — **관측법(구현 실측)**: `~/eef/state`는 `tick_us_p99`를 발행하지 **않는다**(§9.1 주석). 대신 `tick_budget_us`(1000 µs) 워치독이 `tick_overrun_limit`(5) 연속 초과 시 fail-closed 자동 disengage하므로, **세션 내내 `auto_reason`에 `tick_budget exceeded`가 없고 브리지 WARN 로그가 0회**면 이 기준을 만족한 것으로 본다
 
-**실패 시 구분**: (a)(b)에서 로봇이 움직이면 앵커 로직 버그다(수식은 P1이 검증). (d) 실패면 실기 캘리브레이션 반영 필요 → §10-Q3.
+**실패 시 구분**: (a)(b)에서 **TCP 위치**가 움직이면(=`excursion_m` ≠ 0) 앵커 로직 버그다(위치 수식은 P1이 검증). **팔의 회전 동작은 실패 신호가 아니다**(위 SUPERSEDED 박스). (d) 실패면 실기 캘리브레이션 반영 필요 → §10-Q3.
 
 ---
 
 ### P7 — 실기: 순수 병진, 저게인 · 난이도 ★★☆
 
-회전 델타 강제 무효화(`rot_freeze:=true`, `R_delta ≡ I`). `pos_scale`을 P-1에서 측정한 `k`로 설정. `v_max` 0.02 → 0.05 m/s 단계 상승. 손은 E-STOP 위.
+⛔ ~~회전 델타 강제 무효화(`rot_freeze:=true`, `R_delta ≡ I`).~~ → **SUPERSEDED (2026-07-22): `rot_freeze`는 구현되어 있지 않다** (아래 박스). ~~`pos_scale`을 P-1에서 측정한 `k`로 설정.~~ → ⛔ **SUPERSEDED (2026-07-22): `pos_scale = 1.0`(yaml 기본값)으로 그대로 둔다.** 이유는 §3.1 성질 2의 SUPERSEDED 박스, 정본은 [MODE.md §1.2](GELLO_UR7E_EEF_MODE.md). `v_max` 0.02 → 0.05 m/s 단계 상승. 손은 E-STOP 위.
+
+> ## ⛔ SUPERSEDED (2026-07-22) — `rot_freeze` / `pos_freeze`는 **존재하지 않는다**
+>
+> 리포 전수 grep 결과 이 두 문자열은 **이 PLAN 산문 두 줄(P7, P8)에만** 나온다. **어떤 소스 파일에도, launch 파일에도, yaml에도 없다** — launch 인자도, 노드 파라미터도, `eef_delta.py`의 cfg 키도 아니다.
+>
+> **결과: P7과 P8을 격리된 채널로 실행할 수 없다.** P7 실행에는 P8의 회전 거동이 이미 섞여 들어오므로, *"회전 버그를 여기서 완전히 배제한다"* 는 아래 문장은 **이 구현에서 성립하지 않는다.**
+>
+> 실제로 실행 가능한 P7/P8(조작 절차로만 채널을 분리)의 정본은 **[MODE.md §3.2의 P7/P8 박스](GELLO_UR7E_EEF_MODE.md)** 다. 요지: P7은 **리더 자세를 유지한 채 평행이동만**, P8은 **리더 그립점을 한 자리에 고정한 채 손목만** 비튼다.
+>
+> 두 플래그를 진짜로 원하면 **별도 구현 작업**이며 이번 범위 밖이다.
 
 **완료 기준**:
-- (a) 리더 그립점을 x/y/z 각 축으로 ±5 cm 물리 이동 → 로봇 TCP가 **같은 축·같은 부호로 ±5 cm** 이동 (`R_align` 및 `pos_scale` 검증)
+- (a) 리더 그립점을 x/y/z 각 축으로 이동 → 로봇 TCP가 **같은 축·같은 부호로** 이동 (`R_align` 검증). `pos_scale=1.0`이므로 이동 **거리**는 손의 물리 이동 거리가 아니라 **joint 모드에서 같은 관절 입력을 줬을 때의 TCP 이동량**과 같아야 한다 — 그 비교가 이 항목의 판정 기준이다(손 5 cm에 TCP가 그보다 크게 가는 것은 정상)
 - (b) **축간 크로스토크 없음** — x만 움직였는데 y/z가 따라오면 §10-Q1(비균일 축소) 또는 `R_align` 문제
 - (c) 손을 멈추면 로봇도 그 자리에 정지(절대 서보 특성 — 상대/속도 매핑이었다면 드리프트)
 - (d) `slew_saturated_joints`가 계속 비어 있음, IK 잔차 < 1e-9
 
-**회전 버그를 여기서 완전히 배제한다.**
+⛔ ~~**회전 버그를 여기서 완전히 배제한다.**~~ → **성립하지 않는다** (`rot_freeze` 미구현, 위 박스). 조작 절차로 회전 입력을 **작게 만들 뿐**이다.
 
 ---
 
 ### P8 — 실기: 순수 회전, 저게인 · 난이도 ★★☆
 
-병진 델타 무효화(`pos_freeze:=true`). 앵커 대비 roll/pitch/yaw 각 ±45°.
+⛔ ~~병진 델타 무효화(`pos_freeze:=true`).~~ → **SUPERSEDED (2026-07-22): `pos_freeze`는 구현되어 있지 않다**(P7의 박스 참조). 대신 **리더 그립점을 한 자리에 물리적으로 고정**한 채 손목만 비튼다 — 손이 이동하면 그 병진은 정상 명령이므로 (b) 판정이 오염된다. 앵커 대비 roll/pitch/yaw 각 ±45°.
 
 **완료 기준**:
 - (a) 로봇 TCP 자세 변화가 **월드축 기준으로** 리더와 일치 (좌측 곱 컨벤션 검증 — 어긋나면 body-frame 곱을 잘못 쓴 것)
@@ -898,8 +988,12 @@ P2의 replay 도구로 P9 실주행 로그를 다시 돌려 `v_max`/`σ_warn`/`b
   "excursion_m":0.121, "branch_id":5, "n_ik_solutions":8,
   "slew_saturated_joints":[], "joint_gap":[0.02,1.31,...],
   "shoulder_radicand":0.083, "tick_us_p50":210, "tick_us_p99":640,
-  "anchor_stamp":1234.567, "pos_scale":0.40 }
+  "anchor_stamp":1234.567, "pos_scale":1.00 }
 ```
+
+> **실제 구현과의 차이(2026-07-22 실측).** 위 JSON은 설계 시안이다. 현행 `gello_ur_bridge_node._on_eef_state_timer()`가 실제로 싣는 키는
+> `mode, state, reject_reason, auto_reason, sigma_min, gamma, ls_scale, ik_residual, lag_pos, lag_rot, excursion_m, branch_id, n_ik_solutions, pos_scale, joint_gap` 이다.
+> **`tick_us_p50` / `tick_us_p99` / `budget_overrun` / `reject_count_60s` / `shoulder_radicand` / `slew_saturated_joints` / `anchor_stamp` 는 발행되지 않는다.** 틱 예산은 발행 대신 **워치독**으로만 존재한다: `tick_budget_us`(기본 1000 µs)를 `tick_overrun_limit`(기본 5회) 연속 초과하면 fail-closed 자동 disengage되고, 그 사유가 `auto_reason`에 `tick_budget exceeded ...` 로 찍힌다. 따라서 "p99 < 1.0 ms"의 실무 판정은 **세션 중 해당 auto-disengage / WARN 로그가 0회인가**로 한다.
 
 **3개 pose를 RViz에 동시에 띄우는 것이 1차 진단 도구다.** `leader` / `desired` / `commanded` 세 프레임을 한 화면에서 보면 "리더가 이상한가 / 거버너가 막았나 / IK가 틀렸나"를 눈으로 즉시 구분할 수 있다.
 
@@ -913,10 +1007,17 @@ P2의 replay 도구로 P9 실주행 로그를 다시 돌려 `v_max`/`σ_warn`/`b
 | 특이점 근처에서 영원히 안 풀린다 | γ 락업 (비대칭 규칙 미적용?) | `gamma`, `sigma_min`. 되돌리는 방향에서 `gamma`가 1로 돌아오는지 |
 | 손을 멈췄는데 로봇이 계속 간다 | anti-windup 미작동 / `T_cmd`가 `T_des`보다 크게 뒤처짐 | `lag_pos_m`, `lag_rot_rad` |
 | disengage 했는데 로봇이 계속 간다 | `_paused` 경로를 안 탐 | `~/state`가 `PAUSED`인지, 발행이 멈췄는지 `ros2 topic hz` |
-| 축이 뒤바뀌거나 섞인다 (병진) | `R_align` 또는 비균일 축소 | P7 축별 독립 테스트. 크로스토크면 §10-Q1 |
+| 축이 뒤바뀌거나 섞인다 (병진) | `R_align` 또는 비균일 축소 | **`R_align`을 먼저 배제한다** — 두 원인은 증상이 겹치는데 `R_align`은 로봇 없이 측정 가능하다([MODE.md §1.6](GELLO_UR7E_EEF_MODE.md)). 그 다음 P7 축별 독립 테스트, 그래도 크로스토크면 §10-Q1 |
+| 이동 **거리는 맞는데 방향이 조금 비딱하다** ("게가 걷는 느낌") | **`R_align` 오정합 10~20°** — 가장 놓치기 쉬운 구간 | 크기 보존 + 방향만 회전이 `R_align`의 고유 지문이다(§3.3 박스). [MODE.md §1.6](GELLO_UR7E_EEF_MODE.md) 측정 절차. 10 cm 이동 시 가로 오차: 10°→1.74 cm, 20°→3.42 cm |
+| **의도한 방향으로 이동량이 0** | `R_align` 오차 90° (π/2 스냅 모호성) | 같은 절차. 이쪽은 오히려 즉시 티가 나므로 안전한 실패다 |
+| 특이점 근처에서 팔이 **아주 느리게 계속 기어간다** | **버그 아님 — 의도된 락업 방지.** `σ_min < σ_stop`이어도 `γ_min·v_max = 4 mm/s`로 움직이고, 탈출 방향은 감속조차 안 한다 | `eef_delta.py`의 `step()` γ 블록(γ 하한), `:414-419`(비대칭 면제). §6.3 |
+| 2초쯤 멈춰 있다가 **세션이 끊긴다** | `hold_latch_s`는 **최소 유지시간이 아니라 최대 허용시간**(2.0 s)이다 | `auto_reason`에 `hold_latched`. 복귀는 `13) eef 재무장`(`~/eef_resume`) |
+| **engage 전인데 팔이 리더 관절을 따라 움직인다** | `JOINT_BOOTSTRAP` 상태에 있다 (3D 펜 `HOLD`가 아님) | `~/eef/state`의 `hold_when_not_engaged`. `false`면 패스스루다 → `~/eef_resume`으로 `HOLD` 복귀([MODE.md §3.5](GELLO_UR7E_EEF_MODE.md)) |
+| 펜던트 **속도 슬라이더를 내려도 안 느려진다** | **버그 아님 — 미구현.** 브리지는 `/speed_scaling_state_broadcaster`를 구독하지 않는다 | §6.8 SUPERSEDED 박스. `v_max:=` / `w_max:=`로 재기동 |
 | 축이 뒤바뀐다 (회전) | 좌/우 곱 순서 | P1 (d) 회귀 테스트가 통과했는데 실기에서 틀리면 GELLO `joint_signs` 문제 |
-| 손목만 돌렸는데 TCP가 크게 병진 | **tool 오프셋 미설정/오설정** (§3.1 성질 3) | P8 (b). `T_tool_L`/`T_tool_R` 재실측 |
-| 손 5 cm에 로봇이 12 cm | **`pos_scale`이 `k`가 아니라 1.0** | `~/eef/state`의 `pos_scale`, P-1의 `k` 실측값 |
+| 손목만 돌렸는데 TCP가 크게 병진 | **tool 오프셋 미설정/오설정** (§3.1 성질 3) | P8 (b). `tool_l_xyz_rpy`와 `tool_r_xyz_rpy`가 **같은 값(`[0,0,0.174,0,0,0]`)인지 먼저 확인** — 한쪽만 0이면 이 증상이 정확히 나타난다. 그 다음 펜던트 TCP와 yaml이 동기화됐는지 |
+| 손 5 cm에 로봇이 12 cm | **버그 아님 — 정상 동작.** 축소 리더의 당연한 성질이고 joint 모드와 동일하다(§3.1 성질 2 SUPERSEDED 박스, [MODE.md §1.2](GELLO_UR7E_EEF_MODE.md)) | `~/eef/state`의 `pos_scale`이 `1.0`인지만 확인. `1.0`이면 정상. `1.0`이 아닌데 아무도 바꾼 기억이 없다면 그때가 오설정이다 |
+| 손을 조금 움직였는데 로봇이 **joint 모드보다도 훨씬 크게** 간다 | `pos_scale`이 `1.0`보다 크게 설정됨 (의도적 증폭 값이 남아있음) | `~/eef/state`의 `pos_scale`, 기동 로그의 `pos_scale=...` 줄, launch에 `pos_scale:=` 를 넘겼는지 |
 | 정상 조작 중 갑자기 멈춤이 잦다 | `branch_tol`/`s_floor`/`σ_warn` 과대 | `reject_count_60s`. P2 replay로 오발동률 재측정 |
 | 로봇이 굼뜨다 / 진동 | `slew_saturated_joints` 비어있지 않음 = **버그 신호**(§3.5) | `step_eff` 전달 누락 확인 |
 | 가끔 명령이 끊긴다 | 틱 예산 초과 | `tick_us_p99`, `budget_overrun` |
@@ -930,16 +1031,29 @@ P2의 replay 도구로 P9 실주행 로그를 다시 돌려 `v_max`/`σ_warn`/`b
 
 ## 10. 미해결 질문 / 사용자 결정 필요 사항
 
-### Q1. GELLO 축소 모델이 **균일**한가? (P-1에서 판정, 미해결 시 설계 영향 큼)
+### Q1. GELLO 축소 모델이 **균일**한가? — 부분 해소 (2026-07-22): **`k`는 측정하지 않는다**
+
+> **결정 기록.** 축소비 `k` 자체는 **측정하지 않기로 확정**되었고(`pos_scale = 1.0` 유지, §3.1 성질 2 SUPERSEDED 박스), 사용자가 3D 펜 프레이밍 하에서 이를 **재확인**했다. 따라서 이 항목의 "P-1에서 `k`를 2개 관절로 교차 측정" 부분은 **수행하지 않는다.**
+>
+> **대신 정직하게 기록해 둘 것**: `pos_scale = 1.0`은 **가상 풀사이즈 UR7e 공간에서만 1:1**이고, **조작자의 손은 로봇 TCP보다 대략 `k`배 적게 움직인다**. 즉 이것은 **의도적으로 증폭된 펜**이며, **"내 손이 가는 자리에 공구 끝이 간다"는 이 설정이 제공하지 않는다.** 그 대가로 얻는 것은 joint 모드와 동일한 조작 감각(익숙한 기준선)이다. → [MODE.md §1.2](GELLO_UR7E_EEF_MODE.md)
+>
+> **남는 질문은 "균일성"뿐이다.** 비균일이면 위치 델타의 **방향**이 왜곡되고, 그것은 P7의 축간 크로스토크로 나타난다. 다만 그 증상은 **`R_align` 오정합과 구별이 어렵다**(§3.3 박스) — **`R_align`을 먼저 측정해 배제한 뒤**에 비균일성을 의심할 것.
+
+(원문)
 리포 어디에도 GELLO 링크 길이 데이터가 없다. "UR7e와 링크 길이 비율이 동일한 축소 모델"이라는 전제는 **리포의 어떤 파일로도 뒷받침되지 않는다.** 우리 설계는 회전이 스케일 불변이라는 성질에만 강하게 의존하므로 비율이 균일하면 `k` 하나로 끝나지만, **링크마다 비율이 다르면 위치 델타의 방향이 왜곡된다**(회전은 여전히 정확). P-1에서 2개 관절로 `k`를 교차 측정하고 P7에서 축간 크로스토크로 판정한다.
 → **비균일로 판명되면**: GELLO 실측 링크 길이로 별도 DH를 만들거나(하드웨어 작업), 폴백으로 "회전만 EEF 델타, 위치는 joint 미러링" 축소 모드를 검토한다.
 
-### Q2. `T_tool_L` / `T_tool_R` 실측값 (P-1, **필수**)
-회전 중심을 정의하려면 두 tool 오프셋이 필요하다(§3.1 성질 3). `T_tool_R`(Robotiq 2F-85 TCP)은 데이터시트로 근사 가능하지만, `T_tool_L`(GELLO 손잡이 그립점)은 **"사람이 어디를 잡느냐"에 의존**하므로 물리 실측 + 조작자 합의가 필요하다.
-→ **사용자 확인 필요**: GELLO를 잡을 때 손의 기준점을 어디로 정의할 것인가?
+### Q2. `T_tool_L` / `T_tool_R` 실측값 — ✅ **해결 (2026-07-22)**
+`T_tool_R` = Robotiq 2F-85 TCP = flange **+Z 0.174 m** (실측, 펜던트 `TCP_2f85`와 일치).
+`T_tool_L` = **`T_tool_R`과 동일값**. "사람이 GELLO를 어디를 잡느냐"라는 원래 질문은 **성립하지 않는다** — `tool_l`은 물리 GELLO가 아니라 **가상 풀사이즈 UR7e flange** 기준 오프셋이기 때문이다(§3.1 성질 3 SUPERSEDED 박스). 정본 [MODE.md §1.1](GELLO_UR7E_EEF_MODE.md).
+→ 남은 확인은 **P8에서 기생 병진 < 1 cm**로 하는 실기 검증뿐이다.
+
+> ⚠️ **운영 주의**: 펜던트에서 TCP를 다시 티칭하면 `config/ur7e_gello_eef.yaml`의 `tool_*_xyz_rpy`도 **손으로** 고치고 재빌드해야 한다. 코드는 드라이버/펜던트 TCP를 읽지 않는다.
 
 ### Q3. 실기 UR7e 기구학 캘리브레이션 반영 여부
 zero-jump는 리더/로봇 FK와 IK가 **같은 DH**를 쓸 때 왕복 항등으로 보장된다. `config/ur7e_calibration.yaml`의 보정 DH를 로봇측에만 넣으면 해석 IK(명목 DH 가정)와 불일치해 engage 시 미세 스텝이 생긴다. **기본은 명목 DH 통일**이며, 이는 TCP 절대 위치에 1~2 mm 오차를 남긴다(상대 텔레오퍼에는 무해).
+
+> **구현 실측(2026-07-22)**: 현재 코드는 **명목 DH 통일로 이미 고정되어 있다.** `ur_kin.load_dh()`는 `config/ur7e_dh.yaml`을 읽지만 **정보용일 뿐이며 `fk`/`ik`/`jacobian`은 모듈 상수(`D`, `A`, `ALPHA`, …)를 쓴다**(`ur_kin.load_dh()` docstring, "INFORMATIONAL ONLY … Wiring it into the kinematics … is intentionally not done"). 따라서 캘리브레이션 파일을 넣어도 **자동 반영되지 않는다.** 실제 오차 크기는 P6 (d)에서 `/tcp_pose_broadcaster/pose` vs `~/eef/commanded_pose` 대조로 **측정만** 하고, 반영 여부는 그 결과를 보고 결정한다.
 → **결정 필요**: 절대 좌표 기반 정밀 작업이 EEF 모드의 목표인가? 아니라면 명목 DH 통일로 확정한다.
 
 ### Q4. `ur_analytic_ik` 빌드 가능성 (P-1)
@@ -957,8 +1071,9 @@ zero-jump는 리더/로봇 FK와 IK가 **같은 DH**를 쓸 때 왕복 항등으
 EEF 모드는 joint 모드보다 충돌 위험이 **높다**(§6.5). keep-out 게이트는 완화일 뿐 해결이 아니다. MoveIt planning scene 기반 충돌 검사를 250 Hz 루프에 넣는 것은 이번 범위 밖이며, 넣더라도 planning scene에 실제 환경이 등록되어 있어야 한다.
 → 운영 제약으로 문서에 명시하고, 물리 클리어런스 + 운영자 주시 + E-STOP에 의존한다.
 
-### Q8. `/speed_scaling_state_broadcaster` 활성 여부 (P-1)
-비활성이면 UR이 내부적으로 감속 중인데 우리는 원속도로 스트리밍하는 불일치가 남는다. 그 경우 `v_max`를 보수적으로 고정한다.
+### Q8. `/speed_scaling_state_broadcaster` — ⛔ **모의(moot) 처리 (2026-07-22)**
+질문은 "브로드캐스터가 활성인가"였는데, **활성 여부와 무관하게 브리지가 구독하지 않는다**(§6.8 SUPERSEDED 박스, 소스 전수 grep). 따라서 **"UR이 내부적으로 감속 중인데 우리는 원속도로 스트리밍하는 불일치"는 항상 존재한다.**
+→ 대응은 원안 그대로: **`v_max`를 보수적으로 잡는다**(브링업 단계에서는 launch 인자로 0.01→0.02→0.05→0.08). 펜던트 슬라이더를 안전 수단으로 세지 말 것.
 
 ### Q9. 그리퍼 — 클러치 중 동결이 필요한가?
 현재 설계는 **그리퍼 경로를 건드리지 않는다**(§3.6). 따라서 disengage 중 GELLO를 되잡을 때 손이 레버를 건드리면 그리퍼가 움직인다. 조작 절차(콘솔의 그리퍼 pause)로 대응하도록 했다.

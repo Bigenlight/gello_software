@@ -73,6 +73,37 @@ human authorization via a ROS service (Trigger):
               * ``~/override_follow`` hands over despite an offset ONLY if every
                 joint is within alignment_hard_limit; beyond that it is refused
                 even with override. Re-align.
+
+``start_mode:=switch_only`` is the NO-MOTION bring-up used by EEF (Cartesian
+delta) teleop. It exists because the two modes above both exist to make the
+robot's joint pose MATCH the leader's joint pose before streaming — which is
+exactly the wrong thing for EEF mode, where GELLO is used as a free-floating
+"3D pen": the leader and the follower are DELIBERATELY in different joint
+configurations, and the delta math is pose-independent, so there is nothing to
+align. Dragging the arm to the leader's joint pose at bring-up is therefore not
+a safety measure there, it is an unwanted large autonomous motion.
+
+So this mode NEVER builds or sends a trajectory and NEVER moves the arm:
+
+    1. Wait for the source controller to become active (unchanged; on real HW
+       this is still the "press Play on the pendant" wait).
+    2. STRICT-switch to the target controller. The arm holds its CURRENT pose:
+       ``forward_position_controller`` (a ForwardCommandController) writes
+       NOTHING to the position command interfaces until it receives its first
+       ``/forward_position_controller/commands`` message, and the value already
+       latched in those interfaces is whatever the outgoing
+       ``scaled_joint_trajectory_controller`` last wrote — and JTC in Humble
+       holds position from ``on_activate`` onward (it enqueues a hold trajectory
+       at the measured pose), so that latched value IS the current pose.
+       (Verified empirically against ros2_control mock hardware: across a
+       switch_only switch with no prior trajectory, /joint_states did not move.)
+    3. Call the bridge resume service named by ``bridge_resume_service``. For
+       EEF that should point at the bridge's ``~/eef_resume`` (which re-arms
+       WITHOUT the joint-alignment gate that ``~/resume`` enforces); the
+       joint-mode default stays ``~/resume``.
+
+Fail-safe is unchanged: if the source controller never activates, or the switch
+fails, no switch happens and the bridge is never resumed.
 """
 
 import time
@@ -143,6 +174,14 @@ class GelloMoveToStart(Node):
         self.resume_bridge = bool(
             self.declare_parameter("resume_bridge", False).value
         )
+        # WHICH resume service to call after the switch. Default ~/resume is the
+        # joint-mode, alignment-gated one. EEF (Cartesian delta) bring-up points
+        # this at ~/eef_resume instead: in that mode the leader and the follower
+        # are deliberately in DIFFERENT joint configurations ("GELLO as a 3D
+        # pen"), so the joint-alignment gate would permanently refuse — and it
+        # is not protecting anything, because the eef delta math is
+        # pose-independent. Retargeting is pure configuration: nothing else in
+        # this node depends on which service name this is.
         self.bridge_resume_service = str(
             self.declare_parameter(
                 "bridge_resume_service", "/gello_ur_bridge/resume"
@@ -244,6 +283,15 @@ class GelloMoveToStart(Node):
         #                  Safer: the arm's first autonomous motion is to a known
         #                  pose, and handover happens with leader ~= follower so
         #                  there is no large slew when streaming begins.
+        #   "switch_only": NO ARM MOTION AT ALL. Wait for the source controller,
+        #                  STRICT-switch to the target controller (the arm keeps
+        #                  holding its current pose — see the module docstring
+        #                  for why the command interface is already seeded), then
+        #                  call bridge_resume_service. Used by EEF (Cartesian
+        #                  delta) teleop, where leader and follower are
+        #                  DELIBERATELY in different joint configurations and
+        #                  joint alignment is meaningless, so both moving modes
+        #                  above would only produce an unwanted large motion.
         self.start_mode = str(
             self.declare_parameter("start_mode", "gello").value
         ).strip().lower()
@@ -268,7 +316,9 @@ class GelloMoveToStart(Node):
         self.alignment_timeout = float(
             self.declare_parameter("alignment_timeout", 0.0).value
         )
-        if self.start_mode not in ("gello", "init_align"):
+        # A typo must fall back to the SAFE, motion-gated default, never to
+        # switch_only (which would skip every convergence check).
+        if self.start_mode not in ("gello", "init_align", "switch_only"):
             self.get_logger().warn(
                 f"Unknown start_mode '{self.start_mode}'; falling back to 'gello'."
             )
@@ -360,7 +410,9 @@ class GelloMoveToStart(Node):
             f"source={self.source_controller} "
             f"target={self.target_controller} "
             f"trajectory_duration={self.trajectory_duration} "
-            f"arrival_tolerance={self.arrival_tolerance}"
+            f"arrival_tolerance={self.arrival_tolerance} "
+            f"resume_bridge={self.resume_bridge} "
+            f"bridge_resume_service={self.bridge_resume_service}"
         )
 
     # ---------------------------------------------------------------------
@@ -702,6 +754,17 @@ class GelloMoveToStart(Node):
                 "re-home)."
             )
             return response
+        if self.start_mode == "switch_only":
+            # switch_only's whole contract is "this node never moves the arm".
+            # (The flag is never serviced in this mode anyway — there is no
+            # operator-gate loop — so answering success would be a lie.)
+            response.success = False
+            response.message = (
+                "go_home is unavailable in start_mode=switch_only: this mode never "
+                "moves the arm. Relaunch with start_mode:=gello / init_align if you "
+                "want a homing motion."
+            )
+            return response
         self._go_home_requested = True
         response.success = True
         response.message = (
@@ -962,7 +1025,24 @@ class GelloMoveToStart(Node):
         if not self._wait_for_source_active():
             return False
 
-        if self.start_mode == "init_align":
+        if self.start_mode == "switch_only":
+            # NO MOTION PATH. Deliberately skips _converge_and_handover() and
+            # never touches self._action_client: no trajectory is built and none
+            # is sent, so the arm cannot move during bring-up. The arm holds its
+            # current pose across the STRICT switch because the position command
+            # interfaces still carry the value the outgoing JTC was writing while
+            # it held position, and forward_position_controller writes nothing
+            # until its first /commands message arrives.
+            self.get_logger().warn(
+                "start_mode=switch_only: NOT moving the arm and NOT checking "
+                "joint alignment. Switching control to "
+                f"{self.target_controller} in place, then resuming the bridge via "
+                f"{self.bridge_resume_service}. The arm holds its current pose; "
+                "the leader may be in a completely different joint configuration "
+                "(this is the intended EEF / '3D pen' bring-up). Keep clear: the "
+                "first leader motion after resume WILL command the robot."
+            )
+        elif self.start_mode == "init_align":
             # GATE 1: operator authorizes the move to the fixed init pose.
             if not self._wait_for_operator(
                 "_proceed_init",
@@ -1012,11 +1092,17 @@ class GelloMoveToStart(Node):
     def _resume_bridge_after_switch(self) -> None:
         """Release the pre-spawned paused bridge to begin streaming.
 
-        The bridge's ~/resume is alignment-gated (|gello-actual| <=
-        resume_align_tol); a just-converged arm passes. If resume never
-        succeeds, forward_position_controller stays ACTIVE holding the arrived
-        pose (safe) but no teleop streams — surfaced loudly with the manual
-        recovery command. Handshake still counts as succeeded (switch was OK).
+        Which service this calls is ``bridge_resume_service``. The joint-mode
+        default ~/resume is alignment-gated (|gello-actual| <= resume_align_tol);
+        a just-converged arm passes. EEF bring-up points it at ~/eef_resume,
+        which re-arms WITHOUT that gate (in EEF mode leader and follower are
+        deliberately in different joint configurations, so the gate would refuse
+        forever while protecting nothing — the delta math is pose-independent).
+
+        If resume never succeeds, forward_position_controller stays ACTIVE
+        holding the current pose (safe) but no teleop streams — surfaced loudly
+        with the manual recovery command. Handshake still counts as succeeded
+        (the switch was OK).
         """
         svc = self.bridge_resume_service
         manual = f"ros2 service call {svc} std_srvs/srv/Trigger"
@@ -1041,9 +1127,15 @@ class GelloMoveToStart(Node):
                 f"Bridge resume attempt {attempt + 1}/3 not accepted: {msg}"
             )
             time.sleep(0.5)
+        hint = (
+            "does the service exist? (EEF re-arm lives on the bridge as "
+            "~/eef_resume)"
+            if self.start_mode == "switch_only"
+            else "leader likely not aligned within resume_align_tol"
+        )
         self.get_logger().error(
-            "Bridge did NOT resume after 3 attempts (leader likely not aligned "
-            f"within resume_align_tol). {self.target_controller} is ACTIVE and "
+            f"Bridge did NOT resume after 3 attempts ({hint}). "
+            f"{self.target_controller} is ACTIVE and "
             f"HOLDING; no teleop. Align the GELLO leader, then: {manual}"
         )
 

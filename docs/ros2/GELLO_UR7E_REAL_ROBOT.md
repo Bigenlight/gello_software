@@ -26,6 +26,9 @@
 | 그리퍼 | `robotiq_gripper_modbus` → 드라이버 socat 브리지 공유(`serial_port:=/tmp/ttyUR`, Modbus RTU), `gello_gripper_bridge`가 구동. **로봇 전원 ON 필수**(24V tool voltage로 2F-85 급전) |
 | 캘리브레이션 | GELLO 캘리브(`FTBEO6QK`)는 **그대로 재사용**; UR7e **기구학** 캘리브는 로봇당 1회 별도 추출 |
 | 최대 리스크 | `forward_position_controller`는 보간 없이 즉시 명령 → 활성화 시점 로봇 자세 ≠ GELLO 자세면 **joint-velocity-limit protective stop** → §2 handshake 필수 |
+| `control_mode` | `joint`(**기본**, 절대 관절 미러링 — 이 문서의 모든 절차는 이 모드 기준) / `eef`(EEF 델타, [MODE 문서](GELLO_UR7E_EEF_MODE.md)) / `joint_delta`(**시작 앵커 기준 관절 델타**, [MODE 문서](GELLO_UR7E_JOINT_DELTA_MODE.md)) — 모두 **opt-in**이고 기본은 `joint`이므로 기존 절차는 영향 없음 |
+
+> **`control_mode:=joint_delta` 를 쓸 때에도 §2의 handshake 시퀀스는 그대로다.** `start_mode`/`bridge_resume_service`는 joint 모드와 **동일하게** `gello` / `/gello_ur_bridge/resume`으로 파생되고, 수렴 게이트 chase → STRICT 전환 → `~/resume`까지 한 글자도 바뀌지 않는다. 델타 제어는 그 뒤에 조작자가 직접 `ros2 service call /gello_ur_bridge/joint_delta_engage std_srvs/srv/Trigger` 로 건다. (`eef` 모드만 §2와 다른 no-motion 기동 경로를 쓴다.)
 
 ### 목차
 

@@ -33,6 +33,7 @@ from ur_gello_bringup.ur_kin import (
     ik_analytic,
     branch_id,
     se3_log,
+    se3_exp,
     so3_log,
 )
 
@@ -236,6 +237,15 @@ def test_g_analytic_scale_no_dead_stop():
 # (h) wrist-singularity branch lock rejects a ~pi flip                         #
 # --------------------------------------------------------------------------- #
 def test_h_branch_lock_rejects_wrist_flip():
+    """The wrist flip is refused and the arm holds at the anchor.
+
+    ATTRIBUTION (changed deliberately, see test_d3_*): the reason is
+    ``JOINT_JUMP``, not ``BRANCH_JUMP``.  The branch LOCK works exactly as
+    designed here -- it never offers the flipped configuration at all, so the
+    candidate the gate actually refuses is the anchor's OWN branch solution for
+    the flipped target pose.  That candidate is simply a long way away, which is
+    a step-size refusal.  ``BRANCH_JUMP`` is now reserved for the case where the
+    refused candidate really did come off a different branch (test_d3b)."""
     if not ik_analytic(fk(np.array([0.3, -1.1, 1.0, -0.6, 0.15, 0.4]))):
         pytest.skip("analytic IK unavailable")
 
@@ -245,7 +255,7 @@ def test_h_branch_lock_rejects_wrist_flip():
     qb[3] = qa[3] + math.pi
     qb[4] = -qa[4]
     qb[5] = qa[5] + math.pi
-    # The refused motion is a genuine >3 rad branch jump on a different branch.
+    # The LEADER really is asking for a >3 rad, different-branch configuration.
     assert np.linalg.norm(qb - qa) >= 3.0
     assert branch_id(qb) != branch_id(qa)
 
@@ -256,8 +266,11 @@ def test_h_branch_lock_rejects_wrist_flip():
     q_cmd, info = c.step(qb, step_eff=100.0)
 
     assert info["state"] == "HOLD"
-    assert info["reject_reason"] == "BRANCH_JUMP"
+    assert info["reject_reason"] == "JOINT_JUMP"
     assert np.allclose(q_cmd, qa)  # held at the anchor, no jump
+    # The lock held: the candidate that was refused is on the anchor's branch,
+    # i.e. the controller never even considered flipping.
+    assert c._last_ik_branch == c.branch0
 
 
 # --------------------------------------------------------------------------- #
@@ -320,7 +333,15 @@ def test_j_anti_windup_bounds_lag():
 # (k) every reject_reason is a distinct string                                #
 # --------------------------------------------------------------------------- #
 def _reason_no_ik():
-    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0], pos_scale=3.0)
+    """Unreachable target AND no room for the line-search fallback to shrink.
+
+    s_floor is raised to 0.95 on purpose: since the Defect-1 fix the fallback
+    halves the increment down to s_floor before giving up, so a merely
+    out-of-reach target is no longer enough to produce NO_IK -- a 2 % increment
+    towards it is perfectly solvable.  NO_IK now means what it says: nothing was
+    solvable anywhere in the permitted scale range."""
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               pos_scale=3.0, s_floor=0.95)
     c = EefDeltaController(cfg)
     qa = np.array([0.2, -1.0, 1.0, -0.6, 1.2, 0.3])
     c.engage(qa, qa)
@@ -328,7 +349,7 @@ def _reason_no_ik():
     return info
 
 
-def _reason_branch_jump():
+def _reason_joint_jump():
     cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0])
     c = EefDeltaController(cfg)
     qa = np.array([0.3, -1.1, 1.0, -0.6, 0.15, 0.4])
@@ -338,6 +359,49 @@ def _reason_branch_jump():
     qb[4] = -qa[4]
     qb[5] += math.pi
     _, info = c.step(qb, step_eff=100.0)
+    return info
+
+
+# A pair (found by search, pinned here) whose branch-locked IK has NO solution
+# on the anchor's branch, so the filter falls back to the whole pool and the
+# refused candidate genuinely comes off a different branch -> BRANCH_JUMP.
+_BRANCH_JUMP_ANCHOR = np.array(
+    [-0.055770, 2.443477, 1.818498, 2.315096, 1.504585, -0.093698])
+_BRANCH_JUMP_LEADER = np.array(
+    [0.514245, 0.775605, -1.011835, -2.173648, 1.674941, -0.590926])
+
+
+def _reason_branch_jump():
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               max_excursion_m=10.0)
+    c = EefDeltaController(cfg)
+    c.engage(_BRANCH_JUMP_ANCHOR, _BRANCH_JUMP_ANCHOR)
+    _, info = c.step(_BRANCH_JUMP_LEADER, step_eff=100.0)
+    return info
+
+
+def _reason_step_floor():
+    """Line search shrinks to s_floor and the step still overruns the budget."""
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               max_excursion_m=10.0, branch_tol=1e9)
+    qa = np.array([2.215281, 0.056638, 1.751027, -2.095820, 0.536779, -0.617567])
+    ql = np.array([-1.627361, 1.858176, 1.675891, 2.011075, -0.114232, -0.347519])
+    c = EefDeltaController(cfg)
+    c.engage(qa, qa)
+    _, info = c.step(ql, step_eff=1e-4)
+    return info
+
+
+def _reason_step_cap():
+    """Line search runs out of iterations while still over the budget (s stays
+    above s_floor, so it is NOT the floor case)."""
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               max_excursion_m=10.0, s_floor=1e-9, branch_tol=1e9)
+    qa = np.array([-2.307287, 0.959212, 2.787900, 1.616822, 2.386551, 2.352970])
+    ql = np.array([-0.840003, -1.609907, 0.208047, -1.014959, -2.361026, 2.026500])
+    c = EefDeltaController(cfg)
+    c.engage(qa, qa)
+    _, info = c.step(ql, step_eff=1e-3)
     return info
 
 
@@ -378,6 +442,7 @@ def _reason_excursion():
 def test_k_reject_reasons_distinct():
     infos = {
         "NO_IK": _reason_no_ik(),
+        "JOINT_JUMP": _reason_joint_jump(),
         "BRANCH_JUMP": _reason_branch_jump(),
         "JOINT_LIMIT": _reason_joint_limit(),
         "GEOM_KEEPOUT": _reason_keepout(),
@@ -390,8 +455,8 @@ def test_k_reject_reasons_distinct():
             f"expected {expected}, got {info['reject_reason']}"
         )
         reasons[expected] = info["reject_reason"]
-    # All five are distinct strings.
-    assert len(set(reasons.values())) == 5
+    # All six are distinct strings.
+    assert len(set(reasons.values())) == 6
 
 
 # --------------------------------------------------------------------------- #
@@ -578,11 +643,365 @@ def test_c5_all_reject_reasons_distinct():
         info_bad["reject_reason"],
         info_estop["reject_reason"],
         _reason_no_ik()["reject_reason"],
+        _reason_joint_jump()["reject_reason"],
         _reason_branch_jump()["reject_reason"],
         _reason_joint_limit()["reject_reason"],
         _reason_keepout()["reject_reason"],
         _reason_excursion()["reject_reason"],
+        _reason_step_floor()["reject_reason"],
+        _reason_step_cap()["reject_reason"],
     }
-    # All seven reject reasons are distinct, non-empty strings.
-    assert len(all_reasons) == 7
+    # All TEN reject reasons are distinct, non-empty strings.  Two pairs used to
+    # be conflated: JOINT_JUMP/BRANCH_JUMP both reported "BRANCH_JUMP", and
+    # STEP_FLOOR/STEP_CAP both reported "STEP_FLOOR".
+    assert len(all_reasons) == 10, sorted(all_reasons)
     assert all(isinstance(r, str) and r for r in all_reasons)
+    assert {"JOINT_JUMP", "BRANCH_JUMP", "STEP_FLOOR", "STEP_CAP"} <= all_reasons
+
+
+# --------------------------------------------------------------------------- #
+# (D1) line-search fallback: a failed FULL-scale probe must not dead-stop      #
+# --------------------------------------------------------------------------- #
+# The configuration the stall was measured on (found by the seeded search in
+# test_eef_pose_independence's P11 and pinned here so this test is standalone
+# and deterministic).  q_lead_t is q_lead's TCP translated by ~10 mm.
+_STALL_ROBOT = np.array(
+    [-1.254664, -1.053499, -0.983078, -1.321357, -0.217743, 0.447516])
+_STALL_LEAD = np.array(
+    [0.823232, -0.802169, 1.893673, -1.893838, 1.475472, -0.996294])
+_STALL_LEAD_T = np.array(
+    [0.823826, -0.823499, 1.920207, -1.899002, 1.475886, -0.996723])
+
+
+def test_d1_full_scale_probe_failure_falls_back_instead_of_holding():
+    """THE Defect-1 regression pin.
+
+    ``step()`` used to probe ONLY the full rate-limited increment and return
+    NO_IK the moment that one probe failed, so the halving line-search under it
+    was never entered -- even though a fraction of the very same increment was
+    solvable.  Here we reproduce a tick where the full-scale probe genuinely has
+    no branch-locked IK solution, and assert the controller nevertheless finds a
+    reduced scale and ADVANCES.
+
+    Written so it fails against the old code: the first two asserts establish
+    that the full-scale probe (the old code's only probe) really does fail."""
+    c = EefDeltaController({})
+    c.engage(_STALL_ROBOT, _STALL_LEAD)
+
+    # Walk forward until we hit a tick whose FULL-scale probe has no solution.
+    found = None
+    for _ in range(400):
+        q_before = c.q_ik_prev.copy()
+        xi_lim = _rate_limited_increment(c, _STALL_LEAD_T)
+        q_full, n_full = c._ik_branchlock(c.T_cmd @ se3_exp(xi_lim))
+        if q_full is None:
+            found = (q_before, xi_lim, n_full)
+            break
+        c.step(_STALL_LEAD_T, step_eff=0.0025)
+    assert found is not None, "never reached a full-scale-probe failure"
+    q_before, xi_lim, n_full = found
+
+    # (1) the full-scale probe -- all the old code ever tried -- fails.
+    assert n_full == 0
+    # (2) a reduced scale of the SAME increment is solvable and in budget.
+    solvable = {}
+    for s in (0.5, 0.25, 0.125, 0.0625, 0.03125, 0.02):
+        cand, n = c._ik_branchlock(c.T_cmd @ se3_exp(s * xi_lim))
+        if cand is not None:
+            solvable[s] = float(np.max(np.abs(cand - q_before)))
+    assert solvable, f"no reduced scale was solvable: {solvable}"
+
+    # (3) and step() therefore does NOT hold: it moves.
+    q_cmd, info = c.step(_STALL_LEAD_T, step_eff=0.0025)
+    assert info["state"] == "ENGAGED", (
+        f"still dead-stopping: {info['reject_reason']} (solvable scales {solvable})"
+    )
+    assert info["ls_probe_scale"] < 1.0      # it really used the fallback
+    assert info["ls_probe_scale"] >= c.s_floor
+    assert float(np.max(np.abs(q_cmd - q_before))) > 0.0   # it actually advanced
+    assert float(np.max(np.abs(q_cmd - q_before))) <= 0.0025 * (1 + 1e-6)
+
+
+def _rate_limited_increment(c, q_lead_t):
+    """Rebuild the tick's xi_lim (governor increment) from the controller state
+    exactly as step() computes it, without taking a step."""
+    from ur_gello_bringup.eef_delta import _inv_se3
+    T_g = fk(q_lead_t) @ c.T_tool_L
+    R_des = c.R_align @ (T_g[:3, :3] @ c.R_g_anchor.T) @ c.R_align.T @ c.R_r_anchor
+    p_des = c.p_r_anchor + c.pos_scale * (c.R_align @ (T_g[:3, 3] - c.p_g_anchor))
+    T_des = np.eye(4)
+    T_des[:3, :3] = R_des
+    T_des[:3, 3] = p_des
+    # anti-windup clamp
+    xi_lag = se3_log(_inv_se3(c.T_cmd) @ T_des)
+    v_l, w_l = xi_lag[:3].copy(), xi_lag[3:].copy()
+    nvl, nwl = float(np.linalg.norm(v_l)), float(np.linalg.norm(w_l))
+    if nvl > c.lag_pos:
+        v_l *= c.lag_pos / nvl
+    if nwl > c.lag_rot:
+        w_l *= c.lag_rot / nwl
+    T_des = c.T_cmd @ se3_exp(np.concatenate([v_l, w_l]))
+    xi_raw = se3_log(_inv_se3(c.T_cmd) @ T_des)
+    nv = float(np.linalg.norm(xi_raw[:3]))
+    nw = float(np.linalg.norm(xi_raw[3:]))
+    sigma = sigma_min(c.q_ik_prev, c.char_length)
+    denom = c.sigma_warn - c.sigma_stop
+    gamma = 1.0 if denom <= 0 else (sigma - c.sigma_stop) / denom
+    gamma = min(1.0, max(c.gamma_min, gamma))
+    sc = 1.0
+    if nv > 1e-12:
+        sc = min(sc, gamma * c.v_max * c.dt / nv)
+    if nw > 1e-12:
+        sc = min(sc, gamma * c.w_max * c.dt / nw)
+    return xi_raw * sc
+
+
+def test_d1b_fallback_delivers_more_motion_than_the_short_circuit():
+    """Trajectory-level before/after.  Counts the ticks whose full-scale probe
+    failed -- every one of those is a tick the old code dead-stopped on -- and
+    checks the controller still advanced through them."""
+    c = EefDeltaController({})
+    c.engage(_STALL_ROBOT, _STALL_LEAD)
+    advanced_through_probe_failure = 0
+    for _ in range(300):
+        q_before = c.q_ik_prev.copy()
+        _, info = c.step(_STALL_LEAD_T, step_eff=0.0025)
+        used_fallback = 0.0 < info.get("ls_probe_scale", 0.0) < 1.0
+        moved = float(np.max(np.abs(c.q_ik_prev - q_before))) > 0.0
+        if used_fallback and moved:
+            advanced_through_probe_failure += 1
+    assert advanced_through_probe_failure > 0, (
+        "the fallback never rescued a tick -- Defect 1 regression"
+    )
+
+
+def test_d1c_fallback_still_fails_closed_when_nothing_is_solvable():
+    """Fail-closed is preserved: if NOTHING is solvable down to s_floor the
+    controller still HOLDs, with NO_IK, and does not move a micron."""
+    info = _reason_no_ik()
+    assert info["state"] == "HOLD"
+    assert info["reject_reason"] == "NO_IK"
+    assert info["n_ik_solutions"] == 0
+    assert info["ls_probe_scale"] == 0.0
+
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               pos_scale=3.0, s_floor=0.95)
+    qa = np.array([0.2, -1.0, 1.0, -0.6, 1.2, 0.3])
+    c = EefDeltaController(cfg)
+    c.engage(qa, qa)
+    q_cmd, _ = c.step(np.array([0.0, -0.2, 0.2, -0.2, 0.5, 0.0]), step_eff=100.0)
+    assert np.array_equal(q_cmd, qa)  # bit-for-bit frozen
+
+
+def test_d1d_probe_reaches_s_floor_exactly():
+    """The halving sequence must LAND on s_floor, not step over it.
+
+    Plain halving goes 0.03125 -> 0.015625 and skips s_floor=0.02 entirely; at a
+    measured stall point 0.02 was the largest solvable scale, so the naive
+    sequence reported NO_IK on a solvable target."""
+    c = EefDeltaController({})
+    c.engage(_STALL_ROBOT, _STALL_LEAD)
+
+    # The probe ladder step() walks, reconstructed from the same recurrence.
+    scales = []
+    s = 1.0
+    while True:
+        scales.append(s)
+        if s <= c.s_floor:
+            break
+        s = max(c.s_floor, 0.5 * s)
+    assert scales[-1] == c.s_floor, scales
+    assert c.s_floor in scales
+    # The naive `s *= 0.5` ladder would have skipped it.
+    naive = [1.0 * 0.5 ** k for k in range(12)]
+    assert c.s_floor not in naive
+
+
+# --------------------------------------------------------------------------- #
+# (D2) STEP_FLOOR and STEP_CAP are different conditions, reported differently  #
+# --------------------------------------------------------------------------- #
+def test_d2_step_floor_and_step_cap_are_distinct_conditions():
+    floor_info = _reason_step_floor()
+    cap_info = _reason_step_cap()
+
+    assert floor_info["state"] == "HOLD"
+    assert floor_info["reject_reason"] == "STEP_FLOOR"
+    assert cap_info["state"] == "HOLD"
+    assert cap_info["reject_reason"] == "STEP_CAP"
+    assert floor_info["reject_reason"] != cap_info["reject_reason"]
+
+    # STEP_CAP means the search kept a usable scale (it did NOT collapse to the
+    # floor) but the resulting joint step still overran the budget.
+    assert cap_info["ls_scale"] > 0.0
+
+
+def test_d2b_valid_in_budget_candidate_below_s_floor_is_not_thrown_away():
+    """Defect 2: the line search used to discard a candidate purely because the
+    SCALE FRACTION landed under s_floor -- even when the candidate itself was on
+    branch, inside the joint limits and comfortably inside the step budget.
+    That produced the second permanent dead-stop.  Here the accepted step is
+    verified to be genuinely inside every gate while ls_scale < s_floor."""
+    c = EefDeltaController({})
+    c.engage(_STALL_ROBOT, _STALL_LEAD)
+    seen_below_floor = 0
+    for _ in range(300):
+        q_before = c.q_ik_prev.copy()
+        _, info = c.step(_STALL_LEAD_T, step_eff=0.0025)
+        if info["state"] == "ENGAGED" and 0.0 < info["ls_scale"] < c.s_floor:
+            seen_below_floor += 1
+            dq = c.q_ik_prev - q_before
+            # every acceptance gate genuinely satisfied
+            assert float(np.max(np.abs(dq))) <= 0.0025 * (1 + 1e-6)
+            assert c._wnorm(dq) <= c.branch_tol
+    assert seen_below_floor > 0, (
+        "no sub-s_floor step was accepted -- this test is not exercising Defect 2"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (D3) JOINT_JUMP vs BRANCH_JUMP attribution                                   #
+# --------------------------------------------------------------------------- #
+def test_d3_joint_jump_is_reported_when_the_branch_did_not_change():
+    """The ``||dq||_W > branch_tol`` gate is a weighted joint-STEP-SIZE test.
+    When it fires on a candidate that is on the anchor's own branch the operator
+    must be told JOINT_JUMP, not BRANCH_JUMP."""
+    info = _reason_joint_jump()
+    assert info["state"] == "HOLD"
+    assert info["reject_reason"] == "JOINT_JUMP"
+
+
+def test_d3b_branch_jump_is_reported_only_on_a_real_branch_change():
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               max_excursion_m=10.0)
+    c = EefDeltaController(cfg)
+    c.engage(_BRANCH_JUMP_ANCHOR, _BRANCH_JUMP_ANCHOR)
+    q_cmd, info = c.step(_BRANCH_JUMP_LEADER, step_eff=100.0)
+
+    assert info["state"] == "HOLD"
+    assert info["reject_reason"] == "BRANCH_JUMP"
+    assert np.allclose(q_cmd, _BRANCH_JUMP_ANCHOR)  # still held; safety intact
+    # ... and the branch really did change (that is what makes it BRANCH_JUMP).
+    assert c._last_ik_branch >= 0
+    assert c._last_ik_branch != c.branch0
+
+
+def test_d3c_numeric_backend_never_claims_a_branch_change():
+    """With the numeric backend there is no closed-form branch label at all, so
+    the size gate can only ever report JOINT_JUMP."""
+    cfg = dict(dt=1.0, v_max=1e6, w_max=1e6, lag_max_pose=[100.0, 100.0],
+               ik_backend="numeric")
+    qa = np.array([0.3, -1.1, 1.0, -0.6, 0.15, 0.4])
+    c = EefDeltaController(cfg)
+    c.engage(qa, qa)
+    assert c.branch0 == -1
+    seen = set()
+    rng = np.random.default_rng(1)
+    for _ in range(60):
+        c2 = EefDeltaController(cfg)
+        c2.engage(qa, qa)
+        _, info = c2.step(qa + rng.uniform(-1.5, 1.5, 6), step_eff=100.0)
+        if info["reject_reason"]:
+            seen.add(info["reject_reason"])
+    assert "BRANCH_JUMP" not in seen, seen
+
+
+# --------------------------------------------------------------------------- #
+# (D5) per-tick cost regression (informational print + guard)                  #
+# --------------------------------------------------------------------------- #
+def test_d5_step_tick_cost(capsys):
+    """Per-tick cost of the REAL step(), not a proxy hot path.
+
+    The shipped node runs at 250 Hz (4000 us period) with tick_budget_us = 1000.
+    A hard overrun now DEGRADES (holds one tick, leaky bucket) rather than
+    counting toward an immediate teardown; only tick_overrun_limit ticks of
+    SUSTAINED slowness fail closed.  This measured 2054 us mean while the leader
+    was moving -- 2x the SOFT budget -- which under the old 5-consecutive policy
+    auto-disengaged EEF teleop within ~20 ms of any motion.
+
+    Asserts loosely (wall-clock is machine dependent) but hard enough to catch a
+    return to the 2 ms regime."""
+    import time
+
+    cfg = dict(pos_scale=1.0,
+               tool_l_xyz_rpy=[0.0, 0.0, 0.174, 0.0, 0.0, 0.0],
+               tool_r_xyz_rpy=[0.0, 0.0, 0.174, 0.0, 0.0, 0.0],
+               dt=1.0 / 250.0, ik_backend="analytic")
+    step_eff = 0.0025
+    qa = np.array([0.3, -1.2, 1.1, -0.7, 1.3, 0.4])
+    ql0 = np.array([0.9, -0.9, 1.4, -1.1, 1.2, -0.5])
+    drift = np.array([0.0006, 0.0005, -0.0004, 0.0003, 0.0005, -0.0002])
+
+    def run(moving, n=300):
+        c = EefDeltaController(cfg)
+        c.engage(qa, ql0)
+        ql = ql0.copy()
+        for _ in range(40):                      # warm up
+            ql = ql + drift if moving else ql
+            c.step(ql, step_eff=step_eff)
+        out = []
+        for _ in range(n):
+            ql = ql + drift if moving else ql
+            t0 = time.perf_counter()
+            c.step(ql, step_eff=step_eff)
+            out.append((time.perf_counter() - t0) * 1e6)
+        return np.asarray(out)
+
+    still = run(False)
+    moving = run(True)
+    p99 = float(np.percentile(moving, 99))
+
+    with capsys.disabled():
+        print("\n[timing] step() us  still: mean %.0f p99 %.0f | moving: mean %.0f "
+              "p99 %.0f max %.0f  (budget 1000 us @250Hz)"
+              % (still.mean(), np.percentile(still, 99),
+                 moving.mean(), p99, moving.max()))
+
+    # Generous vs the machine, tight vs the 2054 us regression that broke teleop.
+    assert p99 < 1500.0, f"moving-tick p99 {p99:.0f} us regressed toward the budget"
+    assert still.mean() < 600.0, f"zero-delta tick mean {still.mean():.0f} us"
+
+
+def test_d5b_sigma_decimation_does_not_change_commands():
+    """The decimated SVD must be EXACT for the emitted command, not merely
+    close: it is only reused while the cached value certifies sigma > sigma_warn,
+    where gamma saturates at 1.0 regardless of the exact value."""
+    import ur_gello_bringup.eef_delta as ed
+
+    cfg = dict(dt=1.0 / 250.0, tool_r_xyz_rpy=[0, 0, 0.174, 0, 0, 0])
+    qa = np.array([0.3, -1.2, 1.1, -0.7, 1.3, 0.4])
+    ql0 = np.array([0.9, -0.9, 1.4, -1.1, 1.2, -0.5])
+    drift = np.array([0.0006, 0.0005, -0.0004, 0.0003, 0.0005, -0.0002])
+
+    def run(max_stale):
+        old = ed._SIGMA_MAX_STALE_TICKS
+        ed._SIGMA_MAX_STALE_TICKS = max_stale
+        try:
+            c = EefDeltaController(cfg)
+            c.engage(qa, ql0)
+            ql = ql0.copy()
+            out = []
+            for _ in range(200):
+                ql = ql + drift
+                q, info = c.step(ql, step_eff=0.0025)
+                out.append((q.copy(), info["gamma"], info["state"]))
+            return out
+        finally:
+            ed._SIGMA_MAX_STALE_TICKS = old
+
+    decimated = run(10)
+    every_tick = run(0)          # 0 -> the guard can never hold -> SVD every tick
+    assert len(decimated) == len(every_tick)
+    for (qa_, ga, sa), (qb_, gb, sb) in zip(decimated, every_tick):
+        assert sa == sb
+        assert ga == gb
+        assert np.array_equal(qa_, qb_), "decimated SVD changed the command"
+    # and the decimation really was active (otherwise this test is vacuous)
+    c = EefDeltaController(cfg)
+    c.engage(qa, ql0)
+    ql = ql0.copy()
+    stale_seen = 0
+    for _ in range(200):
+        ql = ql + drift
+        _, info = c.step(ql, step_eff=0.0025)
+        stale_seen = max(stale_seen, info["sigma_stale_ticks"])
+    assert stale_seen > 0, "sigma_min was never reused -- decimation inactive"

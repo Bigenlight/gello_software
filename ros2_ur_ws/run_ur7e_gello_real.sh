@@ -83,7 +83,14 @@ set -e
 ROBOT_IP="${ROBOT_IP:-192.168.10.11}"     # override: ROBOT_IP=x.x.x.x ./run_ur7e_gello_real.sh
 CALIB="${CALIB:-}"                          # optional: CALIB=/path/ur7e_calibration.yaml
 HEADLESS="${HEADLESS:-}"                     # HEADLESS=true|1 -> Method B (no pendant Play; needs REMOTE mode)
-START_MODE="${START_MODE:-gello}"           # gello (default) | init_align (park at init pose, align GELLO, then stream)
+# EMPTY (default) = AUTO: the launch file derives start_mode from control_mode
+#   control_mode:=joint      -> 'gello'        (arm chases the leader, as always)
+#   control_mode:=eef        -> 'switch_only'  (arm NEVER moves at bring-up)
+# Setting START_MODE explicitly still wins and is passed through verbatim.
+# Do NOT default this to 'gello': that would override the eef auto-derive and
+# sweep the arm to the leader's pose, which is the exact hazard 3D-pen mode exists
+# to avoid. Values: <empty> | gello | init_align | switch_only
+START_MODE="${START_MODE:-}"
 
 # Also honor headless_mode:=true passed as a launch arg so the banner below can
 # never disagree with the effective launch (ros2 launch is last-wins on dupes).
@@ -94,7 +101,8 @@ export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 
-ARGS=(robot_ip:="${ROBOT_IP}" start_mode:="${START_MODE}")
+ARGS=(robot_ip:="${ROBOT_IP}")
+[ -n "${START_MODE}" ] && ARGS+=(start_mode:="${START_MODE}")
 [ -n "${CALIB}" ] && ARGS+=(kinematics_params_file:="${CALIB}")
 
 # Method B (headless): driver sends URScript directly; robot MUST be in REMOTE
@@ -110,12 +118,40 @@ fi
 
 echo "### REAL UR7e teleop | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>}"
 echo "### headless_mode=${HEADLESS_STATE}"
-if [ "${START_MODE}" = "init_align" ]; then
-    echo "### start_mode=init_align — robot parks at the init pose; ALIGN the GELLO"
-    echo "###   leader to it, then streaming starts automatically. (Safer handover.)"
-else
-    echo "### start_mode=gello — robot moves straight to the GELLO's current pose."
+# Resolve the EFFECTIVE start_mode for the banner exactly as the launch file does,
+# so the printed warning can never disagree with what the arm is about to do.
+CONTROL_MODE=joint
+for _a in "$@"; do case "$_a" in control_mode:=*) CONTROL_MODE="${_a#control_mode:=}" ;; esac; done
+EFF_START_MODE="${START_MODE}"
+if [ -z "${EFF_START_MODE}" ]; then
+    case "${CONTROL_MODE}" in
+        eef) EFF_START_MODE=switch_only ;;
+        *)   EFF_START_MODE=gello ;;
+    esac
 fi
+
+echo "### control_mode=${CONTROL_MODE} | start_mode=${EFF_START_MODE}${START_MODE:+ (explicit)}"
+case "${EFF_START_MODE}" in
+    switch_only)
+        echo "### start_mode=switch_only — the arm DOES NOT MOVE at bring-up: no trajectory"
+        echo "###   is sent, the controller switch happens in place, the bridge HOLDS the"
+        echo "###   arm where it stands. GELLO is a free-floating 3D pen — its pose is"
+        echo "###   IRRELEVANT at startup and does NOT have to match the robot."
+        echo "###   The arm moves only after you call eef_engage (console '7')."
+        ;;
+    init_align)
+        echo "### start_mode=init_align — robot parks at the init pose; ALIGN the GELLO"
+        echo "###   leader to it, then streaming starts automatically. (Safer handover.)"
+        ;;
+    *)
+        echo "### start_mode=gello — robot moves straight to the GELLO's current pose."
+        if [ "${CONTROL_MODE}" = "eef" ]; then
+            echo "### !!! WARNING: start_mode=gello with control_mode=eef makes the arm sweep"
+            echo "### !!! to the leader's joint pose first. That defeats 3D-pen bring-up."
+            echo "### !!! Unset START_MODE to get the safe 'switch_only' default."
+        fi
+        ;;
+esac
 echo "### Robotiq 2F-85 gripper INCLUDED (Modbus over driver socat bridge /tmp/ttyUR)."
 echo "### ROBOT MUST BE POWERED ON. Tool voltage is supplied by the DRIVER"
 echo "### (tool_voltage:=24), NOT the pendant Installation tab. Keep fingers clear —"

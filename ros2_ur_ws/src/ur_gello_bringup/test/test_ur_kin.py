@@ -37,6 +37,7 @@ from ur_gello_bringup.ur_kin import (
     quat_xyzw_to_mat,
     load_dh,
     _ik_analytic_tagged,
+    _link_segment_samples,
     _pose_error,
     JOINT_LIMITS,
     CHAR_LENGTH,
@@ -638,3 +639,166 @@ def test_c6_branch_id_bits_are_real_selectors():
     assert set(by_t1.keys()) == {0, 1}
     for vals in by_t1.values():
         assert max(vals) - min(vals) < 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# (D4) keepout sees the TOOL and can be given a link radius                    #
+# --------------------------------------------------------------------------- #
+def _tool_z(length):
+    """flange -> TCP transform: `length` metres along the flange +Z."""
+    T = np.eye(4)
+    T[2, 3] = length
+    return T
+
+
+# Measured Robotiq 2F-85 endpoint from the flange (config/ur7e_gello_eef.yaml).
+_TOOL_2F85 = 0.174
+
+# A configuration whose flange +Z points straight down, so the entire gripper
+# hangs 0.174 m below the LOWEST arm origin (found by search, pinned here).
+# min arm origin z = +0.1625 (shoulder), TCP z = -0.0115.
+_TOOL_BELOW_ARM_Q = np.array(
+    [1.272342, -0.009926, -0.231177, -1.346880, -1.562786, -2.185306])
+
+
+def test_d4_keepout_is_blind_to_the_tool_without_a_tool_transform():
+    """The defect, pinned: a pose whose FLANGE clears the floor but whose
+    GRIPPER TIP is well below it reads as safe when the tool is not supplied,
+    and is correctly rejected once it is."""
+    # Found by search: flange +Z points straight down, so the whole 0.174 m
+    # gripper hangs below every arm origin.
+    q = _TOOL_BELOW_ARM_Q
+    tool = _tool_z(_TOOL_2F85)
+
+    flange_z = min(o[2] for o in link_origins(q))
+    tcp_z = min(o[2] for o in link_origins(q, tool))
+    # The tool really does hang below everything else on the arm.
+    assert tcp_z < flange_z - 0.10, (flange_z, tcp_z)
+
+    floor = tcp_z + 0.05          # a floor BETWEEN the tool tip and the flange
+    assert flange_z > floor > tcp_z
+
+    cfg = {"floor_z": floor}
+    assert keepout_ok(q, cfg) is True             # blind: tool not modelled
+    assert keepout_ok(q, cfg, tool) is False      # sees the gripper -> reject
+    # Same thing expressed purely through the config (no extra argument).
+    assert keepout_ok(q, dict(cfg, tool=tool)) is False
+    assert keepout_ok(q, dict(cfg, tool_xyz_rpy=[0, 0, _TOOL_2F85, 0, 0, 0])) is False
+
+
+def test_d4b_link_origins_tool_argument_is_backward_compatible():
+    q = np.array([0.2, -1.0, 1.0, -0.5, 1.2, 0.3])
+    base = link_origins(q)
+    assert len(base) == 6                       # unchanged default: 6 frames
+    with_tool = link_origins(q, _tool_z(_TOOL_2F85))
+    assert len(with_tool) == 7                  # + the TCP
+    for a, b in zip(base, with_tool):
+        assert np.array_equal(a, b)             # the first six are identical
+    # The 7th is the flange displaced along the flange +Z by the tool length.
+    T = fk(q)
+    assert np.allclose(with_tool[6], T[:3, 3] + _TOOL_2F85 * T[:3, 2])
+    assert abs(np.linalg.norm(with_tool[6] - with_tool[5]) - _TOOL_2F85) < 1e-12
+
+
+def test_d4c_link_radius_inflates_every_constraint():
+    q = np.array([0.2, -1.0, 1.0, -0.5, 1.2, 0.3])
+    z_min = min(o[2] for o in link_origins(q))
+
+    # floor_z: a centreline exactly on the floor is "ok" with radius 0 but not
+    # once the link is given a physical thickness.
+    floor = z_min - 1e-9
+    assert keepout_ok(q, {"floor_z": floor}) is True
+    assert keepout_ok(q, {"floor_z": floor, "link_radius": 0.05}) is False
+    # link_radius composes with margin (both are just added).
+    assert keepout_ok(q, {"floor_z": floor - 0.06, "link_radius": 0.05}) is True
+    assert keepout_ok(q, {"floor_z": floor - 0.06, "link_radius": 0.05,
+                          "margin": 0.02}) is False
+
+    # halfplane and cylinder are inflated the same way.
+    hp = {"halfplane": {"point": [0, 0, floor], "normal": [0, 0, 1]}}
+    assert keepout_ok(q, hp) is True
+    assert keepout_ok(q, dict(hp, link_radius=0.05)) is False
+
+    origins = link_origins(q)
+    mid = 0.5 * (origins[1] + origins[2])
+    cy = {"cylinder": {"point": (mid + np.array([0.0, 0.30, 0.0])).tolist(),
+                       "axis": [0, 0, 1], "radius": 0.05}}
+    assert keepout_ok(q, cy) is True
+    assert keepout_ok(q, dict(cy, link_radius=0.30)) is False
+
+
+def test_d4d_empty_and_constraintless_keepout_stay_a_no_op():
+    """`keepout_json` ships as "{}" -- that must remain a pure no-op, and so
+    must a config that carries only a tool / radius and no constraint."""
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        q = _rand_q(rng)
+        assert keepout_ok(q, {}) is True
+        assert keepout_ok(q, {}, _tool_z(_TOOL_2F85)) is True
+        assert keepout_ok(q, {"margin": 0.5}) is True
+        assert keepout_ok(q, {"link_radius": 0.5}) is True
+        assert keepout_ok(q, {"tool_xyz_rpy": [0, 0, 0.174, 0, 0, 0]}) is True
+
+
+def test_d4e_pedestal_segment_is_still_excluded_from_the_sweep():
+    """base->shoulder must stay out of the sampled set (it is the robot's own
+    column and must not trip a base_cylinder pedestal guard)."""
+    q = np.array([0.0, -1.2, 1.2, -0.6, 1.2, 0.3])
+    samples = _link_segment_samples(q, T_tool=_tool_z(_TOOL_2F85))
+    shoulder = link_origins(q)[0]
+    # No sample lies strictly between the base origin and the shoulder.
+    for s in samples:
+        assert not (s[2] < shoulder[2] - 1e-9 and math.hypot(s[0], s[1]) < 1e-6)
+    # A base_cylinder that encloses the pedestal is not tripped by the arm here.
+    assert keepout_ok(q, {"base_cylinder": {"radius": 0.05, "height": 0.10}},
+                      _tool_z(_TOOL_2F85)) is True
+
+
+def test_d4f_tool_segment_is_swept_not_just_its_tip():
+    """A keepout the gripper BODY passes through, with both the flange and the
+    tip outside it, must still be caught."""
+    q = _TOOL_BELOW_ARM_Q
+    tool = _tool_z(_TOOL_2F85)
+    pts = link_origins(q, tool)
+    flange, tip = pts[5], pts[6]
+    mid = 0.5 * (flange + tip)
+
+    # A small sphere-like cylinder centred on the middle of the gripper, whose
+    # radius is too small to contain either endpoint.
+    r = 0.4 * float(np.linalg.norm(tip - flange))
+    axis = np.cross(tip - flange, [1.0, 0.0, 0.0])
+    if np.linalg.norm(axis) < 1e-9:
+        axis = np.cross(tip - flange, [0.0, 1.0, 0.0])
+    cy = {"cylinder": {"point": mid.tolist(), "axis": axis.tolist(), "radius": r}}
+    assert np.linalg.norm(np.cross(flange - mid, axis / np.linalg.norm(axis))) > r
+    assert np.linalg.norm(np.cross(tip - mid, axis / np.linalg.norm(axis))) > r
+    assert keepout_ok(q, cy, tool) is False, "mid-tool piercing not detected"
+
+
+def test_d4g_controller_passes_its_tool_transform_to_keepout():
+    """EefDeltaController must wire tool_r_xyz_rpy into its keepout config, so
+    the operator does not have to hand-inflate floor_z by the tool length."""
+    from ur_gello_bringup.eef_delta import EefDeltaController
+
+    c = EefDeltaController({"tool_r_xyz_rpy": [0, 0, _TOOL_2F85, 0, 0, 0],
+                            "keepout": {"floor_z": 0.0}})
+    assert "tool" in c.keepout
+    assert np.allclose(c.keepout["tool"], _tool_z(_TOOL_2F85))
+
+    q = _TOOL_BELOW_ARM_Q
+    tcp_z = min(o[2] for o in link_origins(q, _tool_z(_TOOL_2F85)))
+    flange_z = min(o[2] for o in link_origins(q))
+    floor = tcp_z + 0.05
+    assert flange_z > floor > tcp_z
+
+    c2 = EefDeltaController({"tool_r_xyz_rpy": [0, 0, _TOOL_2F85, 0, 0, 0],
+                             "keepout": {"floor_z": floor}})
+    assert keepout_ok(q, c2.keepout) is False   # controller's cfg sees the tool
+    # An operator-supplied tool is not overwritten.
+    c3 = EefDeltaController({"tool_r_xyz_rpy": [0, 0, _TOOL_2F85, 0, 0, 0],
+                             "keepout": {"floor_z": floor, "tool": np.eye(4)}})
+    assert np.allclose(c3.keepout["tool"], np.eye(4))
+    # The caller's dict is never mutated.
+    ko = {"floor_z": floor}
+    EefDeltaController({"keepout": ko})
+    assert ko == {"floor_z": floor}
