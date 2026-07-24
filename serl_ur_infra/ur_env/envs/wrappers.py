@@ -5,6 +5,12 @@ train_rlpd.py / record_demos.py work unchanged: when the human is intervening,
 step() executes the human action instead of the policy action and reports it
 in info["intervene_action"] (in env action units, [-1,1]^7).
 
+UR-specific metadata is reported on every step:
+    info["policy_action"]  = policy output before any human override
+    info["intervened"]     = 1 if the human action was executed, else 0
+This keeps counterfactual policy output and action-source labeling at the
+robot-infra boundary without patching the vendored hil-serl actor.
+
 Semantics differ from the spacemouse in one fundamental way: GELLO is an
 absolute-pose device with no zero-rest, so intervention is gated by an
 explicit DEADMAN (hold-to-engage), not by output magnitude.
@@ -291,10 +297,16 @@ class GelloIntervention(gym.ActionWrapper):
         return expert_a, True
 
     def step(self, action):
+        # Copy before the wrapped env sees the array: the policy output is a
+        # counterfactual record during intervention and must not alias either
+        # the caller's buffer or the executed human action.
+        policy_action = np.asarray(action).copy()
         new_action, replaced = self.action(action)
         obs, rew, done, truncated, info = self.env.step(new_action)
         if replaced:
-            info["intervene_action"] = new_action
+            info["intervene_action"] = np.asarray(new_action).copy()
+        info["policy_action"] = policy_action
+        info["intervened"] = int(replaced)
         # spacemouse-button fields kept for script compatibility
         info["left"] = False
         info["right"] = False
