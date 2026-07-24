@@ -1,6 +1,13 @@
 # GELLO → UR7e **EEF 모드** 실행 런북 (operator runbook)
 
-> **문서 상태 (2026-07-22)**: 코드는 구현·mock 검증 완료(커밋 `2905925` + 이후 3D-펜 기동 경로 작업). **실기 첫 투입 전**이다. 이 문서가 조작자용 **정본**이며, 설계·근거는 [`GELLO_UR7E_EEF_TELEOP_PLAN.md`](GELLO_UR7E_EEF_TELEOP_PLAN.md)를 본다. 두 문서가 어긋나면 **이 문서가 우선**이다(PLAN의 대체된 부분에는 `⛔ SUPERSEDED` 표시를 붙여 두었다).
+> ### 🟢 2026-07-24 업데이트 — 실기 첫 투입 성공 + 아래가 바뀌었다
+> EEF 3D-펜 텔레오퍼가 **실기 UR7e에서 동작 확인**되었다(사용자 확인). 이 세션에서 바뀐 것(전부 아직 **미커밋**):
+> - **워치독**: `tick_budget` 초과가 성능 신호로 재분류됨 — 1틱 HOLD + leaky-bucket, 지속 ~1초만 disengage. "갈 수 있는데 갑자기 멈추던" 증상 해소 → **§4 하단 표**.
+> - **`run_ur7e_gello_real.sh`**: `start_mode`를 더는 `gello`로 강제하지 않는다(비우면 `control_mode:=eef → switch_only` 자동 유도가 살아남). 배너가 실효값을 출력 → **§3.1**.
+> - **`v_max`/`w_max` 기본값 2배**(0.16 / 1.0)로 상향, **`pos_scale`/`v_max`/`w_max` 라이브 튜닝** 가능(`ros2 param set`) → **§1.3**.
+> - **EEF 마우스 GUI 신설**(`run_eef_gui.sh`) — 큰 토글 하나로 끄기/켜기, 감도 슬라이더, 그리퍼 → **§3.4.1**.
+>
+> **문서 상태 (2026-07-22 원본)**: 코드는 구현·mock 검증 완료(커밋 `2905925` + 이후 3D-펜 기동 경로 작업). 이 문서가 조작자용 **정본**이며, 설계·근거는 [`GELLO_UR7E_EEF_TELEOP_PLAN.md`](GELLO_UR7E_EEF_TELEOP_PLAN.md)를 본다. 두 문서가 어긋나면 **이 문서가 우선**이다(PLAN의 대체된 부분에는 `⛔ SUPERSEDED` 표시를 붙여 두었다).
 >
 > **안전 불변**: GELLO는 항상 passive read-only. Dynamixel에 절대 토크 X.
 >
@@ -170,6 +177,28 @@ tool 오프셋은 **회전 중심에만** 영향을 준다. **P6(TCP 위치 고�
 
 `forward_position_controller`는 **자체 속도 제한을 하지 않고**, 명령이 너무 빠르면 protective stop을 낸다. 그래서 rate limiting은 우리 쪽에서 한다 — 리더 전용 one-euro(`_euro_lead`) + SE(3) 카테시안 속도 거버너(`v_max`/`w_max`) + joint slew clamp. **손을 아무리 빨리 휘둘러도 로봇 EEF 속도는 `v_max`로 캡**된다.
 
+#### `v_max` / `w_max` — 팔로우 응답 속도 (2026-07-24: 기본값 2배 + 라이브 튜닝)
+
+| 파라미터 | 기본값 | 뜻 |
+|---|---|---|
+| `v_max` | **0.16 m/s** (구 0.08) | 로봇 EEF **직선 속도 상한** |
+| `w_max` | **1.0 rad/s** (구 0.5) | 로봇 EEF **회전 속도 상한** |
+
+"따라오는 게 느리다"의 1순위 조절값이다. `pos_scale`(감도, 거리)과 달리 이건 **속도**다 — GELLO를 빨리 움직이면 로봇이 `v_max` 상한에 걸려 뒤처졌다 따라잡는데, `v_max`를 올리면 그 랙이 준다. 2026-07-24 사용자 요청으로 플랜의 보수적 `0.08/0.5`에서 **2배**로 올렸다.
+
+**`v_max` / `w_max` / `pos_scale`은 이제 실행 중에 라이브로 바꿀 수 있다** (2026-07-24: `_on_set_parameters`에 라이브 세터 추가, `self._eef is not None` 가드로 joint 모드 무영향):
+
+```bash
+source <repo>/ros2_ur_ws/install/setup.bash
+ros2 param set /gello_ur_bridge v_max 0.24     # 더 빠르게
+ros2 param set /gello_ur_bridge w_max 1.4
+ros2 param set /gello_ur_bridge pos_scale 0.5  # 더 정밀하게 (감도 ↓)
+```
+
+> ⚠️ 빠를수록 위험 — 충돌 인지 없음(H1), E-STOP 손 닿는 곳에. 그리고 `v_max`를 아주 높이면 **관절 슬루 상한 `max_step_rad`**(base params, 0.0025 rad/tick @250Hz = 0.625 rad/s/joint, joint 모드와 공유)가 binding limit이 되어 **STEP_FLOOR HOLD가 늘어난다**. 그 이상 빠르게 하려면 `publish_rate_hz`를 500으로 먼저 올려야 한다. 특이점 근처에선 어차피 자동 감속(gamma)한다 — 정상.
+
+> **라이브로 바꾼 값은 런치를 다시 띄우면 사라진다.** 영구 반영은 `config/ur7e_gello_eef.yaml`의 `v_max`/`w_max`/`pos_scale`을 고치고 `colcon build`. `pos_scale`을 ENGAGED 중에 바꾸면 진행 중 스트로크가 미끄러질 수 있으니(§1.2), GUI는 **disengage/engage 순간에만** 커밋한다(A안).
+
 ### 1.4 keep-out — 현재 **비활성**
 
 `keepout_json`은 현재 `"{}"`(미설정, G9 항상 통과). **이것이 무엇을 의미하는지는 위 (H1)을 반드시 읽을 것.** 워크셀 장애물 게이트가 필요하면 JSON 문자열로 채운다(예시는 yaml 주석 참고). Q6 결정: 당분간 펜던트에서 처리 → 비워둠.
@@ -269,6 +298,17 @@ source install/setup.bash
 ```
 
 - 이 PC/실기 PC는 **ROS 2 Humble / Python 3.10**이다(`/opt/ros/humble`; `build_ur7e.sh`와 `run_ur7e_gello_real.sh`가 그걸 소스한다). PLAN 문서의 "Jazzy/24.04/py3.12" 서술은 **설계 당시의 개발 PC** 기준이므로 그대로 믿지 말 것.
+- **`build_ur7e.sh`가 이 환경에서 실패하면**(`AMENT_TRACE_SETUP_FILES: unbound variable` — `set -euo pipefail` + `/opt/ros/humble/setup.bash` 상호작용) colcon을 직접 부른다: `source /opt/ros/humble/setup.bash && colcon build --packages-select ur_gello_bringup`. (소스 트리에 `act_venv/`가 있으면 colcon이 numpy 테스트 디렉터리에서 `package identification` ERROR를 찍는데, `Finished <<< ur_gello_bringup`가 뜨면 무시해도 된다.)
+
+**실행 스크립트 (모두 `ros2_ur_ws/`):**
+
+| 스크립트 | 하는 일 |
+|---|---|
+| `run_ur7e_gello_real.sh` | 실기 teleop 런치. `control_mode:=eef`로 EEF 모드. `HEADLESS=true`로 Remote(§3.1) |
+| **`run_eef_gui.sh`** | **EEF 마우스 GUI**(§3.4.1) — 별도 터미널. `= ros2 run ur_gello_bringup gello_eef_gui` |
+| `run_operator_console.sh` | 텍스트 콘솔(§3.4.2) — GUI 대안 / joint 핸드셰이크용 |
+
+(GUI는 `setup.py`의 `gello_eef_gui` 엔트리로 설치되고 `python3-pyqt5`에 의존 — `package.xml`에 선언됨. 재빌드 후 `source install/setup.bash` 필요.)
 
 > ⚠️ **config yaml을 수정하면 반드시 다시 빌드하라.** colcon은 config를 install로 **복사**한다(symlink 아님). 재빌드 안 하면 launch가 옛 값을 읽는다(`--symlink-install`도 ament_python `data_files`는 복사한다). `tool_*_xyz_rpy`, `keepout_json`, `r_align_rpy`, `ik_backend`, `sigma_*` 등이 전부 여기 해당한다.
 >
@@ -406,7 +446,7 @@ p_des   = p_r_anchor + pos_scale * (R_align @ (p_g - p_g_anchor))
   - `/tcp_pose_broadcaster/pose`가 없으면 → 펜던트 TCP 표시값과 **3개 자세 수동 대조**로 대체.
   - **어긋나면**: 명목 DH ↔ 실기 캘리브레이션 불일치다(PLAN Q3). 상대 텔레오퍼에는 대체로 무해하지만(왕복 항등이 우리 DH 안에서 닫히므로 zero-jump는 유지된다), 절대 좌표 정밀도를 기대하면 안 된다. 오차가 mm 수준을 크게 넘으면 P7로 진행하기 전에 에스컬레이션.
 
-- **(e) 틱 실행시간 예산 초과 0회.** `~/eef/state`는 `tick_us_p99`를 발행하지 **않는다**. 대신 `tick_budget_us`(1000 µs) 워치독이 `tick_overrun_limit`(5회) 연속 초과 시 fail-closed 자동 disengage한다. 따라서 판정은 **세션 내내 `~/eef/state`의 `auto_reason`에 `tick_budget exceeded`가 없고 브리지 WARN 로그가 0회**인가로 한다.
+- **(e) 틱 실행시간 예산 초과로 인한 disengage 0회.** 워치독은 2단이다(2026-07-24 정책 변경, §4 참조): SOFT(`tick_budget_us` 1000 µs)는 **경고만**(성능 신호, 실기 baseline ~1000–1400 µs라 자주 뜨는 게 정상), HARD(period의 80% ≈ 3200 µs @250Hz)는 **그 1틱만 HOLD + leaky-bucket**으로 강등하고 **지속 ~1초**(`tick_overrun_limit` 250)만 fail-closed한다. 따라서 판정은 **`~/eef/state`의 `auto_reason`에 `tick_budget SUSTAINED`가 없는가**로 한다. SOFT WARN 로그 자체는 무시한다(더 이상 판정 기준 아님).
 
 **(a)(b)에서 TCP 위치가 움직이면 앵커 로직 버그다** — 위치 수식은 mock 단계(P1/P4)에서 이미 검증됐다. 다시 강조하지만 **팔이 움직이는 것은 버그가 아니다**(위 정정 박스).
 
@@ -428,7 +468,43 @@ ros2 launch ur_gello_bringup ur7e_gello_real.launch.py --show-args | grep -E "v_
 - 인자를 **빼면** yaml 값으로 돌아온다. **P6 → P7로 넘어갈 때 `pos_scale:=0.0`을 빼는 것을 잊지 말 것** — 안 그러면 로봇이 계속 안 움직이고 "고장난 줄" 알게 된다.
 - 나머지 EEF 파라미터(`tool_*`, `keepout_json`, `r_align_rpy`, `sigma_*` …)는 **launch 인자가 아니다.** yaml을 고치고 §2대로 **재빌드**해야 한다.
 
-### 3.4 조작자 콘솔 메뉴
+### 3.4 조작 인터페이스 — **GUI(권장)** & 콘솔 & 원시 CLI
+
+EEF를 조작하는 방법은 세 가지다. **일상 텔레오퍼는 GUI를 권장**한다.
+
+#### 3.4.1 EEF 마우스 GUI — `run_eef_gui.sh` ★ 권장 (2026-07-24 신설)
+
+로봇 teleop 런치와 **별도 터미널**에서 띄운다(콘솔 대신). PyQt5, 실기 로봇 없이도 뜬다.
+
+```bash
+cd <repo>/ros2_ur_ws && ./run_eef_gui.sh        # = ros2 run ur_gello_bringup gello_eef_gui
+```
+
+**"GELLO = 마우스"** 그대로다. 버튼은 **큰 토글 하나 + 그리퍼 2개**뿐. 실제 화면(실기 세션):
+
+**1) DISENGAGED — 끈 상태(팔 정지). 큰 토글을 누르면 켜진다.**
+
+![EEF GUI — DISENGAGED, 팔 정지](images/eef_gui_disengaged.png)
+
+**2) ⚠️ ENGAGE는 두 번 눌러야 한다.** 첫 클릭에서 버튼이 **주황색 "Click AGAIN to ENGAGE (robot WILL move)"** 로 바뀌고(3초 창), **두 번째 클릭**에서 실제로 팔이 리더를 따라가기 시작한다. 실수로 한 번 눌러서 로봇이 튀어나가는 걸 막는 안전장치다. (끄기(disengage)는 팔이 멈추는 방향이라 **한 번**이면 된다.)
+
+![EEF GUI — 첫 클릭 후 "두 번 더 누르세요" 확인 대기(주황)](images/eef_gui_engage_confirm.png)
+
+**3) ENGAGED — 켜진 상태(추적 중). 상태바가 녹색이 된다.** 이제 GELLO를 펜처럼 움직이면 로봇 EEF가 델타만큼 따라온다. 다시 누르면 disengage.
+
+![EEF GUI — ENGAGED, 추적 중(녹색)](images/eef_gui_engaged.png)
+
+> 화면 구성: 맨 위 빨간 **H1 배너**(충돌 게이트 OFF, 상시) → **상태 표시줄**(HOLD 황 / ENGAGED 녹 / DISENGAGED 회) → **큰 토글** → 그리퍼 PAUSE/Resume → **감도 슬라이더**(pos_scale) → 라이브 `~/eef/state` readout(excursion·sigma_min·reject_reason·paused·`v_max`/`w_max` 읽기전용 등).
+
+- **큰 토글 = 켜기/끄기.** ENGAGED에서 클릭 → **disengage**(한 번, 팔 정지라 안전). HOLD/DISENGAGED에서 클릭 → **engage**(두 번 클릭 확인: 첫 클릭 주황 "다시 누르세요", 3초 내 두 번째). DISENGAGED에서는 내부적으로 `eef_resume → pos_scale 커밋 → eef_engage`를 **자동 연결**한다(브리지가 disengage 후 PAUSED라 bare engage는 G0에서 거부되므로).
+- **매 engage = "지금 로봇 자세 + 지금 GELLO"를 새 앵커.** 그래서 **껐다 켜기 자체가 새 기준 잡기**다: `켜기 → 펜처럼 이동 → 끄기 → GELLO 재배치 → 켜기`. 이 때문에 **reclutch / 재무장 / To-Joint 버튼은 없다**(토글이 전부 흡수). reclutch는 "팔을 안 멈추고 원점만 리셋"하는 니치 기능이라 재배치엔 못 쓰고, To-Joint(joint 패스스루 복귀)는 이 GUI의 마우스 워크플로 밖이라 뺐다 — 그건 콘솔에서 한다.
+- **감도 슬라이더 = `pos_scale`(DPI, 0.10 정밀 … 1.00 기본).** **A안(engage 시 커밋)**: 슬라이더는 pending 값만 바꾸고, **NOT ENGAGED일 때만**(engage 직전 / disengage 시) 백엔드에 밀어넣는다 → 스트로크 중 점프 없음. ENGAGED 중엔 "pending 0.35 → 다음 engage에 적용"으로만 표시.
+- **그리퍼 PAUSE/Resume**은 **별도 in-flight 가드**를 쓴다 — engage/disengage RPC가 떠 있어도 PAUSE는 눌린다(H2: ENGAGED를 벗어나는 순간 그리퍼가 아직 GELLO를 따라가므로 즉시 멈출 수 있어야 함). 상태가 ENGAGED를 벗어나면 GUI가 "그리퍼 PAUSE" 경고를 띄운다.
+- 라이브 readout: `state`, `excursion_m`(구간 기준·클러치마다 리셋, H4), `sigma_min`/`gamma`, `reject_reason`, `auto_reason`(마지막 고장 사유), `pos_scale`, `v_max`/`w_max`(읽기전용, H5), 리더/팔 신선도 램프. `v_max`/`w_max`를 바꾸려면 §1.3의 `ros2 param set`.
+
+#### 3.4.2 텍스트 콘솔 — `run_operator_console.sh` (대안 / joint 핸드셰이크용)
+
+디스플레이 없이 서비스만 쓰거나, joint 모드 핸드셰이크(1~6)가 필요할 때. EEF 항목은 GUI와 같은 서비스를 부른다.
 
 ```
   7) EEF 인게이지        9) EEF 재클러치       11) 그리퍼 일시정지
@@ -436,9 +512,21 @@ ros2 launch ur_gello_bringup ur7e_gello_real.launch.py --show-args | grep -E "v_
      (즉시정지)                                13) EEF 재무장 (eef_resume)
 ```
 
-재클러치 시퀀스에서 **11) → 되잡기 → 9) → 12)** 순서를 지킬 것(위 H2).
+재클러치 시퀀스에서 **11) → 되잡기 → 9) → 12)** 순서를 지킬 것(위 H2). **13) EEF 재무장**은 EEF 기동 직후와 모든 EEF 고장(자동 disengage) 이후의 복귀 경로다 — §3.5.
 
-**13) EEF 재무장**은 EEF 기동 직후와 모든 EEF 고장(자동 disengage) 이후의 복귀 경로다 — §3.5.
+#### 3.4.3 원시 CLI (콘솔/GUI 없이)
+
+모두 `std_srvs/srv/Trigger`. GUI/콘솔은 이걸 감싼 껍데기일 뿐이다.
+
+```bash
+ros2 service call /gello_ur_bridge/eef_engage    std_srvs/srv/Trigger   # 켜기 (HOLD에서)
+ros2 service call /gello_ur_bridge/eef_disengage std_srvs/srv/Trigger   # 끄기 (즉시 정지)
+ros2 service call /gello_ur_bridge/eef_resume    std_srvs/srv/Trigger   # 재무장 → HOLD (disengage 후 먼저 이걸)
+ros2 service call /gello_gripper_bridge/pause    std_srvs/srv/Trigger   # 그리퍼 정지
+ros2 service call /gello_gripper_bridge/resume   std_srvs/srv/Trigger
+```
+
+> disengage 후 바로 `eef_engage`는 **거부된다**(G0, 브리지 PAUSED). 반드시 `eef_resume`(→HOLD) 먼저. GUI 토글은 이 두 단계를 자동으로 잇는다.
 
 ### 3.5 EEF 기동은 **무동작**이다 — `switch_only` / `HOLD` / `~/eef_resume`
 
@@ -500,4 +588,16 @@ ros2 launch ur_gello_bringup ur7e_gello_real.launch.py --show-args | grep -E "v_
 - **팔이 "비딱하게" 간다 / 방향이 조금씩 어긋난다 → `r_align_rpy`(§1.6).** 이 증상의 특징은 **이동 거리는 항상 맞고 방향만 틀린다**는 것이다. 10~20° 오차가 가장 위험한데, "오늘 좀 이상하네"로 넘어가기 쉽기 때문이다. 의심되면 §1.6 측정 절차를 돌린다. (반대로 **의도한 방향으로 아예 안 가면 90° 오차**다.)
 - **특이점 근처에서 팔이 "느리게 계속 기어간다"** → 버그 아님. `sigma_min < sigma_stop`이어도 정지하지 않고 `gamma_min · v_max = 4 mm/s`로 움직이며, 특이점에서 **빠져나오는 방향은 감속조차 하지 않는다**(`eef_delta.py`의 `step()` γ 블록). 의도된 락업 방지 설계다.
 - **HOLD가 계속되면 자동으로 세션이 끊긴다** — `hold_latch_s = 2.0`은 최소 유지시간이 아니라 **최대 허용시간**이다. 2초 넘게 HOLD면 auto-disengage(`auto_reason = hold_latched ...`) → `13) EEF 재무장`으로 복귀.
-- **펜던트 속도 슬라이더는 EEF 명령 속도에 영향이 없다**(H5). 느리게 하려면 `v_max:=` / `w_max:=`로 재기동.
+- **팔로우가 느리다 / 랙이 있다** → §1.3의 `v_max`/`w_max`를 올린다. **라이브 가능**: `ros2 param set /gello_ur_bridge v_max 0.24`. (`pos_scale`는 거리, `v_max`는 속도 — 랙은 `v_max`다.)
+- **`갈 수 있는데 갑자기 안 따라온다` / 실행 중 툭 끊긴다** → 십중팔구 **성능 워치독의 tick_budget**이었다(특이점 근처에서 IK 반감루프가 튀어 step()이 지속적으로 느려질 때). **2026-07-24 수정으로 이제 hard 초과는 그 1틱만 HOLD로 강등하고 지속 ~1초만 disengage**한다(§4 워치독 설명 하단). SOFT WARN(`EEF stage over SOFT budget`)이 계속 떠도 **정상**이다 — 그것만으로는 안 끊긴다. 실제로 끊겼다면 `auto_reason`에 `tick_budget SUSTAINED`가 찍힌다. 즉시 완화: `ros2 param set /gello_ur_bridge tick_overrun_limit 250`(이미 기본값). 이것도 라이브다.
+- **펜던트 속도 슬라이더는 EEF 명령 속도에 영향이 없다**(H5). 느리게 하려면 `v_max` / `w_max`를 낮춘다(라이브 또는 `v_max:=` 재기동).
+
+### 워치독(tick_budget) 상세 — 2단 강등 정책 (2026-07-24)
+
+| 티어 | 임계 | 초과 시 |
+|---|---|---|
+| SOFT | `tick_budget_us` = 1000 µs | **경고만**(throttle). 성능 신호. 절대 disengage 안 함 |
+| HARD | `tick_hard_budget_us`(0 → period의 80% = 3200 µs @250Hz) | **그 1틱 HOLD**(앵커 유지·ENGAGED 유지·정지 안 함) + **leaky-bucket** +1 |
+| 지속 | 버킷이 `tick_overrun_limit`(250 ≈ 1.0초) 도달 | 그제서야 fail-closed auto-disengage (`auto_reason=tick_budget SUSTAINED …`) |
+
+정상 틱마다 버킷은 `tick_overrun_leak`(1.0)만큼 빠진다 → **일시 스파이크(수십 ms)는 버킷이 다 흡수**, 진짜로 지속(loop가 계속 못 따라감)일 때만 끊긴다. 세 knob(`tick_hard_budget_us`, `tick_overrun_limit`, `tick_overrun_leak`) 전부 **라이브 튜닝**(`ros2 param set`). joint_delta 모드도 동일 정책(단 accumulator라 강등 구간의 리더 이동이 복귀 첫 틱에 한 번에 접혀 `max_step_rad`로 제한됨). 근본 스파이크(특이점 IK) 최적화는 **아직 안 함** — 그 구간은 teardown 대신 짧은 HOLD만 생긴다.

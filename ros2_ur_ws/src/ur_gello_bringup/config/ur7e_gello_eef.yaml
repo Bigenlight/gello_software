@@ -225,12 +225,20 @@ gello_ur_bridge:
     # translation must stay < 1 cm).
     tool_r_xyz_rpy: [0.0, 0.0, 0.174, 0.0, 0.0, 0.0]
 
-    # Max commanded EEF linear speed (m/s). Field-proven default from the plan.
+    # Max commanded EEF linear speed (m/s). Raised 2026-07-24 from the plan's
+    # conservative 0.08 to 0.16 (2x) for snappier follow-through on rough teleop
+    # (user request — EEF felt laggy vs joint mode). Live-retunable at runtime:
+    #   ros2 param set /gello_ur_bridge v_max <value>
     # NOTE: param name MUST be v_max (maps 1:1 to EefDeltaController cfg key and
     # the node's declare_parameter("v_max")); an eef_ prefix is silently dropped.
-    v_max: 0.08
-    # Max commanded EEF angular speed (rad/s). Field-proven default from the plan.
-    w_max: 0.5
+    # Near a singularity the arm still auto-slows (gamma throttle), and if raised
+    # far enough the per-joint slew cap max_step_rad (0.0025 rad/tick @250Hz =
+    # 0.625 rad/s/joint, in the base params) becomes the binding limit -> more
+    # STEP_FLOOR HOLDs. Collision gate is OFF (H1): faster = clear the space.
+    v_max: 0.16
+    # Max commanded EEF angular speed (rad/s). Raised 2026-07-24 from 0.5 to 1.0
+    # (2x), same rationale as v_max. Live-retunable: ros2 param set .../w_max.
+    w_max: 1.0
 
     # Manipulability (sigma_min) WARN threshold: below this the controller
     # starts shaping speed down / reporting a warning state as the arm nears

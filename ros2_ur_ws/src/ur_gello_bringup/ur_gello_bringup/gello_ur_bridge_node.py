@@ -834,6 +834,35 @@ class GelloUrBridge(Node):
         """
         from rcl_interfaces.msg import SetParametersResult
         for p in params:
+            # --- EEF live-tunable controller knobs (A안: the GUI commits
+            #     pos_scale at anchor-reset moments via SetParameters). These
+            #     scalars are re-read fresh every tick by EefDeltaController.step,
+            #     so applying them live takes effect on the next control cycle.
+            #     Guarded by `self._eef is not None`: in control_mode:=joint /
+            #     joint_delta self._eef is None, so this is a pure no-op there and
+            #     joint teleop is byte-for-byte unaffected. We still mirror the
+            #     value onto the node attribute so ~/eef/state stays truthful.
+            if p.name == "pos_scale":
+                self.pos_scale = float(p.value)
+                if self._eef is not None:
+                    self._eef.pos_scale = float(p.value)
+                self.get_logger().info(
+                    f"pos_scale set live: {self.pos_scale:.3f} "
+                    f"(controller={'yes' if self._eef is not None else 'n/a'})"
+                )
+                continue
+            elif p.name == "v_max":
+                self.eef_v_max = float(p.value)
+                if self._eef is not None:
+                    self._eef.v_max = float(p.value)
+                self.get_logger().info(f"v_max set live: {self.eef_v_max:.4f}")
+                continue
+            elif p.name == "w_max":
+                self.eef_w_max = float(p.value)
+                if self._eef is not None:
+                    self._eef.w_max = float(p.value)
+                self.get_logger().info(f"w_max set live: {self.eef_w_max:.4f}")
+                continue
             if p.name == "tick_budget_us":
                 self.tick_budget_us = float(p.value)
             elif p.name == "tick_hard_budget_us":

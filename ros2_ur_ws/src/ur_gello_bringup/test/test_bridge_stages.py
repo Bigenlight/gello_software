@@ -1283,3 +1283,45 @@ def test_tick_watchdog_is_retunable_at_runtime():
             [Parameter("state_chase_done_tol", Parameter.Type.DOUBLE, 0.42)]
         )
         assert all(r.successful for r in res)
+
+
+def test_pos_scale_set_param_applies_live_in_eef_mode():
+    """A안 commit-on-engage: the EEF GUI pushes pos_scale via SetParameters.
+    Set-param must update BOTH node.pos_scale (so ~/eef/state stays truthful)
+    AND the live controller's pos_scale (which step() re-reads every tick).
+    v_max / w_max follow the same pattern."""
+    from rclpy.parameter import Parameter
+    with _Bridge(**_eef_params()) as b:
+        assert b.node._eef is not None
+        res = b.node.set_parameters([
+            Parameter("pos_scale", Parameter.Type.DOUBLE, 0.35),
+            Parameter("v_max", Parameter.Type.DOUBLE, 0.05),
+            Parameter("w_max", Parameter.Type.DOUBLE, 0.3),
+        ])
+        assert all(r.successful for r in res)
+        assert b.node.pos_scale == pytest.approx(0.35)
+        assert b.node._eef.pos_scale == pytest.approx(0.35)
+        assert b.node.eef_v_max == pytest.approx(0.05)
+        assert b.node._eef.v_max == pytest.approx(0.05)
+        assert b.node.eef_w_max == pytest.approx(0.3)
+        assert b.node._eef.w_max == pytest.approx(0.3)
+
+
+def test_pos_scale_set_param_is_a_harmless_noop_in_joint_mode():
+    """In control_mode:=joint there is no EEF controller (self._eef is None),
+    so pushing pos_scale must NOT crash and must still report successful=True —
+    joint teleop is byte-for-byte unaffected by the EEF live-setter branch."""
+    from rclpy.parameter import Parameter
+    with _Bridge(control_mode="joint", publish_rate_hz=250.0,
+                 max_step_rad=0.0025, soft_start_s=0.0,
+                 filter_type="one_euro") as b:
+        assert b.node._eef is None
+        res = b.node.set_parameters([
+            Parameter("pos_scale", Parameter.Type.DOUBLE, 0.5),
+            Parameter("v_max", Parameter.Type.DOUBLE, 0.05),
+            Parameter("w_max", Parameter.Type.DOUBLE, 0.3),
+        ])
+        assert all(r.successful for r in res)
+        # Node attribute still tracks the request (harmless), controller absent.
+        assert b.node.pos_scale == pytest.approx(0.5)
+        assert b.node._eef is None

@@ -34,6 +34,7 @@ setup(
             'fake_gello = ur_gello_bringup.fake_gello_node:main',
             'gello_move_to_start = ur_gello_bringup.gello_move_to_start_node:main',
             'gello_operator_console = ur_gello_bringup.gello_operator_console_node:main',
+            'gello_eef_gui = ur_gello_bringup.gello_eef_gui_node:main',
         ],
     },
 )
