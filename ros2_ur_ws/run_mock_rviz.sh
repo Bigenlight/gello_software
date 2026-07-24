@@ -29,6 +29,21 @@ source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 
 echo "### MOCK UR7e + RViz (use_fake_hardware:=true) — no real robot, no 0.0.0.0 connect."
-exec ros2 launch gello_policy ur_control_fake_safe.launch.py \
+echo "### RViz view = rviz/hil_operator_view.rviz (camera on the OPERATOR's side)."
+echo "### The stock ur_description view orbits from the opposite azimuth (~180 about Z),"
+echo "### which makes a CORRECT base-frame arm motion LOOK X/Y-reversed while Z stays"
+echo "### right. The control code is verified true base-frame — only the camera is"
+echo "### rotated. NEVER negate X/Y in code to 'fix' this: it corrupts the recorded"
+echo "### intervene_action (SERL buffer). See serl_ur_infra wrappers.py."
+
+# The official ur_control launch HARDCODES ur_description's view_robot.rviz with
+# no override arg, so we run the stack headless (launch_rviz:=false) and start
+# RViz ourselves with the operator-oriented view, tied to this script's life.
+rviz2 -d "$SCRIPT_DIR/rviz/hil_operator_view.rviz" &
+RVIZ_PID=$!
+cleanup() { kill "$RVIZ_PID" 2>/dev/null || true; }
+trap cleanup INT TERM EXIT
+
+ros2 launch gello_policy ur_control_fake_safe.launch.py \
     ur_type:=ur7e robot_ip:=0.0.0.0 use_fake_hardware:=true \
-    initial_joint_controller:=forward_position_controller launch_rviz:=true "$@"
+    initial_joint_controller:=forward_position_controller launch_rviz:=false "$@"
