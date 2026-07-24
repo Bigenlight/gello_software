@@ -105,9 +105,32 @@ class PolicyDeltaController:
         if not within_joint_limits(q_sol, margin=0.0):
             return self._hold(info, "JOINT_LIMIT")
 
-        # ---- per-tick joint step acceptance gate ---- #
-        dq = np.abs(q_sol - self.q_cmd)
-        if float(np.max(dq)) > self.dq_step_max:
+        # ---- line search: shrink the task step until the joint step fits ---- #
+        # The proven eef_delta controller does exactly this. The earlier code
+        # HARD-REJECTED the whole tick to HOLD the instant max|dq| > dq_step_max.
+        # That is a self-reinforcing STEP_LIMIT storm: a rejected tick freezes
+        # T_cmd while the leader/policy keeps demanding the full (growing) anchor
+        # error, so the same over-budget step is re-rejected every tick and the
+        # arm delivers ~2% of the intended motion (measured, well-conditioned
+        # pose sigma=0.56 — not a singularity). Shrinking the task-space step to
+        # a smaller FEASIBLE one keeps the arm flowing as a rate-limited chase
+        # (measured: 98% held / 2% tracked -> 0% held / 47% tracked, max|dq|
+        # stays under dq_step_max). dq is ~linear in the step at a well-
+        # conditioned pose, so this converges in 1-2 iterations.
+        for _ in range(3):
+            if float(np.max(np.abs(q_sol - self.q_cmd))) <= self.dq_step_max:
+                break
+            s = 0.9 * self.dq_step_max / float(np.max(np.abs(q_sol - self.q_cmd)))
+            v, w = v * s, w * s
+            T_des = self.T_cmd.copy()
+            T_des[:3, 3] = self.T_cmd[:3, 3] + v
+            T_des[:3, :3] = so3_exp(w) @ self.T_cmd[:3, :3]
+            q_sol = ik_numeric(T_des, self.q_cmd)
+            if q_sol is None or not within_joint_limits(q_sol, margin=0.0):
+                return self._hold(info, "NO_IK")
+        else:
+            # still over budget after shrinking (e.g. genuinely near-singular
+            # Jacobian): HOLD is the correct, rare fallback the gate is for.
             return self._hold(info, "STEP_LIMIT")
 
         self.T_cmd = T_des

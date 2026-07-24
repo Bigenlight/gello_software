@@ -244,6 +244,21 @@ class GelloIntervention(gym.ActionWrapper):
         p_err = T_des[:3, 3] - T_cmd[:3, 3]                 # base-frame
         w_err = so3_log(T_des[:3, :3] @ T_cmd[:3, :3].T)    # base-frame rotvec
 
+        # Anti-windup: bound the per-step demand to ONE action_scale step (port
+        # of eef_delta's lag clamp). PROPORTIONAL (norm) clamp, NOT the old
+        # per-axis np.clip: an axis-wise clip of a saturated diagonal move
+        # distorts its DIRECTION (e.g. [2.0, 0.5] -> [1.0, 0.5] bends the path),
+        # which the operator feels as a wrong-direction/scale response. Scaling
+        # each of the position and rotation error vectors by its own norm keeps
+        # the commanded direction exact and caps |act| at 1 by construction, so
+        # the reported action stays in [-1,1] and — with the controller's line
+        # search now delivering a feasible step — close to what is executed.
+        nv, nw = float(np.linalg.norm(p_err)), float(np.linalg.norm(w_err))
+        if nv > self.action_scale[0]:
+            p_err = p_err * (self.action_scale[0] / nv)
+        if nw > self.action_scale[1]:
+            w_err = w_err * (self.action_scale[1] / nw)
+
         act = np.concatenate(
             [p_err / self.action_scale[0], w_err / self.action_scale[1]]
         )
