@@ -41,6 +41,7 @@ import rclpy
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -201,6 +202,24 @@ class PolicyRunWindow(MainWindow):
 
         outer = QVBoxLayout()
 
+        # Read-only reward-classifier visualization.  This never changes the
+        # robot or episode state; it only renders /reward_classifier/status.
+        classifier_box = QGroupBox("Cube-in-cup reward classifier (display only)")
+        classifier_row = QHBoxLayout(classifier_box)
+        self._classifier_verdict = QLabel("OFFLINE")
+        self._classifier_verdict.setAlignment(Qt.AlignCenter)
+        self._classifier_verdict.setMinimumWidth(170)
+        self._classifier_probability = QLabel("p(success): —")
+        self._classifier_probability.setMinimumWidth(170)
+        self._classifier_diagnostics = QLabel(
+            "Start the reward_classifier node")
+        self._classifier_diagnostics.setTextInteractionFlags(
+            Qt.TextSelectableByMouse)
+        classifier_row.addWidget(self._classifier_verdict)
+        classifier_row.addWidget(self._classifier_probability)
+        classifier_row.addWidget(self._classifier_diagnostics, stretch=1)
+        outer.addWidget(classifier_box)
+
         # --- Row 1: policy trigger buttons + result lines ----------------- #
         self._exec_button = QPushButton("START EXECUTION")
         self._exec_button.setMinimumHeight(44)
@@ -284,6 +303,7 @@ class PolicyRunWindow(MainWindow):
         cams_ready = self._node.cameras_ready()
         take_n = self._node.take_index()
         awaiting_label = self._pending_label_dir is not None
+        self._refresh_classifier()
 
         # START EXECUTION gate: never while a take is recording, never while a
         # finished take is still unlabeled (structurally prevents an unlabeled
@@ -329,6 +349,52 @@ class PolicyRunWindow(MainWindow):
             self._take_label.setText("Take: {} (recording)".format(take_n))
         else:
             self._take_label.setText("Take: {}".format(take_n))
+
+    def _refresh_classifier(self):
+        status = self._node.get_classifier_status()
+        age = status.get("status_age_s")
+        if age is None or age > 1.0:
+            self._classifier_verdict.setText("OFFLINE / STALE")
+            self._classifier_verdict.setStyleSheet(
+                "background-color: #666666; color: white; font-weight: bold; "
+                "font-size: 15pt; padding: 8px;")
+            self._classifier_probability.setText("p(success): —")
+            self._classifier_diagnostics.setText(
+                status.get("message", "classifier status stale"))
+            return
+
+        probability = status.get("probability")
+        if probability is None:
+            self._classifier_probability.setText("p(success): —")
+        else:
+            self._classifier_probability.setText(
+                "p(success): {:.3f}".format(float(probability)))
+
+        if not status.get("ready", False):
+            self._classifier_verdict.setText("WAIT / INVALID")
+            self._classifier_verdict.setStyleSheet(
+                "background-color: #dd8800; color: white; font-weight: bold; "
+                "font-size: 15pt; padding: 8px;")
+        elif status.get("success", False):
+            self._classifier_verdict.setText("SUCCESS")
+            self._classifier_verdict.setStyleSheet(
+                "background-color: #22aa22; color: white; font-weight: bold; "
+                "font-size: 15pt; padding: 8px;")
+        else:
+            self._classifier_verdict.setText("FAILURE")
+            self._classifier_verdict.setStyleSheet(
+                "background-color: #cc3333; color: white; font-weight: bold; "
+                "font-size: 15pt; padding: 8px;")
+
+        details = [status.get("message", "")]
+        if status.get("threshold") is not None:
+            details.append("threshold={:.2f}".format(float(status["threshold"])))
+        if status.get("cam_skew_ms") is not None:
+            details.append("skew={:.1f}ms".format(float(status["cam_skew_ms"])))
+        if status.get("inference_ms") is not None:
+            details.append(
+                "inference={:.1f}ms".format(float(status["inference_ms"])))
+        self._classifier_diagnostics.setText(" | ".join(x for x in details if x))
 
     # ------------------------------------------------------------- actions --
     def _on_start_execution_success(self, msg):

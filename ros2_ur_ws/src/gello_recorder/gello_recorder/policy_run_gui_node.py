@@ -36,10 +36,12 @@ against the same USB device would conflict with the running one.
 import json
 import os
 import tempfile
+import threading
 import time
 from datetime import datetime
 
 import rclpy
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from gello_recorder.gello_gui_node import GelloRecorderGuiNode
@@ -48,6 +50,7 @@ from gello_recorder.gello_gui_node import GelloRecorderGuiNode
 # Identical to camera_viewer.py's START_SERVICE / HOLD_SERVICE constants.
 START_SERVICE = "/policy_leader_node/start_execution"
 HOLD_SERVICE = "/policy_leader_node/hold"
+CLASSIFIER_STATUS_TOPIC = "/reward_classifier/status"
 
 
 class PolicyRunGuiNode(GelloRecorderGuiNode):
@@ -77,10 +80,51 @@ class PolicyRunGuiNode(GelloRecorderGuiNode):
         # thread starts, so no locking is needed around their construction.
         self._start_exec_client = self.create_client(Trigger, START_SERVICE)
         self._hold_client = self.create_client(Trigger, HOLD_SERVICE)
+        self._classifier_lock = threading.Lock()
+        self._classifier_status = None
+        self._classifier_status_t = None
+        self.create_subscription(
+            String,
+            CLASSIFIER_STATUS_TOPIC,
+            self._on_classifier_status,
+            10,
+        )
 
         self.get_logger().info(
-            f"policy_run_gui_node up. trigger clients: {START_SERVICE} , {HOLD_SERVICE}"
+            f"policy_run_gui_node up. trigger clients: {START_SERVICE} , {HOLD_SERVICE}; "
+            f"classifier status: {CLASSIFIER_STATUS_TOPIC}"
         )
+
+    def _on_classifier_status(self, msg: String) -> None:
+        try:
+            status = json.loads(msg.data)
+            if not isinstance(status, dict):
+                raise ValueError("status must be a JSON object")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            status = {
+                "ready": False,
+                "message": "invalid classifier status: {}".format(exc),
+            }
+        with self._classifier_lock:
+            self._classifier_status = status
+            self._classifier_status_t = time.monotonic()
+
+    def get_classifier_status(self) -> dict:
+        """Thread-safe classifier snapshot for the Qt refresh timer."""
+        with self._classifier_lock:
+            status = (
+                dict(self._classifier_status)
+                if self._classifier_status is not None
+                else {
+                    "ready": False,
+                    "message": "classifier node not connected",
+                }
+            )
+            received = self._classifier_status_t
+        status["status_age_s"] = (
+            None if received is None else time.monotonic() - received
+        )
+        return status
 
     # ---- Trigger-service access (thread-safe; called from the Qt thread) ----
     @staticmethod
