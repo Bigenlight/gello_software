@@ -4,3 +4,6 @@
 [submodule "third_party/DynamixelSDK"]
 	path = third_party/DynamixelSDK
 	url = https://github.com/ROBOTIS-GIT/DynamixelSDK.git
+[submodule "third_party/hil-serl"]
+	path = third_party/hil-serl
+	url = https://github.com/rail-berkeley/hil-serl.git
