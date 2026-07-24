@@ -25,6 +25,7 @@ TODO(together):
 """
 
 import threading
+import time
 from typing import Optional, Tuple
 
 import gymnasium as gym
@@ -38,36 +39,135 @@ except ImportError:
     _KIN_AVAILABLE = False
 
 
-class GelloExpert:
-    """Deadman state + latest leader reading (SpaceMouseExpert analog).
+# ---------------------------------------------------------------------------- #
+# Deadman sources — the "engaged" signal + a sensitivity gain can come from     #
+# either the spacebar (default) or a ROS topic published by the HIL GUI.        #
+# ---------------------------------------------------------------------------- #
+class DeadmanSource:
+    """Interface: the human deadman 'engaged' signal + a sensitivity gain.
 
-    Leader joints come from the env's ROS backend (/gello/joint_states), so
-    this class only owns the deadman listener (spacebar hold; TODO footswitch).
+    gain() == 1.0 means 1:1 leader->robot translation. Implementations must be
+    thread-safe: is_engaged()/gain() are read from the env step thread while
+    the underlying state is written from a listener / ROS callback thread.
     """
 
-    def __init__(self, backend):
-        self._backend = backend
+    def is_engaged(self) -> bool:
+        raise NotImplementedError
+
+    def gain(self) -> float:
+        return 1.0
+
+
+class SpacebarDeadman(DeadmanSource):
+    """DEFAULT deadman: hold SPACEBAR to engage (pynput). gain fixed at 1.0.
+
+    Behavior is identical to the listener that used to live inline in
+    GelloExpert.__init__. Added guard: mirror UR7eEnv's ESC-listener try/except
+    so a headless/no-display box (pynput raises with no X server) degrades to
+    is_engaged()==False forever instead of crashing env construction.
+    """
+
+    def __init__(self):
         self._engaged = False
         self._lock = threading.Lock()
+        self._listener = None
+        try:
+            from pynput import keyboard
 
-        from pynput import keyboard
+            def on_press(key):
+                if key == keyboard.Key.space:
+                    with self._lock:
+                        self._engaged = True
 
-        def on_press(key):
-            if key == keyboard.Key.space:
-                with self._lock:
-                    self._engaged = True
+            def on_release(key):
+                if key == keyboard.Key.space:
+                    with self._lock:
+                        self._engaged = False
 
-        def on_release(key):
-            if key == keyboard.Key.space:
-                with self._lock:
-                    self._engaged = False
-
-        self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self._listener.start()
+            self._listener = keyboard.Listener(
+                on_press=on_press, on_release=on_release
+            )
+            self._listener.start()
+        except Exception as e:
+            print(
+                f"[SpacebarDeadman] keyboard listener unavailable ({e}) — "
+                "deadman will never engage (is_engaged()==False)"
+            )
 
     def is_engaged(self) -> bool:
         with self._lock:
             return self._engaged
+
+    def gain(self) -> float:
+        return 1.0
+
+
+class RosTopicDeadman(DeadmanSource):
+    """Deadman driven by /hil/deadman, published by the HIL GUI.
+
+    FROZEN CONTRACT (shared with the GUI — do NOT deviate):
+      topic  /hil/deadman        type std_msgs/Float32MultiArray
+      data   [engaged, gain]      engaged in {0.0, 1.0}; gain in [0.10, 1.00]
+      rate   20 Hz heartbeat      (published continuously, not only on change)
+      QoS    default reliable, depth 10
+      stale  newest msg older than STALE_S -> engaged=False (fail-safe to policy)
+
+    Subscribes on the passed rclpy node (the URRosBackend node, spun in its bg
+    thread), so callbacks fire without this class owning an executor.
+    """
+
+    STALE_S = 0.5
+
+    def __init__(self, node):
+        self._lock = threading.Lock()
+        self._engaged_raw = 0.0
+        self._gain = 1.0
+        self._last_rx: Optional[float] = None  # monotonic; None => never rx
+        from std_msgs.msg import Float32MultiArray
+
+        node.create_subscription(
+            Float32MultiArray, "/hil/deadman", self._on_msg, 10
+        )
+
+    def _on_msg(self, msg):
+        data = list(msg.data)
+        engaged = data[0] if len(data) > 0 else 0.0
+        gain = data[1] if len(data) > 1 else 1.0
+        with self._lock:
+            self._engaged_raw = float(engaged)
+            self._gain = float(gain)
+            self._last_rx = time.monotonic()
+
+    def is_engaged(self) -> bool:
+        with self._lock:
+            if self._last_rx is None:
+                return False  # no msg yet -> fail safe to policy
+            if time.monotonic() - self._last_rx > self.STALE_S:
+                return False  # staleness watchdog -> fail safe to policy
+            return self._engaged_raw >= 0.5
+
+    def gain(self) -> float:
+        with self._lock:
+            return float(np.clip(self._gain, 0.10, 1.00))
+
+
+class GelloExpert:
+    """Deadman state + latest leader reading (SpaceMouseExpert analog).
+
+    Leader joints come from the env's ROS backend (/gello/joint_states); the
+    deadman 'engaged'/gain signal is delegated to a DeadmanSource (spacebar by
+    default, or the /hil/deadman ROS topic from the GUI).
+    """
+
+    def __init__(self, backend, deadman: Optional[DeadmanSource] = None):
+        self._backend = backend
+        self.deadman = deadman if deadman is not None else SpacebarDeadman()
+
+    def is_engaged(self) -> bool:
+        return self.deadman.is_engaged()
+
+    def gain(self) -> float:
+        return self.deadman.gain()
 
     def get_leader(self) -> Tuple[Optional[np.ndarray], Optional[float], float]:
         """Returns (q_lead(6,), gripper in [0,1] or None, age_seconds)."""
@@ -84,17 +184,18 @@ class GelloIntervention(gym.ActionWrapper):
     GRIP_CLOSE_THR = 0.7  # leader trigger hysteresis
     GRIP_OPEN_THR = 0.3
 
-    def __init__(self, env):
+    def __init__(self, env, deadman: Optional[DeadmanSource] = None):
         super().__init__(env)
         if not _KIN_AVAILABLE:
             raise RuntimeError("ur_gello_bringup not importable")
-        self.expert = GelloExpert(env.unwrapped.backend)
+        self.expert = GelloExpert(env.unwrapped.backend, deadman=deadman)
         self.action_scale = env.unwrapped.action_scale
 
         self._anchored = False
         self.T_g_anchor: Optional[np.ndarray] = None
         self.T_r_anchor: Optional[np.ndarray] = None
         self._grip_cmd = 0.0  # last hysteresis output in {-1, 0, +1}
+        self._gain = 1.0      # sensitivity gain, latched at each engage edge
 
     # ------------------------------------------------------------------ #
     def _leader_T(self, q_lead: np.ndarray) -> np.ndarray:
@@ -107,6 +208,10 @@ class GelloIntervention(gym.ActionWrapper):
     def _engage(self, q_lead: np.ndarray):
         self.T_g_anchor = self._leader_T(q_lead)
         self.T_r_anchor = self._robot_T_cmd()
+        # LATCH the sensitivity gain at the engage edge (not read live per-tick)
+        # so a slider nudged mid-motion cannot discontinuously rescale the
+        # in-progress anchored delta.
+        self._gain = self.expert.gain()
         self._anchored = True
 
     def _disengage(self):
@@ -128,7 +233,12 @@ class GelloIntervention(gym.ActionWrapper):
 
         T_des = np.eye(4)
         T_des[:3, :3] = R_delta @ self.T_r_anchor[:3, :3]
-        T_des[:3, 3] = self.T_r_anchor[:3, 3] + p_delta
+        # Apply the LATCHED sensitivity gain to the translation delta only
+        # (rotation stays 1:1). This scaling happens BEFORE the /action_scale ->
+        # clip below, so the returned `act` is exactly what env.step re-scales
+        # and executes: the executed==reported buffer-correctness invariant
+        # (README "저장 액션 불변식") is preserved — gain is upstream of the report.
+        T_des[:3, 3] = self.T_r_anchor[:3, 3] + self._gain * p_delta
 
         T_cmd = self._robot_T_cmd()
         p_err = T_des[:3, 3] - T_cmd[:3, 3]                 # base-frame
