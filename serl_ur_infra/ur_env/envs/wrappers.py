@@ -191,6 +191,17 @@ class GelloIntervention(gym.ActionWrapper):
         self.expert = GelloExpert(env.unwrapped.backend, deadman=deadman)
         self.action_scale = env.unwrapped.action_scale
 
+        # GELLO-base -> UR-base alignment (eef_delta's R_align; see config).
+        # Without this the leader delta is applied in the LEADER's base frame,
+        # and any base-mounting yaw shows up as wrong-direction intervention.
+        from scipy.spatial.transform import Rotation
+
+        rpy = np.asarray(
+            getattr(env.unwrapped.config, "R_ALIGN_RPY", [0.0, 0.0, 0.0]),
+            dtype=float,
+        )
+        self.R_align = Rotation.from_euler("xyz", rpy).as_matrix()
+
         self._anchored = False
         self.T_g_anchor: Optional[np.ndarray] = None
         self.T_r_anchor: Optional[np.ndarray] = None
@@ -227,9 +238,22 @@ class GelloIntervention(gym.ActionWrapper):
         position error along base axes, rotation error as a base-frame rotvec.
         """
         T_g = self._leader_T(q_lead)
-        # world-frame delta (same convention as eef_delta.py: R_g @ R_anchor^T)
-        R_delta = T_g[:3, :3] @ self.T_g_anchor[:3, :3].T
-        p_delta = T_g[:3, 3] - self.T_g_anchor[:3, 3]
+        # Leader delta rotated into the UR base frame — the full eef_delta
+        # convention including R_align (base-to-base mounting rotation):
+        #   R_delta = R_align @ (R_g @ R_g_anchor^T) @ R_align^T
+        #   p_delta = R_align @ (p_g - p_g_anchor)
+        # A base-mounting yaw would otherwise rotate every intervention
+        # direction (magnitude right, direction wrong). NOTE: on this rig
+        # R_align = I was measured correct (leader base axes -> robot base
+        # axes, exact identity); the 2026-07 RViz "X/Y flip" report was the
+        # stock camera azimuth, fixed by rviz/hil_operator_view.rviz — keep
+        # this default at identity unless the GELLO mounting itself changes.
+        R_delta = (
+            self.R_align
+            @ (T_g[:3, :3] @ self.T_g_anchor[:3, :3].T)
+            @ self.R_align.T
+        )
+        p_delta = self.R_align @ (T_g[:3, 3] - self.T_g_anchor[:3, 3])
 
         T_des = np.eye(4)
         T_des[:3, :3] = R_delta @ self.T_r_anchor[:3, :3]

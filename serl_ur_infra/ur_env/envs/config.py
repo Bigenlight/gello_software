@@ -117,6 +117,17 @@ class DefaultUR7eEnvConfig:
     # tool_r_xyz_rpy param. tcp_pose obs / command targets are both TCP.
     TCP_OFFSET_XYZ_RPY: list = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+    # GELLO-base -> UR-base alignment rotation (rpy, rad), used by
+    # GelloIntervention exactly like eef_delta's R_align:
+    #   p_delta_robot = R_align @ (p_g - p_g_anchor)
+    #   R_delta_robot = R_align @ (R_g @ R_g_anchor^T) @ R_align^T
+    # Same semantic as the bridge's r_align_rpy (config/ur7e_gello_eef.yaml) —
+    # KEEP THE TWO IN SYNC. [0,0,0] is an UNVERIFIED assumption on this rig;
+    # gello_get_offset.py's pi/2 snapping leaves a 0/90/180/270 deg base-joint
+    # ambiguity, so wrong-direction intervention is the expected symptom until
+    # measured (procedure: docs/ros2/GELLO_UR7E_EEF_MODE.md §1.6, robot-free).
+    R_ALIGN_RPY: list = [0.0, 0.0, 0.0]
+
     # robot /joint_states older than this -> unsafe to act on
     JOINT_STATE_STALE_S: float = 0.2
 
