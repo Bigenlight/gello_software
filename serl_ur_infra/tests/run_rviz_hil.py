@@ -60,8 +60,22 @@ class RvizHilConfig(DefaultUR7eEnvConfig):
     # Mock hardware boots at all-zeros, farther than the real-robot guard
     # allows. Mock-only relaxation — do NOT copy into a real-robot config.
     RESET_MAX_DIST_RAD = 7.0
-    RESET_TIMEOUT_S = 30.0       # zeros -> home at the 0.5 rad/s slew takes ~20 s
+    RESET_TIMEOUT_S = 30.0
     MAX_EPISODE_LENGTH = 200     # override with --max-steps
+
+    # ---- HIL feel: raise the intervention speed ceiling (mock-only) ---- #
+    # Intervention chase speed is hard-capped at ACTION_SCALE*HZ — the human
+    # cannot exceed the policy's own speed limit (executed==stored invariant).
+    # The base default (0.1 m/s) feels crippled next to the 1:1 teleop bridge,
+    # which is what "GELLO barely moves the RViz arm" reports are. The caps
+    # come in three coupled layers; raise them TOGETHER or the next layer
+    # silently eats the speed:
+    #   ACTION_SCALE*HZ  ->  governor (~120% of scale)  ->  upsampler slew
+    ACTION_SCALE = np.array([0.03, 0.10, 1.0])   # 0.3 m/s, 1.0 rad/s @ 10 Hz
+    GOVERNOR = {"v_max": 0.36, "w_max": 1.2, "dq_step_max": 0.12}
+    UPSAMPLER = {"hz": 250.0, "max_step_rad": 0.0048}  # 1.2 rad/s joint slew
+    # Real-task values must be tuned deliberately (start from the config.py
+    # defaults, not these) — faster caps mean harder physical crashes.
 
 
 def scripted_action(t: float) -> np.ndarray:
