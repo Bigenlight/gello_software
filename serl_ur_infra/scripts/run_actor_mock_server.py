@@ -13,6 +13,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "serl_ur_infra"))
 
 from ur_env.actor_network import ActorSessionService  # noqa: E402
+from ur_env.actor_smoke import SummaryDataSink  # noqa: E402
 from ur_env.grpc_actor_transport import create_grpc_server  # noqa: E402
 
 
@@ -20,6 +21,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=50052)
+    parser.add_argument("--summary-capacity", type=int, default=256)
     return parser.parse_args()
 
 
@@ -40,7 +42,15 @@ def main() -> int:
         del observation, deterministic
         return np.zeros(7, dtype=np.float32), 0
 
-    service = ActorSessionService(zero_policy, model_id="mock-zero-policy")
+    sink = SummaryDataSink(
+        capacity=args.summary_capacity,
+        emit=lambda line: print(f"[actor-mock] received={line}", flush=True),
+    )
+    service = ActorSessionService(
+        zero_policy,
+        model_id="mock-zero-policy",
+        accept_data=sink,
+    )
     server, bound_port = create_grpc_server(
         service, bind_address=f"{args.host}:{args.port}"
     )
@@ -54,6 +64,11 @@ def main() -> int:
         server.wait_for_termination()
     except KeyboardInterrupt:
         server.stop(grace=2.0).wait()
+    print(
+        f"[actor-mock] stopped replay_count={sink.replay_count} "
+        f"intervention_count={sink.intervention_count}",
+        flush=True,
+    )
     return 0
 
 

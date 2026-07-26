@@ -99,13 +99,23 @@ Use an isolated environment so ROS Humble's system grpc/protobuf packages are
 not replaced:
 
 ```bash
-python3 -m venv --system-site-packages /tmp/gello-hil-grpc-venv
+python3 -m venv /tmp/gello-hil-grpc-venv
 /tmp/gello-hil-grpc-venv/bin/python -m pip install \
   -r serl_ur_infra/requirements-grpc.lock
 
 PYTHONPATH=serl_ur_infra \
   /tmp/gello-hil-grpc-venv/bin/python \
   serl_ur_infra/scripts/run_actor_mock_server.py
+```
+
+For a robot/config-free check, run the standalone smoke client in another
+terminal. It sends one normal transition followed by one terminal intervention
+transition, using two raw 128x128 RGB images per observation:
+
+```bash
+/tmp/gello-hil-grpc-venv/bin/python \
+  serl_ur_infra/scripts/run_actor_smoke_client.py \
+  --host 127.0.0.1 --port 50052
 ```
 
 Then start the actor in a second terminal with the experiment-specific config:
@@ -119,14 +129,20 @@ Then start the actor in a second terminal with the experiment-specific config:
 ```
 
 For an SSH-hosted server, keep the gRPC service on server loopback and forward
-the same endpoint from the laptop:
+it from the laptop. Use a port confirmed free on both machines; for example:
 
 ```bash
-ssh -N -L 50052:127.0.0.1:50052 kanu
+ssh -N -T -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:50053:127.0.0.1:50053 kanu
+
+/tmp/gello-hil-grpc-venv/bin/python \
+  serl_ur_infra/scripts/run_actor_smoke_client.py \
+  --host 127.0.0.1 --port 50053
 ```
 
-The laptop config remains `127.0.0.1:50052`. This has not yet been exercised
-against `kanu`; the committed loopback test is the gate before that step.
+The server's mock stdout records only IDs, counters, timestamps, intervention
+labels, tensor dtype/shape, and cumulative routing counts. It does not persist
+or print image/action values.
 
 ## Failure rules
 
