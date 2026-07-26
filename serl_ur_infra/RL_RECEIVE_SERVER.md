@@ -63,7 +63,8 @@ overwrite counters, and the latest transition ID/env step.
 Kanu's existing `il` environment already provides Python 3.10, CUDA JAX,
 Flax, NumPy, gRPC, and the classifier dependencies. Do not install into or
 upgrade that shared environment. Instead, create a small venv which reads its
-packages and owns only the missing Agentlace/LZ4 files:
+packages and owns only the protocol/runtime compatibility files missing from
+that environment:
 
 ```bash
 /home/junhyeong/miniconda3/envs/il/bin/python -m venv \
@@ -74,9 +75,10 @@ packages and owns only the missing Agentlace/LZ4 files:
 ```
 
 `--no-deps` is intentional: it prevents pip from replacing packages inherited
-from `il`. The overlay adds only Agentlace (needed as the upstream replay
-store's base class) and LZ4 (imported by Agentlace). This avoids duplicating the
-multi-gigabyte CUDA/Python environment or creating a Docker image.
+from `il`. The overlay adds Agentlace (needed as the upstream replay store's
+base class), LZ4 (imported by Agentlace), and protobuf `3.20.3` (required by the
+checked-in generated gRPC module). This avoids duplicating the multi-gigabyte
+CUDA/Python environment or creating a Docker image.
 
 Run the receive server from the isolated branch worktree:
 
