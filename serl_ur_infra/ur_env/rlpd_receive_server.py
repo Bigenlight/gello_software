@@ -496,10 +496,13 @@ class RewardTransitionFinalizer:
             )
 
         result = self.classifier.classify(transition["next_observations"])
+        # Reward is classifier-authoritative in both directions.  Local may
+        # propose episode terminal/truncation semantics, but it cannot inject
+        # a positive reward when the server classifier is negative.
+        transition["rewards"] = 1.0 if result.success else 0.0
         if result.success:
             # Classifier success wins if the local time limit happened on this
             # same observation, matching basic HIL-SERL one-positive behavior.
-            transition["rewards"] = 1.0
             transition["masks"] = 0.0
             transition["dones"] = True
             transition["truncated"] = False

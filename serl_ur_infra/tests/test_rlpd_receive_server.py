@@ -289,6 +289,18 @@ def test_reward_finalizer_uses_strict_threshold():
     assert data["transition"]["dones"] is False
 
 
+def test_reward_finalizer_rejects_provisional_positive_reward_when_negative():
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([0.1], threshold=0.85)
+    )
+
+    data, outcome = finalizer(_data(reward=1.0))
+
+    assert data["transition"]["rewards"] == 0.0
+    assert outcome.reward == 0.0
+    assert outcome.success is False
+
+
 def test_reward_finalizer_classifier_failure_produces_no_data():
     finalizer = RewardTransitionFinalizer(
         ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")])

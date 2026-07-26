@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(_HERE, ".."))
 from ur_env.actor_network import ActorProtocolError  # noqa: E402
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
+    STATE_FEATURES,
     observation_schema_document,
     validate_canonical_observation,
 )
@@ -37,6 +38,17 @@ def test_canonical_observation_validates_and_copies():
     assert all(result[key] is not source[key] for key in result)
     assert len(CANONICAL_OBSERVATION_SCHEMA_HASH) == 64
     assert observation_schema_document()["schema_id"].endswith("-v1")
+    assert len(STATE_FEATURES) == 19
+    assert observation_schema_document()["state_features"] == list(STATE_FEATURES)
+    assert STATE_FEATURES[:6] == (
+        "tcp_position_x",
+        "tcp_position_y",
+        "tcp_position_z",
+        "tcp_euler_x",
+        "tcp_euler_y",
+        "tcp_euler_z",
+    )
+    assert STATE_FEATURES[-1] == "gripper_position"
 
 
 @pytest.mark.parametrize(

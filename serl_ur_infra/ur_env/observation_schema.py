@@ -17,6 +17,27 @@ from ur_env.actor_network import ActorProtocolError
 
 
 OBSERVATION_SCHEMA_ID = "hil-serl-ur-canonical-observation-v1"
+STATE_FEATURES = (
+    "tcp_position_x",
+    "tcp_position_y",
+    "tcp_position_z",
+    "tcp_euler_x",
+    "tcp_euler_y",
+    "tcp_euler_z",
+    "tcp_linear_velocity_x",
+    "tcp_linear_velocity_y",
+    "tcp_linear_velocity_z",
+    "tcp_angular_velocity_x",
+    "tcp_angular_velocity_y",
+    "tcp_angular_velocity_z",
+    "tcp_force_x",
+    "tcp_force_y",
+    "tcp_force_z",
+    "tcp_torque_x",
+    "tcp_torque_y",
+    "tcp_torque_z",
+    "gripper_position",
+)
 CANONICAL_OBSERVATION_SPEC = MappingProxyType(
     {
         "cam1": (np.dtype(np.uint8), (1, 128, 128, 3)),
@@ -29,6 +50,7 @@ CANONICAL_OBSERVATION_SPEC = MappingProxyType(
 def _schema_document() -> dict[str, Any]:
     return {
         "schema_id": OBSERVATION_SCHEMA_ID,
+        "state_features": list(STATE_FEATURES),
         "tensors": [
             {
                 "path": key,

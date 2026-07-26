@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 import sys
 from types import SimpleNamespace
 
@@ -126,7 +127,9 @@ class _InProcessNetwork:
         return result
 
 
-def test_actor_resets_on_server_classifier_success_and_keeps_final_values():
+def test_actor_resets_on_server_classifier_success_and_keeps_final_values(
+    tmp_path,
+):
     accepted = []
 
     def finalize(data):
@@ -163,8 +166,9 @@ def test_actor_resets_on_server_classifier_success_and_keeps_final_values():
     summary = run_remote_actor(
         _InProcessNetwork(service),
         env,
-        config=SimpleNamespace(max_steps=2, random_steps=0, buffer_period=0),
+        config=SimpleNamespace(max_steps=2, random_steps=0, buffer_period=1),
         actor_id="actor",
+        checkpoint_path=str(tmp_path),
         run_id="run",
         session_id_factory=lambda: next(sessions),
     )
@@ -177,3 +181,18 @@ def test_actor_resets_on_server_classifier_success_and_keeps_final_values():
     assert accepted[0]["transition"]["masks"] == 0.0
     assert accepted[0]["transition"]["dones"] is True
     assert accepted[0]["transition"]["truncated"] is False
+    with open(
+        tmp_path / "actor_data" / "run" / "replay" / "data_0.pkl", "rb"
+    ) as stream:
+        local_backup = pickle.load(stream)
+    assert len(local_backup) == 1
+    assert set(local_backup[0]["transition"]["observations"]) == {
+        "state",
+        "cam1",
+        "cam2",
+    }
+    assert set(local_backup[0]["transition"]["next_observations"]) == {
+        "state",
+        "cam1",
+        "cam2",
+    }

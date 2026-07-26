@@ -314,10 +314,18 @@ def run_remote_actor(
             )
             transition["reward_model_id"] = outcome.reward_model_id
         terminal = bool(outcome.done) or bool(outcome.truncated)
-        replay_data.append(copy.deepcopy(data))
-        if data["meta"]["intervened"] == 1:
-            intervention_data.append(copy.deepcopy(data))
+        intervened = data["meta"]["intervened"] == 1
+        if intervened:
             total_intervention_steps += 1
+        if checkpoint_path:
+            # Optional local backup is replay-ready.  This does not resend
+            # images: it only materializes the two observations already held
+            # by the laptop before writing the local pickle.
+            transition["observations"] = copy.deepcopy(observation)
+            transition["next_observations"] = copy.deepcopy(next_observation)
+            replay_data.append(copy.deepcopy(data))
+            if intervened:
+                intervention_data.append(copy.deepcopy(data))
 
         if buffer_period and (env_step + 1) % buffer_period == 0:
             _dump_data(
