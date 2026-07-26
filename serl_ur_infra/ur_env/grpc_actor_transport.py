@@ -19,6 +19,7 @@ from ur_env.actor_network import (
     ActorSessionService,
     ActorTransportError,
     BeginEpisodeCommand,
+    BufferStatus,
     FailedPreconditionError,
     ObservationPacket,
     PolicyInferenceError,
@@ -26,6 +27,7 @@ from ur_env.actor_network import (
     StepCommand,
     StepResult,
     TransitionAck,
+    TransitionOutcome,
     copy_observation,
     validate_action,
     validate_counter,
@@ -187,6 +189,175 @@ def data_from_proto(message: pb.Data) -> dict[str, Any]:
     return data
 
 
+def transition_outcome_to_proto(outcome: TransitionOutcome) -> pb.TransitionOutcome:
+    validated = _validate_transition_outcome(outcome)
+    return pb.TransitionOutcome(
+        transition_id=validated.transition_id,
+        reward=validated.reward,
+        mask=validated.mask,
+        done=validated.done,
+        truncated=validated.truncated,
+        success=validated.success,
+        classifier_evaluated=validated.classifier_evaluated,
+        classifier_probability=validated.classifier_probability,
+        classifier_threshold=validated.classifier_threshold,
+        reward_model_id=validated.reward_model_id,
+    )
+
+
+def transition_outcome_from_proto(
+    message: pb.TransitionOutcome,
+    *,
+    expected_transition_id: Optional[str] = None,
+) -> TransitionOutcome:
+    outcome = TransitionOutcome(
+        transition_id=message.transition_id,
+        reward=float(message.reward),
+        mask=float(message.mask),
+        done=bool(message.done),
+        truncated=bool(message.truncated),
+        success=bool(message.success),
+        classifier_evaluated=bool(message.classifier_evaluated),
+        classifier_probability=float(message.classifier_probability),
+        classifier_threshold=float(message.classifier_threshold),
+        reward_model_id=message.reward_model_id,
+    )
+    validated = _validate_transition_outcome(outcome)
+    if (
+        expected_transition_id is not None
+        and validated.transition_id != expected_transition_id
+    ):
+        raise ActorProtocolError(
+            "transition outcome identity mismatch: expected "
+            f"{expected_transition_id!r}, got {validated.transition_id!r}"
+        )
+    return validated
+
+
+def _validate_transition_outcome(
+    outcome: TransitionOutcome,
+) -> TransitionOutcome:
+    if not isinstance(outcome, TransitionOutcome):
+        raise ActorProtocolError("outcome must be TransitionOutcome")
+    if not isinstance(outcome.transition_id, str) or not outcome.transition_id:
+        raise ActorProtocolError("outcome.transition_id is required")
+    reward = float(outcome.reward)
+    mask = float(outcome.mask)
+    probability = float(outcome.classifier_probability)
+    threshold = float(outcome.classifier_threshold)
+    if not all(
+        math.isfinite(value) for value in (reward, mask, probability, threshold)
+    ):
+        raise ActorProtocolError("outcome contains a non-finite scalar")
+    for name, value in (
+        ("done", outcome.done),
+        ("truncated", outcome.truncated),
+        ("success", outcome.success),
+        ("classifier_evaluated", outcome.classifier_evaluated),
+    ):
+        if not isinstance(value, (bool, np.bool_)):
+            raise ActorProtocolError(f"outcome.{name} must be bool")
+    if not isinstance(outcome.reward_model_id, str):
+        raise ActorProtocolError("outcome.reward_model_id must be a string")
+    done = bool(outcome.done)
+    truncated = bool(outcome.truncated)
+    success = bool(outcome.success)
+    evaluated = bool(outcome.classifier_evaluated)
+    if done and truncated:
+        raise ActorProtocolError("outcome cannot be both done and truncated")
+    expected_mask = 0.0 if done else 1.0
+    if mask != expected_mask:
+        raise ActorProtocolError(
+            f"outcome.mask must be {expected_mask} for done={done}"
+        )
+    if evaluated:
+        if not 0.0 <= probability <= 1.0:
+            raise ActorProtocolError(
+                "outcome.classifier_probability must be within [0, 1]"
+            )
+        if not 0.0 <= threshold <= 1.0:
+            raise ActorProtocolError(
+                "outcome.classifier_threshold must be within [0, 1]"
+            )
+        if not outcome.reward_model_id:
+            raise ActorProtocolError(
+                "outcome.reward_model_id is required after classifier evaluation"
+            )
+        if success != (probability > threshold):
+            raise ActorProtocolError(
+                "outcome.success must use strict probability > threshold"
+            )
+    elif success or probability != 0.0 or threshold != 0.0 or outcome.reward_model_id:
+        raise ActorProtocolError(
+            "unevaluated classifier outcome must not carry classifier results"
+        )
+    if success and (reward != 1.0 or not done or truncated or mask != 0.0):
+        raise ActorProtocolError(
+            "successful outcome must be reward=1, done=true, "
+            "truncated=false, mask=0"
+        )
+    return TransitionOutcome(
+        transition_id=outcome.transition_id,
+        reward=reward,
+        mask=mask,
+        done=done,
+        truncated=truncated,
+        success=success,
+        classifier_evaluated=evaluated,
+        classifier_probability=probability,
+        classifier_threshold=threshold,
+        reward_model_id=str(outcome.reward_model_id),
+    )
+
+
+def buffer_status_from_proto(message: pb.BufferStatusReply) -> BufferStatus:
+    if message.protocol_version != PROTOCOL_VERSION:
+        raise ActorProtocolError(
+            "incompatible buffer status protocol_version "
+            f"{message.protocol_version!r}; expected {PROTOCOL_VERSION!r}"
+        )
+    if int(message.schema_version) != SCHEMA_VERSION:
+        raise ActorProtocolError(
+            f"buffer status schema_version is {int(message.schema_version)}, "
+            f"expected {SCHEMA_VERSION}"
+        )
+    values = {}
+    for name in (
+        "replay_size",
+        "replay_capacity",
+        "intervention_size",
+        "intervention_capacity",
+        "replay_insert_count",
+        "intervention_insert_count",
+        "replay_overwrite_count",
+        "intervention_overwrite_count",
+    ):
+        values[name] = validate_counter(getattr(message, name), name=name)
+    if values["replay_size"] > values["replay_capacity"]:
+        raise ActorProtocolError("replay_size exceeds replay_capacity")
+    if values["intervention_size"] > values["intervention_capacity"]:
+        raise ActorProtocolError("intervention_size exceeds intervention_capacity")
+    has_last = bool(message.has_last_transition)
+    if has_last != bool(message.last_transition_id):
+        raise ActorProtocolError(
+            "buffer status last transition presence is inconsistent"
+        )
+    if not has_last and int(message.last_env_step) != 0:
+        raise ActorProtocolError(
+            "buffer status has last_env_step without a last transition"
+        )
+    last_env_step = (
+        validate_counter(message.last_env_step, name="last_env_step")
+        if has_last
+        else None
+    )
+    return BufferStatus(
+        **values,
+        last_transition_id=message.last_transition_id if has_last else "",
+        last_env_step=last_env_step,
+    )
+
+
 def _action_to_proto(result: ActionResult) -> pb.ActionReply:
     return pb.ActionReply(
         ok=True,
@@ -216,6 +387,7 @@ class GrpcActorNetwork:
         max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
         channel: Any = None,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
+        expected_observation_schema_hash: Optional[str] = None,
     ) -> None:
         if not target:
             raise ValueError("gRPC target is required")
@@ -224,7 +396,7 @@ class GrpcActorNetwork:
         if timeout_s <= 0 or max_response_age_s <= 0:
             raise ValueError("timeouts must be positive")
         if retry_count != 1:
-            raise ValueError("protocol v1 requires exactly one transient retry")
+            raise ValueError("protocol v2 requires exactly one transient retry")
         if max_message_bytes <= 0:
             raise ValueError("max_message_bytes must be positive")
         self._target = target
@@ -234,6 +406,15 @@ class GrpcActorNetwork:
         self._max_response_age_s = float(max_response_age_s)
         self._retry_count = retry_count
         self._monotonic_ns = monotonic_ns
+        self._expected_observation_schema_hash = (
+            None
+            if expected_observation_schema_hash is None
+            else str(expected_observation_schema_hash)
+        )
+        if self._expected_observation_schema_hash == "":
+            raise ValueError("expected_observation_schema_hash cannot be empty")
+        self._server_info_verified = False
+        self._server_info: Optional[ServerInfo] = None
         self._channel = channel or grpc.insecure_channel(
             target,
             options=(
@@ -262,6 +443,19 @@ class GrpcActorNetwork:
         port = int(config.get("port", 50052))
         if not host or not 0 < port < 65536:
             raise ValueError("NETWORK host/port is invalid")
+        configured_hash = config.get("observation_schema_hash")
+        explicit_hash = config.get("expected_observation_schema_hash")
+        if (
+            configured_hash is not None
+            and explicit_hash is not None
+            and str(configured_hash) != str(explicit_hash)
+        ):
+            raise ValueError(
+                "NETWORK observation schema hash settings disagree"
+            )
+        expected_hash = (
+            explicit_hash if explicit_hash is not None else configured_hash
+        )
         return cls(
             f"{host}:{port}",
             actor_id=actor_id,
@@ -272,6 +466,7 @@ class GrpcActorNetwork:
             max_message_bytes=int(
                 config.get("max_message_bytes", DEFAULT_MAX_MESSAGE_BYTES)
             ),
+            expected_observation_schema_hash=expected_hash,
         )
 
     @property
@@ -294,12 +489,13 @@ class GrpcActorNetwork:
             schema_version=int(reply.schema_version),
             action_dim=int(reply.action_dim),
             model_id=reply.model_id,
+            reward_authority=reply.reward_authority,
+            reward_model_id=reply.reward_model_id,
+            observation_schema_hash=reply.observation_schema_hash,
         )
-        if not info.ready:
-            raise FailedPreconditionError("remote policy service is not ready")
         if info.protocol_version != PROTOCOL_VERSION:
             raise ActorProtocolError(
-                f"server protocol_version is {info.protocol_version!r}, "
+                f"incompatible server protocol_version {info.protocol_version!r}; "
                 f"expected {PROTOCOL_VERSION!r}"
             )
         if info.schema_version != SCHEMA_VERSION:
@@ -312,7 +508,31 @@ class GrpcActorNetwork:
                 f"server action_dim is {info.action_dim}, "
                 f"expected {int(np.prod(self._action_shape))}"
             )
+        if not info.reward_authority:
+            raise ActorProtocolError("server reward_authority is empty")
+        if (
+            self._expected_observation_schema_hash is not None
+            and info.observation_schema_hash
+            != self._expected_observation_schema_hash
+        ):
+            raise ActorProtocolError(
+                "server observation_schema_hash is "
+                f"{info.observation_schema_hash!r}, expected "
+                f"{self._expected_observation_schema_hash!r}"
+            )
+        if not info.ready:
+            raise FailedPreconditionError("remote actor service is not ready")
+        self._server_info_verified = True
+        self._server_info = info
         return info
+
+    def get_buffer_status(self) -> BufferStatus:
+        reply, _ = self._call(
+            self._stub.GetBufferStatus,
+            pb.BufferStatusRequest(protocol_version=PROTOCOL_VERSION),
+            "GetBufferStatus",
+        )
+        return buffer_status_from_proto(reply)
 
     def begin_episode(
         self,
@@ -325,6 +545,11 @@ class GrpcActorNetwork:
         timestamp_ns: int,
         deterministic: bool = False,
     ) -> ActionResult:
+        if (
+            self._expected_observation_schema_hash is not None
+            and not self._server_info_verified
+        ):
+            self.get_server_info()
         if self._pending_step is not None:
             raise FailedPreconditionError(
                 "cannot begin an episode while a transition ACK is pending"
@@ -430,14 +655,45 @@ class GrpcActorNetwork:
             )
 
         # The transition is now accepted even if inference for the next action
-        # failed. Clear pending before reporting any action-side error.
+        # failed. Clear pending before reporting any outcome/action-side error.
         self._pending_step = None
         self._next_request_id += 1
-        if not request_action:
+        try:
+            if not reply.HasField("outcome"):
+                raise ActorProtocolError(
+                    "protocol v2 StepReply is missing TransitionOutcome"
+                )
+            outcome = transition_outcome_from_proto(
+                reply.outcome,
+                expected_transition_id=expected_ack[0],
+            )
+            if (
+                outcome.classifier_evaluated
+                and self._server_info is not None
+                and self._server_info.reward_model_id
+                and outcome.reward_model_id
+                != self._server_info.reward_model_id
+            ):
+                raise ActorProtocolError(
+                    "outcome.reward_model_id does not match ServerInfo"
+                )
+        except Exception:
+            self._active = False
+            raise
+
+        if outcome.terminal:
             self._active = False
             if reply.has_action:
-                raise ActorProtocolError("terminal Step unexpectedly returned an action")
-            return StepResult(ack=ack, action=None)
+                raise ActorProtocolError(
+                    "server-finalized terminal Step unexpectedly returned an action"
+                )
+            return StepResult(ack=ack, outcome=outcome, action=None)
+
+        if not request_action:
+            self._active = False
+            raise ActorProtocolError(
+                "server cleared a locally terminal transition"
+            )
 
         if not reply.has_action:
             self._active = False
@@ -457,7 +713,7 @@ class GrpcActorNetwork:
             self._active = False
             raise
         self._last_policy_version = result.policy_version
-        return StepResult(ack=ack, action=result)
+        return StepResult(ack=ack, outcome=outcome, action=result)
 
     def close(self) -> None:
         self._active = False
@@ -563,10 +819,36 @@ class GrpcActorServicer(pb_grpc.ActorTransportServicer):
             schema_version=info.schema_version,
             action_dim=info.action_dim,
             model_id=info.model_id,
+            reward_authority=info.reward_authority,
+            reward_model_id=info.reward_model_id,
+            observation_schema_hash=info.observation_schema_hash,
         )
+
+    def GetBufferStatus(self, request, context):
+        try:
+            _validate_wire_protocol(request.protocol_version)
+            status = self._service.get_buffer_status()
+            return pb.BufferStatusReply(
+                protocol_version=status.protocol_version,
+                schema_version=status.schema_version,
+                replay_size=status.replay_size,
+                replay_capacity=status.replay_capacity,
+                intervention_size=status.intervention_size,
+                intervention_capacity=status.intervention_capacity,
+                replay_insert_count=status.replay_insert_count,
+                intervention_insert_count=status.intervention_insert_count,
+                replay_overwrite_count=status.replay_overwrite_count,
+                intervention_overwrite_count=status.intervention_overwrite_count,
+                last_transition_id=status.last_transition_id,
+                last_env_step=status.last_env_step or 0,
+                has_last_transition=status.last_env_step is not None,
+            )
+        except Exception as exc:
+            _abort(context, exc)
 
     def BeginEpisode(self, request, context):
         try:
+            _validate_wire_protocol(request.protocol_version)
             command = BeginEpisodeCommand(
                 protocol_version=request.protocol_version,
                 actor_id=request.actor_id,
@@ -587,6 +869,7 @@ class GrpcActorServicer(pb_grpc.ActorTransportServicer):
 
     def Step(self, request, context):
         try:
+            _validate_wire_protocol(request.protocol_version)
             command = StepCommand(
                 protocol_version=request.protocol_version,
                 actor_id=request.actor_id,
@@ -611,6 +894,7 @@ class GrpcActorServicer(pb_grpc.ActorTransportServicer):
                     error=result.ack.error,
                 ),
                 has_action=result.action is not None,
+                outcome=transition_outcome_to_proto(result.outcome),
             )
             if result.action is not None:
                 reply.action.CopyFrom(_action_to_proto(result.action))
@@ -621,6 +905,14 @@ class GrpcActorServicer(pb_grpc.ActorTransportServicer):
             return reply
         except Exception as exc:
             _abort(context, exc)
+
+
+def _validate_wire_protocol(protocol_version: str) -> None:
+    if protocol_version != PROTOCOL_VERSION:
+        raise ActorProtocolError(
+            "incompatible protocol_version "
+            f"{protocol_version!r}; expected {PROTOCOL_VERSION!r}"
+        )
 
 
 def _abort(context: Any, exc: Exception) -> None:

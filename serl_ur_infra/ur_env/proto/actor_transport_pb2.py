@@ -19,7 +19,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x15\x61\x63tor_transport.proto\x12\x11gello.hil_serl.v1\"\x0f\n\rHealthRequest\";\n\x0bHealthReply\x12\r\n\x05\x61live\x18\x01 \x01(\x08\x12\r\n\x05ready\x18\x02 \x01(\x08\x12\x0e\n\x06\x64\x65tail\x18\x03 \x01(\t\"\x13\n\x11ServerInfoRequest\"x\n\x0fServerInfoReply\x12\r\n\x05ready\x18\x01 \x01(\x08\x12\x18\n\x10protocol_version\x18\x02 \x01(\t\x12\x16\n\x0eschema_version\x18\x03 \x01(\r\x12\x12\n\naction_dim\x18\x04 \x01(\r\x12\x10\n\x08model_id\x18\x05 \x01(\t\"B\n\x06Tensor\x12\x0c\n\x04path\x18\x01 \x03(\t\x12\r\n\x05\x64type\x18\x02 \x01(\t\x12\r\n\x05shape\x18\x03 \x03(\x04\x12\x0c\n\x04\x64\x61ta\x18\x04 \x01(\x0c\"g\n\x0bObservation\x12\x16\n\x0eobservation_id\x18\x01 \x01(\t\x12\x14\n\x0ctimestamp_ns\x18\x02 \x01(\x04\x12*\n\x07tensors\x18\x03 \x03(\x0b\x32\x19.gello.hil_serl.v1.Tensor\"\xf7\x01\n\x13\x42\x65ginEpisodeRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63tor_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x12\n\nepisode_id\x18\x05 \x01(\x04\x12\x12\n\nrequest_id\x18\x06 \x01(\x04\x12\x1c\n\x14\x63reated_monotonic_ns\x18\x07 \x01(\x04\x12\x33\n\x0bobservation\x18\x08 \x01(\x0b\x32\x1e.gello.hil_serl.v1.Observation\x12\x15\n\rdeterministic\x18\t \x01(\x08\"\xd6\x01\n\x04Meta\x12\x16\n\x0eschema_version\x18\x01 \x01(\r\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x10\n\x08\x61\x63tor_id\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x15\n\rtransition_id\x18\x05 \x01(\t\x12\x10\n\x08\x65nv_step\x18\x06 \x01(\x04\x12\x14\n\x0ctimestamp_ns\x18\x07 \x01(\x04\x12\x16\n\x0epolicy_version\x18\x08 \x01(\x04\x12\x15\n\rpolicy_action\x18\t \x03(\x02\x12\x12\n\nintervened\x18\n \x01(\x08\"\xeb\x01\n\nTransition\x12\x12\n\nepisode_id\x18\x01 \x01(\x04\x12\x0f\n\x07step_id\x18\x02 \x01(\x04\x12\x16\n\x0eobservation_id\x18\x03 \x01(\t\x12\x0f\n\x07\x61\x63tions\x18\x04 \x03(\x02\x12\x1b\n\x13next_observation_id\x18\x05 \x01(\t\x12\x0f\n\x07rewards\x18\x06 \x01(\x01\x12\r\n\x05masks\x18\x07 \x01(\x01\x12\r\n\x05\x64ones\x18\x08 \x01(\x08\x12\x11\n\ttruncated\x18\t \x01(\x08\x12\x19\n\x11has_grasp_penalty\x18\n \x01(\x08\x12\x15\n\rgrasp_penalty\x18\x0b \x01(\x01\"`\n\x04\x44\x61ta\x12%\n\x04meta\x18\x01 \x01(\x0b\x32\x17.gello.hil_serl.v1.Meta\x12\x31\n\ntransition\x18\x02 \x01(\x0b\x32\x1d.gello.hil_serl.v1.Transition\"\x9f\x02\n\x0bStepRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63tor_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x12\n\nrequest_id\x18\x05 \x01(\x04\x12\x1c\n\x14\x63reated_monotonic_ns\x18\x06 \x01(\x04\x12%\n\x04\x64\x61ta\x18\x07 \x01(\x0b\x32\x17.gello.hil_serl.v1.Data\x12\x38\n\x10next_observation\x18\x08 \x01(\x0b\x32\x1e.gello.hil_serl.v1.Observation\x12\x16\n\x0erequest_action\x18\t \x01(\x08\x12\x15\n\rdeterministic\x18\n \x01(\x08\"{\n\x03\x41\x63k\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x15\n\rtransition_id\x18\x02 \x01(\t\x12\x12\n\nsession_id\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\x04\x12\x14\n\x0c\x64\x65\x64uplicated\x18\x05 \x01(\x08\x12\r\n\x05\x65rror\x18\x06 \x01(\t\"\xed\x01\n\x0b\x41\x63tionReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\x12\x18\n\x10protocol_version\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x12\n\nrequest_id\x18\x05 \x01(\x04\x12$\n\x1crequest_created_monotonic_ns\x18\x06 \x01(\x04\x12\x16\n\x0eobservation_id\x18\x07 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x08 \x03(\x02\x12\x16\n\x0epolicy_version\x18\t \x01(\x04\x12\x1b\n\x13server_inference_ms\x18\n \x01(\x01\"t\n\tStepReply\x12#\n\x03\x61\x63k\x18\x01 \x01(\x0b\x32\x16.gello.hil_serl.v1.Ack\x12\x12\n\nhas_action\x18\x02 \x01(\x08\x12.\n\x06\x61\x63tion\x18\x03 \x01(\x0b\x32\x1e.gello.hil_serl.v1.ActionReply2\xd5\x02\n\x0e\x41\x63torTransport\x12J\n\x06Health\x12 .gello.hil_serl.v1.HealthRequest\x1a\x1e.gello.hil_serl.v1.HealthReply\x12Y\n\rGetServerInfo\x12$.gello.hil_serl.v1.ServerInfoRequest\x1a\".gello.hil_serl.v1.ServerInfoReply\x12V\n\x0c\x42\x65ginEpisode\x12&.gello.hil_serl.v1.BeginEpisodeRequest\x1a\x1e.gello.hil_serl.v1.ActionReply\x12\x44\n\x04Step\x12\x1e.gello.hil_serl.v1.StepRequest\x1a\x1c.gello.hil_serl.v1.StepReplyb\x06proto3'
+  serialized_pb=b'\n\x15\x61\x63tor_transport.proto\x12\x11gello.hil_serl.v1\"\x0f\n\rHealthRequest\";\n\x0bHealthReply\x12\r\n\x05\x61live\x18\x01 \x01(\x08\x12\r\n\x05ready\x18\x02 \x01(\x08\x12\x0e\n\x06\x64\x65tail\x18\x03 \x01(\t\"\x13\n\x11ServerInfoRequest\"\xcc\x01\n\x0fServerInfoReply\x12\r\n\x05ready\x18\x01 \x01(\x08\x12\x18\n\x10protocol_version\x18\x02 \x01(\t\x12\x16\n\x0eschema_version\x18\x03 \x01(\r\x12\x12\n\naction_dim\x18\x04 \x01(\r\x12\x10\n\x08model_id\x18\x05 \x01(\t\x12\x18\n\x10reward_authority\x18\x06 \x01(\t\x12\x17\n\x0freward_model_id\x18\x07 \x01(\t\x12\x1f\n\x17observation_schema_hash\x18\x08 \x01(\t\"/\n\x13\x42ufferStatusRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\"\x83\x03\n\x11\x42ufferStatusReply\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x16\n\x0eschema_version\x18\x02 \x01(\r\x12\x13\n\x0breplay_size\x18\x03 \x01(\x04\x12\x17\n\x0freplay_capacity\x18\x04 \x01(\x04\x12\x19\n\x11intervention_size\x18\x05 \x01(\x04\x12\x1d\n\x15intervention_capacity\x18\x06 \x01(\x04\x12\x1b\n\x13replay_insert_count\x18\x07 \x01(\x04\x12!\n\x19intervention_insert_count\x18\x08 \x01(\x04\x12\x1e\n\x16replay_overwrite_count\x18\t \x01(\x04\x12$\n\x1cintervention_overwrite_count\x18\n \x01(\x04\x12\x1a\n\x12last_transition_id\x18\x0b \x01(\t\x12\x15\n\rlast_env_step\x18\x0c \x01(\x04\x12\x1b\n\x13has_last_transition\x18\r \x01(\x08\"B\n\x06Tensor\x12\x0c\n\x04path\x18\x01 \x03(\t\x12\r\n\x05\x64type\x18\x02 \x01(\t\x12\r\n\x05shape\x18\x03 \x03(\x04\x12\x0c\n\x04\x64\x61ta\x18\x04 \x01(\x0c\"g\n\x0bObservation\x12\x16\n\x0eobservation_id\x18\x01 \x01(\t\x12\x14\n\x0ctimestamp_ns\x18\x02 \x01(\x04\x12*\n\x07tensors\x18\x03 \x03(\x0b\x32\x19.gello.hil_serl.v1.Tensor\"\xf7\x01\n\x13\x42\x65ginEpisodeRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63tor_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x12\n\nepisode_id\x18\x05 \x01(\x04\x12\x12\n\nrequest_id\x18\x06 \x01(\x04\x12\x1c\n\x14\x63reated_monotonic_ns\x18\x07 \x01(\x04\x12\x33\n\x0bobservation\x18\x08 \x01(\x0b\x32\x1e.gello.hil_serl.v1.Observation\x12\x15\n\rdeterministic\x18\t \x01(\x08\"\xd6\x01\n\x04Meta\x12\x16\n\x0eschema_version\x18\x01 \x01(\r\x12\x0e\n\x06run_id\x18\x02 \x01(\t\x12\x10\n\x08\x61\x63tor_id\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x15\n\rtransition_id\x18\x05 \x01(\t\x12\x10\n\x08\x65nv_step\x18\x06 \x01(\x04\x12\x14\n\x0ctimestamp_ns\x18\x07 \x01(\x04\x12\x16\n\x0epolicy_version\x18\x08 \x01(\x04\x12\x15\n\rpolicy_action\x18\t \x03(\x02\x12\x12\n\nintervened\x18\n \x01(\x08\"\xeb\x01\n\nTransition\x12\x12\n\nepisode_id\x18\x01 \x01(\x04\x12\x0f\n\x07step_id\x18\x02 \x01(\x04\x12\x16\n\x0eobservation_id\x18\x03 \x01(\t\x12\x0f\n\x07\x61\x63tions\x18\x04 \x03(\x02\x12\x1b\n\x13next_observation_id\x18\x05 \x01(\t\x12\x0f\n\x07rewards\x18\x06 \x01(\x01\x12\r\n\x05masks\x18\x07 \x01(\x01\x12\r\n\x05\x64ones\x18\x08 \x01(\x08\x12\x11\n\ttruncated\x18\t \x01(\x08\x12\x19\n\x11has_grasp_penalty\x18\n \x01(\x08\x12\x15\n\rgrasp_penalty\x18\x0b \x01(\x01\"`\n\x04\x44\x61ta\x12%\n\x04meta\x18\x01 \x01(\x0b\x32\x17.gello.hil_serl.v1.Meta\x12\x31\n\ntransition\x18\x02 \x01(\x0b\x32\x1d.gello.hil_serl.v1.Transition\"\x9f\x02\n\x0bStepRequest\x12\x18\n\x10protocol_version\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63tor_id\x18\x02 \x01(\t\x12\x0e\n\x06run_id\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x12\n\nrequest_id\x18\x05 \x01(\x04\x12\x1c\n\x14\x63reated_monotonic_ns\x18\x06 \x01(\x04\x12%\n\x04\x64\x61ta\x18\x07 \x01(\x0b\x32\x17.gello.hil_serl.v1.Data\x12\x38\n\x10next_observation\x18\x08 \x01(\x0b\x32\x1e.gello.hil_serl.v1.Observation\x12\x16\n\x0erequest_action\x18\t \x01(\x08\x12\x15\n\rdeterministic\x18\n \x01(\x08\"{\n\x03\x41\x63k\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x15\n\rtransition_id\x18\x02 \x01(\t\x12\x12\n\nsession_id\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\x04\x12\x14\n\x0c\x64\x65\x64uplicated\x18\x05 \x01(\x08\x12\r\n\x05\x65rror\x18\x06 \x01(\t\"\xed\x01\n\x0b\x41\x63tionReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\r\n\x05\x65rror\x18\x02 \x01(\t\x12\x18\n\x10protocol_version\x18\x03 \x01(\t\x12\x12\n\nsession_id\x18\x04 \x01(\t\x12\x12\n\nrequest_id\x18\x05 \x01(\x04\x12$\n\x1crequest_created_monotonic_ns\x18\x06 \x01(\x04\x12\x16\n\x0eobservation_id\x18\x07 \x01(\t\x12\x0e\n\x06\x61\x63tion\x18\x08 \x03(\x02\x12\x16\n\x0epolicy_version\x18\t \x01(\x04\x12\x1b\n\x13server_inference_ms\x18\n \x01(\x01\"\xef\x01\n\x11TransitionOutcome\x12\x15\n\rtransition_id\x18\x01 \x01(\t\x12\x0e\n\x06reward\x18\x02 \x01(\x01\x12\x0c\n\x04mask\x18\x03 \x01(\x01\x12\x0c\n\x04\x64one\x18\x04 \x01(\x08\x12\x11\n\ttruncated\x18\x05 \x01(\x08\x12\x0f\n\x07success\x18\x06 \x01(\x08\x12\x1c\n\x14\x63lassifier_evaluated\x18\x07 \x01(\x08\x12\x1e\n\x16\x63lassifier_probability\x18\x08 \x01(\x01\x12\x1c\n\x14\x63lassifier_threshold\x18\t \x01(\x01\x12\x17\n\x0freward_model_id\x18\n \x01(\t\"\xab\x01\n\tStepReply\x12#\n\x03\x61\x63k\x18\x01 \x01(\x0b\x32\x16.gello.hil_serl.v1.Ack\x12\x12\n\nhas_action\x18\x02 \x01(\x08\x12.\n\x06\x61\x63tion\x18\x03 \x01(\x0b\x32\x1e.gello.hil_serl.v1.ActionReply\x12\x35\n\x07outcome\x18\x04 \x01(\x0b\x32$.gello.hil_serl.v1.TransitionOutcome2\xb6\x03\n\x0e\x41\x63torTransport\x12J\n\x06Health\x12 .gello.hil_serl.v1.HealthRequest\x1a\x1e.gello.hil_serl.v1.HealthReply\x12Y\n\rGetServerInfo\x12$.gello.hil_serl.v1.ServerInfoRequest\x1a\".gello.hil_serl.v1.ServerInfoReply\x12_\n\x0fGetBufferStatus\x12&.gello.hil_serl.v1.BufferStatusRequest\x1a$.gello.hil_serl.v1.BufferStatusReply\x12V\n\x0c\x42\x65ginEpisode\x12&.gello.hil_serl.v1.BeginEpisodeRequest\x1a\x1e.gello.hil_serl.v1.ActionReply\x12\x44\n\x04Step\x12\x1e.gello.hil_serl.v1.StepRequest\x1a\x1c.gello.hil_serl.v1.StepReplyb\x06proto3'
 )
 
 
@@ -164,6 +164,27 @@ _SERVERINFOREPLY = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='reward_authority', full_name='gello.hil_serl.v1.ServerInfoReply.reward_authority', index=5,
+      number=6, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='reward_model_id', full_name='gello.hil_serl.v1.ServerInfoReply.reward_model_id', index=6,
+      number=7, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='observation_schema_hash', full_name='gello.hil_serl.v1.ServerInfoReply.observation_schema_hash', index=7,
+      number=8, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
   ],
   extensions=[
   ],
@@ -176,8 +197,156 @@ _SERVERINFOREPLY = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=143,
-  serialized_end=263,
+  serialized_start=144,
+  serialized_end=348,
+)
+
+
+_BUFFERSTATUSREQUEST = _descriptor.Descriptor(
+  name='BufferStatusRequest',
+  full_name='gello.hil_serl.v1.BufferStatusRequest',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  create_key=_descriptor._internal_create_key,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='protocol_version', full_name='gello.hil_serl.v1.BufferStatusRequest.protocol_version', index=0,
+      number=1, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+  ],
+  serialized_options=None,
+  is_extendable=False,
+  syntax='proto3',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=350,
+  serialized_end=397,
+)
+
+
+_BUFFERSTATUSREPLY = _descriptor.Descriptor(
+  name='BufferStatusReply',
+  full_name='gello.hil_serl.v1.BufferStatusReply',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  create_key=_descriptor._internal_create_key,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='protocol_version', full_name='gello.hil_serl.v1.BufferStatusReply.protocol_version', index=0,
+      number=1, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='schema_version', full_name='gello.hil_serl.v1.BufferStatusReply.schema_version', index=1,
+      number=2, type=13, cpp_type=3, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='replay_size', full_name='gello.hil_serl.v1.BufferStatusReply.replay_size', index=2,
+      number=3, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='replay_capacity', full_name='gello.hil_serl.v1.BufferStatusReply.replay_capacity', index=3,
+      number=4, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='intervention_size', full_name='gello.hil_serl.v1.BufferStatusReply.intervention_size', index=4,
+      number=5, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='intervention_capacity', full_name='gello.hil_serl.v1.BufferStatusReply.intervention_capacity', index=5,
+      number=6, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='replay_insert_count', full_name='gello.hil_serl.v1.BufferStatusReply.replay_insert_count', index=6,
+      number=7, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='intervention_insert_count', full_name='gello.hil_serl.v1.BufferStatusReply.intervention_insert_count', index=7,
+      number=8, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='replay_overwrite_count', full_name='gello.hil_serl.v1.BufferStatusReply.replay_overwrite_count', index=8,
+      number=9, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='intervention_overwrite_count', full_name='gello.hil_serl.v1.BufferStatusReply.intervention_overwrite_count', index=9,
+      number=10, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='last_transition_id', full_name='gello.hil_serl.v1.BufferStatusReply.last_transition_id', index=10,
+      number=11, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='last_env_step', full_name='gello.hil_serl.v1.BufferStatusReply.last_env_step', index=11,
+      number=12, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='has_last_transition', full_name='gello.hil_serl.v1.BufferStatusReply.has_last_transition', index=12,
+      number=13, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+  ],
+  serialized_options=None,
+  is_extendable=False,
+  syntax='proto3',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=400,
+  serialized_end=787,
 )
 
 
@@ -229,8 +398,8 @@ _TENSOR = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=265,
-  serialized_end=331,
+  serialized_start=789,
+  serialized_end=855,
 )
 
 
@@ -275,8 +444,8 @@ _OBSERVATION = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=333,
-  serialized_end=436,
+  serialized_start=857,
+  serialized_end=960,
 )
 
 
@@ -363,8 +532,8 @@ _BEGINEPISODEREQUEST = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=439,
-  serialized_end=686,
+  serialized_start=963,
+  serialized_end=1210,
 )
 
 
@@ -458,8 +627,8 @@ _META = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=689,
-  serialized_end=903,
+  serialized_start=1213,
+  serialized_end=1427,
 )
 
 
@@ -560,8 +729,8 @@ _TRANSITION = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=906,
-  serialized_end=1141,
+  serialized_start=1430,
+  serialized_end=1665,
 )
 
 
@@ -599,8 +768,8 @@ _DATA = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1143,
-  serialized_end=1239,
+  serialized_start=1667,
+  serialized_end=1763,
 )
 
 
@@ -694,8 +863,8 @@ _STEPREQUEST = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1242,
-  serialized_end=1529,
+  serialized_start=1766,
+  serialized_end=2053,
 )
 
 
@@ -761,8 +930,8 @@ _ACK = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1531,
-  serialized_end=1654,
+  serialized_start=2055,
+  serialized_end=2178,
 )
 
 
@@ -856,8 +1025,103 @@ _ACTIONREPLY = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1657,
-  serialized_end=1894,
+  serialized_start=2181,
+  serialized_end=2418,
+)
+
+
+_TRANSITIONOUTCOME = _descriptor.Descriptor(
+  name='TransitionOutcome',
+  full_name='gello.hil_serl.v1.TransitionOutcome',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  create_key=_descriptor._internal_create_key,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='transition_id', full_name='gello.hil_serl.v1.TransitionOutcome.transition_id', index=0,
+      number=1, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='reward', full_name='gello.hil_serl.v1.TransitionOutcome.reward', index=1,
+      number=2, type=1, cpp_type=5, label=1,
+      has_default_value=False, default_value=float(0),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='mask', full_name='gello.hil_serl.v1.TransitionOutcome.mask', index=2,
+      number=3, type=1, cpp_type=5, label=1,
+      has_default_value=False, default_value=float(0),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='done', full_name='gello.hil_serl.v1.TransitionOutcome.done', index=3,
+      number=4, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='truncated', full_name='gello.hil_serl.v1.TransitionOutcome.truncated', index=4,
+      number=5, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='success', full_name='gello.hil_serl.v1.TransitionOutcome.success', index=5,
+      number=6, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='classifier_evaluated', full_name='gello.hil_serl.v1.TransitionOutcome.classifier_evaluated', index=6,
+      number=7, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='classifier_probability', full_name='gello.hil_serl.v1.TransitionOutcome.classifier_probability', index=7,
+      number=8, type=1, cpp_type=5, label=1,
+      has_default_value=False, default_value=float(0),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='classifier_threshold', full_name='gello.hil_serl.v1.TransitionOutcome.classifier_threshold', index=8,
+      number=9, type=1, cpp_type=5, label=1,
+      has_default_value=False, default_value=float(0),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='reward_model_id', full_name='gello.hil_serl.v1.TransitionOutcome.reward_model_id', index=9,
+      number=10, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+  ],
+  serialized_options=None,
+  is_extendable=False,
+  syntax='proto3',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=2421,
+  serialized_end=2660,
 )
 
 
@@ -890,6 +1154,13 @@ _STEPREPLY = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='outcome', full_name='gello.hil_serl.v1.StepReply.outcome', index=3,
+      number=4, type=11, cpp_type=10, label=1,
+      has_default_value=False, default_value=None,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
   ],
   extensions=[
   ],
@@ -902,8 +1173,8 @@ _STEPREPLY = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=1896,
-  serialized_end=2012,
+  serialized_start=2663,
+  serialized_end=2834,
 )
 
 _OBSERVATION.fields_by_name['tensors'].message_type = _TENSOR
@@ -914,10 +1185,13 @@ _STEPREQUEST.fields_by_name['data'].message_type = _DATA
 _STEPREQUEST.fields_by_name['next_observation'].message_type = _OBSERVATION
 _STEPREPLY.fields_by_name['ack'].message_type = _ACK
 _STEPREPLY.fields_by_name['action'].message_type = _ACTIONREPLY
+_STEPREPLY.fields_by_name['outcome'].message_type = _TRANSITIONOUTCOME
 DESCRIPTOR.message_types_by_name['HealthRequest'] = _HEALTHREQUEST
 DESCRIPTOR.message_types_by_name['HealthReply'] = _HEALTHREPLY
 DESCRIPTOR.message_types_by_name['ServerInfoRequest'] = _SERVERINFOREQUEST
 DESCRIPTOR.message_types_by_name['ServerInfoReply'] = _SERVERINFOREPLY
+DESCRIPTOR.message_types_by_name['BufferStatusRequest'] = _BUFFERSTATUSREQUEST
+DESCRIPTOR.message_types_by_name['BufferStatusReply'] = _BUFFERSTATUSREPLY
 DESCRIPTOR.message_types_by_name['Tensor'] = _TENSOR
 DESCRIPTOR.message_types_by_name['Observation'] = _OBSERVATION
 DESCRIPTOR.message_types_by_name['BeginEpisodeRequest'] = _BEGINEPISODEREQUEST
@@ -927,6 +1201,7 @@ DESCRIPTOR.message_types_by_name['Data'] = _DATA
 DESCRIPTOR.message_types_by_name['StepRequest'] = _STEPREQUEST
 DESCRIPTOR.message_types_by_name['Ack'] = _ACK
 DESCRIPTOR.message_types_by_name['ActionReply'] = _ACTIONREPLY
+DESCRIPTOR.message_types_by_name['TransitionOutcome'] = _TRANSITIONOUTCOME
 DESCRIPTOR.message_types_by_name['StepReply'] = _STEPREPLY
 _sym_db.RegisterFileDescriptor(DESCRIPTOR)
 
@@ -957,6 +1232,20 @@ ServerInfoReply = _reflection.GeneratedProtocolMessageType('ServerInfoReply', (_
   # @@protoc_insertion_point(class_scope:gello.hil_serl.v1.ServerInfoReply)
   })
 _sym_db.RegisterMessage(ServerInfoReply)
+
+BufferStatusRequest = _reflection.GeneratedProtocolMessageType('BufferStatusRequest', (_message.Message,), {
+  'DESCRIPTOR' : _BUFFERSTATUSREQUEST,
+  '__module__' : 'actor_transport_pb2'
+  # @@protoc_insertion_point(class_scope:gello.hil_serl.v1.BufferStatusRequest)
+  })
+_sym_db.RegisterMessage(BufferStatusRequest)
+
+BufferStatusReply = _reflection.GeneratedProtocolMessageType('BufferStatusReply', (_message.Message,), {
+  'DESCRIPTOR' : _BUFFERSTATUSREPLY,
+  '__module__' : 'actor_transport_pb2'
+  # @@protoc_insertion_point(class_scope:gello.hil_serl.v1.BufferStatusReply)
+  })
+_sym_db.RegisterMessage(BufferStatusReply)
 
 Tensor = _reflection.GeneratedProtocolMessageType('Tensor', (_message.Message,), {
   'DESCRIPTOR' : _TENSOR,
@@ -1021,6 +1310,13 @@ ActionReply = _reflection.GeneratedProtocolMessageType('ActionReply', (_message.
   })
 _sym_db.RegisterMessage(ActionReply)
 
+TransitionOutcome = _reflection.GeneratedProtocolMessageType('TransitionOutcome', (_message.Message,), {
+  'DESCRIPTOR' : _TRANSITIONOUTCOME,
+  '__module__' : 'actor_transport_pb2'
+  # @@protoc_insertion_point(class_scope:gello.hil_serl.v1.TransitionOutcome)
+  })
+_sym_db.RegisterMessage(TransitionOutcome)
+
 StepReply = _reflection.GeneratedProtocolMessageType('StepReply', (_message.Message,), {
   'DESCRIPTOR' : _STEPREPLY,
   '__module__' : 'actor_transport_pb2'
@@ -1037,8 +1333,8 @@ _ACTORTRANSPORT = _descriptor.ServiceDescriptor(
   index=0,
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_start=2015,
-  serialized_end=2356,
+  serialized_start=2837,
+  serialized_end=3275,
   methods=[
   _descriptor.MethodDescriptor(
     name='Health',
@@ -1061,9 +1357,19 @@ _ACTORTRANSPORT = _descriptor.ServiceDescriptor(
     create_key=_descriptor._internal_create_key,
   ),
   _descriptor.MethodDescriptor(
+    name='GetBufferStatus',
+    full_name='gello.hil_serl.v1.ActorTransport.GetBufferStatus',
+    index=2,
+    containing_service=None,
+    input_type=_BUFFERSTATUSREQUEST,
+    output_type=_BUFFERSTATUSREPLY,
+    serialized_options=None,
+    create_key=_descriptor._internal_create_key,
+  ),
+  _descriptor.MethodDescriptor(
     name='BeginEpisode',
     full_name='gello.hil_serl.v1.ActorTransport.BeginEpisode',
-    index=2,
+    index=3,
     containing_service=None,
     input_type=_BEGINEPISODEREQUEST,
     output_type=_ACTIONREPLY,
@@ -1073,7 +1379,7 @@ _ACTORTRANSPORT = _descriptor.ServiceDescriptor(
   _descriptor.MethodDescriptor(
     name='Step',
     full_name='gello.hil_serl.v1.ActorTransport.Step',
-    index=3,
+    index=4,
     containing_service=None,
     input_type=_STEPREQUEST,
     output_type=_STEPREPLY,

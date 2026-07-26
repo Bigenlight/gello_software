@@ -1,11 +1,11 @@
-# HIL-SERL remote actor gRPC v1
+# HIL-SERL remote actor gRPC v2
 
 This adapter keeps robot control and intervention on the laptop while policy
 inference and replay routing live on the server. The current server entry point
 is a loopback-only zero-action mock for contract testing; the RL server team can
-inject its policy through `ActorSessionService(sample_action=...)` and its
-atomic replay router through `accept_data(data, intervened)` without changing
-the transport API.
+inject its policy, reward finalizer, and replay router through
+`ActorSessionService` callbacks without changing the transport API. The
+receive-only implementation is documented in `RL_RECEIVE_SERVER.md`.
 
 ## Direction and one-observation-per-step flow
 
@@ -19,12 +19,16 @@ At environment step `t`:
 1. Local executes `A(t)`. GELLO may replace it with a human action.
 2. **Local → Server** `Step(O(t+1), D(t), request_action=true)` sends the next
    observation and the transition that references `O(t)` and `O(t+1)`.
-3. **Server → Local** returns `ACK(D(t)) + A(t+1)`.
+3. Server finalizes reward/termination and inserts the transition into RAM
+   replay routes.
+4. **Server → Local** returns `ACK(D(t)) + TransitionOutcome + A(t+1)`.
 
-For a terminal or truncated step, Local sends the same `Step` with
-`request_action=false`. Server returns only `ACK`; Local does not reset until
-that ACK is validated. Images are raw lossless numpy bytes with their nested
-key path, dtype, and shape. `O(t)` is therefore not resent inside `D(t)`.
+For a locally terminal or truncated step, Local sends the same `Step` with
+`request_action=false`. A server classifier may also finalize a provisional
+non-terminal transition as terminal; in that case the server suppresses the
+requested next action. Local uses the returned outcome and never resets before
+the ACK is validated. Images are raw lossless numpy bytes with their nested key
+path, dtype, and shape. `O(t)` is therefore not resent inside `D(t)`.
 
 ## Data envelope
 
@@ -33,7 +37,7 @@ Conceptually the server receives:
 ```python
 data = {
     "meta": {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": "...",
         "actor_id": "...",
         "session_id": "...",
@@ -83,10 +87,11 @@ An experiment may define:
 NETWORK = {
     "type": "grpc",
     "host": "127.0.0.1",
-    "port": 50052,
+    "port": 50053,
     "timeout_s": 0.6,
     "max_response_age_s": 0.8,
     "retry_count": 1,
+    "observation_schema_hash": "<expected canonical SHA256>",
 }
 ```
 
@@ -152,5 +157,7 @@ or print image/action values.
   request once. Server reply caching prevents duplicate inference and replay
   insertion.
 - A failed Step keeps its transition pending and prevents reset/new actions.
+- Classifier or replay insertion failures emit no ACK and make the server
+  not-ready; Local fails stopped.
 - Application or malformed-action failures abort the active episode; no
-  fallback/random action is executed. Protocol v1 requires `random_steps == 0`.
+  fallback/random action is executed. Protocol v2 requires `random_steps == 0`.

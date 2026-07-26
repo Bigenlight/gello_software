@@ -21,6 +21,11 @@ class ActorTransportStub:
             request_serializer=actor__transport__pb2.ServerInfoRequest.SerializeToString,
             response_deserializer=actor__transport__pb2.ServerInfoReply.FromString,
         )
+        self.GetBufferStatus = channel.unary_unary(
+            "/gello.hil_serl.v1.ActorTransport/GetBufferStatus",
+            request_serializer=actor__transport__pb2.BufferStatusRequest.SerializeToString,
+            response_deserializer=actor__transport__pb2.BufferStatusReply.FromString,
+        )
         self.BeginEpisode = channel.unary_unary(
             "/gello.hil_serl.v1.ActorTransport/BeginEpisode",
             request_serializer=actor__transport__pb2.BeginEpisodeRequest.SerializeToString,
@@ -44,6 +49,11 @@ class ActorTransportServicer:
         context.set_details("GetServerInfo is not implemented")
         raise NotImplementedError("GetServerInfo is not implemented")
 
+    def GetBufferStatus(self, request, context):
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("GetBufferStatus is not implemented")
+        raise NotImplementedError("GetBufferStatus is not implemented")
+
     def BeginEpisode(self, request, context):
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("BeginEpisode is not implemented")
@@ -66,6 +76,11 @@ def add_ActorTransportServicer_to_server(servicer, server):
             servicer.GetServerInfo,
             request_deserializer=actor__transport__pb2.ServerInfoRequest.FromString,
             response_serializer=actor__transport__pb2.ServerInfoReply.SerializeToString,
+        ),
+        "GetBufferStatus": grpc.unary_unary_rpc_method_handler(
+            servicer.GetBufferStatus,
+            request_deserializer=actor__transport__pb2.BufferStatusRequest.FromString,
+            response_serializer=actor__transport__pb2.BufferStatusReply.SerializeToString,
         ),
         "BeginEpisode": grpc.unary_unary_rpc_method_handler(
             servicer.BeginEpisode,

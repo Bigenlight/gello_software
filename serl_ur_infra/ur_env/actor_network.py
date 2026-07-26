@@ -20,8 +20,8 @@ from typing import Any, Callable, Mapping, Optional, Protocol, Tuple
 import numpy as np
 
 
-PROTOCOL_VERSION = "1"
-SCHEMA_VERSION = 1
+PROTOCOL_VERSION = "2"
+SCHEMA_VERSION = 2
 
 
 class ActorNetworkError(RuntimeError):
@@ -103,8 +103,29 @@ class TransitionAck:
 
 
 @dataclass(frozen=True)
+class TransitionOutcome:
+    """Server-authoritative transition values that were accepted by replay."""
+
+    transition_id: str
+    reward: float
+    mask: float
+    done: bool
+    truncated: bool
+    success: bool
+    classifier_evaluated: bool
+    classifier_probability: float = 0.0
+    classifier_threshold: float = 0.0
+    reward_model_id: str = ""
+
+    @property
+    def terminal(self) -> bool:
+        return self.done or self.truncated
+
+
+@dataclass(frozen=True)
 class StepResult:
     ack: TransitionAck
+    outcome: TransitionOutcome
     action: Optional[ActionResult]
     action_error: str = ""
 
@@ -116,6 +137,25 @@ class ServerInfo:
     schema_version: int
     action_dim: int
     model_id: str
+    reward_authority: str
+    reward_model_id: str
+    observation_schema_hash: str
+
+
+@dataclass(frozen=True)
+class BufferStatus:
+    replay_size: int
+    replay_capacity: int
+    intervention_size: int
+    intervention_capacity: int
+    replay_insert_count: int
+    intervention_insert_count: int
+    replay_overwrite_count: int
+    intervention_overwrite_count: int
+    last_transition_id: str = ""
+    last_env_step: Optional[int] = None
+    protocol_version: str = PROTOCOL_VERSION
+    schema_version: int = SCHEMA_VERSION
 
 
 class ActorNetwork(Protocol):
@@ -125,6 +165,9 @@ class ActorNetwork(Protocol):
         ...
 
     def get_server_info(self) -> ServerInfo:
+        ...
+
+    def get_buffer_status(self) -> BufferStatus:
         ...
 
     def begin_episode(
@@ -298,6 +341,17 @@ def command_fingerprint(command: Any) -> bytes:
     return digest.digest()
 
 
+def _values_equal(left: Any, right: Any) -> bool:
+    left_digest = hashlib.sha256()
+    right_digest = hashlib.sha256()
+    try:
+        _hash_value(left_digest, left)
+        _hash_value(right_digest, right)
+    except ActorProtocolError:
+        return False
+    return left_digest.digest() == right_digest.digest()
+
+
 @dataclass
 class _RunState:
     next_env_step: int = 0
@@ -328,9 +382,18 @@ class ActorSessionService:
         *,
         action_shape: Tuple[int, ...] = (7,),
         model_id: str = "mock-zero-policy",
+        reward_authority: str = "local",
+        reward_model_id: str = "",
+        observation_schema_hash: str = "",
         cache_size: int = 2048,
         clock: Callable[[], float] = time.perf_counter,
         accept_data: Optional[Callable[[dict[str, Any], bool], None]] = None,
+        finalize_transition: Optional[
+            Callable[
+                [dict[str, Any]], tuple[dict[str, Any], TransitionOutcome]
+            ]
+        ] = None,
+        buffer_status_provider: Optional[Callable[[], BufferStatus]] = None,
         in_memory_capacity: int = 256,
     ) -> None:
         if not action_shape or any(int(dim) <= 0 for dim in action_shape):
@@ -339,15 +402,25 @@ class ActorSessionService:
             raise ValueError("cache_size must be positive")
         if in_memory_capacity <= 0:
             raise ValueError("in_memory_capacity must be positive")
+        if not isinstance(reward_authority, str) or not reward_authority:
+            raise ValueError("reward_authority is required")
         self._sample_action = sample_action
         self._action_shape = tuple(int(dim) for dim in action_shape)
         self._model_id = str(model_id)
+        self._reward_authority = reward_authority
+        self._reward_model_id = str(reward_model_id)
+        self._observation_schema_hash = str(observation_schema_hash)
         self._cache_size = int(cache_size)
         self._clock = clock
         self._in_memory_capacity = int(in_memory_capacity)
         self._accept_data = accept_data or self._accept_data_in_memory
+        self._finalize_transition = (
+            finalize_transition or self._finalize_transition_identity
+        )
+        self._buffer_status_provider = buffer_status_provider
         self._lock = threading.RLock()
         self._ready = True
+        self._fault_detail = ""
         self._runs: dict[tuple[str, str], _RunState] = {}
         self._sessions: dict[tuple[str, str], _SessionState] = {}
         self._observations: dict[tuple[str, str, str], ObservationPacket] = {}
@@ -358,10 +431,12 @@ class ActorSessionService:
         self.intervention_items: list[dict[str, Any]] = []
         self.observation_accept_count = 0
         self.inference_count = 0
+        self._last_transition_id = ""
+        self._last_env_step: Optional[int] = None
 
     def health(self) -> tuple[bool, bool, str]:
         with self._lock:
-            return True, self._ready, "ready" if self._ready else "policy fault"
+            return True, self._ready, "ready" if self._ready else self._fault_detail
 
     def get_server_info(self) -> ServerInfo:
         with self._lock:
@@ -371,7 +446,19 @@ class ActorSessionService:
                 schema_version=SCHEMA_VERSION,
                 action_dim=int(np.prod(self._action_shape)),
                 model_id=self._model_id,
+                reward_authority=self._reward_authority,
+                reward_model_id=self._reward_model_id,
+                observation_schema_hash=self._observation_schema_hash,
             )
+
+    def get_buffer_status(self) -> BufferStatus:
+        with self._lock:
+            status = (
+                self._buffer_status_provider()
+                if self._buffer_status_provider is not None
+                else self._in_memory_buffer_status()
+            )
+            return self._validated_buffer_status(status)
 
     def begin_episode(self, command: BeginEpisodeCommand) -> ActionResult:
         fingerprint = command.fingerprint or command_fingerprint(command)
@@ -404,8 +491,10 @@ class ActorSessionService:
                 action, version, inference_ms = self._infer(
                     observation.observation, command.deterministic
                 )
-            except Exception:
-                self._ready = False
+            except Exception as exc:
+                self._set_fault(
+                    f"policy inference failed: {type(exc).__name__}: {exc}"
+                )
                 raise
             self._register_observation(
                 observation, command.actor_id, command.session_id
@@ -477,22 +566,41 @@ class ActorSessionService:
                     f"observation_id {next_observation.observation_id!r} was already accepted"
                 )
 
-            data = copy.deepcopy(dict(command.data))
-            transition = data["transition"]
-            transition["observations"] = copy_observation(
+            provisional_data = copy.deepcopy(dict(command.data))
+            provisional_transition = provisional_data["transition"]
+            provisional_transition["observations"] = copy_observation(
                 session.current_observation.observation
             )
-            transition["next_observations"] = copy_observation(
+            provisional_transition["next_observations"] = copy_observation(
                 next_observation.observation
             )
-            intervened = bool(data["meta"]["intervened"])
             try:
+                finalized = self._finalize_transition(
+                    copy.deepcopy(provisional_data)
+                )
+                if not isinstance(finalized, tuple) or len(finalized) != 2:
+                    raise ActorProtocolError(
+                        "transition finalizer must return (data, outcome)"
+                    )
+                finalized_data, outcome = finalized
+                if not isinstance(finalized_data, Mapping):
+                    raise ActorProtocolError(
+                        "transition finalizer data must be a mapping"
+                    )
+                data = copy.deepcopy(dict(finalized_data))
+                outcome = self._validate_finalized_transition(
+                    provisional_data, data, outcome
+                )
+                intervened = bool(data["meta"]["intervened"])
                 # One callback owns replay + intervention routing so a real
                 # server can make acceptance atomic before ACK is returned.
                 self._accept_data(copy.deepcopy(data), intervened)
             except Exception as exc:
+                self._set_fault(
+                    f"transition pipeline failed: {type(exc).__name__}: {exc}"
+                )
                 raise ActorNetworkError(
-                    f"data sink rejected transition: {type(exc).__name__}: {exc}"
+                    f"transition was not acknowledged: {type(exc).__name__}: {exc}"
                 ) from exc
             self._register_observation(
                 next_observation, command.actor_id, command.session_id
@@ -510,6 +618,8 @@ class ActorSessionService:
             session.current_observation = next_observation
             session.expected_request_id += 1
             session.expected_step_id += 1
+            self._last_transition_id = outcome.transition_id
+            self._last_env_step = int(data["meta"]["env_step"])
             ack = TransitionAck(
                 accepted=True,
                 transition_id=str(data["meta"]["transition_id"]),
@@ -517,14 +627,13 @@ class ActorSessionService:
                 request_id=command.request_id,
             )
 
-            terminal = bool(transition["dones"] or transition["truncated"])
-            if terminal:
+            if outcome.terminal:
                 session.active = False
                 run.active_session_id = ""
                 run.next_episode_id += 1
                 self._observations.pop(observation_key, None)
                 self._sessions.pop(session_key, None)
-                result = StepResult(ack=ack, action=None)
+                result = StepResult(ack=ack, outcome=outcome, action=None)
                 self._store_cache(cache_key, fingerprint, result)
                 return _copy_step_result(result)
 
@@ -538,13 +647,16 @@ class ActorSessionService:
                         f"{session.last_policy_version} to {version}"
                     )
             except Exception as exc:  # transition is already accepted
-                self._ready = False
+                self._set_fault(
+                    f"policy inference failed: {type(exc).__name__}: {exc}"
+                )
                 session.active = False
                 run.active_session_id = ""
                 self._sessions.pop(session_key, None)
                 self._observations.pop(observation_key, None)
                 result = StepResult(
                     ack=ack,
+                    outcome=outcome,
                     action=None,
                     action_error=f"policy inference failed: {type(exc).__name__}: {exc}",
                 )
@@ -562,13 +674,33 @@ class ActorSessionService:
                 observation_id=next_observation.observation_id,
                 server_inference_ms=inference_ms,
             )
-            result = StepResult(ack=ack, action=action_reply)
+            result = StepResult(ack=ack, outcome=outcome, action=action_reply)
             self._store_cache(cache_key, fingerprint, result)
             return _copy_step_result(result)
 
     def _require_ready(self) -> None:
         if not self._ready:
-            raise FailedPreconditionError("policy service is not ready")
+            raise FailedPreconditionError(
+                f"actor service is not ready: {self._fault_detail}"
+            )
+
+    def _set_fault(self, detail: str) -> None:
+        self._ready = False
+        self._fault_detail = str(detail) or "actor service fault"
+
+    def _finalize_transition_identity(
+        self, data: dict[str, Any]
+    ) -> tuple[dict[str, Any], TransitionOutcome]:
+        transition = data["transition"]
+        return data, TransitionOutcome(
+            transition_id=str(data["meta"]["transition_id"]),
+            reward=float(transition["rewards"]),
+            mask=float(transition["masks"]),
+            done=bool(transition["dones"]),
+            truncated=bool(transition["truncated"]),
+            success=False,
+            classifier_evaluated=False,
+        )
 
     def _accept_data_in_memory(
         self, data: dict[str, Any], intervened: bool
@@ -585,10 +717,225 @@ class ActorSessionService:
         if intervened:
             self.intervention_items.append(copy.deepcopy(data))
 
+    def _in_memory_buffer_status(self) -> BufferStatus:
+        return BufferStatus(
+            replay_size=len(self.replay_items),
+            replay_capacity=self._in_memory_capacity,
+            intervention_size=len(self.intervention_items),
+            intervention_capacity=self._in_memory_capacity,
+            replay_insert_count=len(self.replay_items),
+            intervention_insert_count=len(self.intervention_items),
+            replay_overwrite_count=0,
+            intervention_overwrite_count=0,
+            last_transition_id=self._last_transition_id,
+            last_env_step=self._last_env_step,
+        )
+
+    def _validated_buffer_status(self, status: BufferStatus) -> BufferStatus:
+        if not isinstance(status, BufferStatus):
+            raise ActorProtocolError(
+                "buffer status provider must return BufferStatus"
+            )
+        if status.protocol_version != PROTOCOL_VERSION:
+            raise ActorProtocolError(
+                "buffer status provider returned incompatible protocol_version "
+                f"{status.protocol_version!r}; expected {PROTOCOL_VERSION!r}"
+            )
+        if status.schema_version != SCHEMA_VERSION:
+            raise ActorProtocolError(
+                "buffer status provider returned incompatible schema_version "
+                f"{status.schema_version}; expected {SCHEMA_VERSION}"
+            )
+        values = {}
+        for name in (
+            "replay_size",
+            "replay_capacity",
+            "intervention_size",
+            "intervention_capacity",
+            "replay_insert_count",
+            "intervention_insert_count",
+            "replay_overwrite_count",
+            "intervention_overwrite_count",
+        ):
+            values[name] = validate_counter(getattr(status, name), name=name)
+        if values["replay_size"] > values["replay_capacity"]:
+            raise ActorProtocolError("replay_size exceeds replay_capacity")
+        if values["intervention_size"] > values["intervention_capacity"]:
+            raise ActorProtocolError(
+                "intervention_size exceeds intervention_capacity"
+            )
+        if not isinstance(status.last_transition_id, str):
+            raise ActorProtocolError("last_transition_id must be a string")
+        if (status.last_env_step is None) != (not status.last_transition_id):
+            raise ActorProtocolError(
+                "last_transition_id and last_env_step must be set together"
+            )
+        last_env_step = None
+        if status.last_env_step is not None:
+            last_env_step = validate_counter(
+                status.last_env_step, name="last_env_step"
+            )
+        return BufferStatus(
+            **values,
+            last_transition_id=status.last_transition_id,
+            last_env_step=last_env_step,
+        )
+
+    def _validate_finalized_transition(
+        self,
+        provisional_data: Mapping[str, Any],
+        finalized_data: Mapping[str, Any],
+        outcome: TransitionOutcome,
+    ) -> TransitionOutcome:
+        if not isinstance(outcome, TransitionOutcome):
+            raise ActorProtocolError(
+                "transition finalizer outcome must be TransitionOutcome"
+            )
+        if set(finalized_data) != {"meta", "transition"}:
+            raise ActorProtocolError(
+                "finalized data must contain exactly meta and transition"
+            )
+        meta = finalized_data["meta"]
+        transition = finalized_data["transition"]
+        if not isinstance(meta, Mapping) or not isinstance(transition, Mapping):
+            raise ActorProtocolError(
+                "finalized data.meta and data.transition must be mappings"
+            )
+
+        provisional_meta = provisional_data["meta"]
+        provisional_transition = provisional_data["transition"]
+        for name, value in provisional_meta.items():
+            if name not in meta or not _values_equal(meta[name], value):
+                raise ActorProtocolError(
+                    f"transition finalizer changed protected meta.{name}"
+                )
+        mutable_fields = {"rewards", "masks", "dones", "truncated"}
+        for name, value in provisional_transition.items():
+            if name in mutable_fields:
+                continue
+            if name not in transition or not _values_equal(transition[name], value):
+                raise ActorProtocolError(
+                    f"transition finalizer changed protected transition.{name}"
+                )
+
+        transition_id = meta.get("transition_id")
+        if outcome.transition_id != transition_id:
+            raise ActorProtocolError(
+                "outcome.transition_id does not match finalized data"
+            )
+        reward = float(transition.get("rewards"))
+        mask = float(transition.get("masks"))
+        if not math.isfinite(reward) or not math.isfinite(mask):
+            raise ActorProtocolError("finalized reward/mask must be finite")
+        done = transition.get("dones")
+        truncated = transition.get("truncated")
+        if not isinstance(done, (bool, np.bool_)) or not isinstance(
+            truncated, (bool, np.bool_)
+        ):
+            raise ActorProtocolError("finalized dones/truncated must be bool")
+        done = bool(done)
+        truncated = bool(truncated)
+        if done and truncated:
+            raise ActorProtocolError(
+                "finalized transition cannot be both done and truncated"
+            )
+        expected_mask = 0.0 if done else 1.0
+        if mask != expected_mask:
+            raise ActorProtocolError(
+                f"finalized masks must be {expected_mask} for dones={done}"
+            )
+
+        for name, value in (
+            ("outcome.done", outcome.done),
+            ("outcome.truncated", outcome.truncated),
+            ("outcome.success", outcome.success),
+            ("outcome.classifier_evaluated", outcome.classifier_evaluated),
+        ):
+            if not isinstance(value, (bool, np.bool_)):
+                raise ActorProtocolError(f"{name} must be bool")
+        outcome_reward = float(outcome.reward)
+        outcome_mask = float(outcome.mask)
+        probability = float(outcome.classifier_probability)
+        threshold = float(outcome.classifier_threshold)
+        if not all(
+            math.isfinite(value)
+            for value in (outcome_reward, outcome_mask, probability, threshold)
+        ):
+            raise ActorProtocolError("outcome contains a non-finite scalar")
+        if (
+            outcome_reward != reward
+            or outcome_mask != mask
+            or bool(outcome.done) != done
+            or bool(outcome.truncated) != truncated
+        ):
+            raise ActorProtocolError(
+                "outcome reward/mask/terminal flags do not match finalized data"
+            )
+
+        evaluated = bool(outcome.classifier_evaluated)
+        success = bool(outcome.success)
+        if evaluated:
+            if not 0.0 <= probability <= 1.0:
+                raise ActorProtocolError(
+                    "classifier_probability must be within [0, 1]"
+                )
+            if not 0.0 <= threshold <= 1.0:
+                raise ActorProtocolError(
+                    "classifier_threshold must be within [0, 1]"
+                )
+            if not isinstance(outcome.reward_model_id, str) or not outcome.reward_model_id:
+                raise ActorProtocolError(
+                    "reward_model_id is required when classifier was evaluated"
+                )
+            if self._reward_model_id and outcome.reward_model_id != self._reward_model_id:
+                raise ActorProtocolError(
+                    "outcome.reward_model_id does not match ServerInfo"
+                )
+            if success != (probability > threshold):
+                raise ActorProtocolError(
+                    "outcome.success must use strict probability > threshold"
+                )
+        elif success or probability != 0.0 or threshold != 0.0:
+            raise ActorProtocolError(
+                "unevaluated classifier outcome must have no success/scalars"
+            )
+        elif outcome.reward_model_id:
+            raise ActorProtocolError(
+                "unevaluated classifier outcome must not name a reward model"
+            )
+
+        if success and (reward != 1.0 or not done or truncated or mask != 0.0):
+            raise ActorProtocolError(
+                "classifier success must finalize reward=1, done=true, "
+                "truncated=false, mask=0"
+            )
+        provisional_done = bool(provisional_transition["dones"])
+        provisional_truncated = bool(provisional_transition["truncated"])
+        if provisional_done and not done:
+            raise ActorProtocolError("finalizer cannot clear a local done")
+        if provisional_truncated and not (
+            truncated or (success and done)
+        ):
+            raise ActorProtocolError("finalizer cannot clear a local truncation")
+
+        return TransitionOutcome(
+            transition_id=str(outcome.transition_id),
+            reward=outcome_reward,
+            mask=outcome_mask,
+            done=done,
+            truncated=truncated,
+            success=success,
+            classifier_evaluated=evaluated,
+            classifier_probability=probability,
+            classifier_threshold=threshold,
+            reward_model_id=outcome.reward_model_id,
+        )
+
     def _validate_begin(self, command: BeginEpisodeCommand) -> None:
         if command.protocol_version != PROTOCOL_VERSION:
             raise ActorProtocolError(
-                f"protocol_version must be {PROTOCOL_VERSION!r}"
+                "incompatible protocol_version "
+                f"{command.protocol_version!r}; expected {PROTOCOL_VERSION!r}"
             )
         for name, value in (
             ("actor_id", command.actor_id),
@@ -607,7 +954,8 @@ class ActorSessionService:
     def _validate_step_identity(self, command: StepCommand) -> None:
         if command.protocol_version != PROTOCOL_VERSION:
             raise ActorProtocolError(
-                f"protocol_version must be {PROTOCOL_VERSION!r}"
+                "incompatible protocol_version "
+                f"{command.protocol_version!r}; expected {PROTOCOL_VERSION!r}"
             )
         for name, value in (
             ("actor_id", command.actor_id),

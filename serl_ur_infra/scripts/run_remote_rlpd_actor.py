@@ -18,6 +18,9 @@ sys.path.insert(
 )
 
 from ur_env.actor_network import create_actor_network  # noqa: E402
+from ur_env.observation_schema import (  # noqa: E402
+    CANONICAL_OBSERVATION_SCHEMA_HASH,
+)
 from ur_env.remote_actor import EnvTimestampAdapter, run_remote_actor  # noqa: E402
 
 
@@ -34,6 +37,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--server-port", type=int)
     parser.add_argument("--timeout-s", type=float)
     parser.add_argument("--max-response-age-s", type=float)
+    parser.add_argument("--observation-schema-hash")
     return parser.parse_args()
 
 
@@ -50,16 +54,20 @@ def _network_config(config: Any, args: argparse.Namespace) -> dict[str, Any]:
         "port": args.server_port,
         "timeout_s": args.timeout_s,
         "max_response_age_s": args.max_response_age_s,
+        "observation_schema_hash": args.observation_schema_hash,
     }
     for key, value in overrides.items():
         if value is not None:
             result[key] = value
     result.setdefault("type", "grpc")
     result.setdefault("host", "127.0.0.1")
-    result.setdefault("port", 50052)
+    result.setdefault("port", 50053)
     result.setdefault("timeout_s", 0.6)
     result.setdefault("max_response_age_s", 0.8)
     result.setdefault("retry_count", 1)
+    result.setdefault(
+        "observation_schema_hash", CANONICAL_OBSERVATION_SCHEMA_HASH
+    )
     return result
 
 
@@ -80,7 +88,8 @@ def main() -> int:
             config.get_environment(
                 fake_env=args.fake_env,
                 save_video=args.save_video,
-                classifier=True,
+                # Reward/termination is authoritative on the remote server.
+                classifier=False,
             )
         )
     )

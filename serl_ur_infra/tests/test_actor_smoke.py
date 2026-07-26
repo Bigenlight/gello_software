@@ -76,7 +76,7 @@ def test_real_loopback_smoke_sends_normal_and_intervention_terminal_data():
     assert records[0]["dones"] is False
     assert records[1]["dones"] is True
     shown = records[0]["observation_tensors"]["shown"]
-    image_specs = [spec for spec in shown if spec["path"].startswith("images/")]
+    image_specs = [spec for spec in shown if spec["path"] in ("cam1", "cam2")]
     assert len(image_specs) == 2
     assert all(spec["dtype"] == "uint8" for spec in image_specs)
     assert all(spec["shape"] == list(IMAGE_SHAPE) for spec in image_specs)
@@ -122,8 +122,8 @@ def test_summary_sink_is_bounded_and_escapes_untrusted_tensor_paths():
     assert len(lines) == 1
     assert "\n" not in lines[0]
     record = json.loads(lines[0])
-    assert record["observation_tensors"]["total"] == 5
-    assert record["observation_tensors"]["omitted"] == 3
+    assert record["observation_tensors"]["total"] == 4
+    assert record["observation_tensors"]["omitted"] == 2
     assert all(
         len(spec["path"]) <= 24
         for spec in record["observation_tensors"]["shown"]

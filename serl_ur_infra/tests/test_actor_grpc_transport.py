@@ -15,12 +15,16 @@ sys.path.insert(0, os.path.join(_HERE, ".."))
 
 from ur_env.actor_network import (  # noqa: E402
     PROTOCOL_VERSION,
+    ActorNetworkError,
     ActorProtocolError,
     ActorSessionService,
     BeginEpisodeCommand,
+    BufferStatus,
+    FailedPreconditionError,
     ObservationPacket,
     PolicyInferenceError,
     StepCommand,
+    TransitionOutcome,
 )
 from ur_env.grpc_actor_transport import (  # noqa: E402
     GrpcActorNetwork,
@@ -205,6 +209,140 @@ def test_service_combines_inference_replay_routing_terminal_and_dedupe():
     assert len(service.replay_items) == 2
     assert len(service.intervention_items) == 1
     assert service.inference_count == 2  # terminal O2 is stored, not inferred
+
+
+def test_server_finalizer_success_suppresses_requested_action_and_dedupes():
+    finalize_calls = []
+    sink_calls = []
+
+    def finalize(data):
+        finalize_calls.append(data["meta"]["transition_id"])
+        transition = data["transition"]
+        transition.update(
+            rewards=1.0,
+            masks=0.0,
+            dones=True,
+            truncated=False,
+        )
+        return data, TransitionOutcome(
+            transition_id=data["meta"]["transition_id"],
+            reward=1.0,
+            mask=0.0,
+            done=True,
+            truncated=False,
+            success=True,
+            classifier_evaluated=True,
+            classifier_probability=0.9,
+            classifier_threshold=0.85,
+            reward_model_id="cube-in-cup:150",
+        )
+
+    def accept(data, intervened):
+        sink_calls.append((data, intervened))
+
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        reward_authority="server",
+        reward_model_id="cube-in-cup:150",
+        finalize_transition=finalize,
+        accept_data=accept,
+    )
+    action = service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            0,
+            1,
+            10_000,
+            ObservationPacket("o0", 1_000, _observation(0)),
+        )
+    )
+    command = StepCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        2,
+        20_000,
+        _data(action.action),
+        ObservationPacket("o1", 2_000, _observation(1)),
+        True,
+    )
+
+    result = service.step(command)
+    duplicate = service.step(command)
+
+    assert result.outcome.success
+    assert result.outcome.terminal
+    assert result.action is None
+    assert duplicate.ack.deduplicated
+    assert len(finalize_calls) == 1
+    assert len(sink_calls) == 1
+    assert sink_calls[0][0]["transition"]["rewards"] == 1.0
+    assert service.inference_count == 1
+
+
+def test_transition_pipeline_failure_has_no_ack_and_marks_service_not_ready():
+    def fail_finalizer(data):
+        raise RuntimeError("classifier unavailable")
+
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        finalize_transition=fail_finalizer,
+    )
+    action = service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            0,
+            1,
+            10_000,
+            ObservationPacket("o0", 1_000, _observation(0)),
+        )
+    )
+    command = StepCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        2,
+        20_000,
+        _data(action.action),
+        ObservationPacket("o1", 2_000, _observation(1)),
+        True,
+    )
+
+    with pytest.raises(ActorNetworkError, match="not acknowledged"):
+        service.step(command)
+    assert service.health()[1] is False
+    assert service.replay_items == []
+    with pytest.raises(FailedPreconditionError, match="not ready"):
+        service.step(command)
+
+
+def test_buffer_status_provider_is_exposed_without_raw_data():
+    expected = BufferStatus(
+        replay_size=17,
+        replay_capacity=50_000,
+        intervention_size=3,
+        intervention_capacity=10_000,
+        replay_insert_count=19,
+        intervention_insert_count=3,
+        replay_overwrite_count=2,
+        intervention_overwrite_count=0,
+        last_transition_id="run:18",
+        last_env_step=18,
+    )
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        buffer_status_provider=lambda: expected,
+    )
+
+    assert service.get_buffer_status() == expected
 
 
 def test_duplicate_id_with_changed_payload_is_rejected():
@@ -510,6 +648,18 @@ def _action_reply(request, action, *, policy_version=0):
     )
 
 
+def _outcome_reply(request, **overrides):
+    values = {
+        "transition_id": request.data.meta.transition_id,
+        "reward": request.data.transition.rewards,
+        "mask": request.data.transition.masks,
+        "done": request.data.transition.dones,
+        "truncated": request.data.transition.truncated,
+    }
+    values.update(overrides)
+    return pb.TransitionOutcome(**values)
+
+
 def test_grpc_client_retries_same_begin_request_once():
     requests = []
 
@@ -583,6 +733,7 @@ def test_grpc_client_rejects_decreasing_policy_version_after_ack():
                 request_id=request.request_id,
             ),
             has_action=True,
+            outcome=_outcome_reply(request),
             action=_action_reply(
                 request,
                 np.zeros(7, np.float32),
@@ -657,7 +808,9 @@ def test_real_loopback_grpc_begin_and_terminal_step():
     )
     try:
         assert client.health()[:2] == (True, True)
-        assert client.get_server_info().action_dim == 7
+        info = client.get_server_info()
+        assert info.action_dim == 7
+        assert info.reward_authority == "local"
         action = client.begin_episode(
             _observation(0),
             run_id="run",
@@ -675,7 +828,124 @@ def test_real_loopback_grpc_begin_and_terminal_step():
         )
         assert result.ack.accepted
         assert result.action is None
+        assert result.outcome.done
+        assert result.outcome.reward == pytest.approx(1.25)
+        assert not result.outcome.classifier_evaluated
         assert len(service.replay_items) == 1
+        status = client.get_buffer_status()
+        assert status.replay_size == 1
+        assert status.intervention_size == 0
+        assert status.replay_insert_count == 1
+        assert status.last_transition_id == "run:0"
+        assert status.last_env_step == 0
     finally:
         client.close()
         server.stop(grace=0).wait()
+
+
+def test_expected_observation_schema_is_checked_before_begin_episode():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        observation_schema_hash="server-schema",
+    )
+    server, port = create_grpc_server(service)
+    server.start()
+    client = GrpcActorNetwork(
+        f"127.0.0.1:{port}",
+        actor_id="actor",
+        timeout_s=1.0,
+        expected_observation_schema_hash="laptop-schema",
+    )
+    try:
+        with pytest.raises(ActorProtocolError, match="observation_schema_hash"):
+            client.begin_episode(
+                _observation(0),
+                run_id="run",
+                session_id="session",
+                episode_id=0,
+                observation_id="o0",
+                timestamp_ns=1_000,
+            )
+        assert service.inference_count == 0
+        assert service.observation_accept_count == 0
+    finally:
+        client.close()
+        server.stop(grace=0).wait()
+
+
+def test_grpc_client_accepts_server_classifier_terminal_without_action():
+    def finalize(data):
+        data["transition"].update(
+            rewards=1.0,
+            masks=0.0,
+            dones=True,
+            truncated=False,
+        )
+        return data, TransitionOutcome(
+            transition_id=data["meta"]["transition_id"],
+            reward=1.0,
+            mask=0.0,
+            done=True,
+            truncated=False,
+            success=True,
+            classifier_evaluated=True,
+            classifier_probability=0.91,
+            classifier_threshold=0.85,
+            reward_model_id="cube-in-cup:150",
+        )
+
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        reward_authority="server",
+        reward_model_id="cube-in-cup:150",
+        finalize_transition=finalize,
+    )
+    server, port = create_grpc_server(service)
+    server.start()
+    client = GrpcActorNetwork(
+        f"127.0.0.1:{port}", actor_id="actor", timeout_s=1.0
+    )
+    try:
+        action = client.begin_episode(
+            _observation(0),
+            run_id="run",
+            session_id="session",
+            episode_id=0,
+            observation_id="o0",
+            timestamp_ns=1_000,
+        )
+        result = client.step(
+            _observation(1),
+            next_observation_id="o1",
+            next_timestamp_ns=2_000,
+            data=_data(action.action),
+            request_action=True,
+        )
+
+        assert result.ack.accepted
+        assert result.outcome.success
+        assert result.outcome.done
+        assert result.action is None
+        assert service.inference_count == 1
+    finally:
+        client.close()
+        server.stop(grace=0).wait()
+
+
+def test_protocol_v1_begin_is_rejected_as_incompatible():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0)
+    )
+    command = BeginEpisodeCommand(
+        "1",
+        "actor",
+        "run",
+        "session",
+        0,
+        1,
+        10_000,
+        ObservationPacket("o0", 1_000, _observation(0)),
+    )
+
+    with pytest.raises(ActorProtocolError, match="incompatible protocol_version"):
+        service.begin_episode(command)

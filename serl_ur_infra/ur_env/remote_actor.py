@@ -214,7 +214,7 @@ def run_remote_actor(
         raise ValueError("config.max_steps must be positive")
     if int(config.random_steps) != 0:
         raise ValueError(
-            "remote actor protocol v1 requires config.random_steps == 0"
+            "remote actor protocol v2 requires config.random_steps == 0"
         )
     buffer_period = int(getattr(config, "buffer_period", 0))
     if buffer_period < 0:
@@ -227,7 +227,7 @@ def run_remote_actor(
         raise ValueError("actor_id and run_id are required")
     action_shape = tuple(int(dim) for dim in env.action_space.shape)
     if action_shape != (7,):
-        raise ValueError(f"protocol v1 requires action shape (7,), got {action_shape}")
+        raise ValueError(f"protocol v2 requires action shape (7,), got {action_shape}")
 
     replay_data: list[dict[str, Any]] = []
     intervention_data: list[dict[str, Any]] = []
@@ -281,16 +281,39 @@ def run_remote_actor(
             info=info,
             action_shape=action_shape,
         )
-        terminal = bool(done) or bool(truncated)
+        provisional_terminal = bool(done) or bool(truncated)
         result = network.step(
             next_observation,
             next_observation_id=next_observation_id,
             next_timestamp_ns=next_timestamp_ns,
             data=data,
-            request_action=not terminal,
+            request_action=not provisional_terminal,
         )
         # Reaching here proves the server ACKed this transition. In particular,
         # terminal reset can never happen after an unacknowledged Step.
+        outcome = result.outcome
+        if outcome.transition_id != data["meta"]["transition_id"]:
+            raise ActorProtocolError(
+                "transition outcome ID does not match the accepted data"
+            )
+        transition = data["transition"]
+        transition["rewards"] = float(outcome.reward)
+        transition["masks"] = float(outcome.mask)
+        transition["dones"] = bool(outcome.done)
+        transition["truncated"] = bool(outcome.truncated)
+        transition["success"] = bool(outcome.success)
+        transition["classifier_evaluated"] = bool(
+            outcome.classifier_evaluated
+        )
+        if outcome.classifier_evaluated:
+            transition["classifier_probability"] = float(
+                outcome.classifier_probability
+            )
+            transition["classifier_threshold"] = float(
+                outcome.classifier_threshold
+            )
+            transition["reward_model_id"] = outcome.reward_model_id
+        terminal = bool(outcome.done) or bool(outcome.truncated)
         replay_data.append(copy.deepcopy(data))
         if data["meta"]["intervened"] == 1:
             intervention_data.append(copy.deepcopy(data))

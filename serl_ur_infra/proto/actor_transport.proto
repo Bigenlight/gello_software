@@ -1,5 +1,8 @@
 syntax = "proto3";
 
+// Keep the original service name so v1 peers can reach GetServerInfo and
+// receive an explicit protocol-version error.  The request/reply contract
+// itself is v2 and rejects protocol_version="1".
 package gello.hil_serl.v1;
 
 // Unary actor boundary between the robot laptop and the RL server.
@@ -10,6 +13,7 @@ package gello.hil_serl.v1;
 service ActorTransport {
   rpc Health(HealthRequest) returns (HealthReply);
   rpc GetServerInfo(ServerInfoRequest) returns (ServerInfoReply);
+  rpc GetBufferStatus(BufferStatusRequest) returns (BufferStatusReply);
   rpc BeginEpisode(BeginEpisodeRequest) returns (ActionReply);
   rpc Step(StepRequest) returns (StepReply);
 }
@@ -30,6 +34,31 @@ message ServerInfoReply {
   uint32 schema_version = 3;
   uint32 action_dim = 4;
   string model_id = 5;
+  string reward_authority = 6;
+  string reward_model_id = 7;
+  string observation_schema_hash = 8;
+}
+
+message BufferStatusRequest {
+  string protocol_version = 1;
+}
+
+// Summary-only replay ingress status.  Raw observations and actions are never
+// returned by this RPC.
+message BufferStatusReply {
+  string protocol_version = 1;
+  uint32 schema_version = 2;
+  uint64 replay_size = 3;
+  uint64 replay_capacity = 4;
+  uint64 intervention_size = 5;
+  uint64 intervention_capacity = 6;
+  uint64 replay_insert_count = 7;
+  uint64 intervention_insert_count = 8;
+  uint64 replay_overwrite_count = 9;
+  uint64 intervention_overwrite_count = 10;
+  string last_transition_id = 11;
+  uint64 last_env_step = 12;
+  bool has_last_transition = 13;
 }
 
 // One leaf from a nested observation mapping. `path` retains the exact mapping
@@ -126,8 +155,24 @@ message ActionReply {
   double server_inference_ms = 10;
 }
 
+// The server-authoritative values that were inserted into replay.  Classifier
+// scalars are zero when classifier_evaluated is false.
+message TransitionOutcome {
+  string transition_id = 1;
+  double reward = 2;
+  double mask = 3;
+  bool done = 4;
+  bool truncated = 5;
+  bool success = 6;
+  bool classifier_evaluated = 7;
+  double classifier_probability = 8;
+  double classifier_threshold = 9;
+  string reward_model_id = 10;
+}
+
 message StepReply {
   Ack ack = 1;
   bool has_action = 2;
   ActionReply action = 3;
+  TransitionOutcome outcome = 4;
 }

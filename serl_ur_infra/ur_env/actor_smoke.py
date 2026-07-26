@@ -21,7 +21,7 @@ from ur_env.remote_actor import build_data
 
 
 MOCK_MODEL_ID = "mock-zero-policy"
-IMAGE_SHAPE = (128, 128, 3)
+IMAGE_SHAPE = (1, 128, 128, 3)
 
 
 @dataclass(frozen=True)
@@ -153,24 +153,17 @@ class SummaryDataSink:
 
 
 def synthetic_observation(index: int) -> dict[str, Any]:
-    """Return a small state plus two realistic raw RGB image tensors."""
+    """Return one observation matching the canonical policy/replay schema."""
     image_value = int(index) % 256
     return {
-        "state": {
-            "tcp_pose": np.linspace(
-                -0.25 + index * 0.01,
-                0.25 + index * 0.01,
-                7,
-                dtype=np.float32,
-            ),
-            "gripper_pos": np.array([index * 0.1], dtype=np.float32),
-        },
-        "images": {
-            "wrist": np.full(IMAGE_SHAPE, image_value, dtype=np.uint8),
-            "side": np.full(
-                IMAGE_SHAPE, 255 - image_value, dtype=np.uint8
-            ),
-        },
+        "state": np.linspace(
+            -0.25 + index * 0.01,
+            0.25 + index * 0.01,
+            19,
+            dtype=np.float32,
+        ).reshape(1, 19),
+        "cam1": np.full(IMAGE_SHAPE, image_value, dtype=np.uint8),
+        "cam2": np.full(IMAGE_SHAPE, 255 - image_value, dtype=np.uint8),
     }
 
 
