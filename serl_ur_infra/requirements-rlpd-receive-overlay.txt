@@ -1,0 +1,5 @@
+# Small overlay for Kanu's existing Python 3.10 ``il`` environment.
+# Install with ``pip --no-deps`` so the shared base environment is never
+# upgraded or otherwise modified.
+lz4==4.3.3
+agentlace @ git+https://github.com/youliangtan/agentlace.git@cf2c337c5e3694cdbfc14831b239bd657bc4894d

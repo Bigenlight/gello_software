@@ -47,12 +47,58 @@ Both laptop and server verify the same deterministic schema hash:
 - `cam1`: RGB `uint8`, shape `(1, 128, 128, 3)`;
 - `cam2`: RGB `uint8`, shape `(1, 128, 128, 3)`.
 
+The hash covers not only dtype and shape, but the exact ordered state feature
+names: TCP position XYZ, TCP Euler XYZ, TCP linear velocity XYZ, TCP angular
+velocity XYZ, TCP force XYZ, TCP torque XYZ, then gripper position. Reordering
+state values therefore changes the advertised contract instead of silently
+sharing the old hash.
+
 The environment timestamp stays in `data.meta.timestamp_ns`; it is not appended
 to policy state. `GetServerInfo` advertises the observation schema hash and
 reward model identity. `GetBufferStatus` returns only capacities, insert and
 overwrite counters, and the latest transition ID/env step.
 
-## Isolated Python 3.10 container
+## Preferred Kanu runtime: small overlay venv
+
+Kanu's existing `il` environment already provides Python 3.10, CUDA JAX,
+Flax, NumPy, gRPC, and the classifier dependencies. Do not install into or
+upgrade that shared environment. Instead, create a small venv which reads its
+packages and owns only the missing Agentlace/LZ4 files:
+
+```bash
+/home/junhyeong/miniconda3/envs/il/bin/python -m venv \
+  --system-site-packages /tmp/gello-hil-rl-receive-overlay-v2
+/tmp/gello-hil-rl-receive-overlay-v2/bin/python -m pip install \
+  --no-deps \
+  -r serl_ur_infra/requirements-rlpd-receive-overlay.txt
+```
+
+`--no-deps` is intentional: it prevents pip from replacing packages inherited
+from `il`. The overlay adds only Agentlace (needed as the upstream replay
+store's base class) and LZ4 (imported by Agentlace). This avoids duplicating the
+multi-gigabyte CUDA/Python environment or creating a Docker image.
+
+Run the receive server from the isolated branch worktree:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 \
+PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
+/tmp/gello-hil-rl-receive-overlay-v2/bin/python \
+  serl_ur_infra/scripts/run_rlpd_receive_server.py \
+  --host 127.0.0.1 \
+  --port 50053 \
+  --checkpoint /home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150 \
+  --expected-checkpoint-sha256 e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997 \
+  --threshold 0.85 \
+  --replay-capacity 50000 \
+  --intervention-capacity 10000 \
+  --require-jax-backend gpu
+```
+
+Before choosing a GPU, re-run `nvidia-smi`; do not assume an earlier free GPU
+is still free.
+
+## Optional reproducible container
 
 Initialize the pinned upstream submodule in this branch's isolated worktree:
 
@@ -68,9 +114,8 @@ protobuf `3.20.3`, and NumPy `1.26.4`. Agentlace is installed only because the
 upstream `MemoryEfficientReplayBufferDataStore` imports its `DataStoreBase`;
 no Agentlace socket or port is used.
 
-Before choosing a GPU, re-run `nvidia-smi`; do not assume an earlier free GPU
-is still free. The following example uses GPU 7 and host networking so the
-process can remain bound to Kanu loopback:
+The following optional example uses GPU 7 and host networking so the process
+can remain bound to Kanu loopback:
 
 ```bash
 docker run \
@@ -86,13 +131,15 @@ docker run \
   --expected-checkpoint-sha256 e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997 \
   --threshold 0.85 \
   --replay-capacity 50000 \
-  --intervention-capacity 10000
+  --intervention-capacity 10000 \
+  --require-jax-backend gpu
 ```
 
 The server loads and hashes the explicit checkpoint file, compiles one warmup
-inference before reporting ready, and fails closed on classifier or buffer
-errors. Its logs contain IDs, counters, tensor contracts, and timings only;
-they never print image or action values.
+inference before reporting ready, verifies that JAX actually selected the GPU,
+and fails closed on classifier or buffer errors. Its logs contain IDs,
+counters, tensor contracts, and timings only; they never print image or action
+values.
 
 ## Laptop-to-Kanu synthetic acceptance test
 
@@ -114,7 +161,9 @@ PYTHONPATH=serl_ur_infra \
 The client tolerates classifier-authoritative early episode termination and
 checks exact deltas of 100 replay inserts and 10 intervention inserts through
 `GetBufferStatus`. The final synthetic step is locally truncated so no unused
-server session remains active.
+server session remains active. Before acknowledging the 100th insert, the
+server also samples and validates real packed replay and intervention batches;
+the summary-only log event is `rlpd_receive_sample_probe_passed`.
 
 ## Deferred work
 
