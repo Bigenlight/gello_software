@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package gello.hil_serl.v1;
+
+// Unary actor boundary between the robot laptop and the RL server.
+//
+// The laptop sends each observation exactly once: O0 in BeginEpisode, then
+// O(t+1) together with transition D(t) in Step. The server acknowledges D(t)
+// and, for non-terminal steps, returns the policy action for O(t+1).
+service ActorTransport {
+  rpc Health(HealthRequest) returns (HealthReply);
+  rpc GetServerInfo(ServerInfoRequest) returns (ServerInfoReply);
+  rpc BeginEpisode(BeginEpisodeRequest) returns (ActionReply);
+  rpc Step(StepRequest) returns (StepReply);
+}
+
+message HealthRequest {}
+
+message HealthReply {
+  bool alive = 1;
+  bool ready = 2;
+  string detail = 3;
+}
+
+message ServerInfoRequest {}
+
+message ServerInfoReply {
+  bool ready = 1;
+  string protocol_version = 2;
+  uint32 schema_version = 3;
+  uint32 action_dim = 4;
+  string model_id = 5;
+}
+
+// One leaf from a nested observation mapping. `path` retains the exact mapping
+// keys while dtype/shape/raw bytes provide a lossless numpy round trip.
+message Tensor {
+  repeated string path = 1;
+  string dtype = 2;
+  repeated uint64 shape = 3;
+  bytes data = 4;
+}
+
+message Observation {
+  string observation_id = 1;
+  uint64 timestamp_ns = 2;
+  repeated Tensor tensors = 3;
+}
+
+message BeginEpisodeRequest {
+  string protocol_version = 1;
+  string actor_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  uint64 episode_id = 5;
+  uint64 request_id = 6;
+  uint64 created_monotonic_ns = 7;
+  Observation observation = 8;
+  bool deterministic = 9;
+}
+
+message Meta {
+  uint32 schema_version = 1;
+  string run_id = 2;
+  string actor_id = 3;
+  string session_id = 4;
+  string transition_id = 5;
+  uint64 env_step = 6;
+  uint64 timestamp_ns = 7;
+  uint64 policy_version = 8;
+  repeated float policy_action = 9;
+  bool intervened = 10;
+}
+
+message Transition {
+  uint64 episode_id = 1;
+  uint64 step_id = 2;
+  string observation_id = 3;
+  repeated float actions = 4;
+  string next_observation_id = 5;
+  double rewards = 6;
+  double masks = 7;
+  bool dones = 8;
+  bool truncated = 9;
+  bool has_grasp_penalty = 10;
+  double grasp_penalty = 11;
+}
+
+message Data {
+  Meta meta = 1;
+  Transition transition = 2;
+}
+
+message StepRequest {
+  string protocol_version = 1;
+  string actor_id = 2;
+  string run_id = 3;
+  string session_id = 4;
+  uint64 request_id = 5;
+  uint64 created_monotonic_ns = 6;
+  Data data = 7;
+  Observation next_observation = 8;
+  bool request_action = 9;
+  bool deterministic = 10;
+}
+
+message Ack {
+  bool accepted = 1;
+  string transition_id = 2;
+  string session_id = 3;
+  uint64 request_id = 4;
+  bool deduplicated = 5;
+  string error = 6;
+}
+
+message ActionReply {
+  bool ok = 1;
+  string error = 2;
+  string protocol_version = 3;
+  string session_id = 4;
+  uint64 request_id = 5;
+  uint64 request_created_monotonic_ns = 6;
+  string observation_id = 7;
+  repeated float action = 8;
+  uint64 policy_version = 9;
+  double server_inference_ms = 10;
+}
+
+message StepReply {
+  Ack ack = 1;
+  bool has_action = 2;
+  ActionReply action = 3;
+}

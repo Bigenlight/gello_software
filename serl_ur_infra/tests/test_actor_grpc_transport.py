@@ -1,0 +1,681 @@
+"""ROS/JAX-free contract tests for the remote actor transport."""
+
+from __future__ import annotations
+
+import os
+import sys
+from types import SimpleNamespace
+
+import grpc
+import numpy as np
+import pytest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, ".."))
+
+from ur_env.actor_network import (  # noqa: E402
+    PROTOCOL_VERSION,
+    ActorProtocolError,
+    ActorSessionService,
+    BeginEpisodeCommand,
+    ObservationPacket,
+    PolicyInferenceError,
+    StepCommand,
+)
+from ur_env.grpc_actor_transport import (  # noqa: E402
+    GrpcActorNetwork,
+    create_grpc_server,
+    data_from_proto,
+    data_to_proto,
+    observation_from_proto,
+    observation_to_proto,
+)
+from ur_env.proto import actor_transport_pb2 as pb  # noqa: E402
+from ur_env.remote_actor import (  # noqa: E402
+    EnvTimestampAdapter,
+    build_data,
+    run_remote_actor,
+)
+
+
+def _observation(value: int) -> dict:
+    return {
+        "state": {
+            "q": np.array([value, value + 0.5], dtype=np.float32),
+            "flags": np.array([True, False], dtype=np.bool_),
+        },
+        "images": {
+            "wrist": np.full((4, 5, 3), value, dtype=np.uint8),
+            "side": np.full((2, 3, 3), value + 1, dtype=np.uint8),
+        },
+    }
+
+
+def _assert_observation_equal(actual, expected):
+    assert actual.keys() == expected.keys()
+    for key in actual:
+        if isinstance(actual[key], dict):
+            _assert_observation_equal(actual[key], expected[key])
+        else:
+            assert actual[key].dtype == expected[key].dtype
+            assert actual[key].shape == expected[key].shape
+            np.testing.assert_array_equal(actual[key], expected[key])
+
+
+def _data(
+    action,
+    *,
+    env_step=0,
+    step_id=0,
+    source_timestamp_ns=1_000,
+    next_observation_id="o1",
+    policy_version=0,
+    intervened=False,
+    terminal=False,
+    truncated=False,
+):
+    info = {}
+    if intervened:
+        info = {
+            "intervened": 1,
+            "intervene_action": np.full(7, -0.25, dtype=np.float32),
+            "grasp_penalty": -0.1,
+        }
+    return build_data(
+        actor_id="actor",
+        run_id="run",
+        session_id="session",
+        transition_id=f"run:{env_step}",
+        env_step=env_step,
+        timestamp_ns=source_timestamp_ns,
+        policy_version=policy_version,
+        policy_action=action,
+        episode_id=0,
+        step_id=step_id,
+        observation_id=f"o{step_id}",
+        next_observation_id=next_observation_id,
+        reward=1.25,
+        done=terminal,
+        truncated=truncated,
+        info=info,
+    )
+
+
+def test_observation_codec_is_lossless_for_images_and_state():
+    expected = _observation(3)
+    packet = ObservationPacket("observation-3", 123_456_789, expected)
+
+    decoded = observation_from_proto(observation_to_proto(packet))
+
+    assert decoded.observation_id == packet.observation_id
+    assert decoded.timestamp_ns == packet.timestamp_ns
+    _assert_observation_equal(decoded.observation, expected)
+
+
+def test_data_codec_keeps_meta_transition_and_optional_grasp_penalty():
+    action = np.linspace(-0.5, 0.5, 7, dtype=np.float32)
+    expected = _data(action, intervened=True)
+
+    decoded = data_from_proto(data_to_proto(expected))
+
+    assert set(decoded) == {"meta", "transition"}
+    assert decoded["meta"]["timestamp_ns"] == 1_000
+    assert decoded["meta"]["intervened"] == 1
+    np.testing.assert_array_equal(decoded["meta"]["policy_action"], action)
+    np.testing.assert_array_equal(
+        decoded["transition"]["actions"], np.full(7, -0.25, np.float32)
+    )
+    assert decoded["transition"]["grasp_penalty"] == pytest.approx(-0.1)
+
+
+def test_service_combines_inference_replay_routing_terminal_and_dedupe():
+    calls = []
+
+    def sample(observation, deterministic):
+        calls.append((observation, deterministic))
+        value = 0.1 * len(calls)
+        return np.full(7, value, dtype=np.float32), len(calls) - 1
+
+    service = ActorSessionService(sample)
+    begin = BeginEpisodeCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        0,
+        1,
+        10_000,
+        ObservationPacket("o0", 1_000, _observation(0)),
+    )
+    action0 = service.begin_episode(begin)
+    data0 = _data(action0.action)
+    step0 = StepCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        2,
+        20_000,
+        data0,
+        ObservationPacket("o1", 2_000, _observation(1)),
+        True,
+    )
+
+    reply0 = service.step(step0)
+    duplicate = service.step(step0)
+
+    assert reply0.ack.accepted
+    assert duplicate.ack.deduplicated
+    assert len(service.replay_items) == 1
+    assert len(service.intervention_items) == 0
+    assert service.observation_accept_count == 2
+    assert service.inference_count == 2
+    assert len(calls) == 2
+    assert service.replay_items[0]["meta"]["timestamp_ns"] == 1_000
+    _assert_observation_equal(
+        service.replay_items[0]["transition"]["observations"], _observation(0)
+    )
+
+    data1 = _data(
+        reply0.action.action,
+        env_step=1,
+        step_id=1,
+        source_timestamp_ns=2_000,
+        next_observation_id="o2",
+        policy_version=reply0.action.policy_version,
+        intervened=True,
+        terminal=True,
+    )
+    terminal = service.step(
+        StepCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            3,
+            30_000,
+            data1,
+            ObservationPacket("o2", 3_000, _observation(2)),
+            False,
+        )
+    )
+
+    assert terminal.ack.accepted
+    assert terminal.action is None
+    assert len(service.replay_items) == 2
+    assert len(service.intervention_items) == 1
+    assert service.inference_count == 2  # terminal O2 is stored, not inferred
+
+
+def test_duplicate_id_with_changed_payload_is_rejected():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0)
+    )
+    begin = BeginEpisodeCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        0,
+        1,
+        10_000,
+        ObservationPacket("o0", 1_000, _observation(0)),
+    )
+    action = service.begin_episode(begin)
+    command = StepCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        2,
+        20_000,
+        _data(action.action),
+        ObservationPacket("o1", 2_000, _observation(1)),
+        True,
+    )
+    service.step(command)
+    changed = StepCommand(
+        command.protocol_version,
+        command.actor_id,
+        command.run_id,
+        command.session_id,
+        command.request_id,
+        command.created_monotonic_ns,
+        {**command.data, "transition": {**command.data["transition"], "rewards": 99.0}},
+        command.next_observation,
+        command.request_action,
+    )
+
+    with pytest.raises(ActorProtocolError, match="different content"):
+        service.step(changed)
+
+
+def test_service_rejects_out_of_range_policy_action():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.full(7, 1.01, np.float32), 0)
+    )
+    command = BeginEpisodeCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        0,
+        1,
+        10_000,
+        ObservationPacket("o0", 1_000, _observation(0)),
+    )
+
+    with pytest.raises(PolicyInferenceError, match=r"\[-1, 1\]"):
+        service.begin_episode(command)
+    assert service.health()[1] is False
+
+
+def test_mock_store_rejects_at_capacity_without_second_ack():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        in_memory_capacity=1,
+    )
+    action = service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            0,
+            1,
+            10_000,
+            ObservationPacket("o0", 1_000, _observation(0)),
+        )
+    )
+    first = service.step(
+        StepCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            2,
+            20_000,
+            _data(action.action),
+            ObservationPacket("o1", 2_000, _observation(1)),
+            True,
+        )
+    )
+    with pytest.raises(RuntimeError, match="capacity"):
+        service.step(
+            StepCommand(
+                PROTOCOL_VERSION,
+                "actor",
+                "run",
+                "session",
+                3,
+                30_000,
+                _data(
+                    first.action.action,
+                    env_step=1,
+                    step_id=1,
+                    source_timestamp_ns=2_000,
+                    next_observation_id="o2",
+                    policy_version=first.action.policy_version,
+                ),
+                ObservationPacket("o2", 3_000, _observation(2)),
+                True,
+            )
+        )
+    assert len(service.replay_items) == 1
+
+
+class _InProcessNetwork:
+    def __init__(self, service, actor_id="actor"):
+        self.service = service
+        self.actor_id = actor_id
+        self.run_id = ""
+        self.session_id = ""
+        self.request_id = 1
+        self.clock = 10_000
+
+    def begin_episode(
+        self,
+        observation,
+        *,
+        run_id,
+        session_id,
+        episode_id,
+        observation_id,
+        timestamp_ns,
+        deterministic=False,
+    ):
+        self.run_id = run_id
+        self.session_id = session_id
+        self.request_id = 2
+        self.clock += 1
+        return self.service.begin_episode(
+            BeginEpisodeCommand(
+                PROTOCOL_VERSION,
+                self.actor_id,
+                run_id,
+                session_id,
+                episode_id,
+                1,
+                self.clock,
+                ObservationPacket(observation_id, timestamp_ns, observation),
+                deterministic,
+            )
+        )
+
+    def step(
+        self,
+        next_observation,
+        *,
+        next_observation_id,
+        next_timestamp_ns,
+        data,
+        request_action,
+        deterministic=False,
+    ):
+        self.clock += 1
+        result = self.service.step(
+            StepCommand(
+                PROTOCOL_VERSION,
+                self.actor_id,
+                self.run_id,
+                self.session_id,
+                self.request_id,
+                self.clock,
+                data,
+                ObservationPacket(
+                    next_observation_id, next_timestamp_ns, next_observation
+                ),
+                request_action,
+                deterministic,
+            )
+        )
+        self.request_id += 1
+        return result
+
+
+class _ActionSpace:
+    shape = (7,)
+
+
+class _TwoStepEnv:
+    action_space = _ActionSpace()
+
+    def __init__(self):
+        self.reset_count = 0
+        self.step_count = 0
+
+    def reset(self):
+        self.reset_count += 1
+        return _observation(0), {"timestamp_ns": np.int64(1_000)}
+
+    def step(self, action):
+        self.step_count += 1
+        if self.step_count == 1:
+            return _observation(1), 0.0, False, False, {
+                "timestamp_ns": np.int64(2_000),
+                "intervened": 0,
+            }
+        return _observation(2), 1.0, True, False, {
+            "timestamp_ns": np.int64(3_000),
+            "intervened": 1,
+            "intervene_action": np.full(7, -0.5, np.float32),
+        }
+
+
+def test_actor_uses_source_timestamp_and_waits_for_terminal_ack_before_reset():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0)
+    )
+    network = _InProcessNetwork(service)
+    env = _TwoStepEnv()
+
+    summary = run_remote_actor(
+        network,
+        env,
+        config=SimpleNamespace(max_steps=2, random_steps=0, buffer_period=0),
+        actor_id="actor",
+        run_id="run",
+        session_id_factory=lambda: "session",
+    )
+
+    assert summary.env_steps == 2
+    assert summary.intervention_steps == 1
+    assert env.reset_count == 1  # final terminal ACK did not start an unused episode
+    assert [item["meta"]["env_step"] for item in service.replay_items] == [0, 1]
+    assert [item["transition"]["step_id"] for item in service.replay_items] == [0, 1]
+    assert [item["meta"]["timestamp_ns"] for item in service.replay_items] == [
+        1_000,
+        2_000,
+    ]
+    assert len(service.intervention_items) == 1
+
+
+def test_timestamp_adapter_preserves_env_timestamp_and_stamps_missing_info():
+    class Env:
+        def reset(self):
+            return {}, {"timestamp_ns": 55}
+
+        def step(self, action):
+            return {}, 0.0, False, False, {}
+
+        def close(self):
+            pass
+
+    env = EnvTimestampAdapter(Env(), wall_time_ns=lambda: 99)
+    assert int(env.reset()[1]["timestamp_ns"]) == 55
+    assert int(env.step(None)[4]["timestamp_ns"]) == 99
+
+
+class _FakeRpcError(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.UNAVAILABLE
+
+    def details(self):
+        return "simulated response loss"
+
+
+class _FakeChannel:
+    def __init__(self, begin_handler, step_handler=None):
+        self.begin_handler = begin_handler
+        self.step_handler = step_handler
+
+    def unary_unary(self, path, request_serializer, response_deserializer):
+        del request_serializer, response_deserializer
+        if path.endswith("/BeginEpisode"):
+            return self.begin_handler
+        if path.endswith("/Step") and self.step_handler is not None:
+            return self.step_handler
+        return lambda request, timeout: None
+
+    def close(self):
+        pass
+
+
+def _action_reply(request, action, *, policy_version=0):
+    observation = (
+        request.observation
+        if isinstance(request, pb.BeginEpisodeRequest)
+        else request.next_observation
+    )
+    return pb.ActionReply(
+        ok=True,
+        protocol_version=PROTOCOL_VERSION,
+        session_id=request.session_id,
+        request_id=request.request_id,
+        request_created_monotonic_ns=request.created_monotonic_ns,
+        observation_id=observation.observation_id,
+        action=action,
+        policy_version=policy_version,
+        server_inference_ms=1.0,
+    )
+
+
+def test_grpc_client_retries_same_begin_request_once():
+    requests = []
+
+    def handler(request, timeout):
+        del timeout
+        requests.append(request.SerializeToString(deterministic=True))
+        if len(requests) == 1:
+            raise _FakeRpcError()
+        return _action_reply(request, np.zeros(7, np.float32))
+
+    ticks = iter((1_000_000_000, 1_100_000_000))
+    client = GrpcActorNetwork(
+        "unused",
+        actor_id="actor",
+        channel=_FakeChannel(handler),
+        monotonic_ns=lambda: next(ticks),
+    )
+
+    result = client.begin_episode(
+        _observation(0),
+        run_id="run",
+        session_id="session",
+        episode_id=0,
+        observation_id="o0",
+        timestamp_ns=1_000,
+    )
+
+    assert len(requests) == 2
+    assert requests[0] == requests[1]
+    np.testing.assert_array_equal(result.action, np.zeros(7, np.float32))
+
+
+def test_grpc_client_rejects_stale_action_reply():
+    def handler(request, timeout):
+        del timeout
+        return _action_reply(request, np.zeros(7, np.float32))
+
+    ticks = iter((1_000_000_000, 1_900_000_001))
+    client = GrpcActorNetwork(
+        "unused",
+        actor_id="actor",
+        channel=_FakeChannel(handler),
+        monotonic_ns=lambda: next(ticks),
+        max_response_age_s=0.8,
+    )
+    with pytest.raises(ActorProtocolError, match="stale"):
+        client.begin_episode(
+            _observation(0),
+            run_id="run",
+            session_id="session",
+            episode_id=0,
+            observation_id="o0",
+            timestamp_ns=1_000,
+        )
+
+
+def test_grpc_client_rejects_decreasing_policy_version_after_ack():
+    def begin_handler(request, timeout):
+        del timeout
+        return _action_reply(
+            request, np.zeros(7, np.float32), policy_version=2
+        )
+
+    def step_handler(request, timeout):
+        del timeout
+        return pb.StepReply(
+            ack=pb.Ack(
+                accepted=True,
+                transition_id=request.data.meta.transition_id,
+                session_id=request.session_id,
+                request_id=request.request_id,
+            ),
+            has_action=True,
+            action=_action_reply(
+                request,
+                np.zeros(7, np.float32),
+                policy_version=1,
+            ),
+        )
+
+    ticks = iter((1_000_000_000, 1_010_000_000, 1_020_000_000, 1_030_000_000))
+    client = GrpcActorNetwork(
+        "unused",
+        actor_id="actor",
+        channel=_FakeChannel(begin_handler, step_handler),
+        monotonic_ns=lambda: next(ticks),
+    )
+    action = client.begin_episode(
+        _observation(0),
+        run_id="run",
+        session_id="session",
+        episode_id=0,
+        observation_id="o0",
+        timestamp_ns=1_000,
+    )
+    with pytest.raises(ActorProtocolError, match="policy_version"):
+        client.step(
+            _observation(1),
+            next_observation_id="o1",
+            next_timestamp_ns=2_000,
+            data=_data(action.action, policy_version=2),
+            request_action=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_action",
+    [
+        np.zeros(6, np.float32),
+        np.array([0, 0, 0, 0, 0, 0, np.nan], np.float32),
+        np.array([0, 0, 0, 0, 0, 0, 1.0001], np.float32),
+    ],
+)
+def test_grpc_client_rejects_malformed_policy_action(bad_action):
+    def handler(request, timeout):
+        del timeout
+        return _action_reply(request, bad_action)
+
+    ticks = iter((1_000_000_000, 1_010_000_000))
+    client = GrpcActorNetwork(
+        "unused",
+        actor_id="actor",
+        channel=_FakeChannel(handler),
+        monotonic_ns=lambda: next(ticks),
+    )
+    with pytest.raises(ActorProtocolError):
+        client.begin_episode(
+            _observation(0),
+            run_id="run",
+            session_id="session",
+            episode_id=0,
+            observation_id="o0",
+            timestamp_ns=1_000,
+        )
+
+
+def test_real_loopback_grpc_begin_and_terminal_step():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0)
+    )
+    server, port = create_grpc_server(service)
+    server.start()
+    client = GrpcActorNetwork(
+        f"127.0.0.1:{port}", actor_id="actor", timeout_s=1.0
+    )
+    try:
+        assert client.health()[:2] == (True, True)
+        assert client.get_server_info().action_dim == 7
+        action = client.begin_episode(
+            _observation(0),
+            run_id="run",
+            session_id="session",
+            episode_id=0,
+            observation_id="o0",
+            timestamp_ns=1_000,
+        )
+        result = client.step(
+            _observation(1),
+            next_observation_id="o1",
+            next_timestamp_ns=2_000,
+            data=_data(action.action, terminal=True),
+            request_action=False,
+        )
+        assert result.ack.accepted
+        assert result.action is None
+        assert len(service.replay_items) == 1
+    finally:
+        client.close()
+        server.stop(grace=0).wait()

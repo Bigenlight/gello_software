@@ -1,0 +1,3 @@
+# Install in an isolated venv; do not replace ROS Humble's system packages.
+grpcio==1.74.0
+protobuf==3.20.3
