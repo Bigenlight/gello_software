@@ -1,5 +1,8 @@
 # HIL-SERL receive server milestone
 
+한국어 구현·검증·인수인계 요약은
+[HIL_RLPD_RECEIVE_SERVER_KO.md](./HIL_RLPD_RECEIVE_SERVER_KO.md)를 참고한다.
+
 This milestone runs reward inference and real HIL-SERL RAM replay buffers on
 Kanu. It deliberately does **not** run an RL learner, update policy parameters,
 or control the real robot. The action reply is a safe fake `float32[7]` zero
