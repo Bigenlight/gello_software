@@ -1,41 +1,75 @@
 # 05 — 통신 (gRPC actor · 스키마 · 레이턴시 · Kanu 터널)
 
-**상태: 이 브랜치에서 미검증.** 절차와 계약은 코드/문서에 있고, 아래는 그것을 실행 가능한
-형태로 정리한 것이다.
+**상태: 2026-07-27 실기 세션에서 크게 진전.**
 
-정본: `serl_ur_infra/REMOTE_ACTOR_GRPC.md`, `serl_ur_infra/RL_RECEIVE_SERVER.md`,
+| 항목 | 상태 |
+|---|---|
+| gRPC 트랜스포트 단위/루프백 | **PASS** — 35 tests (venv python) |
+| 스키마 해시 랩톱↔Kanu 일치 | **PASS** — `3459098d…0352903` |
+| Kanu 왕복 (Stage A, fake-env, 100 스텝) | **PASS** — `replay_insert_count: 100` |
+| 레이턴시 예산 | **측정 완료 — 예산이 사실상 소진 상태** (§5.3) |
+| 시스템 python3의 grpcio | 🛑 **손상. 절대 쓰지 말 것** (§1) |
+| 실기 센서를 붙인 Stage B | **미검증** → `09_HIL_ACTOR_RUNBOOK.md` |
+
+정본: [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md)(기동 절차·오늘의 실측),
+`serl_ur_infra/REMOTE_ACTOR_GRPC.md`, `serl_ur_infra/RL_RECEIVE_SERVER.md`,
 `serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md`.
+이 문서는 **계약과 판정 기준**을, 09는 **한 줄 기동 절차**를 담는다.
 
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export ACTOR_PY=/home/laptop3/venvs/gello-hil-actor/bin/python   # grpcio 1.74.0
 ```
 
 ---
 
-## 1. 🛑 venv 격리 원칙 — 이게 1번인 이유
+## 1. 🛑 인터프리터 — 이게 1번인 이유 (2026-07-27 갱신)
 
-**ROS Humble의 시스템 grpc/protobuf를 절대 갈아엎지 마라.** 갈아엎으면 rclpy가 죽고,
-로봇 랩톱 전체가 못 쓰게 된다.
+### 1.0 시스템 `python3`로 gRPC를 부르면 **영구 정지한다**
+
+apt의 `python3-grpcio 1.30.2`가 이 머신에서 손상돼 있다. 채널을 하나 만들기만 해도
+**에러도 로그도 없이 CPU 100%로 무한 스핀**한다. 30초 뒤에도, 30분 뒤에도 안 돌아온다.
 
 ```bash
-# 로봇 랩톱: gRPC 전용 격리 venv
-python3 -m venv /tmp/gello-hil-grpc-venv
-/tmp/gello-hil-grpc-venv/bin/python -m pip install -r $WT/serl_ur_infra/requirements-grpc.lock
+python3 -c "import grpc; print(grpc.__version__)"   # -> 1.30.2   ← 이 인터프리터는 금지
+$ACTOR_PY -c "import grpc; print(grpc.__version__)" # -> 1.74.0   ← 이것만 쓴다
 ```
 
-`requirements-grpc.lock` 내용 (핀 고정):
+재현·관찰 방법과 "왜 실운용 Kanu 왕복은 멀쩡했는가"는 `00_SETUP_AND_SAFETY.md` §3.4에 있다.
 
-```
-grpcio==1.74.0
-numpy==1.26.4
-protobuf==3.20.3
-```
+**이것이 실제로 물었던 자리:**
 
-- `protobuf==3.20.3`은 **체크인된 생성 gRPC 모듈이 요구하는 버전**이다. 올리면 깨진다.
+- 오늘 actor 기동 실패 4건 중 1건 (`09` §0의 #1)
+- `serl_ur_infra` 테스트 4개 파일의 무한 hang (`00` §4.2)
+
+**규칙:** `serl_ur_infra`의 어떤 것이든 gRPC를 만질 가능성이 있으면 `$ACTOR_PY`를
+**절대경로로** 쓴다. `python3`을 손으로 치지 않는다 — 실기 기동은 `run_hil_actor.sh`가
+이걸 강제한다 (`09` §1).
+
+### 1.1 venv 격리 원칙
+
+**ROS Humble의 시스템 grpc/protobuf를 절대 갈아엎지 마라.** 갈아엎으면 rclpy가 죽고,
+로봇 랩톱 전체가 못 쓰게 된다. 그래서 **고치는 게 아니라 우회한다.**
+
+현재 쓰는 venv:
+
+| | |
+|---|---|
+| 경로 | `/home/laptop3/venvs/gello-hil-actor` |
+| 종류 | `--system-site-packages` (rclpy 등을 시스템에서 상속) |
+| grpcio | **1.74.0** |
+| protobuf | **3.20.3** (체크인된 생성 모듈이 요구. 올리면 깨진다) |
+| 기타 | numpy 2.2.6, gymnasium 1.2.0, opencv-python 4.13, scipy 1.15.3 |
+
+> 🔧 **정정:** 이전 판은 `/tmp/gello-hil-grpc-venv`를 만들라고 했다. `/tmp`는 재부팅에
+> 날아간다. 지금 정본은 위의 `~/venvs/gello-hil-actor`이고, `run_hil_actor.sh`의
+> `ACTOR_VENV` 기본값도 이 경로다.
+
 - `serl_ur_infra` 자체는 `pip install --user -e ... --no-deps`로 설치한다 (`--no-deps` 필수).
-- 실행 시엔 `PYTHONPATH=$WT/serl_ur_infra`를 앞에 붙인다.
+- 실행 시 `PYTHONPATH`는 **덮어쓰지 말고 이어붙인다**:
+  `PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}"` → `00` §3.4(2).
 
-### 1.1 Kanu(서버) 쪽 — 오버레이 venv
+### 1.2 Kanu(서버) 쪽 — 오버레이 venv
 
 Kanu의 공유 conda env `il`을 **수정하지 말 것**. 시스템 사이트 패키지를 읽는 작은 오버레이를
 만든다 (`RL_RECEIVE_SERVER.md`의 "Preferred Kanu runtime"):
@@ -58,15 +92,15 @@ Kanu의 공유 conda env `il`을 **수정하지 말 것**. 시스템 사이트 �
 
 ```bash
 # 터미널 1 — mock 서버 (기본 127.0.0.1:50052)
-PYTHONPATH=$WT/serl_ur_infra \
-/tmp/gello-hil-grpc-venv/bin/python \
+PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}" \
+$ACTOR_PY \
   $WT/serl_ur_infra/scripts/run_actor_mock_server.py --host 127.0.0.1 --port 50052
 ```
 
 ```bash
 # 터미널 2 — 스모크 클라이언트 (128x128 RGB 2장 × 관측 2개, 일반 1건 + 종단 개입 1건)
-PYTHONPATH=$WT/serl_ur_infra \
-/tmp/gello-hil-grpc-venv/bin/python \
+PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}" \
+$ACTOR_PY \
   $WT/serl_ur_infra/scripts/run_actor_smoke_client.py --host 127.0.0.1 --port 50052
 ```
 
@@ -120,7 +154,7 @@ Server → Local  :  ACK(D(t)) + TransitionOutcome + A(t+1)
 
 ---
 
-## 4. 🛑 스키마 fail-fast — 지금 계약이 바뀌는 중이다
+## 4. 스키마 fail-fast — **v2로 확정됨**
 
 ### 4.1 어떻게 강제되는가
 
@@ -132,10 +166,11 @@ Server → Local  :  ACK(D(t)) + TransitionOutcome + A(t+1)
 `json.dumps(sort_keys=True)`는 dict **키**만 정렬하고 **리스트 원소**는 정렬하지 않으므로,
 **순서를 바꾸면 해시가 바뀐다 — 그게 의도다** (`observation_schema.py`의 `_schema_document()` 주석).
 
-### 4.2 canonical v2 계약
+### 4.2 canonical v2 계약 (확정)
 
 `serl_ur_infra/ur_env/observation_schema.py`의 v2 계약은 hardware commit `6a0b127`과
-learner/hardware merge `248255f`에 통합됐다:
+learner/hardware merge `248255f`에 통합됐고, 2026-07-27 Kanu 왕복에서 **양쪽 해시 일치가
+실제로 확인**됐다. 더 이상 "바뀌는 중"이 아니다:
 
 | | 이전 (v1, 사용 금지) | 현재 canonical (v2) |
 |---|---|---|
@@ -154,11 +189,11 @@ learner/hardware merge `248255f`에 통합됐다:
 >   `GRIPPER_POSITION_INDEX` / `gripper_position_from_state()`를 쓴다.
 > - laptop/server 모두 live `CANONICAL_OBSERVATION_SCHEMA_HASH`를 사용한다.
 
-라이브 확인:
+라이브 확인 (2026-07-27 실측 결과가 아래 블록 다음에 있다):
 
 ```bash
 cd $WT/serl_ur_infra
-python3 - <<'PY'
+env -u PYTHONPATH python3 - <<'PY'
 from ur_env.observation_schema import (
     OBSERVATION_SCHEMA_ID, CANONICAL_OBSERVATION_SCHEMA_HASH,
     STATE_FEATURES, STATE_DIM, GRIPPER_POSITION_INDEX, CANONICAL_STATE_LAYOUT)
@@ -171,16 +206,31 @@ for k, a, b in CANONICAL_STATE_LAYOUT:
 PY
 ```
 
-**양쪽(랩톱/Kanu)에서 이 명령을 돌려 해시가 같은지 먼저 확인한 뒤에** 원격 스모크를 시작한다.
-해시가 다르면 어떤 통신도 시도하지 말 것 — 이미 fail-fast가 막아주지만,
-그 전에 원인을 알고 들어가는 편이 빠르다.
+2026-07-27 랩톱 실측:
 
-레이아웃 회귀 테스트:
+```
+id    : hil-serl-ur-canonical-observation-v2
+hash  : 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903
+dim   : 19
+grip@ : 0
+  gripper_pose [0:1)
+  tcp_force    [1:4)
+  tcp_pose     [4:10)
+  tcp_torque   [10:13)
+  tcp_vel      [13:19)
+```
+
+**Kanu 서버가 광고한 값과 동일함이 확인됐다** (`09_HIL_ACTOR_RUNBOOK.md` §2.1).
+그래도 **양쪽에서 이 명령을 돌려 대조한 뒤에** 원격 스모크를 시작한다 — 위 해시를
+복사해서 비교하지 말고, 양쪽 출력을 나란히 본다. 해시가 다르면 어떤 통신도 시도하지 말 것.
+
+레이아웃 회귀 테스트 (2026-07-27: `test_state_layout_contract` **22 passed**,
+`test_observation_schema` **5 passed**):
 
 ```bash
 cd $WT/serl_ur_infra
-python3 -m pytest tests/test_state_layout_contract.py tests/test_observation_schema.py \
-  -q -p no:anyio
+env -u PYTHONPATH $ACTOR_PY -m pytest \
+  tests/test_state_layout_contract.py tests/test_observation_schema.py -q -p no:anyio
 ```
 
 ---
@@ -202,8 +252,8 @@ python3 -m pytest tests/test_state_layout_contract.py tests/test_observation_sch
 스모크를 **프로덕션 값으로 다시** 돌린다:
 
 ```bash
-PYTHONPATH=$WT/serl_ur_infra \
-/tmp/gello-hil-grpc-venv/bin/python \
+PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}" \
+$ACTOR_PY \
   $WT/serl_ur_infra/scripts/run_actor_smoke_client.py \
   --host 127.0.0.1 --port 50052 \
   --timeout-s 0.6 --max-response-age-s 0.8
@@ -219,9 +269,43 @@ PYTHONPATH=$WT/serl_ur_infra \
 - `timeout_s` = 한 gRPC 호출의 데드라인. 넘으면 transient로 보고 **1회만** 재시도.
 - `max_response_age_s` = 서버가 찍은 `created_ns` 기준 응답 나이 상한
   (`grpc_actor_transport.py:735-737`). 오래된 응답은 버린다.
-- env 루프는 `HZ = 10.0` (`config.py:32`) → 스텝 주기 100 ms.
+- env 루프는 `HZ = 10.0` (`config.py`) → 스텝 주기 100 ms.
   **`timeout_s=0.6`은 이미 6스텝 분량이다.** 여기에 재시도까지 겹치면 1.2 s가 날아간다.
   즉 이 예산은 "여유"가 아니라 이미 상당히 관대한 값이다.
+
+### 5.3 🛑 실측 (2026-07-27, Kanu 왕복 100 스텝) — **예산이 사실상 소진 상태다**
+
+Stage A(fake-env) 100 스텝 acceptance가 통과했고, 그때 측정된 값:
+
+| 지표 | 실측 |
+|---|---|
+| 왕복 RTT p50 | **58.6 ms** |
+| 왕복 RTT p95 | **75.8 ms** |
+| **왕복 RTT p99** | **97.1 ms** |
+| 관측 1건 크기 | **96.1 KiB** |
+| 10 Hz에서의 상행 대역폭 | **약 7.9 Mbit/s** |
+
+동반 확인: 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`
+(절차·전체 로그는 `09_HIL_ACTOR_RUNBOOK.md`).
+
+> ### 무엇을 뜻하는가
+> **10 Hz 스텝 예산은 100 ms다. p99가 97.1 ms다.** 즉 100스텝 중 한 번꼴로 통신 하나가
+> 스텝 예산을 통째로 먹는다. `timeout_s = 0.6`은 아직 여유가 있지만, **"예산 안에 든다"와
+> "루프가 10 Hz를 유지한다"는 다른 얘기**다. 이 값들은 통과 판정이 아니라 **경고**로 읽어야 한다.
+>
+> **병목은 서버 추론이 아니라 WiFi 대역폭이다.** 96.1 KiB × 10 Hz = 7.9 Mbit/s를 무선으로
+> 계속 밀고 있고, RTT 분포의 꼬리는 그 링크에서 나온다.
+
+**따라서 다음 사람이 할 일 (우선순위 순):**
+
+1. **유선으로 옮긴다.** 가장 싸고 가장 크게 듣는 조치다. 옮긴 뒤 같은 100스텝을 다시
+   돌려 p99를 이 표 아래에 기록한다.
+2. 그 전까지는 **`timeout_s`/`max_response_age_s`를 늘리지 말 것.** 늘리면 증상만 감춘다.
+   재시도는 `retry_count = 1`로 고정이고 다른 값은 생성 시 거부된다.
+3. 관측 크기를 줄이는 것은 **최후 수단**이다 — 이미지 인코딩을 바꾸면 스키마 해시가 바뀌고
+   체크포인트/데모와 어긋난다.
+4. 실기(Stage B)에서는 여기에 **센서 파이프라인 지연이 더해진다.** 이 표의 숫자는
+   fake-env 값이므로 **실기 상한이 아니라 하한**이다.
 
 ---
 
@@ -230,18 +314,21 @@ PYTHONPATH=$WT/serl_ur_infra \
 서버 gRPC는 **서버 loopback에만** 열어 두고 랩톱에서 포워딩한다.
 
 ```bash
-# 랩톱
+# 랩톱 — 2026-07-27에 실제로 쓴 형태 (로컬 50153 -> 원격 50053)
 ssh -N -T -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:50053:127.0.0.1:50053 kanu
+  -L 127.0.0.1:50153:127.0.0.1:50053 kanu
 ```
 
 - `ExitOnForwardFailure=yes`가 **중요하다.** 없으면 포워딩이 실패해도 ssh가 살아 있어서
   "연결됐는데 왜 안 되지"로 시간을 버린다.
 - 양쪽에서 **비어 있는 것이 확인된 포트**를 쓴다.
+- 🔧 **로컬 쪽이 50053이 아니라 50153인 이유:** 2026-07-27에 로컬 `50053`이 다른
+  프로세스에 잡혀 있었다. **터널의 로컬 쪽만 바꾸고 원격 쪽은 50053 그대로** 둔다.
+  `run_hil_actor.sh`의 `SERVER_PORT` 기본값도 `50153`이다.
 
 ```bash
-# 터널 확인
-ss -ltnp | grep 50053
+# 터널 확인 (로컬 쪽 포트를 본다)
+ss -ltnp | grep 50153
 ```
 
 서버 기동 (Kanu, `RL_RECEIVE_SERVER.md`의 명령을 워크트리에 맞춘 것):
@@ -259,13 +346,13 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --require-jax-backend gpu
 ```
 
-랩톱에서 수신 스모크:
+랩톱에서 수신 스모크 (**터널 로컬 포트**를 쓴다):
 
 ```bash
-PYTHONPATH=$WT/serl_ur_infra \
-/tmp/gello-hil-grpc-venv/bin/python \
+PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}" \
+$ACTOR_PY \
   $WT/serl_ur_infra/scripts/run_rlpd_receive_smoke_client.py \
-  --host 127.0.0.1 --port 50053 --timeout-s 0.6 --max-response-age-s 0.8
+  --host 127.0.0.1 --port 50153 --timeout-s 0.6 --max-response-age-s 0.8
 ```
 
 수신 스모크는 시작하자마자 세 가지를 **fail-fast**로 검사한다 (`rlpd_receive_smoke.py:46-58`):
@@ -283,12 +370,17 @@ PYTHONPATH=$WT/serl_ur_infra \
 
 ## 7. 판정 체크리스트
 
-- [ ] `/tmp/gello-hil-grpc-venv`가 만들어졌고 **시스템 python이 오염되지 않았다**
-      (`python3 -c "import rclpy"`가 여전히 동작)
-- [ ] mock 서버 + 스모크 클라이언트가 루프백에서 통과 (기본값)
+- [x] **인터프리터가 `$ACTOR_PY`인지 확인** — `$ACTOR_PY -c "import grpc; print(grpc.__version__)"`
+      가 `1.74.0`이어야 한다. `1.30.2`가 보이면 즉시 중단 (§1.0)
+- [x] **시스템 python이 오염되지 않았다** (`python3 -c "import rclpy"`가 여전히 동작)
+- [x] mock 서버 + 스모크 클라이언트가 루프백에서 통과 (기본값)
 - [ ] **같은 스모크가 `--timeout-s 0.6 --max-response-age-s 0.8`에서도 통과** (§5.1)
-- [ ] 랩톱과 Kanu의 스키마 해시가 **동일** (§4.2 스크립트)
-- [ ] `test_state_layout_contract.py` 통과
-- [ ] SSH 터널이 `ExitOnForwardFailure`로 열리고 `ss -ltnp`에 보인다
-- [ ] 수신 스모크의 3가지 fail-fast 검사 통과
+- [x] 랩톱과 Kanu의 스키마 해시가 **동일** (§4.2) — 2026-07-27 `3459098d…`
+- [x] `test_state_layout_contract.py` 통과 (22 passed)
+- [x] SSH 터널이 `ExitOnForwardFailure`로 열리고 `ss -ltnp`에 보인다 (로컬 50153)
+- [x] 수신 스모크의 3가지 fail-fast 검사 통과
 - [ ] 서버 로그에 이미지/액션 값이 찍히지 않는다 (§2.2)
+- [ ] **§5.3의 레이턴시를 유선에서 재측정하고 p99를 기록** ← 지금 가장 값싼 개선
+
+> `[x]`는 2026-07-27 Kanu Stage A(fake-env) 왕복에서 확인된 것이다.
+> **실기 센서를 붙인 Stage B는 아직 하나도 체크되지 않았다** → `09_HIL_ACTOR_RUNBOOK.md`.

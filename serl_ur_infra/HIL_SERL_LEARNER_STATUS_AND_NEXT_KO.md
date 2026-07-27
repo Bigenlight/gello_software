@@ -8,7 +8,11 @@
 >
 > learner/hardware 통합 merge: `248255f` (schema v2 검증 및 canonical branch 통합 완료)
 >
+> **robot actor 작업 branch: `test/hil-hardware-comms` @ `ee3240e`** — worktree `/home/laptop3/gello_worktrees/hil-hardware-comms`, `5fb716b` 대비 7 commit / +4,944−54 / 19 files. §11 참조
+>
 > Kanu 실행 절차: [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)
+>
+> 하드웨어/통신 테스트 절차: [../docs/testing/README.md](../docs/testing/README.md)
 
 ## 한눈에 보기
 
@@ -23,6 +27,9 @@
 - external policy/classifier는 canonical raw `uint8 (1,128,128,3)` image를 계속 받지만, replay/demo에는 frozen ResNet-10의 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` map의 current/next만 저장한다. GAP은 적용하지 않고 augmentation은 `none`이다.
 - `SpatialLearnedEmbeddings(8) -> Dropout(0.1) -> Dense(256) -> LayerNorm -> tanh`는 동결하지 않았다. learner가 feature batch를 꺼낼 때 현재 weight로 적용하므로 critic/grasp critic CTA update가 유지된다.
 - checkpoint만 영속화되고 replay/intervention buffer는 RAM-only다. checkpoint는 덮어쓰기·삭제·자동 pruning을 하지 않는다.
+- **(2026-07-27 추가)** robot actor 쪽은 `5fb716b` 시점에 **실행 자체가 불가능**했다. 4개 층이 동시에 막고 있었고(§11.1) 전부 해소했다. 이제 actor가 기동해서 Kanu까지 왕복하고, workspace box와 reset branch-cut 두 안전 게이트가 실제로 동작한다.
+- **(2026-07-27 추가)** 실기 검증 완료: 2F-85 gripper 개폐 방향, GELLO leader 7 모터, laptop→Kanu 100-step gRPC 왕복(`replay_insert_count:100`, schema hash 일치), 왕복 지연 p50 58.6 / p95 75.8 / p99 97.1 ms. 미검증: 팔 실제 구동, 카메라(현재 하드웨어 고장), 개입 루프 실기.
+- **(2026-07-27 추가)** Kanu에는 **inference server가 없다**. 떠 있는 것은 `run_rlpd_receive_server.py`(PID 1096786, port 50053)뿐이고 이건 `FakeActionRuntime` — 항상 zero action을 돌려준다. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 하며, 그 유일한 하드 블로커는 여전히 §7 P0-2의 canonical robot demo 부재다. Kanu 환경 자체는 추가 설치 없이 준비돼 있다(§11.5).
 
 ---
 
@@ -45,8 +52,17 @@
 | Kanu GPU continuous learner | 미검증 |
 | 실제 robot actor → Kanu learner E2E | 미검증 |
 | frozen-trunk feature replay/demo | 구현·자동 검증; Kanu GPU dry-run/CTA smoke 통과 |
+| **robot actor 기동 (wrapper chain + task config)** | **구현·자동 검증 (`ee3240e`); §11.2** |
+| **actor → Kanu 실제 gRPC 왕복 100 step** | **실기 검증 (receive server 상대); §11.4** |
+| **workspace box / reset branch-cut 안전 게이트** | **구현·단위 검증; 실기 미검증 (DRY_RUN=True); §11.3** |
+| **2F-85 gripper, GELLO leader 하드웨어 경로** | **실기 검증** |
+| **팔 실제 구동 (`DRY_RUN=False`)** | **미시도** |
+| **카메라 경로** | **차단 — USB 하드웨어 고장, 케이블 분리 상태** |
+| **Kanu 실제 정책 서빙 (learner server)** | **미배포 — receive server(zero action)만 가동 중; §11.5** |
 
 즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, unified schema v2 bounded fake learning/checkpoint/resume serving까지 확인했다. fake-data milestone은 완료다.
+
+robot actor 쪽은 “실행 불가”에서 “기동·통신·안전 게이트 동작”까지 올라왔고, 남은 것은 **팔을 실제로 움직이는 것**과 **카메라 복구**, 그리고 **Kanu에 진짜 정책 서버를 올리는 것** 세 가지다.
 
 ## 2. 작업 위치와 branch
 
@@ -564,14 +580,17 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
    - 기본 ring camera map `7,864,320,000 B` + offline demo + reserve 할당 후 장시간 RSS/VMS/GPU memory/compile/contention을 계측한다.
    - CPU용 `requirements-learner.lock`을 공유 Kanu env에 그대로 설치하지 않는다.
 
-2. **real serving용 canonical robot demo 부재**
+2. **real serving용 canonical robot demo 부재 — 현재 유일한 하드 블로커**
    - 사용자가 지정한 현재 fake-data acceptance는 완료됐다.
    - fake는 bounded `--synthetic-e2e`에서만 live learner에 허용되고 production robot-data scope에는 의도적으로 차단된다.
    - 실제 robot serving 단계에는 canonical EEF/action/grasp-penalty demo가 필요하다.
+   - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 `--run-id`를 노출하지 않고 `remote_actor.py:224`에서 `uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
+   - **생산 경로는 존재한다**: `remote_actor.py`의 `_dump_data`가 `--checkpoint-path` 를 받으면 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl` 을 남기고, `load_demo_pickles`(`demo.py:92-98`)가 바로 그 `{"meta":…, "transition":…}` 형식을 받는다. 즉 receive server를 띄운 채 텔레오퍼레이션으로 성공 에피소드를 녹화하면 그 pickle이 `--demo-path` 입력이 된다. strict loader 계약(canonical v2 스키마, action `(7,)` f32 `[-1,1]` 마지막 원소 `{-1,0,1}`, reward/mask `{0,1}`, `grasp_penalty ∈ {0, -0.02}`)을 실제 dump로 아직 확인하지 않았다.
 
 3. **실제 robot/task/camera E2E**
-   - task config의 `GRASP_PENALTY`, action convention, camera key/shape/timing을 확인한다.
-   - robot laptop → SSH tunnel → Kanu → classifier/replay → policy response를 검증한다.
+   - task config의 `GRASP_PENALTY`(`-0.02`), action convention, camera key/shape/timing을 확인한다. → task config는 `ur_experiments/cube_in_cup.py`로 확정됐고 `GRASP_PENALTY`도 서버 기본값과 일치한다(§11.2).
+   - robot laptop → SSH tunnel → Kanu → classifier/replay → policy response를 검증한다. → **receive server 상대로는 100-step 왕복 검증 완료**(§11.4). 실제 정책 응답은 learner server 배포 후로 남는다.
+   - **카메라가 현재 물리적으로 차단 상태다**(§11.6). actor 전체 경로는 카메라 없이 돌 수 없고, 팔 단독 검증은 `run_real_hil.py` 경로로만 가능하다.
 
 4. **continuous learner degraded monitoring**
    - 현재 learner fault는 stdout/JSONL event로만 확인하며 gRPC health는 last-known-good serving 때문에 ready일 수 있다.
@@ -591,10 +610,24 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 
 ## 8. 권장 다음 순서
 
-1. 실제 canonical robot demo가 준비되면 production-scope 5,000-step bounded learner run을 수행한다.
-2. 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
-3. task/camera/safety review 후 실제 robot actor를 연결한다.
-4. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
+두 갈래가 병렬로 진행되며, 합류 지점은 “canonical robot demo 확보”다.
+
+**A. robot actor 갈래 (laptop, 카메라 불필요)**
+
+1. `run_real_hil.py --scale 1.0` move-then-hold 프로토콜로 frame-map을 재측정한다. 이전 측정은 스텝의 73.7%가 속도 제한에 포화돼 무효였다(§11.7).
+2. actor에 `--deadman {topic,spacebar}` 를 배선한다. 현재 GUI deadman은 아무 효과가 없고 전역 스페이스바만 동작한다(§11.7).
+3. `DRY_RUN` 을 CLI로 뒤집을 수 있게 하고, `forward_position_controller` 활성화 후 `--arm --scale 0.25` 로 **첫 실물 구동**을 한다. 이때 workspace box와 reset branch-cut 게이트가 실기에서 처음 검증된다.
+
+**B. 카메라 갈래**
+
+4. USB 허브 `4-4` 고장을 복구한다(§11.6). 카메라 없이는 actor 전 경로가 돌지 않는다.
+
+**C. 합류 후**
+
+5. receive server를 띄운 채 텔레오퍼레이션으로 성공 에피소드를 녹화해 `--checkpoint-path` dump에서 canonical demo pickle을 만들고, strict loader를 통과하는지 확인한다(§7 P0-2).
+6. Kanu에서 receive server를 내리고 `run_rlpd_learner_server.py` 를 port 50053에 올린다. 순서는 fake demo `--dry-run` → production bounded run(§11.5).
+7. production-scope 5,000-step bounded learner run을 수행하고, 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
+8. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
 
 ## 9. 재현 명령
 
@@ -682,3 +715,158 @@ PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 - verified frozen trunk 직후 `float32 (1,4,4,512)` current/next 계약과 augmentation `none`을 유지한다.
 - online/target trunk invariant 검사와 target repin을 우회하지 않는다.
 - raw/random-crop checkpoint를 feature/no-aug lineage에 resume하지 않는다.
+
+robot actor 쪽 불변식 (§11):
+
+- GELLO는 수동 read-only 리더다. **Dynamixel에 절대 토크를 걸지 않는다.**
+- `TCP_POSE_SOURCE` / `TCP_OFFSET_XYZ_RPY` / `ABS_POSE_LIMIT` 은 결합된 한 세트다. 하나만 바꾸지 않는다.
+- RViz에서 좌우/전후가 뒤집혀 보인다는 이유로 `wrappers.py` 의 X/Y 부호를 뒤집지 않는다. 카메라 방위각 artifact이며 `R_align = I` 다.
+- 프레임 통일 명목으로 wrench(`tcp_force`/`tcp_torque`)를 회전시키지 않는다. upstream도 건드리지 않는다.
+- `RelativeFrame.step` 의 두 시점(step 이전 행렬로 action 변환, 이후 행렬로 observation 변환)을 하나로 합치지 않는다.
+- `wrapped_nearest` 가 elbow를 unwrap하지 않는 것은 의도다.
+- gRPC 코드를 시스템 `python3` 로 실행하지 않는다.
+- gripper는 `Ctrl-C` 로 종료한다. `kill -9` 하지 않는다.
+- headless 세션에서 `ur_play`/`ur_load`/`ur_stop` 을 실행하지 않는다. `ur_resend` 만 쓴다.
+
+---
+
+## 11. robot actor / 하드웨어·통신 현황 (2026-07-27)
+
+이 절은 laptop 쪽 robot actor 작업의 현황이다. 작업 위치는 worktree `/home/laptop3/gello_worktrees/hil-hardware-comms`, branch `test/hil-hardware-comms`, HEAD `ee3240e` (origin 푸시 완료). canonical 운영 checkout `/home/laptop3/gello_software`는 건드리지 않았다.
+
+`5fb716b` 대비 **7 commit / +4,944 −54 / 19 files (신규 14, 수정 5)**.
+
+| commit | 내용 |
+| --- | --- |
+| `cc13710` | `RecordEpisodeStatistics` 를 gymnasium 패키지 루트에서 import |
+| `ebc77f7` | Franka task registry 없이도 actor가 기동하도록 |
+| `14c57d8` | canonical observation을 만드는 wrapper 이식 |
+| `50f65de` | UR7e task config와 `CONFIG_MAPPING` 추가 |
+| `a4a2b0a` | robot state stream을 기다린 뒤 `__init__` 반환 |
+| `d49d0f6` | workspace box 활성화 + reset이 먼 길로 돌지 않게 |
+| `ee3240e` | z 바닥과 reset gate 정정, frame test를 실제로 물게 만듦 |
+
+테스트: `332 passed, 11 skipped, 1 xfailed` (venv 사용, ROS PYTHONPATH 제거, `-p no:launch_testing`). UR/GELLO suite `436 passed`.
+
+### 11.1 `5fb716b` 에서 actor가 실행 불가능했던 4개 층
+
+전부 해소했다. 어느 하나만 고쳐도 다음 층에서 다시 멈췄다.
+
+1. **wrapper 3종 부재** — `RelativeFrame`, `Quat2EulerWrapper`, `ChunkingWrapper` 가 없었다. 이것들이 없으면 state가 canonical 19-D가 되지 못한다(quat 7-D → euler 6-D 변환이 20-D를 19-D로 만든다). upstream에서 import할 수 없었던 이유는 §11.2.
+2. **task config 부재** — `CONFIG_MAPPING` 에 UR7e task가 없어 `--config` 로 지정할 대상 자체가 없었다.
+3. **import 시점 실패 2건** — actor가 upstream Franka registry를 무조건 import해서 `ModuleNotFoundError: jax`, 그리고 gymnasium 1.0에서 삭제된 `gymnasium.wrappers.record_episode_statistics` 경로.
+4. **DDS discovery race** — `UR7eEnv.__init__` 이 `/joint_states` 도착 전에 반환해서 첫 reset이 `no /joint_states — cannot reset` 으로 죽었다. discovery에 약 1.0 s 걸린다.
+
+### 11.2 이식한 wrapper와 task config
+
+**wrapper를 import하지 않고 이식한 이유**: upstream `franka_env.envs.relative_env` 는 legacy `gym` 패키지를, `franka_env.envs.wrappers` 는 module scope에서 `pyspacemouse`/`hidapi`/`pyrealsense2` 를 끌고 온다. `serl_launcher.wrappers.chunking` 은 `jax.tree_map` 하나 때문에 `import jax` 를 한다. robot laptop은 의도적으로 jax가 없는 순수 rclpy/numpy 프로세스여야 한다. 동작은 upstream을 줄 단위로 옮겼다 — UR7e run과 Franka run이 같은 observation/action 의미를 보게 하는 것이 이 파일의 존재 이유이므로 그대로 유지할 것.
+
+- `ur_env/envs/frame_wrappers.py` (208줄) — `RelativeFrame` + `Quat2EulerWrapper`. `ChunkingWrapper` 는 `ur_env/envs/chunking.py` (105줄), `obs_horizon=1` 외에는 `NotImplementedError`.
+- `RelativeFrame` 의 타이밍 미묘함을 upstream 그대로 보존했다: action과 `info["intervene_action"]` 은 **step 이전** 행렬로 변환하고, 그 다음에 반환 observation용으로 행렬을 갱신한다. 두 용도는 의도적으로 한 제어 주기 떨어져 있다. 하나의 행렬로 "고치지" 말 것.
+- `Quat2EulerWrapper` 는 upstream과 달리 observation space를 deep-copy한 뒤 수정한다. upstream은 공유 객체를 in-place로 바꿔서 내부 env가 만들지 못하는 space를 광고하게 된다.
+- `tcp_force`/`tcp_torque` 는 건드리지 않는다. upstream도 그렇다. 우리 `/force_torque_sensor_broadcaster/wrench` 는 `tool0` 에, libfranka `K_F_ext_hat_K` 는 stiffness(EE) frame에 publish하므로 양쪽 다 tool frame wrench + tool frame `tcp_vel` 로 끝난다. **프레임 통일 명목으로 wrench를 회전시키지 말 것.**
+
+**task config `ur_experiments/cube_in_cup.py`** (288줄). 패키지 이름이 `experiments` 가 아니라 `ur_experiments` 인 것은 upstream `examples` 가 sys.path에서 더 앞이기 때문이다. 미측정 값은 `UNSET = None` sentinel로 두고 `__init__` 에서 예외를 던진다 — 0으로 조용히 떨어지면 zero-volume workspace나 테이블을 가로지르는 수평 자세가 된다.
+
+| 항목 | 값 | 근거 |
+| --- | --- | --- |
+| `RESET_JOINTS` | `[3.1382, −1.5276, 1.7168, −1.7592, −1.5216, −3.1331]` | cube_in_cup 데이터셋 시작 자세. `fk` = `(0.5036, 0.1365, 0.4138)`, box 내부 |
+| `RESET_MAX_DIST_RAD` | `0.9` | §11.3 |
+| `TCP_POSE_SOURCE` / `TCP_OFFSET_XYZ_RPY` | `"driver"` / `[0]*6` | **flange frame. 결합된 한 세트** |
+| `ABS_POSE_LIMIT_LOW` | `[0.375, −0.229, 0.185, 2.60, −0.30, 1.10]` | §11.3 |
+| `ABS_POSE_LIMIT_HIGH` | `[0.642, 0.272, 0.550, π, 0.35, 2.20]` | X/Y는 데이터 범위의 1.5배(탐사 여유), Z 상한은 데이터 최대 |
+| `IMAGE_CROP` | cam1 `[20:670, 340:990]` (650×650) / cam2 `[0:720, 420:1140]` (720×720) | **cam2가 손목 카메라** |
+| `MAX_EPISODE_LENGTH` | `100` (HZ=10 → 10 s) | |
+| `GRASP_PENALTY` | `−0.02` | learner 서버 기본값과 일치해야 함 |
+| `DRY_RUN` | `True` | 모든 로봇 명령 publish를 차단 중 |
+
+`TCP_POSE_SOURCE`/`TCP_OFFSET_XYZ_RPY`/`ABS_POSE_LIMIT` 세 설정은 **반드시 함께 움직인다**. box를 flange frame에서 측정했으므로, 실제 0.174 m tool offset을 넣거나 pose source를 `fk` 로 바꾸면 관측 pose가 오류 없이 17.4 cm 이동해 z 바닥이 테이블 아래로 내려간다. `test_pose_reference_point_stays_coupled` 가 이를 고정한다.
+
+`get_environment(classifier=True)` 는 예외를 던진다 — reward는 서버가 결정한다.
+
+### 11.3 검수로 뒤집힌 값 2개
+
+두 값 모두 처음 산출값이 틀렸고, 독립 검수에서 잡혀 `ee3240e` 로 정정했다.
+
+**z 바닥 `0.1785` → `0.185`.** `0.1785` 는 테이블 표면이 아니라 **충돌 깊이**였다. 그 최소값을 만든 40개 샘플이 전부 take_11이고, 해당 구간의 gripper 개구가 0.047–0.176(빈 손), `fz` 가 −133.2 ~ −24.2 N이다. 즉 빈 그리퍼로 테이블을 눌러 박은 자세다. 접촉 없는 샘플만 필터링하면 표면은 `0.1808`. 따라서 바닥은 그 위여야 하고, 동시에 가장 낮은 성공 그랩 `0.1941` 아래여야 과제가 도달 가능하다. `test_z_floor_clears_the_contact_free_table_surface` 가 양쪽을 고정한다.
+
+**`RESET_MAX_DIST_RAD` `0.5` → `0.9`.** `0.5` 는 23개 take 중 **16개**의 정상 에피소드 종료 자세를 거부한다. 각 take 마지막 프레임에서 `RESET_JOINTS` 까지의 branch-safe 거리는 중앙값 0.615 rad, 최대 0.774 rad다. 게이트가 정상 종료를 막으면 매 에피소드가 수동 개입을 요구한다.
+
+**reset branch-cut (H3).** `go_to_reset` 은 `ur_kin.wrapped_nearest(q, ref)` 를 쓴다. 실기에서 wrist_3가 `+3.1795`, 목표가 `−3.1331` 인 상황이 나왔다 — 실제로는 0.029 rad 떨어져 있는데 순진한 차분은 6.31 rad다. 게이트가 없으면 reset이 wrist_3를 **한 바퀴 통째로** 돌려 2F-85 tool-comm 케이블을 감는다. `wrapped_nearest` 는 elbow(index 2, ±π 한계)를 **의도적으로 unwrap하지 않는다**.
+
+`clip_safety_box` 는 부호를 보존하는 abs-clip으로 구현했다. 두 게이트 모두 단위 테스트는 통과했고 **실기 검증은 아직**이다 (`DRY_RUN=True`).
+
+### 11.4 실기 검증된 것
+
+- **2F-85 gripper** — Modbus RTU over UR tool-comm `:54321`. 개폐 및 방향을 눈으로 확인했다. 이로써 crush-hazard 게이트가 닫혔다. 로봇 전원이 켜져 있어야 하고(tool 24 V), `:54321` 은 클라이언트를 **하나만** 받는다. 반드시 `Ctrl-C` 로 종료할 것 — `kill -9` 는 FIN-WAIT-2로 재접속을 30–45초 굶긴다.
+- **GELLO leader** — 7개 모터 전부 baud 57600에서 응답. **토크는 항상 OFF를 유지한다.**
+- **laptop → SSH tunnel → Kanu 100-step 왕복** — `replay_insert_count:100`, `state_shape:[8,1,19]`, observation schema hash `3459098d…` 가 양쪽 일치. 상대는 receive server(zero action)였다.
+- **지연/대역폭** — RTT p50 58.6 / p95 75.8 / **p99 97.1 ms**, step당 96.1 KiB → 7.9 Mbit/s. 병목은 WiFi 대역폭(약 13 Mbit/s)이다. 유선 재측정 권장.
+
+### 11.5 Kanu 정책 서빙 — 지금 무엇이 떠 있고 무엇이 필요한가
+
+**현재 Kanu에 떠 있는 것은 `run_rlpd_receive_server.py` (PID 1096786, `127.0.0.1:50053`) 하나뿐이고, 이것은 `FakeActionRuntime` 이라 항상 zero action을 돌려준다.** `model_id` 도 `fake-zero-action-v0` 다. 실제 정책 추론은 일어나지 않는다.
+
+실제 서빙은 `run_rlpd_learner_server.py` 가 한다. 이 스크립트는 receive server의 **엄격한 상위집합**이다 — 같은 gRPC ingress + 같은 classifier runtime에 더해 실제 `SACAgentHybridSingleArm` 추론(`composition.py:366` 의 `VersionedPolicyRuntime` 이 `build_actor_service(sample_action=runtime)` 로 꽂힌다), CTA 학습, feature replay, checkpoint를 한 프로세스에 조립한다. 둘 다 기본 port 50053이라 **동시 실행 불가**이며, receive server를 내리고 learner가 인수하는 것이 맞다(랩탑 SSH 터널도 그대로 재사용된다).
+
+serving model ID (`ur_env/learner/config.py:14-17`):
+
+- production: `hil-serl-hybrid-sac-resnet10-trunk-cache-v1`
+- `--synthetic-e2e`: `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`
+
+학습 시작 게이트는 `batches.py:362-366` 의 `ready` — **online replay ≥ 100 AND offline demo ≥ 1**. 둘 다 필요하다. replay가 100 미만이면 서버는 정상적으로 뜬 채 policy version 0을 계속 서빙하고 워커는 대기한다.
+
+**Kanu 환경 점검 결과 — 추가 설치 불필요, 단 베이스 env를 쓸 것.**
+
+| 항목 | 결과 |
+| --- | --- |
+| python | **`/home/junhyeong/miniconda3/envs/il/bin/python`** (베이스 `il`) |
+| jax/jaxlib/flax/distrax/tfp/wandb | `0.5.3 / 0.5.3 / 0.10.5 / 0.1.5 / 0.25.0 / 0.26.0` — lock과 정확히 일치, `validate_learner_dependencies` 통과 |
+| protobuf | `7.34.1`, implementation `python` |
+| ResNet-10 자산 | source·`~/.serl` 캐시 모두 SHA `175745d4…07f57b` 일치 |
+| GPU | 8× RTX A4000 (16 GiB). **GPU 2/4/5/6 권장**, GPU 7은 receive server가 12.3 GiB 점유 중 |
+| RAM | 251 G 중 available 73 G. feature ring 7.32 GiB + reserve 2 GiB 여유 |
+| disk | 단일 파일시스템 `/` 1.8 T 중 **여유 127 G (93% 사용)**. checkpoint 305 MiB × N, **자동 pruning 없음** |
+| learner 파일 최신성 | Kanu `5fb716b` 와 로컬 `ee3240e` 의 learner 파일 19개 전부 SHA256 동일. `5fb716b..ee3240e` 차이는 전부 actor 쪽 |
+
+**overlay venv `/tmp/gello-hil-rl-receive-overlay-v2` 를 learner에 재사용하지 말 것.** protobuf를 `3.20.3` 으로 핀했는데 wandb 0.26.0은 `wandb/proto/` 에 v4~v7만 배포한다 → `ImportError: cannot import name 'Imports' from wandb.proto.wandb_telemetry_pb2`. `requirements-learner.lock` 도 protobuf 7.34.1을 요구한다.
+
+기타 함정:
+
+- `XLA_PYTHON_CLIENT_PREALLOCATE=false` **필수**. receive server가 12.3 GiB를 잡은 것은 JAX 기본 75% preallocation(16376 × 0.75) 때문이고, 16 GiB 카드에서 이걸 두면 learner + classifier가 한 GPU에 못 들어간다.
+- `--resnet-cache` 는 run root 안의 새 경로로 지정할 것. `~/.serl/resnet10_params.pkl` 의 SHA가 다르면 `ResNetAssetError` 로 즉사하며 코드는 절대 덮어쓰지 않는다. (현재는 SHA가 일치하므로 기본값도 안전하다.)
+- `preflight_checkpoint_run` (`composition.py:91`) 은 `--resume-*` 없이 시작할 때 checkpoint root에 기존 항목이 있으면 **거부**한다. 새 run은 반드시 빈 root.
+- `--dry-run` 은 gRPC를 bind하지 않고 `rlpd_learner_dry_run_passed` 출력 후 즉시 exit한다. 구성 검증 전용이라 actor가 붙을 수 없다.
+- `--target-learner-step` 을 생략하면 무한 continuous 학습이다. 첫 실전은 `5000` 을 권장한다.
+- 학습 워커가 fault를 내도 서버는 last-known-good 정책을 계속 서빙하므로 gRPC health는 ready로 보인다. `rlpd_learner_worker_fault` 이벤트를 로그로 감시해야 한다(§7 P0-4).
+
+actor가 pin해야 하는 값:
+
+```text
+--expected-model-id hil-serl-hybrid-sac-resnet10-trunk-cache-v1
+--expected-reward-authority server_classifier
+--expected-reward-model-id cube-in-cup-checkpoint-150
+--observation-schema-hash 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903
+```
+
+**미해결 위험**: 학습이 시작되기 전 초기화된 정책이 어떤 크기의 action을 내는지 아직 확인하지 않았다. 첫 실물 구동에서는 `DRY_RUN` 또는 낮은 `--scale` 로 이를 먼저 관측할 것.
+
+### 11.6 카메라 — 현재 차단
+
+cam1/cam2가 공유 USB 허브 `4-4` 에서 동시에 죽었다: `uvcvideo Non-zero status (-71)` (EPROTO). 운영자가 케이블을 분리한 상태다. actor 전 경로는 카메라 없이 돌 수 없다. 팔 단독 검증은 `run_real_hil.py` 경로로만 가능하다.
+
+**cam2는 손목 카메라다.** 이전 문서와 한 에이전트가 고정 데스크 카메라로 오판한 적이 있다. 두 카메라를 구별하려면 팔을 한 번 움직여 보면 된다.
+
+### 11.7 남은 actor 쪽 결함
+
+1. **frame-map 측정 무효** — DRY RUN 잔차 0.864가 나왔으나 스텝의 **73.7%가 속도 제한에 포화**돼 있었다(`--scale 0.25` 에서 명령이 2.5 cm/s로 잘리는 동안 leader는 중앙값 24.5 cm 이동, 명령은 6.0 cm). 변환 행렬 M의 대각이 전부 양수여서 **부호 뒤집힘은 없다**는 것까지는 말할 수 있다. `--scale 1.0` + move-then-hold로 재측정해야 한다.
+2. **deadman GUI 무효** — `run_remote_rlpd_actor.py` 가 `deadman` 을 전혀 넘기지 않아 `GelloIntervention` 이 항상 `SpacebarDeadman()` 으로 떨어진다. pynput 리스너는 **전역**이라 아무 창에서나 스페이스바가 개입을 켜고 ESC가 에피소드를 종료시킨다. `test_deadman_wiring.py` 가 `--deadman` 플래그 부재를 strict xfail로 고정해 두었다.
+3. `_await_robot_state` 에 카메라 첫 프레임 대기가 없다.
+4. `DRY_RUN` 을 CLI로 뒤집을 방법이 없다.
+
+### 11.8 환경 함정 (반복 발생)
+
+- **시스템 grpcio 1.30.2가 고장나 있다.** gRPC를 쓰면 오류 없이 100% CPU로 무한 정지한다(rc=124, 단일 스레드 `R`, `wchan` 비어 있음). 기계어 원인은 미확인이나 **행동은 100% 재현**된다. 반드시 `/home/laptop3/venvs/gello-hil-actor` (grpcio 1.74.0, rclpy용 `--system-site-packages`)를 쓸 것. 시스템 `python3` 로 gRPC 코드를 절대 실행하지 말 것.
+- **PYTHONPATH는 덮어쓰지 말고 이어붙일 것** — `PYTHONPATH=…` 는 ROS overlay를 날려 `ModuleNotFoundError: ur_gello_bringup` 을 만든다. `:$PYTHONPATH` 를 붙인다. **반대로 pytest는 ROS PYTHONPATH가 있으면 깨진다.** 원인은 ROS의 pytest 플러그인이므로 `-p no:launch_testing` 으로 해결한다(`--ignore=` 로는 막히지 않는다 — 다음 파일이 같은 자리를 물려받는다).
+- ROS setup.bash를 `set -u` 아래에서 source하면 `AMENT_TRACE_SETUP_FILES: unbound variable` 이 난다. `set +u` / `set -u` 로 감쌀 것.
+- 모든 절차는 **worktree에서만** 돈다. `/home/laptop3/gello_software` 에는 `serl_ur_infra/ur_experiments/` 가 아예 없다(다른 branch).

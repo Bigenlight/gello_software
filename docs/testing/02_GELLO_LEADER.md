@@ -3,7 +3,7 @@
 **상태: 실기 검증 완료.** 모터 응답, 발행 주기, 드롭, 트리거 스팬 전부 통과.
 
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 ```
 
 ---
@@ -194,32 +194,35 @@ self._gripper_pub.publish(gripper_msg)
 > ⚠️ 흔한 오해 정정: "publisher가 트리거를 버린다"가 아니다. 트리거는 **다른 토픽으로
 > 정상 발행되고 있다.** 문제는 RL 백엔드가 그 토픽을 구독하지 않은 것이었다.
 
-### 5.1 수정됨 (2026-07-27, 커밋 안 됨, 하드웨어 미검증)
+### 5.1 수정·커밋됨 (commit `6a0b127`) — **여전히 하드웨어 미검증**
 
 `URRosBackend`가 트리거 토픽을 **추가로 구독**하고 두 스트림을 7-요소로 합친다:
 
 | | |
 |---|---|
-| 트리거 토픽 상수 | `GELLO_TRIGGER_TOPIC = "/gripper/gripper_client/target_gripper_width_percent"` (`ros_backend.py:68`) |
-| 병합 함수 | `merge_gello_state(q, age_q, trigger, age_trigger, stale_s)` (`ros_backend.py:77-124`) |
-| 트리거 스테일 임계 | `GELLO_TRIGGER_STALE_S = 0.3` (`ros_backend.py:74`) |
-| **트리거 부재 표현** | **`NaN`** — `0.0`은 "완전 열림"이라는 **정당한 값**이므로 센티널로 쓰면 토픽이 죽을 때마다 그리퍼를 조용히 열어버린다 (`ros_backend.py:91-96`) |
-| 반환 age | **관절 age만.** 트리거가 없다고 팔 텔레옵까지 막지 않기 위해 (`:97-101`) |
-| 레거시 폴백 | 트리거 토픽이 **한 번도** 안 왔고 JointState에 7번째가 있으면 그걸 쓴다. 토픽이 말한 뒤 스테일된 경우엔 **폴백하지 않는다** (실신호 장애를 가리지 않기 위해, `:102-109`) |
-| 원시 접근 | `URRosBackend.get_gello_trigger()` → `(0..1 or None, age)` (`ros_backend.py:306-309`) |
+| 트리거 토픽 상수 | `GELLO_TRIGGER_TOPIC = "/gripper/gripper_client/target_gripper_width_percent"` (`ros_backend.py:81`) |
+| 병합 함수 | `merge_gello_state(q, age_q, trigger, age_trigger, stale_s)` (`ros_backend.py:90`) |
+| 트리거 스테일 임계 | `GELLO_TRIGGER_STALE_S = 0.3` (`ros_backend.py:87`) |
+| **트리거 부재 표현** | **`NaN`** — `0.0`은 "완전 열림"이라는 **정당한 값**이므로 센티널로 쓰면 토픽이 죽을 때마다 그리퍼를 조용히 열어버린다 |
+| 반환 age | **관절 age만.** 트리거가 없다고 팔 텔레옵까지 막지 않기 위해 |
+| 레거시 폴백 | 트리거 토픽이 **한 번도** 안 왔고 JointState에 7번째가 있으면 그걸 쓴다. 토픽이 말한 뒤 스테일된 경우엔 **폴백하지 않는다** (실신호 장애를 가리지 않기 위해) |
+| 원시 접근 | `URRosBackend.get_gello_trigger()` → `(0..1 or None, age)` |
 
 **중요:** `/gello/joint_states`의 계약(`position` 길이 6)은 **일부러 그대로 뒀다**.
 기존 소비자(`gello_ur_bridge`, `gello_gripper_bridge`, 레코더, GUI)를 건드리지 않는
-쪽이 위험이 낮기 때문이다 (`ros_backend.py:162-166`).
+쪽이 위험이 낮기 때문이다.
 
-회귀 테스트 (rclpy·시리얼 불필요):
+회귀 테스트 (rclpy·시리얼 불필요) — 2026-07-27 재실행 **23 passed**:
 
 ```bash
 cd $WT/serl_ur_infra
-python3 -m pytest tests/test_gello_gripper_wiring.py -q -p no:anyio
+env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
+  -m pytest tests/test_gello_gripper_wiring.py -q -p no:anyio
 ```
 
 **하드웨어에서는 아직 확인되지 않았다.** 실기 판정은 `04_HIL_INTERVENTION.md` §6.
+2026-07-27 실기에서 **PASS한 것은 GELLO 리더 발행 경로(§2)까지**이고,
+"리더 트리거 → RL 개입 그리퍼"는 여전히 미검증이다. 둘을 섞지 말 것.
 
 ---
 

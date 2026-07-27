@@ -1,10 +1,22 @@
 # 04 — HIL 개입 (데드맨 · 앵커 · 좌표계 · 메타데이터)
 
-**상태: 이 브랜치에서 미검증.** mock + RViz 절차는 존재하고 정본은
+**상태: 실기 미검증.** mock + RViz 절차는 존재하고 정본은
 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`다. 이 문서는 **판정 기준과 함정**에 집중한다.
 
+> ### 2026-07-27 실기 세션이 이 문서에 미친 영향
+> - **개입 루프 자체는 여전히 미검증이다.** 오늘 진전된 것은 통신(`05`/`09`)과
+>   워크스페이스 박스·리셋 안전(`08` G1/G13)이다.
+> - 다만 **리셋 경로가 바뀌었다**: `go_to_reset()`이 branch-cut을 적용하게 됐고
+>   (`00` §6.1.1), `cube_in_cup`의 `RESET_MAX_DIST_RAD`가 `0.5` → **`0.9`**로 올랐다
+>   (0.5는 23테이크 중 16개의 정상 종료 자세를 거부했다). §4.5의 "리셋이 가드에 걸려
+>   멈추는 것이 의도된 안전 실패"는 여전히 맞지만, **이제 정상 에피소드는 통과한다.**
+> - 개입 액션이 저장되는 프레임 관련 테스트가 오늘 크게 강화됐다
+>   (`test_frame_wrappers.py`, commit `ee3240e`) — 이전 테스트들은 identity 자세
+>   fixture라 "회전했는가" 단정이 전부 자명하게 통과하고 있었다. §5의 좌표계 3×3을
+>   실행하기 전에 이 사실을 알고 있을 것.
+
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 ```
 
 ---
@@ -261,7 +273,13 @@ python3 tests/run_real_hil.py --arm --yes        # ⚠️ 실제로 움직인다
 
 ---
 
-## 6. 그리퍼 개입 — **결함이었고, 방금 고쳐졌다 (하드웨어 미검증)**
+## 6. 그리퍼 개입 — **결함이었고, 고쳐졌다 (여전히 하드웨어 미검증)**
+
+> ### ⚠️ 2026-07-27 실기 결과와 혼동하지 말 것
+> 오늘 실기에서 **PASS한 것**은 (a) 그리퍼 단독 경로(`01`), (b) GELLO 리더 발행과
+> 트리거 스팬 0.000~1.000(`02` §2)이다.
+> **"리더 트리거를 쥐면 개입 중 로봇 그리퍼가 움직인다"는 아직 한 번도 확인되지 않았다.**
+> 두 번째와 세 번째를 합쳐 "그리퍼 개입 검증됨"으로 승격하지 말 것.
 
 ### 6.1 원래 결함 (확증됨)
 
@@ -277,11 +295,11 @@ GelloIntervention._expert_gripper(None):  return 0.0                 # → 항�
 `GRIP_CLOSE_THR = 0.7` / `GRIP_OPEN_THR = 0.3` 히스테리시스가 **데드 코드**였고,
 개입 중 사람이 트리거를 아무리 쥐어도 로봇 그리퍼가 움직이지 않았다.
 
-### 6.2 현재 코드 (2026-07-27, 커밋 안 됨)
+### 6.2 현재 코드 (커밋 `6a0b127`) — 코드는 고쳐졌고 **하드웨어는 아직**
 
 `URRosBackend`가 트리거 토픽을 **별도로 구독**하고 `merge_gello_state()`가 두 스트림을
-7-요소로 합친다 (`ros_backend.py:64-124`, `:162-172`). `get_leader()`는 NaN을 `None`으로
-매핑해 "지금 트리거 없음"을 한 가지 표현으로 통일한다 (`wrappers.py:179-196`).
+7-요소로 합친다 (`ros_backend.py:81-140`, `:362`). `get_leader()`는 NaN을 `None`으로
+매핑해 "지금 트리거 없음"을 한 가지 표현으로 통일한다.
 
 핵심 설계 결정 세 가지 — **판정할 때 이걸 본다**:
 
@@ -298,9 +316,10 @@ GelloIntervention._expert_gripper(None):  return 0.0                 # → 항�
 ### 6.3 판정 (미실행)
 
 ```bash
-# 1) 유닛 (rclpy·시리얼 불필요)
+# 1) 유닛 (rclpy·시리얼 불필요) — 2026-07-27: 23 passed
 cd $WT/serl_ur_infra
-python3 -m pytest tests/test_gello_gripper_wiring.py -q -p no:anyio
+env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
+  -m pytest tests/test_gello_gripper_wiring.py -q -p no:anyio
 
 # 2) 라이브 배선 — 러너 없이 토픽만
 ros2 topic hz  /gripper/gripper_client/target_gripper_width_percent   # ~30 Hz
@@ -363,10 +382,22 @@ next_observations, rewards, masks(=1.0-done), dones,  [grasp_penalty]
 ### 7.3 판정 명령
 
 ```bash
+# 2026-07-27: 2 passed + 8 passed
 cd $WT/serl_ur_infra
-python3 -m pytest tests/test_intervention_metadata.py tests/test_rlpd_actor_adapter.py \
-  -q -p no:anyio
+env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest \
+  tests/test_intervention_metadata.py tests/test_rlpd_actor_adapter.py -q -p no:anyio
 ```
+
+프레임 변환 회귀 (개입 액션이 어느 프레임으로 저장되는가) — 오늘 재작성됨:
+
+```bash
+env -u PYTHONPATH \
+PYTHONPATH="$WT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages:$WT/third_party/hil-serl/serl_launcher" \
+/home/laptop3/venvs/gello-hil-actor/bin/python -m pytest tests/test_frame_wrappers.py -q -p no:anyio
+```
+
+> ⚠️ 오버레이 `PYTHONPATH` 없이 돌리면 **`1 skipped`로 조용히 넘어간다**
+> (`serl_launcher` 미발견). 통과했다고 착각하기 쉽다 → `00_SETUP_AND_SAFETY.md` §4.2.
 
 ---
 
@@ -379,4 +410,6 @@ python3 -m pytest tests/test_intervention_metadata.py tests/test_rlpd_actor_adap
 - [ ] gain 슬라이더를 스트로크 중에 움직여도 진행 중 개입이 안 튄다 (§2)
 - [ ] GUI를 죽였을 때 0.5 s 안에 `intervened`가 0으로 떨어진다 (→ 정책 복귀, 정지 아님)
 - [ ] `info["intervened"]` / `intervene_action` 일관성 테스트 통과 (§7.3)
-- [ ] **그리퍼 개입이 안 되는 것을 재확인** (§6) — 이건 PASS가 아니라 **기록된 결함**이다
+- [ ] **그리퍼 개입 판정** (§6.3) — 코드는 고쳐졌으므로 이제는 "안 되는 것 확인"이 아니라
+      **실제로 되는지**를 본다. 특히 트리거 퍼블리셔를 죽였을 때
+      `intervene_action[6]`이 0.0(HOLD)이 되고 **그리퍼가 저절로 열리지 않는지**가 핵심 회귀 판정

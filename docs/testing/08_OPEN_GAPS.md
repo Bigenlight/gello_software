@@ -4,59 +4,123 @@
 각 항목은 코드 근거 → 왜 위험한가 → **지금 쓸 수 있는 완화책** 순이다.
 
 > ## 🛑 게이트 선언
-> **G1 ~ G4가 닫히기 전에는 RL 정책 경로로 실기 UR7e를 구동하지 않는다.**
-> `DRY_RUN`은 기본값 `True`로 둔다 (`serl_ur_infra/ur_env/envs/config.py:130`).
+> **G2 · G4 · G6 · G9가 닫히고, G1 · G3 · G13이 실기에서 확인되기 전에는
+> RL 정책 경로로 실기 UR7e를 구동하지 않는다.**
+> `DRY_RUN`은 기본값 `True`로 둔다 (`DefaultUR7eEnvConfig`, `CubeInCupEnvConfig.DRY_RUN`).
+
+### 현황 요약 (2026-07-27 갱신)
+
+| | 갭 | 이전 | 지금 |
+|---|---|---|---|
+| G1 | `clip_safety_box` | 🔴 미구현 | 🟢 **구현·단위검증** (실기 미검증) |
+| G2 | `PolicyDeltaController` 단순화판 | 🔴 | 🔴 (변화 없음) |
+| G3 | 그리퍼 개입 | 🟠 데드코드 | 🟡 **코드 수정됨**, 하드웨어 미확인 |
+| G4 | 두 퍼블리셔 충돌 / 업샘플러 스테일 | 🔴 | 🟠 **자동 거부 가드 추가** (G4a), G4b는 그대로 |
+| G5 | 19-D state 순서 | 🟢 | 🟢 + **Kanu 해시 일치 실증** |
+| G6 | staleness 시 예외 | 🟠 | 🟠 |
+| G7 | 명목 DH ↔ 캘리브레이션 | 🟠 | 🟠 (+ 플랜지 프레임 확정으로 일부 명확해짐) |
+| G8 | 브로드캐스터 누락 = 조용한 오염 | 🟠 | 🟠 |
+| G9 | 개입 앵커가 flange 기준 | 🟡 | 🟡 |
+| G10 | pinned submodule | 🟡 | 🟡 |
+| G11 | build/gripper shell | 🟢 | 🟢 |
+| G12 | 스페이스바 데드맨 기본값 | 🟡 | 🟡 |
+| **G13** | **리셋 branch-cut** | (미발견) | 🟡 **수정·단위검증**, 실기 미검증 |
+| **G14** | **시스템 grpcio 1.30.2 손상** | (미발견) | 🟠 **완화만 됨**(venv 강제), 근본 미해결 |
+| **G15** | **분류기 전처리 ↔ 크롭 불일치** | (미발견) | 🟠 보상을 믿기 전에 반드시 해결 |
+| **G16** | **10 Hz 레이턴시 예산 소진** | (미발견) | 🟠 유선 전환 필요 |
 
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 ```
 
 ---
 
-## G1 — `clip_safety_box`가 **구현되어 있지 않다** 🔴
+## G1 — `clip_safety_box` 🟢 **구현·단위검증 완료 (실기 미검증)**
 
-### 사실
+> ### 🔧 정정 (2026-07-27)
+> 이전 판: *"두 gym Box는 생성된 뒤 리포 어디에서도 다시 참조되지 않는다. 주석만 있고
+> 클램프 코드는 없다."* — **더 이상 사실이 아니다.** commit `d49d0f6` / `ee3240e`에서
+> 구현·배선됐다. `serl_ur_infra/README.md`의 "❌ config만 존재, 미작동" 현황표도 낡았다.
+
+### 지금의 사실
+
+| | 위치 |
+|---|---|
+| 박스 구성·검증 | `UR7eEnv._build_safety_box()` (`ur7e_env.py:213-297`) |
+| 공개 클립 (upstream 시그니처) | `UR7eEnv.clip_safety_box(pose7) -> pose7` (`:334`) |
+| 컨트롤러 훅 (4×4 어댑터) | `UR7eEnv._clip_command_pose(T) -> (T, clipped)` (`:357`) |
+| 배선 | `PolicyDeltaController(..., clip_pose=self._clip_command_pose)` (`:188`), 적용 지점 `policy_delta_controller.py:140-141` |
+| 회귀 테스트 | `tests/test_clip_safety_box.py` — **26 passed** (2026-07-27) |
+
+적용 시점은 upstream과 동일하게 **명령 포즈**다. 관측은 클립하지 않는다 — 관측을 클립하면
+정책에게 팔 위치를 거짓말하게 된다.
+
+**두 가지 안전 설계가 들어 있다. 이걸 "단순화"하지 말 것:**
+
+1. **REFUSE-DON'T-CLAMP.** `ABS_POSE_LIMIT_*`가 기본값(0벡터)이거나 뒤집혀 있으면 박스를
+   **끄고 크게 경고한다.** 0-부피 박스로 클램프하면 TCP를 (0,0,0)·rpy 0으로,
+   즉 **로봇 베이스를 관통하는 방향**으로 명령하게 된다.
+2. **인덱스 3은 `rx`가 아니라 `|rx|`다.** 툴이 바닥을 향하므로 `rx`는 ±π 근처에 살고
+   `as_euler("xyz")`가 가까운 쪽 분기로 보고한다. cube_in_cup 샘플의 **12%가 음의 분기**에
+   있다. 순진한 `np.clip(rx, 2.60, pi)`는 `rx=-3.14`를 `+2.60`으로 보내 **5.7 rad 손목
+   플립**을 "안전 조치"로 명령한다. upstream처럼 **크기를 클립하고 부호를 복원**한다.
+
+### 실측 박스 (`cube_in_cup`, 23테이크 19,802샘플) — ⚠️ 프레임에 주의
+
+**전부 플랜지(`tool0`) 프레임이다.**
 
 ```python
-# ur7e_env.py:117-127
-# workspace safety box (same semantics as FrankaEnv.clip_safety_box)
-self.xyz_bounding_box = gym.spaces.Box(...ABS_POSE_LIMIT_LOW[:3], ...HIGH[:3])
-self.rpy_bounding_box = gym.spaces.Box(...ABS_POSE_LIMIT_LOW[3:], ...HIGH[3:])
+ABS_POSE_LIMIT_LOW  = [0.375, -0.229, 0.185, 2.60, -0.30, 1.10]   # [3]은 |rx|
+ABS_POSE_LIMIT_HIGH = [0.642,  0.272, 0.550, pi,    0.35, 2.20]
+TCP_POSE_SOURCE     = "driver"
+TCP_OFFSET_XYZ_RPY  = [0, 0, 0, 0, 0, 0]
 ```
 
-**두 객체는 생성된 뒤 리포 어디에서도 다시 참조되지 않는다.** (전수 grep 확인:
-`xyz_bounding_box` / `rpy_bounding_box`는 `ur7e_env.py:118`, `:123` 두 줄이 전부.)
+> ### 🛑 이 셋은 **한 세트**다. 하나만 바꾸면 안전 바닥이 테이블 17.4 cm 아래로 간다
+> 2F-85는 플랜지 z로 174 mm지만 **cube_in_cup을 녹화할 때 펜던트 TCP는 0이었다**
+> (검증: 기록된 `ur_joint_states`를 FK로 재생하면 `/tcp_pose_broadcaster/pose`를
+> **플랜지 해석에서 중앙값 0.6 mm**로 재현한다. 그리퍼 끝 가설에서는 174.2 mm 어긋난다).
+> `PolicyDeltaController`도 플랜지(`fk(q)`, `T_tool` 없음)에서 적분한다.
+>
+> 진짜 TCP 의미론으로 옮기려면 **넷을 동시에** 바꿔야 한다:
+> `TCP_POSE_SOURCE → "fk"`, `TCP_OFFSET_XYZ_RPY → [0,0,0.174,0,0,0]`,
+> z 한계 −0.174 (0.011 … 0.376), `PolicyDeltaController`가 `fk(q) @ T_tool`에서 적분.
+>
+> `_build_safety_box()`가 `TCP_OFFSET`이 0이 아닌데 박스가 켜져 있으면 경고를 찍는다
+> (`ur7e_env.py:285-297`). **경고일 뿐 막지는 않는다.**
 
-`_apply_action()`의 주석은 클램프가 적용되는 것처럼 읽힌다:
+> ### 🔧 z 바닥이 오늘 한 번 더 정정됐다 (`0.1785` → `0.185`)
+> 처음에는 "관측 최솟값 = 테이블"이라고 보고 `0.1785`를 썼다. **틀렸다.** 그 최솟값의
+> 40샘플이 전부 take_11 하나에서 나오는데, 거기서는 그리퍼가 빈손으로 닫힌 채
+> (`grip_pos` 0.05–0.18) `fz`가 0.4초 동안 **−24 ~ −133 N**을 찍고 있다. 즉 테이블이
+> 아니라 **실패한 그랩이 표면을 눌러 박은 깊이**다.
+> 접촉 없는 샘플(`fz > −5 N`)만 남기면 실제 표면은 **0.1808**이고, 옛 바닥은 그보다
+> **2.3 mm 아래**였다.
+>
+> 왜 중요한가: `PolicyDeltaController`는 **클립된 포즈를 자기 적분기에 되쓴다.** 아래로
+> 미는 정책은 명령 플랜지를 정확히 "133 N이 필요했던 깊이"에 주차시키고, **이 루프에는
+> 힘을 제한하는 것이 아무것도 없다.** `0.185`는 자유 표면을 확보하고 take_11의 73샘플
+> (0.37%)만 버리며, 가장 낮은 성공 그랩(0.1941)보다 9 mm 아래에 있다.
+> 테이블이나 베이스 마운트를 다시 앉히면 **0.190**을 쓴다 (이 박스 전체에 걸친 0.5°
+> 기울기가 z로 5 mm다).
 
-```python
-# ur7e_env.py:234-237
-# workspace box: clamp is applied on the *commanded* TCP pose.
-# TODO(together): fold clip_safety_box into the controller gates so
-# a clamped target re-solves IK instead of holding.
-self.backend.send_joint_command(q_cmd)
-```
+### 남은 위험
 
-**주석만 있고 클램프 코드는 없다.** `serl_ur_infra/README.md`의 현황표도
-"워크스페이스 박스 (`ABS_POSE_LIMIT`) … ❌ config만 존재, 미작동"이라고 적고 있다.
-
-### 왜 위험한가
-
-- 정책이 발산하거나 사람이 개입을 놓친 순간, TCP가 **어디로든** 갈 수 있다.
-  남은 것은 관절 리밋(`JOINT_LIMIT` HOLD)과 스텝 게이트뿐 — **작업 공간 개념이 없다.**
-- `keepout` 존도 RL 경로에는 없다(README 현황표). 즉 **테이블·고정구·사람과의 충돌 인지가 0**이다.
+- **실기에서 한 번도 클립이 발동한 적이 없다.** 첫 실기는 반드시 `DRY_RUN`으로,
+  `info["clipped"]` 빈도를 보면서 시작한다.
+- 박스는 **정책/개입이 명령하는 포즈**만 막는다. 팔꿈치·어깨의 실제 스윕은 여전히
+  자유다 (keepout 존은 RL 경로에 없다 — G2).
 - EEF 텔레옵 쪽 `max_excursion_m = 0.5`는 워크스페이스 제한이 **아니다** — engage마다
   앵커가 새로 잡혀 예산이 0으로 리셋된다 (`03_EEF_MODE.md` §6).
 
-### 임시 완화책
+### 여전히 유효한 완화책
 
 1. **물리적 제약을 우선한다.** 로봇 주변에 실제 장애물/펜스를 두고, 팔이 물리적으로 닿을 수 있는
    범위 자체를 좁힌다.
 2. **펜던트의 UR 안전 평면(Safety Planes)을 설정한다.** 이건 소프트웨어와 무관하게 컨트롤러가
-   강제하며, protective stop으로 나타난다. **현재 유일하게 신뢰할 수 있는 작업공간 경계다.**
-   (설정 여부 미확인 — 실기 투입 전 반드시 확인할 것.)
-3. `ACTION_SCALE`과 `GOVERNOR`를 낮춰 단위 시간당 이동량을 줄인다 (사고를 막지는 못하고
-   충돌 에너지만 줄인다).
+   강제하며, protective stop으로 나타난다. **소프트웨어 박스와 독립적인 두 번째 방어선이다.**
+   (설정 여부 **미확인** — 실기 투입 전 반드시 확인할 것.)
+3. `ACTION_SCALE`과 `GOVERNOR`를 낮춰 단위 시간당 이동량을 줄인다.
 4. 사람이 항상 E-STOP 위에 손을 둔다.
 
 ---
@@ -102,33 +166,28 @@ README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**
 
 ---
 
-## G3 — 그리퍼 개입이 **항상 비활성** 🟠
+## G3 — 그리퍼 개입 🟡 **코드는 고쳐졌고, 하드웨어에서 미확인**
 
-### 사실
+> ### 🔧 정정
+> 이전 판: *"`URRosBackend`가 트리거 토픽을 구독하지 않는다. 미구현."* — commit `6a0b127`에서
+> 구현됐다. `GRIP_CLOSE_THR = 0.7` / `GRIP_OPEN_THR = 0.3`
+> (`wrappers.py:219-220`, `:323-325`)도 더 이상 데드 코드가 아니다.
 
-```python
-# wrappers.py:185
-grip = float(arr[6]) if len(arr) > 6 else None      # arr 길이는 항상 6 → 항상 None
-# wrappers.py:274-276
-def _expert_gripper(self, grip):
-    if grip is None:
-        return 0.0                                   # → 항상 홀드
-```
+### 지금의 사실
 
-`/gello/joint_states`의 `position` 길이가 6이기 때문이다 (`gello_publisher_node.py:190`).
-트리거는 **버려지지 않고** 별도 토픽 `/gripper/gripper_client/target_gripper_width_percent`로
-정상 발행되지만 (`:193-195`), `URRosBackend`가 그 토픽을 구독하지 않는다
-(`ros_backend.py:87-89`).
+`URRosBackend`가 `/gripper/gripper_client/target_gripper_width_percent`를 별도 구독하고
+`merge_gello_state()`가 관절 6 + 트리거 1 = 7요소로 합친다
+(`ros_backend.py:81`, `:90`, `:362`). 트리거 부재는 **`NaN`**으로 표현한다 —
+`0.0`은 "완전 열림"이라는 정당한 값이라 센티널로 쓰면 토픽이 죽을 때마다 그리퍼를
+조용히 열어버리기 때문이다. 회귀: `tests/test_gello_gripper_wiring.py` **23 passed**.
 
-부수 효과: `GRIP_CLOSE_THR = 0.7` / `GRIP_OPEN_THR = 0.3` 히스테리시스가 **데드 코드**다
-(`wrappers.py:191-192`, `:277-281`).
+### 왜 아직 🟡인가
 
-### 왜 위험한가
+**하드웨어에서 한 번도 확인되지 않았다.** 2026-07-27 실기에서 통과한 것은
+그리퍼 단독 경로와 GELLO 트리거 **발행**(0.000~1.000 전 구간)까지이고,
+"개입 중 트리거 → 로봇 그리퍼 동작"은 미검증이다. 확인될 때까지는 아래 완화책을 유지한다.
 
-**"데드맨을 잡고 있으면 그리퍼도 내가 통제한다"는 거짓이다.** 개입 중에도 그리퍼는
-**정책의 통제 아래** 있다. 물체를 놓치거나 물어버리는 것을 사람이 막을 수 없다.
-
-### 임시 완화책
+### 완화책 (실기 판정 전까지 유효)
 
 1. **개입 세션에서는 부서지기 쉬운 물체·손가락을 그리퍼 근처에 두지 않는다.**
 2. 그리퍼를 즉시 열어야 하면 **별도 터미널에서** 서비스를 부른다 (수 초 지연 감수):
@@ -137,11 +196,12 @@ def _expert_gripper(self, grip):
    ```
    > 단, 러너가 계속 `command_percent`를 쏘고 있으면 다시 덮어써진다.
    > 확실한 해제는 **러너 정지 또는 E-STOP**이다.
-3. `GRASP_PENALTY`/`GripperPenaltyWrapper` 실험 시 이 갭을 반드시 명시한다 —
-   "사람이 그리퍼를 시연했다"는 전제가 성립하지 않는다.
+3. `GRASP_PENALTY`/`GripperPenaltyWrapper` 실험 시 이 갭을 명시한다 —
+   "사람이 그리퍼를 시연했다"는 전제가 **아직** 성립하지 않는다.
+   (`cube_in_cup`의 `GRASP_PENALTY = -0.02`는 upstream 태스크 값을 그대로 쓴 것이다.)
 
-**고칠 곳:** publisher가 아니라 `ros_backend`(트리거 토픽 추가 구독) + `get_gello_state()`가
-7번째 값을 합치는 것. 미구현.
+**판정 절차:** `04_HIL_INTERVENTION.md` §6.3. 핵심 회귀는
+"트리거 퍼블리셔를 죽였을 때 그리퍼가 **저절로 열리지 않는다**".
 
 ---
 
@@ -166,6 +226,13 @@ def _expert_gripper(self, grip):
 ros2 topic info /forward_position_controller/commands --verbose | grep -c "Node name"
 # 2 이상이면 즉시 중단
 ```
+
+> ### 🔧 2026-07-27: 자동 가드가 생겼다 (완전 해결은 아님)
+> `ros2_ur_ws/run_hil_actor.sh`의 preflight [9]가 이 토픽의 **퍼블리셔 수를 직접 세고,
+> 하나라도 있으면 기동을 거부한다** ("이 리그 최대 하자"). preflight [8]은
+> `forward_position_controller`가 `active`면 경고한다.
+> `run_real_hil.py`도 같은 가드를 갖는다. **`run_rviz_hil.py`(mock 러너)에는 없다.**
+> 즉 가드는 "actor/실기 러너"에만 있고, 사람이 손으로 두 스택을 띄우는 것은 여전히 막지 못한다.
 
 ### G4b — 업샘플러에 타깃 스테일 정책이 없다
 
@@ -203,11 +270,19 @@ learner/hardware merge `248255f`에 통합됐다:
 이유: 평탄화를 하는 것은 우리가 아니라 upstream `SERLObsWrapper`이고, 그것이 쓰는
 `gym.spaces.Dict`가 매핑을 **알파벳순으로 재정렬**한다. `proprio_keys`는 순서를 정하지 못한다.
 
+### 2026-07-27 추가 확인
+
+랩톱과 Kanu 서버가 **같은 해시를 광고함이 실제 왕복에서 확인**됐다:
+`3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`
+(`09_HIL_ACTOR_RUNBOOK.md` §2.1). 100스텝 acceptance도 통과했고
+서버가 본 `state_shape`는 `[8, 1, 19]`였다.
+
 ### 남은 위험
 
 runtime dependency/gymnasium 변경으로 실제 flatten 순서가 달라질 수 있다. 그래서 live env
 layout assertion과 laptop/server schema hash pin을 계속 유지하고, gripper index를 call site에
-숫자로 재작성하지 않는다.
+숫자로 재작성하지 않는다. **위 해시를 문서에서 복사해 비교하지 말고, 양쪽에서 출력해서
+대조한다** (`05_COMMS_GRPC.md` §4.2).
 
 ### 완화책
 
@@ -248,20 +323,34 @@ README TODO에 남아 있다 ("HOLD/reject_reason을 step info로 노출 + stale
 
 ### RL에서의 추가 문제
 
-`TCP_POSE_SOURCE` 기본이 `"driver"` (`config.py:114`)다. 그러면:
+`TCP_POSE_SOURCE`는 `cube_in_cup`에서도 `"driver"`다. 그러면:
 
 - **관측** `tcp_pose` = 벤더 FK (`/tcp_pose_broadcaster/pose`)
 - **명령/개입 앵커** = 우리 명목 DH (`ur_kin.fk` / `controller.tcp_cmd()`)
 
 두 계가 다르면 관측과 명령이 서로 다른 좌표계 위에 있게 된다.
-코드는 앵커 수식이 자기일관적이라 zero-jump는 유지된다고 적고 있지만
-(`ur7e_env.py:355-358`), **관측-액션 정합**은 별개 문제다.
+코드는 앵커 수식이 자기일관적이라 zero-jump는 유지된다고 적고 있지만,
+**관측-액션 정합**은 별개 문제다.
+
+> ### 🔧 2026-07-27: 크기는 실측됐다 (그리고 프레임은 확정됐다)
+> `cube_in_cup` 23테이크의 `ur_joint_states`를 우리 FK로 재생해
+> 기록된 `/tcp_pose_broadcaster/pose`와 대조한 결과, **중앙값 0.6 mm**로 일치한다
+> — 단, **플랜지(tool0) 해석에서만**. 그리퍼 끝 가설에서는 174.2 mm 어긋난다.
+>
+> 두 가지 결론:
+> 1. **명목 DH ↔ 벤더 FK의 불일치는 이 리그에서 0.6 mm 수준이다.** G7의 "두 계가 다르다"는
+>    여전히 참이지만 크기는 작다. `TCP_POSE_SOURCE`를 바꿀 시급한 이유는 없다.
+> 2. **관측·명령·워크스페이스 박스가 전부 플랜지 프레임으로 통일돼 있다.**
+>    이건 우연이 아니라 유지해야 할 세트다 → G1의 "17.4 cm 함정".
+>
+> ⚠️ 그러므로 아래 완화책 2번(`TCP_POSE_SOURCE = "fk"`로 전환)을 **단독으로 실행하면 안 된다.**
+> `TCP_OFFSET`·z 한계·컨트롤러 적분점까지 넷을 함께 바꿔야 한다 (G1 참조).
 
 ### 완화책
 
 1. `03_EEF_MODE.md` §4.1의 3자세 대조(5 mm / 5 mrad)를 실기 투입 전에 실행하고 결과를 기록한다.
-2. 오차가 크면 `TCP_POSE_SOURCE = "fk"`로 바꿔 **관측과 명령을 같은 kinematics로 통일**한다.
-   (그러면 절대 정확도는 포기하지만 내부 정합성은 얻는다.)
+   (오프라인 데이터 대조는 이미 0.6 mm로 통과했다 — 위 박스.)
+2. `TCP_POSE_SOURCE = "fk"`로의 전환은 **G1의 4종 세트와 함께만** 한다. 단독 변경 금지.
 3. 어느 쪽이든 **절대 좌표 정밀도를 요구하는 태스크를 설계하지 않는다.**
 
 ---
@@ -334,6 +423,120 @@ gain이 1.0으로 고정이고(`:109-110`), 하트비트 워치독이 없다.
 
 ---
 
+## G13 — 리셋이 손목을 **한 바퀴 돌릴 수 있었다** 🟡 (수정됨, 실기 미검증)
+
+### 사실
+
+`forward_position_controller`는 raw 관절 공간에서 선형 보간하며 **2π를 모른다.**
+`cube_in_cup`의 `RESET_JOINTS`는 정확히 ±π 경계 위에 있다
+(`wrist_3 = -3.1331`, `shoulder_pan = 3.1382`). 실측된 파킹 자세는 `wrist_3 = +3.1795`였다.
+
+| | |
+|---|---|
+| 물리적 차이 | **0.029 rad** |
+| 예전 코드의 계산 | **6.3126 rad** |
+
+옛 `go_to_reset()`은 `gap = max(abs(q - target))`만 봤으므로 (a) 거리 가드가 배선 고장처럼
+보이는 에러를 냈고, (b) 가드를 통과시켰다면 **명령도 먼 길로** 나갔다:
+약 10초의 맹목 슬루 + **2F-85 tool-comm 케이블이 손목에 한 바퀴 감김**(H3).
+그때 실제로 일어나지 않은 유일한 이유는 `DRY_RUN=True`였다는 것뿐이다.
+
+### 수정 (commit `d49d0f6`)
+
+`ur_kin.wrapped_nearest(target, q)`로 목표를 **팔의 현재 회전수**로 옮긴 뒤, 거리 가드·명령·
+도착 판정을 **전부 그 값으로** 한다 (`ur7e_env.py:507-540`).
+팔꿈치(index 2)는 가동범위가 ±π라 일부러 감싸지 않는다 — 그래서 branch-safe 거리는
+순진한 원형 거리 2.755가 아니라 **3.5281**이다.
+회귀: `tests/test_reset_branch_cut.py` **10 passed**.
+
+같이 바뀐 것: `RESET_MAX_DIST_RAD` `0.5` → **`0.9`**. 23테이크의 최종 프레임에서
+`RESET_JOINTS`까지의 branch-safe 거리가 중앙값 0.615 / 최대 0.774라서, `0.5`는
+**23개 중 16개의 정상 종료 자세를 거부**했다 (= 대부분의 에피소드 뒤에 `reset()`이 예외).
+
+### 남은 위험
+
+- **실기에서 리셋을 한 번도 실행하지 않았다.** 첫 실기 리셋은 `DRY_RUN`으로 로그만 보고,
+  명령된 `wrist_3`가 현재 값 근처인지 눈으로 확인한 뒤 arm한다.
+- 이 함정은 `go_to_reset()` 밖에도 있다. **`RESET_JOINTS`와 관절값을 비교하는 새 코드는
+  전부 branch-cut safe여야 한다.** 순진한 차이는 동일 자세를 ~2π 떨어진 것으로 보고한다.
+
+---
+
+## G14 — 시스템 `python3-grpcio 1.30.2`가 손상돼 있다 🟠
+
+### 사실
+
+apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **에러도 로그도 없이
+단일 스레드가 CPU 100%로 영구 스핀**한다. 재현·관찰 절차는 `00_SETUP_AND_SAFETY.md` §3.4.
+
+이것이 물었던 자리:
+
+- 2026-07-27 actor 기동 실패 4건 중 1건
+- `serl_ur_infra` 테스트 4개 파일의 무한 hang
+  (`test_actor_grpc_transport`, `test_actor_identity_pinning`, `test_actor_smoke`,
+  `test_rlpd_receive_smoke` — venv에서는 **35 passed**)
+
+### 왜 아직 🟠인가 (완화만 됐다)
+
+- `run_hil_actor.sh`가 `$ACTOR_PY`를 절대경로로 `exec`하고, preflight [2]가 버전 1.30.2를
+  거부하고, [3]이 `cygrpc.CompletionQueue()`를 **타임아웃 건 서브프로세스**로 실제 호출해
+  코어 생존을 확인한다. → 래퍼를 통과하는 경로는 안전하다.
+- **그러나 손으로 `python3`를 치는 경로는 아무것도 막지 못한다.** 그리고 증상이
+  "그냥 멈춤"이라 원인 추적에 시간이 크게 든다.
+- 시스템 패키지를 제거·업그레이드하는 것은 **rclpy를 깨뜨릴 수 있으므로 하지 않는다.**
+
+### 완화책
+
+1. gRPC를 만질 수 있는 모든 명령을 **`$ACTOR_PY` 절대경로**로 쓴다.
+2. 실기 기동은 `run_hil_actor.sh`만 쓴다.
+3. 새 스크립트/테스트를 추가할 때 **shebang을 `#!/usr/bin/env python3`로 두지 않는다.**
+4. "멈췄다"를 만나면 **가장 먼저 인터프리터를 확인한다** —
+   `ls -l /proc/<pid>/exe`, `ps -L -o pcpu,stat -p <pid>`(100% / `R`이면 이 버그 의심).
+
+> ⚠️ 원인으로 보고된 `cygrpc.so`의 `__wrap_memcpy` 무한 루프는 **심볼·바이트 패턴 스캔으로
+> 확인되지 않았다.** 기계어 수준 원인은 미확인이고, **행동은 100% 재현된다.**
+
+---
+
+## G15 — 분류기 전처리가 **크롭을 하지 않는다** 🟠
+
+### 사실
+
+- `reward_classifier_runtime.decode_classifier_image()`는 **풀 프레임**을 리사이즈하고,
+  docstring은 그것이 체크포인트 초기화에 쓴 관측 트리라고 말한다.
+- `rlpd_receive_server._classifier_observation()`은 분류기에 이 env의 **크롭된** canonical
+  관측을 먹인다.
+- `cube_in_cup`은 크롭을 켠다 (cam1 650×650, cam2 720×720).
+
+즉 **분류기 입력이 분포 밖으로 나간다.** 그리고 분류기는 보상·종단의 **권위**다.
+
+### 왜 지금 당장 터지지 않는가
+
+현재 루프는 보상을 무시한다(스텁). 그래서 무해하다 — **보상을 믿는 실행 전까지만.**
+
+### 해결 방향 (둘 중 하나, 미결정)
+
+1. 크롭된 이미지로 분류기를 재학습한다.
+2. 정책 전처리와 분류기 전처리를 분리한다.
+
+근거: `ur_experiments/cube_in_cup.py`의 `IMAGE_CROP` 주석 "KNOWN CONFLICT".
+
+---
+
+## G16 — 10 Hz 레이턴시 예산이 **사실상 소진 상태** 🟠
+
+2026-07-27 Kanu 왕복 실측: RTT p50 58.6 / p95 75.8 / **p99 97.1 ms**.
+관측 96.1 KiB × 10 Hz = **7.9 Mbit/s**. **10 Hz 스텝 예산은 100 ms다.**
+
+병목은 서버 추론이 아니라 **WiFi 대역폭**이다. 그리고 이 숫자는 fake-env 값이므로
+실기(Stage B)에서는 센서 파이프라인 지연이 더해진다 — **상한이 아니라 하한**이다.
+
+**완화책:** 유선으로 옮기고 같은 100스텝을 재측정한다. 그 전까지
+`timeout_s`/`max_response_age_s`를 늘리지 않는다 (증상만 감춘다).
+상세: `05_COMMS_GRPC.md` §5.3.
+
+---
+
 ## 부록 — 발견된 문서 불일치 (코드가 정답)
 
 이 조사 중 상위 문서에서 발견한 낡은 서술. 고치는 것은 각 문서 소유자의 몫이다.
@@ -342,5 +545,9 @@ gain이 1.0으로 고정이고(`:109-110`), 하트비트 워치독이 없다.
 |---|---|---|
 | `docs/ros2/GELLO_UR7E_EEF_MODE.md:380` | P9 "yaml 기본 `v_max=0.08`" | `config/ur7e_gello_eef.yaml:238` = **0.16** (같은 문서 `:7`도 0.16이라 자기모순) |
 | `serl_ur_infra/RL_RECEIVE_SERVER.md` | state 순서 = pose6, vel6, force3, torque3, gripper1 | 현재 `observation_schema.py` = **알파벳순, gripper가 index 0** |
-| `serl_ur_infra/README.md` TODO | "v_max(0.1 m/s) vs ACTION_SCALE 최대(0.2 m/s) 정합 — 거버너가 풀액션을 절반으로 자름" | `config.py:64` `ACTION_SCALE=[0.01,0.05,1.0]` × `HZ=10` = 0.1 m/s < `GOVERNOR v_max=0.12` (`:75`). **이미 정합되어 있고 경고도 안 뜬다** |
+| `serl_ur_infra/README.md` 현황표 | "워크스페이스 박스 (`ABS_POSE_LIMIT`) … ❌ config만 존재, 미작동" | **낡음.** 구현·배선됐다 → G1 |
+| `serl_ur_infra/README.md` TODO | "v_max(0.1 m/s) vs ACTION_SCALE 최대(0.2 m/s) 정합 — 거버너가 풀액션을 절반으로 자름" | `ACTION_SCALE=[0.01,0.05,1.0]` × `HZ=10` = 0.1 m/s < `GOVERNOR v_max=0.12`. **이미 정합되어 있고 경고도 안 뜬다** |
+| `serl_ur_infra/ur_env/envs/ros_backend.py:208` | `VERIFY(hw)` — "퍼블리셔가 best-effort면 구독이 조용히 안 뜬다, 첫 브링업에서 확인할 것" | **확인 완료.** RealSense는 RELIABLE/TRANSIENT_LOCAL → 호환. 주석만 안 지워졌다 → `06_SENSORS.md` §3 |
+| `ros2_ur_ws/launch_cameras.sh:12-16` | "cam2 = CLOSE-UP (workspace)" | **cam2는 손목 카메라다** → `06_SENSORS.md` §1.1 |
+| `ros2_ur_ws/src/gello_policy/config/act_deploy.yaml:35` (및 diffusion/FM 형제) | `RESET_JOINTS = [3.106, -1.817, 1.653, -1.618, -1.628, -3.195]` — 주석은 그냥 "the dataset's start pose" | 그건 **banana-in-pot** 자세다. cube_in_cup과 어깨에서 0.29 rad 차이 = TCP가 13 cm 높고 10 cm 뒤. **HIL에 복사하지 말 것.** cube_in_cup 값은 `[3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331]` |
 | `serl_ur_infra/README.md` 머리말 | "⚠️ UNTESTED SKELETON" | 여전히 맞다 (실기 RL 경로 미검증). 유지 |
