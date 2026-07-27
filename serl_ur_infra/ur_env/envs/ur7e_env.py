@@ -165,6 +165,7 @@ class UR7eEnv(gym.Env):
         self.curr_gripper_pos = np.zeros(1)
         self.curr_force = np.zeros(3)
         self.curr_torque = np.zeros(3)
+        self._last_observation_timestamp_ns = 0
         self.terminate = False
         self.fake_env = fake_env
 
@@ -262,7 +263,10 @@ class UR7eEnv(gym.Env):
         # held/reject_reason surfaced for operator display and logging; extra
         # info keys are ignored by the hil-serl actor loop (it only pops
         # intervene_action/left/right and reads succeed).
-        info = {"succeed": bool(reward)}
+        info = {
+            "succeed": bool(reward),
+            "timestamp_ns": np.int64(self._last_observation_timestamp_ns),
+        }
         info.update(ctrl_info)
         return ob, int(reward), done, False, info
 
@@ -279,7 +283,11 @@ class UR7eEnv(gym.Env):
             self.controller.reset(q)
 
         self._update_currpos()
-        return self._get_obs(), {"succeed": False}
+        observation = self._get_obs()
+        return observation, {
+            "succeed": False,
+            "timestamp_ns": np.int64(self._last_observation_timestamp_ns),
+        }
 
     def go_to_reset(self):
         """Stream to the fixed init pose (RESET_JOINTS) between episodes.
@@ -413,6 +421,10 @@ class UR7eEnv(gym.Env):
             "tcp_force": self.curr_force.copy(),
             "tcp_torque": self.curr_torque.copy(),
         }
+        # Dataset/export timestamp for this exact env observation. This is
+        # deliberately reported through Gym's info mapping instead of becoming
+        # a state feature consumed by the policy.
+        self._last_observation_timestamp_ns = time.time_ns()
         return {"state": state, "images": images}
 
     # ------------------------------------------------------------------ #

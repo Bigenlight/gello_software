@@ -19,7 +19,7 @@ import copy
 import glob
 import os
 import pickle as pkl
-from typing import Any, Mapping, MutableMapping, Optional, Protocol, Tuple
+from typing import Any, Mapping, MutableMapping, Optional, Protocol
 
 import numpy as np
 
@@ -31,6 +31,28 @@ class TransitionStore(Protocol):
         ...
 
 
+class PolicyClient(Protocol):
+    def start_episode(self, session_id: Optional[str] = None) -> str:
+        ...
+
+    def get_action(
+        self,
+        observation: Any,
+        *,
+        observation_timestamp_ns: int,
+        deterministic: bool = False,
+    ) -> Any:
+        ...
+
+
+class TransitionClient(Protocol):
+    def update(self) -> bool:
+        ...
+
+    def request(self, request_type: str, payload: dict[str, Any]) -> Any:
+        ...
+
+
 def build_transition(
     *,
     observation: Any,
@@ -39,6 +61,8 @@ def build_transition(
     reward: Any,
     done: bool,
     info: Mapping[str, Any],
+    timestamp_ns: int,
+    policy_version: int = -1,
 ) -> dict[str, Any]:
     """Build one replay transition without losing intervention provenance.
 
@@ -78,6 +102,21 @@ def build_transition(
             f"{executed_action.shape} != {recorded_policy_action.shape}"
         )
 
+    if isinstance(timestamp_ns, (bool, np.bool_)) or not isinstance(
+        timestamp_ns, (int, np.integer)
+    ):
+        raise TypeError("timestamp_ns must be an integer env timestamp")
+    timestamp_ns = int(timestamp_ns)
+    if timestamp_ns <= 0 or timestamp_ns > np.iinfo(np.int64).max:
+        raise ValueError("timestamp_ns must be a positive signed 64-bit value")
+    if isinstance(policy_version, (bool, np.bool_)) or not isinstance(
+        policy_version, (int, np.integer)
+    ):
+        raise TypeError("policy_version must be an integer")
+    policy_version = int(policy_version)
+    if policy_version < -1 or policy_version > np.iinfo(np.int64).max:
+        raise ValueError("policy_version must be -1 or a non-negative int64")
+
     transition = {
         "observations": observation,
         "actions": executed_action,
@@ -87,6 +126,13 @@ def build_transition(
         "rewards": reward,
         "masks": 1.0 - bool(done),
         "dones": bool(done),
+        # Observation-finalization time supplied by the env. It is metadata
+        # for correlating/exporting robot data.
+        # It deliberately stays outside observations["state"], so SERL never
+        # flattens the timestamp into the policy input vector.
+        "timestamp_ns": np.int64(timestamp_ns),
+        # -1 denotes a locally sampled random exploration action.
+        "policy_version": np.int64(policy_version),
     }
     if "grasp_penalty" in info:
         transition["grasp_penalty"] = info["grasp_penalty"]
@@ -139,48 +185,31 @@ def _dump_transitions(
 
 
 def run_actor(
-    agent: Any,
+    policy_client: PolicyClient,
     replay_store: TransitionStore,
     intervention_store: TransitionStore,
+    transition_client: TransitionClient,
     env: Any,
-    sampling_rng: Any,
     *,
     config: Any,
-    flags: Any,
+    checkpoint_path: Optional[str],
 ) -> None:
-    """Run the training actor with upstream-compatible Agentlace transport.
+    """Run a robot-only actor with server-side policy inference.
 
-    Heavy actor-only dependencies are imported lazily so transition contract
-    tests stay ROS/JAX/Agentlace independent.
+    The policy RPC is synchronous and latency-sensitive. Transition insertion
+    is local and lossless; the caller may run Agentlace's asynchronous update
+    worker to batch uploads independently.
     """
-    import jax
     import tqdm
-    from agentlace.trainer import TrainerClient
-    from serl_launcher.utils.launcher import make_trainer_config
     from serl_launcher.utils.timer_utils import Timer
-
-    datastore_dict = {
-        "actor_env": replay_store,
-        "actor_env_intvn": intervention_store,
-    }
-    client = TrainerClient(
-        "actor_env",
-        flags.ip,
-        make_trainer_config(),
-        data_stores=datastore_dict,
-        wait_for_server=True,
-        timeout_ms=3000,
-    )
-
-    def update_params(params):
-        nonlocal agent
-        agent = agent.replace(state=agent.state.replace(params=params))
-
-    client.recv_network_callback(update_params)
 
     transitions: list[dict[str, Any]] = []
     intervention_transitions: list[dict[str, Any]] = []
-    obs, _ = env.reset()
+    obs, reset_info = env.reset()
+    if "timestamp_ns" not in reset_info:
+        raise RuntimeError("env.reset() info is missing timestamp_ns")
+    observation_timestamp_ns = int(reset_info["timestamp_ns"])
+    policy_client.start_episode()
 
     timer = Timer()
     running_return = 0.0
@@ -188,7 +217,7 @@ def run_actor(
     intervention_steps = 0
     was_intervening = False
 
-    start_step = _start_step(flags.checkpoint_path)
+    start_step = _start_step(checkpoint_path)
     pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
     for step in pbar:
         timer.tick("total")
@@ -196,17 +225,20 @@ def run_actor(
         with timer.context("sample_actions"):
             if step < config.random_steps:
                 policy_action = env.action_space.sample()
+                policy_version = -1
             else:
-                sampling_rng, key = jax.random.split(sampling_rng)
-                policy_action = agent.sample_actions(
-                    observations=jax.device_put(obs),
-                    seed=key,
-                    argmax=False,
+                result = policy_client.get_action(
+                    obs,
+                    observation_timestamp_ns=observation_timestamp_ns,
+                    deterministic=False,
                 )
-                policy_action = np.asarray(jax.device_get(policy_action))
+                policy_action = np.asarray(result.action)
+                policy_version = int(result.policy_version)
 
         with timer.context("step_env"):
             next_obs, reward, done, truncated, info = env.step(policy_action)
+            if "timestamp_ns" not in info:
+                raise RuntimeError("env.step() info is missing timestamp_ns")
             transition = build_transition(
                 observation=obs,
                 policy_action=policy_action,
@@ -214,6 +246,8 @@ def run_actor(
                 reward=reward,
                 done=done,
                 info=info,
+                timestamp_ns=info["timestamp_ns"],
+                policy_version=policy_version,
             )
             route_transition(transition, replay_store, intervention_store)
             transitions.append(copy.deepcopy(transition))
@@ -228,6 +262,7 @@ def run_actor(
 
             running_return += reward
             obs = next_obs
+            observation_timestamp_ns = int(info["timestamp_ns"])
 
             if done or truncated:
                 stats_info = dict(info)
@@ -235,6 +270,7 @@ def run_actor(
                     "intervene_action",
                     "policy_action",
                     "intervened",
+                    "timestamp_ns",
                     "left",
                     "right",
                 ):
@@ -242,7 +278,9 @@ def run_actor(
                 episode_info = stats_info.setdefault("episode", {})
                 episode_info["intervention_count"] = intervention_count
                 episode_info["intervention_steps"] = intervention_steps
-                client.request("send-stats", {"environment": stats_info})
+                transition_client.request(
+                    "send-stats", {"environment": stats_info}
+                )
                 pbar.set_description(f"last return: {running_return}")
 
                 running_return = 0.0
@@ -252,17 +290,21 @@ def run_actor(
 
                 # Match upstream semantics: flush queued transitions while the
                 # robot is between episodes, never in the control-step path.
-                client.update()
-                obs, _ = env.reset()
+                transition_client.update()
+                obs, reset_info = env.reset()
+                if "timestamp_ns" not in reset_info:
+                    raise RuntimeError("env.reset() info is missing timestamp_ns")
+                observation_timestamp_ns = int(reset_info["timestamp_ns"])
+                policy_client.start_episode()
 
         if step > 0 and config.buffer_period > 0:
             if step % config.buffer_period == 0:
-                if not flags.checkpoint_path:
+                if not checkpoint_path:
                     raise ValueError(
                         "checkpoint_path is required when buffer_period > 0"
                     )
                 _dump_transitions(
-                    flags.checkpoint_path,
+                    checkpoint_path,
                     step,
                     transitions,
                     intervention_transitions,
@@ -272,4 +314,6 @@ def run_actor(
 
         timer.tock("total")
         if step % config.log_period == 0:
-            client.request("send-stats", {"timer": timer.get_average_times()})
+            transition_client.request(
+                "send-stats", {"timer": timer.get_average_times()}
+            )

@@ -16,6 +16,10 @@ from ur_env.rlpd_actor import (  # noqa: E402
     build_transition,
     route_transition,
 )
+from ur_env.rlpd_replay_metadata import (  # noqa: E402
+    install_metadata_schema,
+    normalize_transition_metadata,
+)
 
 
 class _Store:
@@ -26,7 +30,7 @@ class _Store:
         self.items.append(transition)
 
 
-def _build(info):
+def _build(info, *, timestamp_ns=1_721_800_000_123_456_789):
     return build_transition(
         observation={"state": np.array([1.0])},
         policy_action=np.array([0.1, -0.2], dtype=np.float32),
@@ -34,6 +38,7 @@ def _build(info):
         reward=0.0,
         done=False,
         info=info,
+        timestamp_ns=timestamp_ns,
     )
 
 
@@ -52,6 +57,7 @@ def test_policy_transition_uses_policy_action_and_replay_only():
     np.testing.assert_allclose(transition["actions"], [0.1, -0.2])
     np.testing.assert_allclose(transition["policy_actions"], [0.1, -0.2])
     assert transition["intervened"] == np.uint8(0)
+    assert transition["timestamp_ns"] == np.int64(1_721_800_000_123_456_789)
     assert replay_store.items == [transition]
     assert intervention_store.items == []
 
@@ -74,6 +80,7 @@ def test_intervention_transition_preserves_both_actions_and_routes_twice():
     np.testing.assert_array_equal(transition["actions"], human_action)
     np.testing.assert_array_equal(transition["policy_actions"], policy_action)
     assert transition["intervened"] == np.uint8(1)
+    assert transition["timestamp_ns"].dtype == np.dtype(np.int64)
     assert replay_store.items == [transition]
     assert intervention_store.items == [transition]
 
@@ -120,6 +127,70 @@ def test_top_level_policy_action_wins_over_inner_wrapper_metadata():
     np.testing.assert_allclose(transition["actions"], [0.1, -0.2])
 
 
+@pytest.mark.parametrize("timestamp_ns", [0, -1, 2**63])
+def test_invalid_transition_timestamp_is_rejected(timestamp_ns):
+    with pytest.raises(ValueError):
+        _build(
+            {
+                "policy_action": np.array([0.1, -0.2], dtype=np.float32),
+                "intervened": 0,
+            },
+            timestamp_ns=timestamp_ns,
+        )
+
+
+def test_non_integer_transition_timestamp_is_rejected():
+    with pytest.raises(TypeError):
+        _build(
+            {
+                "policy_action": np.array([0.1, -0.2], dtype=np.float32),
+                "intervened": 0,
+            },
+            timestamp_ns=1.5,
+        )
+
+
+class _ReplayBuffer:
+    def __init__(self):
+        self.dataset_dict = {
+            "actions": np.empty((8, 2), dtype=np.float32),
+        }
+
+    def __len__(self):
+        return 0
+
+
+def test_server_replay_schema_retains_transition_metadata():
+    replay = install_metadata_schema(_ReplayBuffer())
+    normalized = normalize_transition_metadata(
+        _build(
+            {
+                "policy_action": np.array([0.1, -0.2], dtype=np.float32),
+                "intervene_action": np.array([-0.8, 0.7], dtype=np.float32),
+                "intervened": 1,
+            }
+        )
+    )
+
+    assert replay.dataset_dict["policy_actions"].shape == (8, 2)
+    assert replay.dataset_dict["intervened"].dtype == np.uint8
+    assert replay.dataset_dict["timestamp_ns"].dtype == np.int64
+    assert normalized["timestamp_ns"] == np.int64(1_721_800_000_123_456_789)
+    np.testing.assert_allclose(normalized["policy_actions"], [0.1, -0.2])
+
+
+def test_legacy_transition_gets_explicit_unknown_timestamp():
+    normalized = normalize_transition_metadata(
+        {
+            "actions": np.array([0.1, -0.2], dtype=np.float32),
+        }
+    )
+
+    assert normalized["timestamp_ns"] == np.int64(-1)
+    assert normalized["intervened"] == np.uint8(0)
+    np.testing.assert_allclose(normalized["policy_actions"], [0.1, -0.2])
+
+
 def test_pickle_dump_retains_metadata_and_resume_step(tmp_path):
     policy_transition = _build(
         {
@@ -148,6 +219,7 @@ def test_pickle_dump_retains_metadata_and_resume_step(tmp_path):
         interventions = pickle.load(f)
 
     assert [int(item["intervened"]) for item in replay] == [0, 1]
+    assert all(isinstance(item["timestamp_ns"], np.int64) for item in replay)
     assert [int(item["intervened"]) for item in interventions] == [1]
     np.testing.assert_allclose(
         interventions[0]["policy_actions"], [0.1, -0.2]

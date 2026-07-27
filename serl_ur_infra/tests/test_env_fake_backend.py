@@ -102,6 +102,9 @@ def main():
     # ---- reset: fake robot teleports, arrival check must pass ---- #
     obs, info = env.reset()
     assert np.allclose(backend.q, cfg.RESET_JOINTS, atol=cfg.RESET_TOLERANCE_RAD)
+    assert isinstance(info["timestamp_ns"], np.int64)
+    assert int(info["timestamp_ns"]) > 0
+    previous_timestamp_ns = int(info["timestamp_ns"])
     print("reset ok  q ->", np.round(backend.q, 3))
 
     # ---- obs sanity ---- #
@@ -122,6 +125,8 @@ def main():
         a = np.zeros(7, dtype=np.float32)
         a[0] = 1.0  # full-scale +x
         obs, r, done, trunc, info = env.step(a)
+        assert int(info["timestamp_ns"]) >= previous_timestamp_ns
+        previous_timestamp_ns = int(info["timestamp_ns"])
     elapsed = time.time() - t0
     dx = obs["state"]["tcp_pose"][0] - x0
     # governor caps at v_max (0.1 m/s) * 1 s of stepping
