@@ -2,17 +2,17 @@
 
 > 기준 시각: 2026-07-27 KST
 >
-> canonical 통합 브랜치/작업 위치: `feat/hil-rl-learner` / `/home/laptop3/gello_worktrees/hil-rl-learner`
+> canonical 통합 브랜치/작업 위치: `feat/gello-ur7e-humble-22.04` / `/home/laptop3/gello_software`
 >
 > 이번 후속 작업 시작 기준 HEAD: `c67c3278d8c6cb9bd0245a24c0595811118d12bb`
 
 ## 한눈에 보기
 
-- 실제 작업 위치는 `/home/laptop3/gello_worktrees/hil-rl-learner`, 단일 canonical 브랜치는 `feat/hil-rl-learner`이다. 이 브랜치의 선형 이력에 local actor adapter, 검증된 gRPC actor transport, server-authoritative protocol/receive server, learner foundation이 모두 들어 있다.
-- 통합 이력의 현재 기준점은 `c67c327` (`feat(hil): add local hybrid SAC learner foundation`)이다. 이전 단계 브랜치는 이 선형 이력의 중간 label일 뿐이며 새 작업을 계속할 위치가 아니다.
-- 친구가 작성한 remote inference split 초안은 `be0ffdc` (`wip(hil): snapshot remote inference split draft`)로 따로 스냅샷 보존했다. 이 커밋은 `feat/hil-rl-learner`의 ancestor가 아니며 merge/cherry-pick하지 않았다.
+- 실제 작업 위치는 `/home/laptop3/gello_software`, 단일 canonical 브랜치는 `feat/gello-ur7e-humble-22.04`이다. 이 브랜치의 선형 이력에 local actor adapter, 검증된 gRPC actor transport, server-authoritative protocol/receive server, learner foundation과 실제 checkpoint integration test가 모두 들어 있다.
+- 통합 이력의 현재 기준점은 `a01b665` (`test(hil): verify real learner checkpoint resume`)이다. 이전 단계 브랜치는 이 선형 이력의 중간 label일 뿐이며 local/remote에서 정리했다.
+- 친구가 작성한 remote inference split 초안은 `be0ffdc` (`wip(hil): snapshot remote inference split draft`)로 따로 스냅샷 보존했다. 이 커밋은 canonical lineage에 merge/cherry-pick하지 않았으며 원격 tag `archive/hil-grpc-actor-transport-wip-20260727`이 정확히 이 커밋을 가리킨다.
 - CPU JAX/JAXLIB `0.5.3` 환경에서 실제 `SACAgentHybridSingleArm` 생성, CTA update, policy publish, 전체 Flax train state checkpoint 저장·복원, 복원 후 추가 학습까지 통과했다.
-- `c67c327` 기준 전체 테스트는 기존 74개와 신규 19개를 합쳐 `93 passed`였다. 이번에 실제 agent checkpoint/resume/continue 절차를 opt-in integration test로 저장소에 고정했고, CPU JAX에서 `1 passed, 92 warnings in 41.56s`를 확인했다. 기본 전체 suite는 이 비싼 테스트를 skip하여 `93 passed, 1 skipped in 1.27s`다.
+- `c67c327` 기준 전체 테스트는 기존 74개와 신규 19개를 합쳐 `93 passed`였다. 이번에 실제 agent checkpoint/resume/continue 절차를 opt-in integration test로 저장소에 고정했고, 최종 통합 workspace의 CPU JAX에서 `1 passed, 92 warnings in 40.83s`를 확인했다. 기본 전체 suite는 이 비싼 테스트를 skip하여 `93 passed, 1 skipped in 1.31s`다.
 - learner 라이브러리 경계는 구현했지만 실행 CLI, receive server와 learner의 production 조립, robot wrapper chain 배선, 실제 W&B offline artifact 검증은 아직 남아 있다. 따라서 현재 코드를 Kanu나 실제 robot에서 바로 실행하면 안 된다.
 - replay buffer에 raw image 대신 image encoder feature vector를 저장하는 방향은 아래 10절의 **algorithm v2 후속 계획**으로 유지한다. 이번 actor/server/learner branch 통합에는 구현하지 않는다. 현재 upstream은 ResNet backbone 뒤의 visual head가 학습되므로, 최종 256-D feature 저장은 단순 캐시가 아니라 encoder 동결과 augmentation 변경을 포함하는 새 학습 구성이다.
 - 병렬 에이전트 3개가 작업 인벤토리, 코드·테스트, feature-buffer 설계를 각각 읽기 전용으로 검수했다. 검수에서 intervention 소수 표본 starvation, 불완전한 최신 checkpoint 선택, resume 객체 간 counter 불일치 가능성을 후속 수정 항목으로 확인했다.
@@ -38,12 +38,12 @@
 
 ### 2.1 Git worktree와 branch
 
-| 용도 | 디렉터리 | 브랜치 | 2026-07-27 통합 작업 시작 기준 HEAD | 처리 방침 |
+| 용도 | 디렉터리 또는 보존 위치 | 브랜치/tag | HEAD | 최종 상태 |
 | --- | --- | --- | --- | --- |
-| 원래 주 workspace | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | `dc25cbe403aec6b610a4634caede4687606a2c35` | learner 작업과 분리된 상태를 유지하고, 이 worktree의 별도 dirty 파일을 통합 커밋에 섞지 않는다. |
-| **canonical HIL-SERL 통합** | `/home/laptop3/gello_worktrees/hil-rl-learner` | `feat/hil-rl-learner` | `c67c3278d8c6cb9bd0245a24c0595811118d12bb` | actor/server/learner 후속 작업과 커밋은 여기서만 진행한다. |
-| receive server 중간 worktree | `/tmp/gello-hil-rl-receive-server` | `feat/hil-rl-receive-server` | `e42dbf3848f16a97cffe9ce9ca8ccfdfc2b4265b` | 커밋은 canonical 브랜치의 ancestor다. 별도 개발은 중단하고 branch/worktree 정리 대상으로 본다. |
-| 친구 WIP 보존 worktree | `/tmp/gello-hil-actor-adapter` | `feat/hil-grpc-actor-transport` | `be0ffdc95354d3206780b5245857f7c350a0dbeb` | stable transport `5709bb5` 위에서 따로 갈라진 WIP 스냅샷이다. canonical에 병합하지 않고 보존용으로만 취급한다. |
+| **canonical HIL-SERL 통합** | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | `a01b6652ea93971df229f1806c1540257fdfa2d1` | GitHub default branch와 로컬 작업 브랜치가 같은 commit을 가리킨다. actor/server/learner 후속 작업은 여기서만 진행한다. |
+| 이전 learner worktree | `/home/laptop3/gello_worktrees/hil-rl-learner` | 삭제된 `feat/hil-rl-learner` | `a01b6652ea93971df229f1806c1540257fdfa2d1` | canonical을 원격에 push한 뒤 루트 workspace로 옮기고 worktree와 local/remote alias를 제거했다. |
+| 이전 receive server worktree | 삭제된 `/tmp/gello-hil-rl-receive-server` | 삭제된 `feat/hil-rl-receive-server` | `e42dbf3848f16a97cffe9ce9ca8ccfdfc2b4265b` | canonical의 ancestor이므로 local/remote branch와 worktree를 제거했다. |
+| 친구 WIP archive | 원격 Git tag | `archive/hil-grpc-actor-transport-wip-20260727` | `be0ffdc95354d3206780b5245857f7c350a0dbeb` | WIP branch/worktree는 제거했지만 exact commit은 tag로 보존했다. canonical에는 병합하지 않았다. |
 
 canonical 브랜치에 들어 있는 안정 선형 이력은 다음과 같다.
 
@@ -53,9 +53,12 @@ dc25cbe  robot-local intervention metadata
       └─ ec91bef..5709bb5  gRPC remote actor transport + SSH smoke
           └─ 9cc994f..e42dbf3  server-authoritative protocol + receive server
               └─ c67c327  local hybrid SAC learner foundation
+                  └─ a01b665  real-agent checkpoint integration regression
 ```
 
-`feat/hil-actor-adapter`와 `feat/hil-rl-receive-server`는 위 선형 이력의 중간 commit을 가리키는 label이다. 이들을 따로 merge할 필요가 없다. 반면 `be0ffdc`는 `5709bb5`에서 갈라진 별도 WIP이므로 canonical lineage에 포함되지 않는다. 브랜치/worktree 정리 후에도 새 작업 기준은 오직 `feat/hil-rl-learner`다.
+`feat/hil-actor-adapter`, `feat/hil-grpc-actor-transport`, `feat/hil-rl-receive-server`, `feat/hil-rl-learner`는 정리 전 단계별 label이었다. 안정 커밋은 모두 canonical 선형 이력에 보존돼 있어 별도 merge가 필요하지 않다. `be0ffdc`만 `5709bb5`에서 갈라진 별도 WIP이므로 tag로 보존하고 canonical lineage에는 포함하지 않았다.
+
+GitHub의 기존 default branch가 `feat/gello-ur7e-humble-22.04`였고 현재 로그인 계정에는 default branch를 바꿀 admin 권한이 없었다. 두 원격 branch를 남기지 않기 위해 기존 default branch를 `a01b665`까지 **fast-forward**하고 임시 `feat/hil-rl-learner` alias를 삭제했다. force-push는 사용하지 않았다. 최종적으로 local actor, transport/server, learner는 하나의 local/remote branch에 있다.
 
 ### 2.2 third-party와 생성 코드
 
@@ -166,7 +169,7 @@ TensorFlow 전체 runtime은 설치하지 않았다. shim은 TensorFlow 기능�
 | `serl_ur_infra/tests/test_gripper_penalty.py` | 기본 penalty, 중복 open/close, intervention action 우선 |
 | `serl_ur_infra/tests/test_learner_data.py` | demo schema, LeRobot 거부, batch field, 50:50, startup 조건 |
 | `serl_ur_infra/tests/test_learner_policy_checkpoint.py` | atomic publish, bad snapshot 거부, learner fault 격리, fake-agent checkpoint, fake-W&B logging |
-| `serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py` | 실제 hybrid SAC CTA update → checkpoint → fresh template restore → action/state/RNG 비교 → 추가 CTA; environment variable로만 켜는 opt-in test. `1 passed, 92 warnings in 41.56s` |
+| `serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py` | 실제 hybrid SAC CTA update → checkpoint → fresh template restore → action/state/RNG 비교 → 추가 CTA; environment variable로만 켜는 opt-in test. `1 passed, 92 warnings in 40.83s` |
 
 ## 5. 현재 코드의 의도된 데이터 흐름
 
@@ -238,8 +241,8 @@ cache가 이미 존재하면서 SHA가 다르면 덮어쓰지 않고 실패한�
 | 기존 receive/actor suite | 74 passed | learner 변경 전 기준 회귀 |
 | 신규 learner/gripper/penalty suite | 19 passed | 이번 변경의 신규 자동 검증 |
 | `c67c327` 기준 전체 suite | `93 passed in 1.22s` | learner foundation 커밋 기준 localhost loopback 회귀 |
-| 현재 기본 전체 suite | `93 passed, 1 skipped in 1.27s` | opt-in 실 agent test를 기본 skip하므로 빠른 suite 유지 |
-| opt-in 실 agent checkpoint suite | `1 passed, 92 warnings in 41.56s` | CPU JAX에서 명시적으로 실행한 실제 hybrid SAC checkpoint/resume/continue |
+| 현재 기본 전체 suite | `93 passed, 1 skipped in 1.31s` | opt-in 실 agent test를 기본 skip하므로 빠른 suite 유지 |
+| opt-in 실 agent checkpoint suite | `1 passed, 92 warnings in 40.83s` | CPU JAX에서 명시적으로 실행한 실제 hybrid SAC checkpoint/resume/continue |
 | `git diff --check` | pass | 신규 opt-in test와 문서를 포함한 현재 변경에 whitespace 오류가 없음을 확인 |
 
 restricted sandbox에서 처음 실행했을 때는 `88 passed, 5 failed`였다. 실패 5개는 모두 `127.0.0.1:0` bind가 차단되어 발생한 gRPC loopback 테스트였다. 같은 코드를 localhost bind 권한으로 재실행해 93개 전부 통과했으므로 코드 assertion 실패로 판정하지 않는다.
@@ -305,24 +308,24 @@ resume 후 추가 학습 성공은 model/train-state가 이어진다는 뜻이�
 테스트 파일은 `serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py`이고, opt-in 스위치는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. CPU backend를 고정하고 JAX preallocation을 끄는 재현 명령은 다음과 같다.
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-rl-learner
+cd /home/laptop3/gello_software
 RUN_HIL_SERL_ACTUAL_CHECKPOINT=1 \
 JAX_PLATFORMS=cpu \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 PYTHONDONTWRITEBYTECODE=1 \
 PYTEST_ADDOPTS='-p no:cacheprovider' \
 MPLCONFIGDIR=/tmp/gello-hil-rl-matplotlib \
-PYTHONPATH=/home/laptop3/gello_worktrees/hil-rl-learner/serl_ur_infra \
+PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 /tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
   serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py
 ```
 
-최종 결과는 `1 passed, 92 warnings in 41.56s`다. 경고 92개를 숨기지 않고 결과에 그대로 기록한다. 테스트에서 다음을 확인했다.
+최종 결과는 `1 passed, 92 warnings in 40.83s`다. 경고 92개를 숨기지 않고 결과에 그대로 기록한다. 테스트에서 다음을 확인했다.
 
 - real `SACAgentHybridSingleArm`의 CTA update 후 checkpoint save/restore 성공
 - 전체 train-state leaf, deterministic/stochastic action, counters, learner/inference RNG의 restore 전후 exact equality
 - restore한 learner의 추가 update/publish/checkpoint 진행
-- opt-in하지 않은 기본 전체 suite의 `93 passed, 1 skipped in 1.27s`
+- opt-in하지 않은 기본 전체 suite의 `93 passed, 1 skipped in 1.31s`
 
 ### 7.6 아직 검증하지 않은 것
 
@@ -350,7 +353,7 @@ PYTHONPATH=/home/laptop3/gello_worktrees/hil-rl-learner/serl_ur_infra \
 - atomic policy snapshot, monotonic version, bad snapshot 거부
 - learner non-finite fault와 last-known-good policy 유지
 - full Flax train state checkpoint, checksum, fingerprint, overwrite 금지
-- 실제 agent save/load 및 resume 후 추가 update의 opt-in 자동 integration test (`1 passed, 92 warnings in 41.56s`)
+- 실제 agent save/load 및 resume 후 추가 update의 opt-in 자동 integration test (`1 passed, 92 warnings in 40.83s`)
 - JSONL 및 W&B adapter의 fake-module 단위 검증
 - protobuf 7.34.1 pure-Python compatibility와 TensorFlow annotation shim
 
@@ -695,7 +698,7 @@ episode gap, truncation, intervention route, out-of-order retry에서는 인접�
 ### 12.1 현재 worktree 확인
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-rl-learner
+cd /home/laptop3/gello_software
 git branch --show-current
 git rev-parse HEAD
 git status --short
@@ -705,20 +708,20 @@ git submodule status third_party/hil-serl
 ### 12.2 전체 자동 테스트
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-rl-learner
+cd /home/laptop3/gello_software
 PYTHONDONTWRITEBYTECODE=1 \
 PYTEST_ADDOPTS='-p no:cacheprovider' \
 MPLCONFIGDIR=/tmp/gello-hil-rl-matplotlib \
-PYTHONPATH=/home/laptop3/gello_worktrees/hil-rl-learner/serl_ur_infra \
+PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 /tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q serl_ur_infra/tests
 ```
 
-확인된 결과는 `93 passed, 1 skipped in 1.27s`다. skip 1개는 7.5절의 opt-in 실 agent checkpoint test다. loopback port를 금지하는 sandbox에서는 gRPC 5개가 bind 단계에서 실패할 수 있으므로 localhost bind 권한이 있는 환경에서 최종 판정한다.
+확인된 결과는 `93 passed, 1 skipped in 1.31s`다. skip 1개는 7.5절의 opt-in 실 agent checkpoint test다. loopback port를 금지하는 sandbox에서는 gRPC 5개가 bind 단계에서 실패할 수 있으므로 localhost bind 권한이 있는 환경에서 최종 판정한다.
 
 ### 12.3 asset 확인
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-rl-learner
+cd /home/laptop3/gello_software
 sha256sum third_party/hil-serl/examples/experiments/resnet10_params.pkl
 sha256sum /tmp/gello-hil-rl-learner-assets/resnet10_params.pkl
 ```
@@ -733,12 +736,12 @@ sed -n '1,220p' /tmp/actual-learner-resume-y_dfio4l/checkpoint_000000000001/meta
 sed -n '1,220p' /tmp/actual-learner-resume-y_dfio4l/checkpoint_000000000002/metadata.json
 ```
 
-`c67c327` 기준으로 실제 agent 통합 검증을 실행한 one-off Python 본문은 저장소에 없었다. 따라서 위 artifact 검사는 역사적 결과 확인용이다. 후속으로 `serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py`를 작성했고, 7.5절의 명령으로 `1 passed, 92 warnings in 41.56s`를 확인했다.
+`c67c327` 기준으로 실제 agent 통합 검증을 실행한 one-off Python 본문은 저장소에 없었다. 따라서 위 artifact 검사는 역사적 결과 확인용이다. 후속으로 `serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py`를 작성했고, 7.5절의 명령으로 `1 passed, 92 warnings in 40.83s`를 확인했다.
 
 ## 13. 다음 작업자가 지켜야 할 경계
 
-- 모든 변경은 `/home/laptop3/gello_worktrees/hil-rl-learner`와 `feat/hil-rl-learner`에서 이어간다.
-- `/home/laptop3/gello_software` 주 workspace의 별도 dirty 변경을 이 branch 커밋에 섞지 않는다.
+- 모든 변경은 `/home/laptop3/gello_software`와 `feat/gello-ur7e-humble-22.04`에서 이어간다.
+- 주 workspace에 이미 있던 별도 dirty 변경(`third_party/DynamixelSDK` 내부 상태와 `serl_ur_infra/HIL_SERL_STATUS_AND_NEXT.md`)을 HIL learner 커밋에 섞지 않는다.
 - `third_party/hil-serl`, `.proto`, generated protobuf 파일은 수정하지 않는다.
 - checkpoint를 overwrite, 삭제, pruning하지 않는다.
 - Kanu/robot에서 실행하기 전에 production wiring 미완료 항목을 먼저 해결한다.
@@ -754,4 +757,4 @@ sed -n '1,220p' /tmp/actual-learner-resume-y_dfio4l/checkpoint_000000000002/meta
 2. 코드·테스트 검수: 실제 updated agent checkpoint와 learner resume 후 continue 독립 검증, production wiring과 correctness gap 확인
 3. feature-buffer 설계 검수: upstream encoder의 frozen/trainable 경계, augmentation, memory estimate, fingerprint와 migration 계약 확인
 
-세 검수 모두 `third_party/hil-serl`을 수정하지 않았다. 현재 기본 전체 회귀는 localhost loopback 환경에서 `93 passed, 1 skipped in 1.27s`, opt-in 실 agent checkpoint 검증은 CPU JAX에서 `1 passed, 92 warnings in 41.56s`로 확정했다.
+세 검수 모두 `third_party/hil-serl`을 수정하지 않았다. 현재 기본 전체 회귀는 localhost loopback 환경에서 `93 passed, 1 skipped in 1.31s`, opt-in 실 agent checkpoint 검증은 CPU JAX에서 `1 passed, 92 warnings in 40.83s`로 확정했다.
