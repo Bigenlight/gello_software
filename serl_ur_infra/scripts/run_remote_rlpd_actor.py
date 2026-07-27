@@ -84,7 +84,11 @@ def _network_config(config: Any, args: argparse.Namespace) -> dict[str, Any]:
 def _build_actor_environment(config: Any, args: argparse.Namespace) -> Any:
     """Build the robot-local wrapper chain with an explicit task penalty."""
 
-    from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+    # Import from the package root, not gymnasium.wrappers.record_episode_statistics:
+    # gymnasium 1.0 moved the class into gymnasium.wrappers.common and deleted the
+    # old per-wrapper module, so the deep path raises ModuleNotFoundError on the
+    # gymnasium 1.2.0 we pin.  The package-root name is re-exported by both.
+    from gymnasium.wrappers import RecordEpisodeStatistics
 
     task_env = config.get_environment(
         fake_env=args.fake_env,
