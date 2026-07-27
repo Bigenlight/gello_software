@@ -22,7 +22,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=(
             "Write a deterministic SYNTHETIC ACCEPTANCE-ONLY canonical demo "
             "pickle. The learner server rejects this artifact for real "
-            "serving and accepts it only with --dry-run. Existing files are "
+            "serving and accepts it only with --dry-run or "
+            "--synthetic-e2e. Existing files are "
             "never overwritten."
         )
     )
@@ -49,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
                 "synthetic_transition_count": synthetic_count,
                 "warning": (
                     "SYNTHETIC ACCEPTANCE-ONLY: use as --demo-path only "
-                    "with run_rlpd_learner_server.py --dry-run"
+                    "with run_rlpd_learner_server.py --dry-run or "
+                    "--synthetic-e2e"
                 ),
             },
             sort_keys=True,

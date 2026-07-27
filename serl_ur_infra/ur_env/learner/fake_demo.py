@@ -3,7 +3,8 @@
 This helper is intentionally separate from production data collection.  It
 creates a tiny, trusted pickle for acceptance checks without a real robot demo.
 Every item carries a synthetic provenance marker, and the production learner
-CLI accepts the artifact only together with ``--dry-run``.
+CLI accepts the artifact only with ``--dry-run`` or the bounded
+``--synthetic-e2e`` acceptance mode.
 """
 
 from __future__ import annotations
