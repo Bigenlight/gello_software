@@ -10,18 +10,22 @@
 
 - Kanu learner server는 `127.0.0.1:50053`에만 bind하고 laptop은 SSH local forwarding으로 접속한다.
 - Kanu에서는 JAX/JAXLIB 0.5.3 CUDA 환경을 사용하고 CLI에 `--require-jax-backend gpu`를 반드시 준다.
-- fake canonical demo는 `--dry-run` 전용이다. CLI가 live serving에서 자동 거부한다.
-- 첫 순서는 fake demo 생성 → actual classifier/ResNet SHA 확인 → GPU dry-run이다.
-- live/bounded run에는 real canonical robot demo가 필요하다. fake marker를 제거하거나 검사를 우회하지 않는다.
-- checkpoint는 5,000 learner step마다 약 305 MiB가 추가되며 삭제·덮어쓰기·pruning하지 않는다. filesystem reserve 기본값은 2 GiB다.
+- fake canonical demo는 construction `--dry-run` 또는 bounded `--synthetic-e2e` acceptance에만 허용된다. production robot-data serving은 계속 자동 거부한다.
+- 첫 순서는 fake demo 생성 → actual classifier/ResNet SHA 확인 → GPU dry-run → bounded laptop→Kanu synthetic E2E다.
+- `--synthetic-e2e`는 target 1..10, fresh/restored step에서 exact +1, replay capacity 100 이상, exact 100 transition, all-synthetic demo, actor/run allowlist, bounded timeout을 강제한다. batch 256/training-starts 100/CTA 2를 유지하고 publish/checkpoint period만 1로 줄인다.
+- production bounded/continuous run에는 real canonical robot demo가 필요하다. fake marker를 제거하거나 검사를 우회하지 않는다.
+- production checkpoint는 5,000 learner step마다 약 305 MiB가 추가되며 삭제·덮어쓰기·pruning하지 않는다. synthetic E2E에서만 period 1이며 target을 1..10으로 제한한다. filesystem reserve 기본값은 2 GiB다.
 - replay/intervention buffer는 RAM-only다. process restart와 checkpoint resume가 replay를 복구하지 않는다.
-- 현재 코드는 raw image + random crop이다. no-aug GAP512 feature mode는 결정/구현 전이므로 Kanu 장기 run 전에 memory gate를 다시 확인한다.
+- external policy/classifier는 raw `uint8 (1,128,128,3)`를 사용하고, learner replay/demo는 frozen ResNet-10 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` current/next map을 저장한다. GAP은 없고 augmentation은 `none`이다.
+- trainable `SpatialLearnedEmbeddings/Dropout/Dense256/LayerNorm/tanh`는 sample time에 적용된다. frozen trunk의 online/target exact invariant와 target repin을 유지한다.
+- 기본 50k/10k ring camera tensor는 `7,864,320,000 B = 7.32421875 GiB`다. `--feature-memory-reserve-gib`를 포함한 startup RAM preflight가 fail-closed한다.
+- Kanu GPU actual classifier/agent production dry-run과 feature CTA smoke는 통과했다. laptop→SSH tunnel→Kanu fresh step 1 + process restart/resume step 2 synthetic learning E2E는 pre-hardware schema v1에서 통과했고, final unified schema v2 재검증은 pending이다. production robot E2E와 continuous learner도 아직 미검증이다.
 
 ---
 
 ## 1. 사전 조건
 
-이 PC의 실제 SSH alias는 `kanu`다. 2026-07-27 read-only preflight에서 접속, host RAM, GPU, 기존 `il` Python 환경을 확인했다. production learner dry-run 자체는 아직 실행하지 않았다.
+이 PC의 실제 SSH alias는 `kanu`다. 2026-07-27 read-only preflight에서 접속, host RAM, GPU, 기존 `il` Python 환경을 확인했다. 이후 기존 dirty detached repository를 건드리지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 일회성 tree를 구성해 GPU dry-run/CTA smoke를 수행했다.
 
 ```bash
 ssh -G kanu | sed -n '1,40p'
@@ -159,6 +163,19 @@ if test -e /home/junhyeong/.serl/resnet10_params.pkl; then
 fi
 ```
 
+### 1.4 final unified observation schema
+
+learner `8f242d8`의 Kanu E2E는 pre-hardware schema v1 interim run이다. hardware `6a0b127`을 통합한 final branch의 재검증은 다음 v2를 기준으로 한다.
+
+```text
+schema id: hil-serl-ur-canonical-observation-v2
+schema hash: 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903
+state group order: gripper_pose, tcp_force, tcp_pose, tcp_torque, tcp_vel
+gripper_position index: 0
+```
+
+shape `(1,19)`만 같다고 v1과 v2를 혼합하지 않는다. actor/server는 ordered schema hash를 pin하고 gripper는 `GRIPPER_POSITION_INDEX`/`gripper_position_from_state()`로만 읽는다. `state[0,-1]`은 v2에서 gripper가 아니다.
+
 ## 2. run directory와 disk preflight
 
 run마다 새 영속 directory를 사용한다. `/tmp`는 acceptance scratch에는 쓸 수 있지만 실제 checkpoint lineage에는 쓰지 않는다.
@@ -179,9 +196,28 @@ df -B1 "$HIL_RUN_ROOT"
 
 fresh run의 checkpoint root에는 기존 `checkpoint_*` entry가 없어야 한다. CLI가 root를 만들 수 있으므로 미리 만들 필요는 없다.
 
-checkpoint 하나의 local 실측 payload는 약 305 MiB다. 기본 5,000-step 주기이고 pruning하지 않는다. 예상 checkpoint 수에 payload 총량과 `--checkpoint-reserve-gib`를 더해 disk를 잡는다.
+checkpoint 하나의 payload는 약 305 MiB다. Kanu synthetic E2E step 1/2에서는 각각 `320,100,609 B`를 관측했다. production은 기본 5,000-step 주기이고 pruning하지 않는다. 예상 checkpoint 수에 payload 총량과 `--checkpoint-reserve-gib`를 더해 disk를 잡는다. synthetic E2E는 period 1이므로 target 1..10 제한을 우회하지 않는다.
 
 동일 checkpoint root에는 learner process 하나만 허용된다. `.learner-writer.lock`은 advisory lock metadata file이며 process 종료 후 파일 자체가 남아도 lock은 해제된다. 파일 존재 여부만 보고 임의 삭제하지 않는다.
+
+### 2.1 host RAM preflight
+
+`--feature-memory-reserve-gib`(기본 2)는 checkpoint disk reserve와 다른 **host RAM reserve**다. CLI는 raw demo를 feature로 변환하거나 ring을 할당하기 전에 다음을 계산한다.
+
+```text
+required = feature replay/intervention fixed tensors
+         + converted offline demo fixed tensors
+         + feature-memory reserve
+```
+
+기본 50k/10k의 replay/intervention fixed tensor는 `7,875,840,000 B`(camera `7,864,320,000 B` 포함)다. offline demo는 transition당 current/next, cam1/cam2 map을 추가한다. Linux `MemAvailable`이 required보다 작으면 할당 전에 실패한다.
+
+`--demo-extraction-batch-size`는 startup one-time trunk conversion의 temporary device/host batch를 제어한다. fake demo는 2, production default는 64를 사용하되 GPU memory가 부족하면 실험 기록을 남기고 줄인다. 이 값은 persistent pool size나 feature 의미를 바꾸지 않는다.
+
+```bash
+grep '^MemAvailable:' /proc/meminfo
+free -h
+```
 
 ## 3. fake acceptance demo 생성
 
@@ -207,13 +243,13 @@ sha256sum "$HIL_FAKE_DEMO"
 "synthetic_transition_count": 2
 ```
 
-이 파일은 다음 절의 `--dry-run`에만 사용한다.
+이 파일은 다음 절의 `--dry-run` 또는 5절의 bounded `--synthetic-e2e`에만 사용한다. 일반 production learner option없이 사용하지 않는다.
 
-현재 fake generator의 penalty 값은 `-0.02`로 고정돼 있다. 따라서 fake dry-run의 `HIL_GRASP_PENALTY`도 `-0.02`를 유지한다. 다른 task penalty의 synthetic artifact가 필요하면 generator를 명시적으로 확장하고 strict test를 추가해야 하며 marker나 pickle을 손으로 고치지 않는다.
+현재 fake generator의 penalty 값은 `-0.02`로 고정돼 있다. 따라서 fake dry-run/synthetic E2E의 `HIL_GRASP_PENALTY`도 `-0.02`를 유지한다. 다른 task penalty의 synthetic artifact가 필요하면 generator를 명시적으로 확장하고 strict test를 추가해야 하며 marker나 pickle을 손으로 고치지 않는다.
 
 ## 4. Kanu GPU dry-run
 
-dry-run은 실제 classifier, ResNet, hybrid SAC agent, production composition, fingerprint, JSONL/W&B offline을 준비하지만 gRPC port를 bind하거나 learner update를 실행하지 않는다.
+dry-run은 실제 classifier, ResNet, dual raw/cached hybrid SAC agent, raw demo의 one-time frozen-trunk conversion, feature RAM preflight, production composition, fingerprint, JSONL/W&B offline을 준비하지만 gRPC port를 bind하거나 learner update를 실행하지 않는다.
 
 ```bash
 cd "$HIL_KANU_REPO"
@@ -244,12 +280,35 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --resnet-cache "$HIL_RESNET_CACHE" \
   --replay-capacity 128 \
   --intervention-capacity 32 \
+  --feature-memory-reserve-gib 2 \
+  --demo-extraction-batch-size 2 \
   --grasp-penalty "$HIL_GRASP_PENALTY" \
   --require-jax-backend gpu \
   --dry-run
 ```
 
 성공 시 stdout에 `rlpd_learner_dry_run_passed`가 있어야 한다. JSONL과 W&B offline directory도 확인한다.
+
+2026-07-27 실제 검증은 Kanu 기존 repository가 dirty detached였기 때문에 그 tree를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 tree를 만들어 수행했다. `CUDA_VISIBLE_DEVICES=0`, `il` environment, 128/32 capacity에서 actual classifier + agent production dry-run이 통과했다. 아래 값은 `execution_scope` fingerprint field 추가 전의 역사적 dry-run 결과이며 현재 checkpoint resume identity로 사용하지 않는다.
+
+```text
+fingerprint: 8465e464b3f4eb638513eaa4ab3daea85a9435a9ddf47bdbf841a2c2f2aacce9
+```
+
+별도 실제 GPU feature CTA smoke도 통과했다.
+
+```text
+backend: gpu
+visible devices: 1
+feature shape: [1,4,4,512]
+gradient_step: 2
+augmentation_function: null  # Python None, no augmentation
+raw/cached deterministic action max abs: 0.00012614415027201176
+online trunk invariant: passed
+target trunk invariant after repin: passed
+```
+
+GPU fusion/materialization 경계 때문에 raw/cached action은 bitwise equality가 아니라 위 수치 차이로 동치했다. 이 결과는 construction + one-step CTA smoke이며 server bind, 50-step publish, 5,000-step checkpoint, continuous/robot E2E를 대체하지 않는다.
 
 ```bash
 grep -n 'learner_process_ready' "$HIL_JSONL_PATH"
@@ -259,16 +318,202 @@ find "$HIL_WANDB_DIR" -maxdepth 2 -type d -name 'offline-run-*' -print
 주의:
 
 - dry-run은 port를 bind하지 않는다.
-- fake demo로 CTA update/checkpoint를 검증하지 않는다.
-- fake demo를 그대로 두고 `--dry-run`만 제거하면 CLI가 의도적으로 실패해야 한다.
+- `--dry-run`은 fake demo를 로드하지만 CTA update/checkpoint를 검증하지 않는다. 그 범위는 5절 `--synthetic-e2e`가 담당한다.
+- fake demo를 그대로 두고 `--dry-run`만 제거하면 CLI가 의도적으로 실패해야 한다. live acceptance를 의도했다면 bounded `--synthetic-e2e` 계약을 모두 만족해야 한다.
 - dry-run도 classifier와 agent를 GPU에 올리므로 RSS/GPU memory를 기록한다.
-- dry-run은 replay나 update를 검증하지 않으므로 작은 128/32 capacity를 사용한다. 기본 50k/10k는 raw camera arrays의 virtual allocation이 약 10.99 GiB이므로 dry-run에서 쓸 이유가 없다. RSS와 함께 VMS도 기록한다.
+- dry-run은 replay나 update를 검증하지 않으므로 작은 128/32 capacity를 사용한다. 기본 50k/10k feature ring camera tensor는 7.32421875 GiB이므로 construction dry-run에서 할당할 이유가 없다. RSS와 함께 VMS도 기록한다.
 
 ```bash
 nvidia-smi
 ```
 
-## 5. real canonical demo가 준비된 뒤 bounded learner run
+## 5. bounded fake laptop→Kanu learning E2E
+
+이 mode는 사용자가 지정한 현재 milestone acceptance를 위한 것이다. robot actor를 대체하는 production mode가 아니며 다음을 fail-closed로 강제한다.
+
+- `--dry-run`과 `--synthetic-e2e`는 상호 배타적이다.
+- `--target-learner-step`은 1..10의 bounded 값이어야 한다.
+- target은 fresh/restored learner step에서 정확히 +1이어야 한다.
+- `--replay-capacity`는 production `training_starts=100` 이상이어야 한다.
+- `--synthetic-transition-count`는 production threshold와 같은 정확히 100이어야 하고 pass 시 insert count도 정확히 100이어야 한다.
+- `--synthetic-actor-id`/`--synthetic-run-id`와 exact match하는 actor/run만 service가 허용한다.
+- `--synthetic-timeout-s`는 1..1,800초의 유한 wall-clock deadline이다.
+- offline demo 전체가 `synthetic_acceptance_only=true`여야 하며 real/synthetic 혼합을 거부한다.
+- batch 256, online/demo 50:50, training starts 100, CTA 2, optimizer/model/discount은 production과 동일하다.
+- publish/checkpoint period만 acceptance에서 1 step으로 줄인다.
+- fingerprint `execution_scope`은 `synthetic_laptop_server_e2e_v1`이며 production robot scope와 resume 호환되지 않는다.
+- advertised policy model ID는 `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`으로 production robot ID와 다르다.
+- pass event는 server stop, worker join, process-stopped JSONL, logger close, full checkpoint load roundtrip/counter 검사, frozen online/target trunk invariant 검사까지 끝난 뒤에만 출력된다.
+
+### 5.1 fresh step 1 server
+
+dry-run 산출물과 섞지 않도록 새 run root를 쓴다. 아래 generator는 output을 overwrite하지 않으므로 완전히 새 `HIL_SYNTH_RUN_ID`를 지정한다.
+
+```bash
+export HIL_SYNTH_RUN_ID=UNIQUE_SYNTH_E2E_RUN_ID
+export HIL_SYNTH_RUN_ROOT="/absolute/persistent/path/hil-serl-runs/$HIL_SYNTH_RUN_ID"
+export HIL_SYNTH_CHECKPOINT_ROOT="$HIL_SYNTH_RUN_ROOT/checkpoints"
+export HIL_SYNTH_WANDB_DIR="$HIL_SYNTH_RUN_ROOT/wandb"
+export HIL_SYNTH_JSONL_PATH="$HIL_SYNTH_RUN_ROOT/logs/learner.jsonl"
+export HIL_SYNTH_RESNET_CACHE="$HIL_SYNTH_RUN_ROOT/assets/resnet10_params.pkl"
+export HIL_SYNTH_FAKE_DEMO="$HIL_SYNTH_RUN_ROOT/fake-canonical-demo.pkl"
+
+mkdir -p "$HIL_SYNTH_RUN_ROOT/logs" \
+  "$HIL_SYNTH_RUN_ROOT/wandb" \
+  "$HIL_SYNTH_RUN_ROOT/assets"
+
+cd "$HIL_KANU_REPO"
+PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra" \
+"$HIL_KANU_PYTHON" \
+  serl_ur_infra/scripts/generate_fake_canonical_demo.py \
+  --output "$HIL_SYNTH_FAKE_DEMO"
+```
+
+Kanu terminal에서 다음 server를 시작한다. 100 transition이 들어오기 전까지 policy version 0을 serving하며 learner는 기다린다.
+
+```bash
+cd "$HIL_KANU_REPO"
+
+CUDA_VISIBLE_DEVICES="$HIL_GPU_INDEX" \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+WANDB_SILENT=true \
+WANDB_DISABLE_CODE=true \
+PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/serl_launcher" \
+"$HIL_KANU_PYTHON" \
+  serl_ur_infra/scripts/run_rlpd_learner_server.py \
+  --host 127.0.0.1 \
+  --port 50053 \
+  --classifier-checkpoint "$HIL_CLASSIFIER" \
+  --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
+  --reward-threshold 0.85 \
+  --reward-model-id cube-in-cup-checkpoint-150 \
+  --demo-path "$HIL_SYNTH_FAKE_DEMO" \
+  --checkpoint-root "$HIL_SYNTH_CHECKPOINT_ROOT" \
+  --checkpoint-reserve-gib 2 \
+  --jsonl-path "$HIL_SYNTH_JSONL_PATH" \
+  --wandb-dir "$HIL_SYNTH_WANDB_DIR" \
+  --wandb-mode offline \
+  --wandb-project hil-serl \
+  --run-name "$HIL_SYNTH_RUN_ID-step-1" \
+  --hil-serl-root "$HIL_KANU_REPO/third_party/hil-serl" \
+  --resnet-source "$HIL_RESNET_SOURCE" \
+  --resnet-cache "$HIL_SYNTH_RESNET_CACHE" \
+  --replay-capacity 128 \
+  --intervention-capacity 32 \
+  --feature-memory-reserve-gib 2 \
+  --demo-extraction-batch-size 2 \
+  --grasp-penalty -0.02 \
+  --max-workers 4 \
+  --max-message-bytes 16777216 \
+  --require-jax-backend gpu \
+  --target-learner-step 1 \
+  --poll-interval 0.1 \
+  --synthetic-actor-id fake-e2e-actor \
+  --synthetic-run-id "$HIL_SYNTH_RUN_ID-fresh" \
+  --synthetic-transition-count 100 \
+  --synthetic-timeout-s 300 \
+  --synthetic-e2e
+```
+
+### 5.2 laptop tunnel과 fake actor
+
+laptop의 별도 terminal에서 tunnel을 유지한다.
+
+```bash
+ssh -N -T -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:50053:127.0.0.1:50053 \
+  kanu
+```
+
+server에 `rlpd_learner_server_ready`가 출력된 뒤 laptop의 검증할 commit checkout에서 fake actor를 실행한다. 이 script는 robot env를 열지 않고 canonical raw observation을 gRPC로 보내는 acceptance tool이다. synthetic-only model ID `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`, observation schema, reward authority/model을 inference 전에 pin한다.
+
+```bash
+export HIL_LAPTOP_REPO=/home/laptop3/gello_software
+export HIL_SYNTH_RUN_ID=THE_EXACT_SAME_SYNTH_E2E_RUN_ID_USED_ON_KANU
+
+cd "$HIL_LAPTOP_REPO"
+PYTHONPATH="$HIL_LAPTOP_REPO/serl_ur_infra" \
+python serl_ur_infra/scripts/run_fake_e2e_actor.py \
+  --target 127.0.0.1:50053 \
+  --actor-id fake-e2e-actor \
+  --run-id "$HIL_SYNTH_RUN_ID-fresh" \
+  --transition-count 100 \
+  --expected-start-policy-version 0 \
+  --expected-reward-model-id cube-in-cup-checkpoint-150 \
+  --grasp-penalty -0.02 \
+  --timeout-s 30 \
+  --max-response-age-s 120
+```
+
+actor는 exactly 100 transition ACK/replay insert를 확인한다. server는 실제 batch 256 CTA를 수행한 뒤 다음을 만족해야 exit 0으로 종료한다.
+
+```text
+event: rlpd_learner_synthetic_e2e_passed
+learner_step: 1
+gradient_step: 2
+policy_version: 1
+checkpoint: checkpoint_000000000001
+replay_size: 100
+checkpoint_roundtrip_verified: true
+```
+
+### 5.3 fresh process resume to step 2
+
+같은 Kanu run root, classifier, demo, feature contract, capacity와 execution scope를 유지한다. 5.1의 server command를 fresh process에서 다시 실행하되 다음을 바꾼다.
+
+```text
+--run-name "$HIL_SYNTH_RUN_ID-step-2"
+--synthetic-run-id "$HIL_SYNTH_RUN_ID-resume"
+--resume-latest
+--target-learner-step 2
+```
+
+`--synthetic-e2e`는 계속 필수다. replay는 checkpoint에 없는 RAM-only이므로 새 process에서 100 transition을 다시 보내야 한다. laptop actor command에서 다음을 바꾸어 실행한다.
+
+```text
+--run-id "$HIL_SYNTH_RUN_ID-resume"
+--expected-start-policy-version 1
+```
+
+resume server의 첫 action은 policy version 1이어야 하고 다음 최종 상태로 exit 0해야 한다.
+
+```text
+event: rlpd_learner_synthetic_e2e_passed
+learner_step: 2
+gradient_step: 4
+policy_version: 2
+checkpoint: checkpoint_000000000002
+replay_size: 100
+checkpoint_roundtrip_verified: true
+```
+
+### 5.4 2026-07-27 schema v1 interim 실측 결과
+
+Kanu GPU actual classifier/agent server와 laptop3 SSH tunnel/actor를 사용한 fresh + resume 두 process가 통과했다.
+
+```text
+fingerprint:
+defda67b4463526a6aca4fb397327ff01b93ffd07b9250cc538a46b105bf96cb
+
+fresh:
+  transitions accepted: 100
+  begin RTT max/mean: 91.158068 / 63.2926349 ms
+  learner/gradient/policy: 1 / 2 / 1
+  checkpoint roundtrip/trunk invariant: passed
+
+resume fresh process:
+  initial served policy: 1
+  new transitions accepted: 100
+  begin RTT max/mean: 95.694507 / 64.40843136 ms
+  learner/gradient/policy: 2 / 4 / 2
+  checkpoint roundtrip/trunk invariant: passed
+```
+
+두 JSONL의 learner update loss는 모두 finite였다. replay 100/offline demo 2에서 batch 256의 online/demo 128:128 샘플링이 확인됐고 `policy_published`, `checkpoint_saved`, `learner_process_stopped(exit_code=0)` event가 모두 존재했다. 최종 pass stdout event는 gRPC/worker/logger cleanup 후 checkpoint full-load roundtrip과 trunk invariant을 통과한 경우에만 `checkpoint_roundtrip_verified=true`로 출력됐다.
+
+이 결과는 learner staging commit `8f242d8`의 pre-hardware canonical schema v1 interim 근거다. hardware commit `6a0b127`은 schema ID를 v2, gripper index를 0, hash를 `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`으로 바꾸므로 위 fingerprint/checkpoint는 final unified branch에서 authoritative하지 않다. merge 후 5.1∼5.3을 v2로 다시 실행하고 fingerprint/RTT/counter/checkpoint/test count를 이 블록에 교체한다.
+
+## 6. real canonical demo가 준비된 뒤 bounded learner run
 
 이 절은 fake demo로 실행하면 안 된다. strict loader를 통과하는 실제 EEF-space canonical robot demo path를 지정한다.
 
@@ -320,6 +565,8 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --resnet-cache "$HIL_RESNET_CACHE" \
   --replay-capacity 50000 \
   --intervention-capacity 10000 \
+  --feature-memory-reserve-gib 2 \
+  --demo-extraction-batch-size 64 \
   --grasp-penalty "$HIL_GRASP_PENALTY" \
   --max-workers 4 \
   --max-message-bytes 16777216 \
@@ -330,9 +577,9 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
 
 server는 online replay가 100개에 도달할 때까지 policy version 0으로 inference/ingress를 제공하며 학습을 기다린다. stdout의 `rlpd_learner_server_ready`를 확인한 뒤 laptop tunnel과 actor를 시작한다.
 
-현재 raw replay 기본 capacity의 camera arrays만 약 10.99 GiB가 될 수 있다. GAP512 feature mode가 구현되기 전에 이 run을 한다면 Kanu host RAM을 먼저 확인하거나 승인된 더 작은 capacity를 명시한다. capacity를 바꾸면 실험 기록에 남긴다.
+기본 capacity의 feature camera tensor는 정확히 `7,864,320,000 B = 7.32421875 GiB`다. CLI는 이 ring에 offline demo feature tensor와 `--feature-memory-reserve-gib` 값을 더해 할당 전 `MemAvailable`을 검사한다. Python/JAX/XLA/classifier 오버헤드는 reserve 정책으로 별도 여유를 잡는다. capacity나 reserve를 바꾸면 실험 기록에 남긴다.
 
-## 6. SSH loopback tunnel
+## 7. SSH loopback tunnel
 
 Kanu server는 loopback에만 bind된다. laptop terminal에서 다음 tunnel을 유지한다.
 
@@ -344,7 +591,7 @@ ssh -N -T -o ExitOnForwardFailure=yes \
 
 다른 local process가 50053을 쓰고 있으면 양쪽에서 비어 있는 다른 port를 선택하고 server `--port`, tunnel 두 port, actor `--server-port`를 모두 같은 값으로 바꾼다.
 
-## 7. laptop actor
+## 8. laptop robot actor
 
 실제 task config module은 `CONFIG_MAPPING`을 export하고 해당 config/environment에 `GRASP_PENALTY`가 있어야 한다. run 시작 전 `HIL_GRASP_PENALTY`를 task에서 승인된 값으로 설정하고 actor config와 server CLI가 같은지 확인한다. server는 offline/online data에서 `0` 또는 그 값만 허용한다. reward/termination은 Kanu classifier가 authoritative하다.
 
@@ -360,8 +607,8 @@ python serl_ur_infra/scripts/run_remote_rlpd_actor.py \
   --server-port 50053 \
   --timeout-s 0.6 \
   --max-response-age-s 0.8 \
-  --observation-schema-hash 625c6933a03fca4b9a306788c4846cc2cd10179d02dec86740c9570170d6d515 \
-  --expected-model-id hil-serl-hybrid-sac-resnet10 \
+  --observation-schema-hash 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903 \
+  --expected-model-id hil-serl-hybrid-sac-resnet10-trunk-cache-v1 \
   --expected-reward-authority server_classifier \
   --expected-reward-model-id cube-in-cup-checkpoint-150
 ```
@@ -372,14 +619,14 @@ python serl_ur_infra/scripts/run_remote_rlpd_actor.py \
 
 실제 robot 실행은 workspace, camera streams, GELLO intervention, reset/fault, action limits를 operator가 확인한 뒤 진행한다.
 
-## 8. resume
+## 9. production robot lineage resume
 
-### 8.1 같은 lineage의 최신 valid checkpoint
+### 9.1 같은 lineage의 최신 valid checkpoint
 
 step 5,000에서 끝난 같은 root를 step 10,000까지 이어갈 때:
 
 ```bash
-# 5절 command와 같은 immutable classifier/demo/config 옵션을 그대로 사용한다.
+# 6절 command와 같은 immutable classifier/demo/config 옵션을 그대로 사용한다.
 # 아래 세 옵션만 resume/target 관점에서 달라진다.
 --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
 --resume-latest \
@@ -388,9 +635,11 @@ step 5,000에서 끝난 같은 root를 step 10,000까지 이어갈 때:
 
 fingerprint에는 classifier와 demo SHA도 포함되므로 artifact가 바뀌면 resume가 실패해야 정상이다.
 
+이 절은 `execution_scope=production_robot_data_v1`인 production lineage용이다. 5절 synthetic checkpoint는 `synthetic_laptop_server_e2e_v1`이므로 production option으로 resume할 수 없다. synthetic step 1→2 resume는 5.3의 bounded 절차만 사용한다.
+
 `--resume-latest`와 explicit `--resume-path` 모두 `completion.json`이 있는 complete checkpoint만 허용한다. library에는 one-off legacy migration용 markerless load 옵션이 있지만 production CLI에는 노출되지 않는다.
 
-### 8.2 explicit checkpoint에서 새 lineage root로 복구
+### 9.2 explicit checkpoint에서 새 lineage root로 복구
 
 더 높은 incomplete/damaged `checkpoint_*` entry가 있거나 다른 root의 checkpoint를 사용하려면 기존 entry를 삭제하지 않는다. 새 빈 output root를 만들고 explicit source를 지정한다.
 
@@ -398,7 +647,7 @@ fingerprint에는 classifier와 demo SHA도 포함되므로 artifact가 바뀌�
 export HIL_RESUME_SOURCE=/absolute/old/run/checkpoints/checkpoint_000000005000
 export HIL_RECOVERY_ROOT=/absolute/persistent/path/hil-serl-runs/RECOVERY_RUN_ID/checkpoints
 
-# 5절의 전체 immutable 옵션과 함께 사용한다.
+# 6절의 전체 immutable 옵션과 함께 사용한다.
 --checkpoint-root "$HIL_RECOVERY_ROOT" \
 --resume-path "$HIL_RESUME_SOURCE" \
 --target-learner-step 10000
@@ -406,7 +655,7 @@ export HIL_RECOVERY_ROOT=/absolute/persistent/path/hil-serl-runs/RECOVERY_RUN_ID
 
 기존 incomplete directory도 조사 증거이므로 자동 삭제하지 않는다.
 
-## 9. checkpoint와 log 확인
+## 10. checkpoint와 log 확인
 
 ```bash
 find "$HIL_CHECKPOINT_ROOT" -maxdepth 2 -type f \
@@ -426,13 +675,15 @@ completion.json
 
 `completion.json`은 마지막 commit marker다. 파일을 손으로 수정하거나 marker를 복제하지 않는다.
 
-## 10. fault와 shutdown
+## 11. fault와 shutdown
 
-### 10.1 주요 stdout event
+### 11.1 주요 stdout event
 
 | event | 의미 | 조치 |
 | --- | --- | --- |
 | `rlpd_learner_server_ready` | server/worker 시작 | tunnel/actor 시작 가능 |
+| `rlpd_learner_synthetic_e2e_passed` | bounded synthetic target/counters/checkpoint 검증 완료 | exit code 0, JSONL/checkpoint 수집 |
+| `rlpd_learner_synthetic_e2e_failed` | synthetic target/counter/checkpoint 계약 불충족 | exit code 6 이상, robot에 연결하지 말고 산출물 수집 |
 | `rlpd_learner_worker_fault` | learner가 fault, last-known-good policy serving 중 | actor를 안전 정지하고 JSONL/checkpoint/GPU 상태 수집 |
 | `rlpd_learner_actor_service_fault` | inference/classifier/ingress service fault | process exit code 3 예상, actor fail-stop 확인 |
 | `rlpd_learner_waiting_for_worker_shutdown` | current JAX update 종료 대기 | GPU/process 상태 확인, 무한 대기 시 escalation |
@@ -440,7 +691,7 @@ completion.json
 
 continuous run의 learner fault는 process를 즉시 종료하지 않고 last-known-good policy를 계속 제공한다. 현재 gRPC health에 degraded learner 상태가 표시되지 않으므로 stdout/JSONL event monitor가 필수다.
 
-### 10.2 정상 종료
+### 11.2 정상 종료
 
 먼저 learner terminal에 한 번 `Ctrl-C`를 보내거나 process에 `SIGTERM`을 보낸다. gRPC를 닫고 non-daemon learner worker가 current update를 끝낼 때까지 기다린다.
 
@@ -455,30 +706,48 @@ JAX/native backend가 hang하면 join이 계속될 수 있다. 즉시 `SIGKILL`�
 
 강제 종료는 operator escalation 뒤 수행한다. replay RAM 내용은 복구되지 않으며 incomplete checkpoint는 삭제하지 않는다.
 
-## 11. 현재 허용하지 않는 것
+## 12. 현재 허용하지 않는 것
 
-- fake demo를 live learner에 사용
+- fake demo를 bounded `--synthetic-e2e` 외의 live learner에 사용
+- `--synthetic-e2e`에 real/synthetic 혼합 demo, restored step +1이 아닌 target, target 0/음수/11 이상, replay capacity 100 미만, transition count 100 이외, timeout 1..1,800초 범위 밖을 사용
+- allowlist와 다른 actor/run ID로 synthetic server에 접속하거나 production model ID를 synthetic actor에 pin
+- synthetic E2E checkpoint를 production robot scope로 resume하거나 그 반대로 사용
 - server를 `0.0.0.0`에 bind
 - `--require-jax-backend cpu`로 Kanu production 실행
 - checkpoint overwrite, rename 재사용, manual completion marker 생성
 - markerless legacy checkpoint를 production CLI에서 resume
 - automatic checkpoint pruning/delete
 - fingerprint가 다른 classifier/demo/config로 resume
-- raw checkpoint를 미래 GAP512 checkpoint로 자동 migration
+- 기존 raw/random-crop checkpoint를 frozen-trunk/no-aug checkpoint로 자동 migration
 - shared Kanu environment를 즉석 upgrade
 - learner fault event를 무시한 채 robot actor 계속 운용
 
-## 12. GAP512 전환 전 메모
+## 13. frozen-trunk feature 불변 계약
 
-현재 command는 raw-pixel `random_crop_pad4` contract다. 향후 no-augmentation GAP512가 승인되면 다음 항목이 바뀌므로 이 runbook도 함께 versioning해야 한다.
+현재 command의 run contract는 `frozen_trunk_feature_hybrid_sac_v1`이다.
 
-- demo schema와 offline conversion command
-- replay observation keys/dtypes/shapes
-- capacity별 host RAM 계산
-- agent visual module과 optimizer target
-- encoder fingerprint와 backend pin
-- run contract revision
-- raw classifier → feature ingress ordering
-- checkpoint compatibility rule
+```text
+external policy/classifier:
+  state float32 (1,19)
+  cam1/cam2 uint8 (1,128,128,3)
 
-그 전까지 fake dry-run은 가능하지만, 기본 raw capacity의 장시간 Kanu learner는 메모리 승인 없이 시작하지 않는다.
+learner replay/demo current and next:
+  state float32 (1,19)
+  cam1/cam2 float32 (1,4,4,512)
+
+feature cut:
+  pretrained_resnet10.stop_gradient
+pooling:
+  none
+augmentation:
+  none
+model id:
+  production: hil-serl-hybrid-sac-resnet10-trunk-cache-v1
+  synthetic:  hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1
+```
+
+`SpatialLearnedEmbeddings(8)`, `Dropout(0.1)`, `Dense(256)`, `LayerNorm`, `tanh`는 feature에 포함되지 않으며 sample time의 현재 trainable weight로 실행한다. replay/demo에 raw image, GAP512, 또는 trainable 256-D head 출력을 저장하지 않는다.
+
+offline raw demo는 startup에 `--demo-extraction-batch-size`로 verified trunk를 한 번만 통과하고, online transition은 classifier finalize 후 current/next를 encode한다. long-lived pool/ring은 raw image array를 보유하지 않는다.
+
+fingerprint는 feature revision, shape/dtype/cut point, augmentation, ResNet SHA, classifier/demo/config과 execution scope을 묶는다. production robot scope는 `production_robot_data_v1`, bounded synthetic scope는 `synthetic_laptop_server_e2e_v1`이다. 두 scope, 기존 raw/random-crop lineage, 다른 encoder weight의 checkpoint는 서로 resume 불가다. online trunk은 verified initial tree와 exact equal이어야 하고 target trunk은 CTA candidate마다 verified tree로 repin한 뒤 검사한다.

@@ -1,5 +1,19 @@
 # HIL-SERL receive server milestone
 
+> Historical receive-only milestone. The current production learner keeps the
+> external raw observation schema, but stores explicit current/next frozen
+> ResNet-10 trunk maps (`float32 (1,4,4,512)` per camera), uses no pixel
+> augmentation, and serves model ID
+> `hil-serl-hybrid-sac-resnet10-trunk-cache-v1`. See
+> [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)
+> and [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md). Commands
+> below describe the older receive-only server and are not the production
+> learner launch command. The current bounded fake-data learning acceptance
+> uses `run_rlpd_learner_server.py --synthetic-e2e` together with
+> `run_fake_e2e_actor.py`; it performs real feature replay, CTA updates, policy
+> publication, checkpointing, and fresh-process resume. Do not confuse that
+> workflow with the receive-only synthetic smoke described below.
+
 한국어 구현·검증·인수인계 요약은
 [HIL_RLPD_RECEIVE_SERVER_KO.md](./HIL_RLPD_RECEIVE_SERVER_KO.md)를 참고한다.
 

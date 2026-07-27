@@ -6,7 +6,9 @@
 > ⚠️ **UNTESTED SKELETON** — 실기 경로는 `config.DRY_RUN=True`(명령 미발행)가 기본.
 > 검증 전까지 실기 대상 사용 금지.
 
-HIL-SERL actor/server/learner의 canonical 통합 브랜치, 현재 검증 범위, checkpoint 상태, 브랜치 정리 결과와 raw-image→feature-vector algorithm v2 후속 설계는 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)를 기준으로 한다. 새 HIL-SERL 작업은 `/home/laptop3/gello_software`의 `feat/gello-ur7e-humble-22.04`에서 계속한다.
+HIL-SERL actor/server/learner의 통합 상태, checkpoint, branch/worktree, Kanu 검증, frozen-trunk feature replay, bounded fake-data learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)를 기준으로 한다. 현재 구현 작업 위치는 `/home/laptop3/gello_worktrees/hil-production-learner`의 `feat/hil-production-learner`이며, 검증·commit 후 canonical `feat/gello-ur7e-humble-22.04`에 통합한다.
+
+`scripts/run_fake_e2e_actor.py`는 robot를 제어하는 actor가 아니라 `--synthetic-e2e` Kanu learner에 canonical raw fake observation 100개를 보내 gRPC→classifier→feature replay→CTA→publish→checkpoint→fresh-process resume를 검증하는 acceptance tool이다. server는 exact actor/run ID, exact 100 inserts, bounded timeout을 강제하고 synthetic-only model ID를 advertise한다. cleanup 후 full checkpoint roundtrip/trunk invariant까지 통과해야 pass한다. synthetic checkpoint는 fingerprint/model scope가 다르므로 production robot lineage에 사용할 수 없다.
 
 ## 구조
 
@@ -77,11 +79,12 @@ HIL-SERL actor/server/learner의 canonical 통합 브랜치, 현재 검증 범�
 - [ ] `GelloIntervention._leader_T`에 TCP_OFFSET 배선 (config는 있음, 현재 플랜지 기준)
 - [ ] 로봇 노트북에서 mock 하드웨어 검증 (QoS `VERIFY(hw)` 주석 참고, 그리퍼 방향 육안 확인)
 - [ ] per-task config 예제 (`examples/experiments/<task>/config.py` 형식)
-- [ ] **★ RLPD learner를 GPU 서버(ssh alias `kanu_junhyeong`)에 구축**
-      — JAX(cuda12) + serl_launcher + agentlace 환경(또는 Docker, `deploy/remote_diffusion` 패턴 재사용),
-      SSH 터널 포워딩을 agentlace 포트 2개(5588 데이터 업로드 / 5589 파라미터 broadcast)로,
-      actor(로봇 노트북)는 `--learner` 없이 `--ip 127.0.0.1`로 접속.
-      기존 remote-diffusion Docker/프리플라이트/런북 자산 재사용 (gRPC 코드는 제외)
+- [x] **★ Kanu bounded synthetic learning acceptance**
+      — 실제 SSH alias `kanu`, JAX/JAXLIB 0.5.3 GPU actual classifier/agent, laptop3 SSH tunnel을 사용했다.
+      fresh 100 transition → step 1/gradient 2/policy 1/checkpoint 1, fresh process resume → 새 100 transition → step 2/gradient 4/policy 2/checkpoint 2가 통과했다.
+- [ ] **Kanu production robot/continuous acceptance**
+      — 남은 범위는 real canonical demo, 기본 50-step publish/5,000-step checkpoint, 장시간 memory/contention, robot E2E다.
+      정확한 명령과 feature RAM gate는 `HIL_SERL_KANU_RUNBOOK_KO.md`를 따른다.
 
 ## RViz fake RL 테스트 (로봇 노트북, 실기 리스크 0)
 

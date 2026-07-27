@@ -16,10 +16,12 @@
 - robot actor의 실제 실행 action을 기준으로 `grasp_penalty`를 생성하는 wrapper도 두 actor entrypoint에 배선됐다. learner ingress는 penalty 누락을 허용하지 않는다.
 - 실제 `SACAgentHybridSingleArm`을 사용해 CTA update → publish → checkpoint → fresh agent restore → production composition 재조립 → action/RNG/counter 확인 → 추가 update/checkpoint까지 검증했다.
 - 실제 reward classifier checkpoint는 로컬에서 SHA 검증, load, warm-up까지 성공했다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했다.
-- fake canonical demo generator가 추가됐다. 이 artifact는 **acceptance `--dry-run` 전용**이며 production serving에는 사용할 수 없도록 CLI가 거부한다.
-- current hardening 뒤 fresh process 기본 전체 suite는 `158 passed, 1 skipped, 6 warnings in 2.59s`다. skip 1개인 실제 agent checkpoint/resume test도 별도로 opt-in 실행해 통과했다.
-- 아직 Kanu GPU 실제 learner run, 실제 robot/task/camera E2E, 장시간 GPU contention/latency, 운영 heartbeat가 검증되지 않았다. 따라서 “production-shaped 코드”는 맞지만 “실기 운용 승인 완료” 상태는 아니다.
-- 현재 replay는 raw image와 random-crop augmentation을 사용한다. 사용자가 요청한 기본 no-augmentation feature buffer는 아직 구현되지 않았다. **GAP512 cut point와 전체 freeze 계약을 먼저 확정해야 한다.**
+- fake canonical demo generator가 추가됐다. 이 raw artifact는 construction `--dry-run` 또는 명시적으로 bounded된 `--synthetic-e2e` acceptance에만 허용된다. 일반 robot-data learner serving은 계속 거부한다.
+- frozen-trunk + synthetic E2E 변경 뒤 fresh-process 기본 전체 suite는 `200 passed, 4 skipped, 6 warnings in 2.82s`다. 실제 frozen-trunk agent `2 passed`, agent checkpoint/resume `1 passed`, 실제 local fake E2E `1 passed`를 별도 opt-in 통과했다.
+- 사용자가 현재 milestone 완료 조건으로 지정한 **fake data laptop→SSH tunnel→Kanu 전체 learning E2E**는 pre-hardware schema v1에서 fresh step 1 + fresh-process resume step 2까지 통과했다. 다만 hardware branch 통합이 canonical state layout을 v2로 바꾸므로, 최종 통합 branch의 v2 fresh/resume 재검증이 완료 조건이다.
+- 아직 실제 robot/task/camera E2E, production 50-step publish/5,000-step checkpoint bounded run, 장시간 GPU contention/latency, 운영 heartbeat는 검증되지 않았다. 따라서 현재 fake-data milestone은 완료됐지만 “실기 운용 승인 완료” 상태는 아니다.
+- external policy/classifier는 canonical raw `uint8 (1,128,128,3)` image를 계속 받지만, replay/demo에는 frozen ResNet-10의 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` map의 current/next만 저장한다. GAP은 적용하지 않고 augmentation은 `none`이다.
+- `SpatialLearnedEmbeddings(8) -> Dropout(0.1) -> Dense(256) -> LayerNorm -> tanh`는 동결하지 않았다. learner가 feature batch를 꺼낼 때 현재 weight로 적용하므로 critic/grasp critic CTA update가 유지된다.
 - checkpoint만 영속화되고 replay/intervention buffer는 RAM-only다. checkpoint는 덮어쓰기·삭제·자동 pruning을 하지 않는다.
 
 ---
@@ -36,13 +38,15 @@
 | actor gripper penalty wiring | 구현·자동 검증 |
 | classifier 실제 checkpoint local restore | 로컬 실제 artifact 검증 및 회귀 테스트 |
 | JSONL + 실제 W&B offline artifact | 자동 검증 |
-| fake canonical demo | 생성기·strict loader·dry-run-only gate 자동 검증 |
-| Kanu GPU dry-run | 미검증 |
+| fake canonical demo | 생성기·strict loader·dry-run/synthetic-E2E scope gate 자동 검증 |
+| Kanu GPU production dry-run | actual classifier/agent, feature demo conversion, 128/32 RAM preflight 통과 |
+| Kanu GPU feature CTA smoke | 1 learner step/2 gradient step, raw/cached action, trunk invariant 통과 |
+| laptop→Kanu fake learning E2E | schema v1 fresh/resume 통과; final unified schema v2 재검증 필수 |
 | Kanu GPU continuous learner | 미검증 |
 | 실제 robot actor → Kanu learner E2E | 미검증 |
-| feature/GAP512 replay | 설계 결정 대기, 미구현 |
+| frozen-trunk feature replay/demo | 구현·자동 검증; Kanu GPU dry-run/CTA smoke 통과 |
 
-즉, 코드의 핵심 경계와 실제 agent state 복원은 확인했지만 GPU 서버와 로봇을 포함한 acceptance gate는 아직 통과하지 않았다.
+즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, schema v1 bounded fake learning/resume acceptance는 확인했다. learner+hardware 통합 후 schema v2 E2E를 다시 통과한 뒤에 현재 milestone을 최종 완료로 판정한다.
 
 ## 2. 작업 위치와 branch
 
@@ -54,7 +58,7 @@
 | canonical 통합 workspace | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | 현재 구현 검증 후 fast-forward/cherry-pick 대상. 다른 세션 변경을 임의로 덮어쓰면 안 됨 |
 | hardware 통신 검증 | `/home/laptop3/gello_worktrees/hil-hardware-comms` | `test/hil-hardware-comms` | 별도 worktree. learner 문서 작업 대상 아님 |
 
-세 branch는 현재 `f0dd3e7`에서 분기돼 있다. production learner 변경은 아직 별도 commit으로 고정되지 않았으므로, commit 전에는 worktree 경로 자체가 handoff 기준이다.
+production learner branch는 `f0dd3e7`에서 분기한 뒤 `3e64fd4`, `4ac98df`를 쌓았고, 현재 frozen-trunk feature 변경은 이 worktree의 미커밋 상태다. canonical/hardware branch는 `f0dd3e7`에 남아 있다. feature 변경을 검증·commit한 뒤에만 통합한다.
 
 ### 2.2 역사적 통합 이력
 
@@ -92,20 +96,29 @@ robot laptop
           | SSH local forwarding / gRPC
           v
 Kanu loopback-only learner process
-  RewardClassifierRuntime
+  raw uint8 observation
+       |                  |
+       v                  v
+  RewardClassifierRuntime  raw policy inference
           |
           v
   ActorSessionService
           |
           v
-  FaultGatedReplayIngress
+  FrozenResNet10TrunkExtractor
+  current/next: cam1/cam2 float32 (1,4,4,512)
+          |
+          v
+  FaultGated FeatureReplayIngress
        |               |
        v               v
   online replay   online intervention pool
        |               |
        +-------+-------+
                |
-  canonical offline demo pool
+  raw canonical demo -- one-time trunk conversion
+               |
+  feature offline demo pool
                |
                v
         RLPDBatchSampler
@@ -137,10 +150,12 @@ gRPC ingress, classifier, policy inference, replay stores, sampler, learner work
 - canonical demo strict load와 provenance 검사
 - verified ResNet asset/cache 준비
 - reward classifier SHA 검사, local restore, warm-up
-- 실제 `SACAgentHybridSingleArm` 생성
+- 실제 dual-input `SACAgentHybridSingleArm` 생성
+- raw demo의 one-time frozen-trunk conversion
+- feature replay/demo 고정 tensor RAM preflight
 - fresh/resume checkpoint state 준비
-- learner-mode `ReplayIngress`와 fault gate
-- offline demo pool과 RLPD sampler
+- learner-mode `FeatureReplayIngress`와 fault gate
+- feature offline demo pool과 RLPD sampler
 - versioned policy runtime과 actor service
 - loopback-only gRPC server
 - 정확히 한 개의 non-daemon learner worker
@@ -151,12 +166,34 @@ CLI는 `127.0.0.1`, `localhost`, `::1` 외 bind를 거부한다. 외부 공개 p
 
 fresh run은 checkpoint root 아래에 기존 `checkpoint_*` entry가 있으면 거부한다. resume는 counters, CTA ratio, publish/checkpoint boundary, inference RNG, fingerprint를 조립 전에 검사한다. initial policy는 step 0/version 0부터 actor service와 learner가 동일한 parameter reference를 공유한다.
 
-robot actor는 expected policy model ID, reward authority, reward model ID, observation schema hash를 pin할 수 있다. pin이 하나라도 설정되면 episode 시작마다 `GetServerInfo`를 새로 조회하고 mismatch를 첫 inference 전에 거부한다. 현재 production 값은 policy `hil-serl-hybrid-sac-resnet10`, reward authority `server_classifier`이며 reward model ID는 server CLI에 준 값이다.
+`--synthetic-e2e`는 일반 serving 옵션이 아니라 laptop→server 학습 수명주기를 끝까지 검증하는 명시적 acceptance scope다.
+
+- `--dry-run`과 상호 배타적
+- offline demo item 전체가 `synthetic_acceptance_only=true`여야 함; real/synthetic 혼합 거부
+- `--target-learner-step` 필수, 범위 1..10
+- `--replay-capacity >= 100`
+- `--synthetic-transition-count` 정확히 100; pass 시 replay insert count도 정확히 100
+- `--synthetic-actor-id`/`--synthetic-run-id`와 일치하는 actor/run만 server allowlist로 허용
+- `--synthetic-timeout-s` 1..1,800초의 wall-clock deadline
+- 실제 batch 256, online/demo 50:50, `training_starts=100`, CTA ratio 2, optimizer/model/discount는 production과 동일
+- 검증 시간을 줄이기 위해 publish/checkpoint period만 1 step으로 단축
+- gRPC bind, classifier, feature ingress, replay sampling, CTA, policy publish, checkpoint, process restart/resume를 실제로 실행
+- target은 fresh/restored learner step에서 정확히 +1이어야 함
+- gRPC stop, worker join, process-stopped log, logger close 후 full checkpoint load roundtrip/counter/trunk invariant까지 통과해야 pass event 출력
+
+synthetic execution scope은 fingerprint의 `execution_scope=synthetic_laptop_server_e2e_v1`로 묶는다. 일반 robot lineage의 `production_robot_data_v1`과 다르므로 synthetic checkpoint를 production robot run으로 resume하거나 그 반대로 섞을 수 없다.
+
+robot actor는 expected policy model ID, reward authority, reward model ID, observation schema hash를 pin할 수 있다. pin이 하나라도 설정되면 episode 시작마다 `GetServerInfo`를 새로 조회하고 mismatch를 첫 inference 전에 거부한다. 현재 production 값은 policy `hil-serl-hybrid-sac-resnet10-trunk-cache-v1`, reward authority `server_classifier`이며 reward model ID는 server CLI에 준 값이다.
+
+synthetic E2E server는 production actor가 잘못 연결되지 않도록 별도 policy model ID `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`을 advertise한다. `run_fake_e2e_actor.py`는 이 ID를 exact pin하며 production robot actor는 production ID를 계속 pin한다.
 
 ### 4.2 학습 계약
 
 - agent: upstream `SACAgentHybridSingleArm`
-- observation: `state float32 (1,19)`, `cam1/cam2 uint8 (1,128,128,3)`
+- external observation: `state float32 (1,19)`, `cam1/cam2 uint8 (1,128,128,3)`
+- learner observation: explicit current/next `state float32 (1,19)`, `cam1/cam2 float32 (1,4,4,512)`
+- feature cut: pretrained ResNet-10 `stop_gradient` 직후; no GAP, augmentation `none`
+- sample-time trainable visual head: `SpatialLearnedEmbeddings8 + Dropout0.1 + Dense256 + LayerNorm + tanh`
 - action: `float32 (7,)`; EEF 6D와 gripper `{-1,0,1}`
 - seed: `42`
 - discount: `0.97`
@@ -169,6 +206,8 @@ robot actor는 expected policy model ID, reward authority, reward model ID, obse
 - checkpoint: learner step 5,000마다, publish boundary에서
 
 CTA learner step 하나는 critic/grasp-critic update 한 번과 all-network update 한 번을 수행한다. 따라서 정상 fresh lineage에서는 `gradient_step == learner_step * 2`다.
+
+기본 production period는 publish 50/checkpoint 5,000이다. `--synthetic-e2e`에서만 둘 다 1로 바뀌며, 학습 batch/threshold/CTA는 줄이지 않는다. 따라서 synthetic step 1은 gradient step 2, policy version 1, `checkpoint_000000000001`을 동시에 만들어야 성공이다.
 
 learner batch에는 아래 여섯 필드만 전달한다.
 
@@ -183,7 +222,20 @@ grasp_penalty
 
 timestamp, actor/run/episode/transition ID, intervention label과 success metadata는 학습 tensor payload에서 제거하고 logging/provenance sidecar에 유지한다.
 
-위의 external canonical observation shape와 replay sample의 packed layout은 구분한다. memory-efficient replay가 내놓는 raw batch에서 `observations.cam*`은 current/next frame을 묶은 `(B,2,128,128,3)`이고 `next_observations`에는 state만 있다. sampler가 upstream `pack_batch()`로 agent update용 current/next observation을 복원한다.
+#### final unified observation schema v2
+
+hardware branch `6a0b127` 통합 후 canonical external state는 shape `(1,19)`를 유지하지만 gymnasium `Dict` flatten의 실제 정렬 계약에 맞게 순서가 바뀐다.
+
+```text
+schema id: hil-serl-ur-canonical-observation-v2
+schema hash: 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903
+state groups: gripper_pose, tcp_force, tcp_pose, tcp_torque, tcp_vel
+gripper_position index: 0
+```
+
+즉 `state[0,-1]`은 gripper가 아니라 `tcp_angular_velocity_z`다. gripper는 `GRIPPER_POSITION_INDEX`/`gripper_position_from_state()`로만 읽어야 한다. shape가 같아도 ordered feature/schema hash가 다르므로 v1 checkpoint/fingerprint와 v2를 섞지 않는다. 5.5의 v1 Kanu E2E는 interim 근거이며 final unified branch에서 v2 fresh/resume E2E를 다시 실행해야 한다.
+
+external canonical observation shape와 learner storage shape는 구분한다. actor policy와 reward classifier는 raw image를 소비한다. ingress는 classifier가 reward/termination을 finalize한 뒤 current/next raw observation을 frozen trunk로 encode하고, ring에는 explicit `observations`/`next_observations`의 state와 두 camera map만 보유한다. raw image packing과 upstream `pack_batch()`는 feature learner path에서 사용하지 않는다.
 
 offline demo와 online intervention은 하나의 logical demo union으로 취급한다. source draw를 크기 비례 multinomial로 뽑아 작은 intervention pool이 deterministic rounding 때문에 영구적으로 굶는 문제를 제거했다.
 
@@ -256,21 +308,26 @@ production CLI는 `--resume-latest`뿐 아니라 explicit `--resume-path`에도 
 - fresh start와 resume lineage 혼합 거부
 - resume 시 exact counter/publish boundary 검사
 
-실제 agent checkpoint payload는 로컬 측정에서 약 305 MiB였다. pruning이 없으므로 5,000-step마다 이 정도가 누적된다고 가정하고 disk를 계획해야 한다.
+실제 agent checkpoint payload는 약 305 MiB였고 pre-hardware schema v1 Kanu synthetic E2E의 step 1/2 payload는 각각 `320,100,609 B`였다. final v2 payload는 통합 재검증 후 다시 기록한다. pruning이 없으므로 production 5,000-step checkpoint마다 이 정도가 누적된다고 가정하고 disk를 계획해야 한다. synthetic scope는 검증용으로 period 1이므로 target을 1..10으로 제한한다.
 
 ### 4.7 fingerprint
 
-현재 fingerprint는 observation schema, learner algorithm config, ResNet SHA에 더해 아래 production run contract를 포함한다.
+현재 fingerprint는 external observation schema, learner algorithm config, ResNet SHA에 더해 아래 production run contract를 포함한다.
 
-- raw-pixel hybrid SAC contract revision
-- augmentation mode
+- `frozen_trunk_feature_hybrid_sac_v1` contract revision
+- execution scope: `production_robot_data_v1` 또는 `synthetic_laptop_server_e2e_v1`
+- learner representation `resnet10_frozen_trunk_map_f32_v1`
+- cut point `pretrained_resnet10.stop_gradient`, camera key/shape/dtype, no-GAP 계약
+- augmentation `none`
+- policy model ID: production `hil-serl-hybrid-sac-resnet10-trunk-cache-v1`, synthetic `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`
+- verified ResNet-10 asset SHA
 - action dtype/shape/range/gripper values
 - reward classifier SHA/threshold/model ID
 - offline demo artifact SHA 목록과 transition 수
 - exact grasp-penalty allowed values `[0, configured penalty]`
 - JAX/JAXLIB/Flax/Distrax/TFP version
 
-resume에서 document 또는 SHA가 다르면 즉시 실패한다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
+resume에서 document 또는 SHA가 다르면 즉시 실패한다. 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
 
 ### 4.8 reward classifier와 Flax local-I/O 수정
 
@@ -312,11 +369,13 @@ e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
 
 ### 4.10 fake canonical demo
 
-`scripts/generate_fake_canonical_demo.py`는 deterministic canonical transition 두 개를 pickle로 만든다. strict loader를 즉시 다시 통과시키고 SHA, transition 수, synthetic marker를 JSON으로 출력한다.
+`scripts/generate_fake_canonical_demo.py`는 deterministic canonical raw transition 두 개를 pickle로 만든다. strict loader를 즉시 다시 통과시키고 SHA, transition 수, synthetic marker를 JSON으로 출력한다.
 
-모든 item은 `synthetic_acceptance_only=true` provenance를 가진다. 생성기는 기존 파일을 덮어쓰지 않는다. production CLI는 이 marker를 발견하면 `--dry-run`이 아닌 실행을 거부한다.
+모든 item은 `synthetic_acceptance_only=true` provenance를 가진다. 생성기는 기존 파일을 덮어쓰지 않는다. production CLI는 이 marker를 construction `--dry-run`과 bounded `--synthetic-e2e`에서만 허용한다. 옵션 없는 일반 learner, continuous mode, production robot-data mode에서는 거부한다.
 
-fake artifact로 확인할 수 있는 것:
+CLI는 demo SHA/provenance/penalty를 검증한 뒤 `--demo-extraction-batch-size` 단위로 verified frozen trunk를 한 번만 적용한다. 변환된 pool은 explicit current/next `float32 (1,4,4,512)` map과 learner tensor/provenance sidecar만 소유하고 raw demo reference는 live ring 할당 전에 해제한다. fake와 real canonical demo 모두 같은 one-time conversion 경계를 통과한다.
+
+fake `--dry-run`으로 확인할 수 있는 것:
 
 - canonical loader/schema
 - classifier/agent construction
@@ -325,68 +384,133 @@ fake artifact로 확인할 수 있는 것:
 - production composition construction
 - JSONL/W&B offline initialization
 
-fake `--dry-run`으로 확인할 수 없는 것:
+fake `--synthetic-e2e`가 추가로 실제 실행하는 것:
 
 - gRPC bind와 SSH transport
 - replay 100개 도달
 - learner CTA update
-- 50-step publish
-- 5,000-step checkpoint
-- 실제 robot distribution의 reward/action 품질
+- 1-step acceptance publish/checkpoint
+- process stop, fresh process checkpoint resume, last-known policy serving
 
-이 문서는 “실제 demo artifact는 fake로 하자”는 사용자 결정을 construction acceptance용 fake artifact로 해석한다. fake data로 Kanu gRPC/CTA/publish/checkpoint까지 실행하려는 뜻이라면 현재 dry-run-only gate와 충돌하므로, production gate를 제거하지 말고 별도의 명시적 synthetic-training acceptance mode를 먼저 설계해야 한다.
+fake data로도 확인할 수 없는 것:
+
+- production 기본 50-step publish/5,000-step checkpoint 장시간 lifecycle
+- 실제 robot distribution의 reward/action 품질
+- 실제 camera timing/skew, intervention 행동, robot safety/fault recovery
+
+사용자는 현재 milestone의 완료 조건을 fake data로 laptop→Kanu gRPC/CTA/publish/checkpoint/resume까지 돌리는 것으로 명확히 정했다. 이를 위해 production robot gate를 제거하지 않고 별도 fingerprint의 bounded `--synthetic-e2e` scope를 구현·검증했다.
 
 ## 5. 검증 현황
 
 ### 5.1 현재 확정 회귀 기준
 
-current hardening 완료 뒤 기본 전체 suite 결과는 다음과 같다.
+frozen-trunk feature + synthetic E2E 통합 뒤 기본 전체 suite 결과는 다음과 같다.
 
 ```text
-158 passed, 1 skipped, 6 warnings in 2.59s
+200 passed, 4 skipped, 6 warnings in 2.82s
 ```
 
-skip 1개는 opt-in 실제 hybrid SAC checkpoint test다. 기본 suite에는 production composition, gripper wiring, exact penalty contract, ingress fault gate, classifier local-I/O, actor server-identity pinning, 실제 W&B offline/protobuf smoke가 포함된다.
+skip은 JAX 비용이 큰 opt-in 실제 agent/E2E 경로다. 기본 suite에는 production composition, synthetic CLI scope/fingerprint gate, fake E2E actor, feature demo conversion, feature replay/schema/memory preflight, gripper wiring, exact penalty contract, ingress fault gate, classifier local-I/O, actor server-identity pinning, 실제 W&B offline/protobuf smoke가 포함된다.
 
-역사적으로 hardening 전 확정 기준은 `133 passed, 1 skipped`였다. fingerprint, classifier, exact penalty, actor identity 테스트가 추가되며 현재 숫자로 증가했다. 문서 검수 중 demo SHA preflight와 mock fixture가 잠시 불일치해 transient failure가 있었지만 fixture를 실제 파일 contract에 맞춘 뒤 위 최종 suite가 통과했다.
+역사적으로 feature 전 hardening 기준은 `158 passed, 1 skipped, 6 warnings`였다. 현재 운영 기준은 위 feature suite이며, 이전 숫자를 현재 계약의 근거로 사용하지 않는다.
 
 ### 5.2 opt-in 실제 agent checkpoint/resume
 
 `tests/test_actual_agent_checkpoint_integration.py`는 실제 upstream `SACAgentHybridSingleArm`을 생성해 다음을 확인한다.
 
-1. synthetic raw-image batch로 CTA update
-2. publish와 checkpoint 저장
-3. fresh real-agent template 생성
-4. checkpoint restore
-5. `prepare_learner_state()`와 `compose_learner()`로 production 객체 재조립
-6. train-state leaf, counters, agent/inference RNG 확인
-7. deterministic/stochastic action exact 비교
-8. resume learner에서 추가 CTA update/publish/checkpoint
+1. raw fake demo를 exact frozen-trunk map으로 one-time conversion
+2. cached-feature batch로 CTA update
+3. publish와 checkpoint 저장
+4. fresh real-agent template 생성
+5. checkpoint restore
+6. `prepare_learner_state()`와 `compose_learner()`로 production 객체 재조립
+7. train-state leaf, counters, agent/inference RNG 확인
+8. raw observation deterministic/stochastic action exact 비교
+9. resume learner에서 추가 CTA update/publish/checkpoint
 
 비용을 줄이기 위해 test config의 publish/checkpoint period는 1이다. 따라서 boundary 구현을 검증하지만 default 50/5,000 장시간 run을 대체하지는 않는다.
 
-opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. current production-composition hardening 뒤 CPU JAX 0.5.3에서 다시 실행해 `1 passed, 92 warnings in 43.35s`를 확인했다.
+opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. CPU JAX 0.5.3에서 frozen-trunk feature checkpoint save/resume/continued CTA 통합 검증 `1 passed in 31.01s`를 확인했다.
 
-### 5.3 production dry-run과 실제 classifier
+### 5.3 opt-in 실제 frozen-trunk agent
 
-실제 classifier checkpoint와 생성한 fake canonical demo를 사용한 local production CLI dry-run이 current hardening 뒤 다시 통과했다.
+`tests/test_actual_frozen_trunk_feature_agent.py`는 `RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1`로 실행하며 `2 passed in 20.30s`를 확인했다.
+
+- raw path와 cached-map path의 deterministic/stochastic 7D action 수치 동치
+- feature shape/dtype/finite/no-augmentation contract
+- CTA 후 trainable camera head/proprio path가 변함
+- CTA 후 online trunk가 verified initial trunk와 exact equal
+- target trunk을 verified trunk으로 repin한 뒤 exact equal
+- 변조된 trunk parameter snapshot/publish 거부
+
+### 5.4 production dry-run과 실제 classifier
+
+실제 classifier checkpoint와 생성한 fake canonical demo를 사용한 local production CLI dry-run이 frozen-feature 통합 뒤 통과했다. 아래 fingerprint는 `execution_scope` field 추가 전의 역사적 construction 결과이며 현재 synthetic/production checkpoint resume identity로 사용하지 않는다.
 
 - event: `rlpd_learner_dry_run_passed`
-- artifact root: `/tmp/hil-production-dryrun-mmXlf2`
+- artifact root: `/tmp/hil-feature-production-final-zw6U7b` (local acceptance scratch; 영속 lineage로 사용하지 않음)
 - backend: CPU
 - W&B mode: `disabled`
 - fake demo SHA-256: `6907f4e458e87001bc26dc3d9d8e9b7a4c5ae2ac1ee637bd56ce0e82372c9177`
 - ResNet cache SHA-256: `175745d43d30233eb01b5369465d1c24c11b8ee71ccb734cc1c1bca13e07f57b`
-- production fingerprint: `add5c7f0247d4efd7c95fd492f1826ce3770f5fc61f35d3b12805b4aa8c86009`
+- production fingerprint: `fb48aee61c655300e19fc58d412534dbbf25752ce3ad792704c6ff1ab42754dd`
 - ready state: learner 0, gradient 0, policy version 0, synthetic demo 2개
 
 이전 pre-hardening dry-run에서는 wall time 약 15.03초와 peak RSS 약 1.51 GiB를 관측했다. 최신 hardening run에서는 이 timing/RSS를 다시 계측하지 않았으므로 역사적 참고값으로만 남긴다.
 
 이 결과는 production construction의 실제 dependency/artifact smoke다. 최신 run은 W&B를 disabled로 실행했으므로 실제 W&B offline artifact 검증은 별도 자동 테스트가 근거다. server bind나 training을 실행하지 않으므로 Kanu/robot E2E 결과로 확대 해석하지 않는다.
 
-처음 사용한 `kanu_junhyeong`은 등록되지 않은 이름이었고 실제 SSH alias는 `kanu`였다. 수정 후 read-only 접속에 성공해 RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장과 `/home/junhyeong/miniconda3/envs/il/bin/python`의 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개를 확인했다. Kanu filesystem이나 process는 변경하지 않았다. 실제 production learner GPU dry-run은 아직 미실행이다.
+처음 사용한 `kanu_junhyeong`은 등록되지 않은 이름이었고 실제 SSH alias는 `kanu`였다. read-only preflight에서 RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장과 `/home/junhyeong/miniconda3/envs/il/bin/python`의 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개를 확인했다.
 
-## 6. 현재 raw replay의 메모리와 visual encoder 사실관계
+Kanu의 기존 repository가 dirty detached 상태였으므로 그 workspace를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 검증 tree를 구성했다. `CUDA_VISIBLE_DEVICES=0`으로 실제 classifier + agent production dry-run(128/32 capacity)이 통과했고 당시 pre-execution-scope fingerprint는 `8465e464b3f4eb638513eaa4ab3daea85a9435a9ddf47bdbf841a2c2f2aacce9`였다. 별도 실제 GPU feature CTA smoke는 backend `gpu`, device 1개, feature `[1,4,4,512]`, `gradient_step=2`, `augmentation_function=None`(JSON `null`)을 확인했다. raw/cached deterministic action의 max absolute difference는 `0.00012614415027201176`였고 online/target trunk invariant도 통과했다. 현재 execution-scope fingerprint의 authoritative Kanu E2E 값은 5.5의 `d2cbbad...` 값이다. 이는 bounded synthetic 결과이며 continuous server/robot E2E로 확대 해석하지 않는다.
+
+### 5.5 laptop→Kanu 실제 fake-data learning E2E (schema v1 interim)
+
+`scripts/run_fake_e2e_actor.py`를 laptop3에서 SSH local tunnel 뒤의 Kanu GPU learner에 연결했다. server는 actual classifier, actual dual-input SAC agent, raw→frozen-feature ingress, batch 256/CTA 2 learner, versioned policy, full checkpoint를 실제로 사용했다.
+
+execution fingerprint:
+
+```text
+defda67b4463526a6aca4fb397327ff01b93ffd07b9250cc538a46b105bf96cb
+```
+
+fresh run:
+
+- laptop actor의 fresh canonical raw transition 100개 ACK/feature replay insert
+- `BeginEpisode` RTT: max `91.158068 ms`, mean `63.2926349 ms`
+- replay 100 + offline synthetic demo 2; update batch에서 실제 online/demo 128:128 구성 확인
+- learner `step=1`, `gradient_step=2`, `policy_version=1`
+- `checkpoint_000000000001`; cleanup 후 full load roundtrip/counter/trunk invariant 통과
+- update loss 모두 finite, `policy_published`, `checkpoint_saved`, `learner_process_stopped(exit_code=0)` JSONL event 확인
+
+fresh-process resume run:
+
+- Kanu learner process를 새로 시작해 checkpoint 1을 restore하고 actor의 첫 action을 `policy_version=1`로 serving
+- replay는 RAM-only이므로 새 transition 100개를 다시 ACK/insert
+- `BeginEpisode` RTT: max `95.694507 ms`, mean `64.40843136 ms`
+- learner `step=2`, `gradient_step=4`, `policy_version=2`
+- `checkpoint_000000000002`; cleanup 후 full load roundtrip/counter/trunk invariant 통과
+- update loss 모두 finite, publish/checkpoint/`learner_process_stopped(exit_code=0)` event 확인
+
+위 hardened run은 schema v1에서 exact actor/run allowlist, exact 100 insert, synthetic-only model ID, timeout, target +1, post-cleanup checkpoint roundtrip까지 통과했다. 그러나 hardware branch의 schema v2/hash/gripper index 변경이 fingerprint와 state 의미를 바꾸므로 **최종 통합 branch v2 fresh/resume E2E는 아직 pending**이다. 위 v1 fingerprint/checkpoint를 v2 authoritative 산출물로 사용하지 않는다. RTT는 일회 관측값이며 SLA가 아니다.
+
+final v2 rerun 후 이 문서에 다음을 교체·기록해야 한다.
+
+- unified commit/branch
+- schema v2 fingerprint
+- fresh/resume sender RTT·counter·checkpoint roundtrip
+- v2 default suite와 opt-in actual test 최종 수치
+
+### 5.6 local opt-in actual fake E2E
+
+`tests/test_actual_fake_data_e2e_learning.py`는 실제 localhost gRPC server/client, canonical raw pixels, frozen feature ingress, CTA, publish, checkpoint, server restart/resume를 하나의 opt-in test로 검증한다.
+
+```text
+RUN_HIL_SERL_FAKE_E2E=1
+1 passed, 92 warnings in 29.17s
+```
+
+## 6. frozen-trunk feature replay와 메모리
 
 ### 6.1 현재 기본값
 
@@ -395,71 +519,57 @@ opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. current produc
 - replay: 50,000 logical transitions
 - intervention: 10,000 logical transitions
 
-upstream memory-efficient buffer의 frame/bootstrap storage까지 고려한 physical camera slots는 대략 replay 100,000 + intervention 20,000이다. 두 카메라 `128x128x3 uint8` raw arrays만 약 10.99 GiB다. Python object, state/action/metadata, JAX/XLA, classifier/learner model memory는 별도다.
+각 logical slot은 current/next, cam1/cam2의 `float32 (1,4,4,512)` map을 보유한다. replay 50,000 + intervention 10,000 기본 ring의 camera tensor는 정확히 `7,864,320,000 B = 7.32421875 GiB`다. state/action/reward/mask/grasp tensor, offline demo feature pool, NumPy/Python sidecar, JAX/XLA, classifier/learner model memory는 별도다.
 
-따라서 raw mode 기본 capacity를 Kanu에서 그대로 쓰려면 host RAM과 실제 RSS를 먼저 계측해야 한다. RAM buffer는 process 종료 시 사라진다.
+CLI는 ring과 offline demo의 고정 tensor byte를 실제 할당 전에 계산하고 Linux `MemAvailable`에서 `--feature-memory-reserve-gib`(기본 2 GiB)를 남길 수 없으면 fail-closed한다. dry-run은 replay/update를 검증하지 않으므로 128/32 같은 작은 ring을 쓴다. RAM buffer는 process 종료 시 사라진다.
 
-### 6.2 upstream encoder는 어디까지 frozen인가
+### 6.2 exact feature boundary
 
-“pretrained image encoder를 가져와 얼린다”는 방향은 맞지만, 현재 upstream의 **전체 visual path가 frozen인 것은 아니다.**
+저장 경계는 pretrained image encoder 전체의 임의 bottleneck이 아니라 upstream ResNet-10의 기존 `jax.lax.stop_gradient` 직후다.
 
 ```text
-uint8 image
+canonical uint8 image
   -> ImageNet normalization
   -> pretrained ResNet-10 backbone
-  -> 4x4x512 map                     [stop_gradient; frozen]
+  -> 4x4x512 float32 map             [stop_gradient; frozen; replay/demo에 저장]
   -> SpatialLearnedEmbeddings
   -> Dropout(0.1)
-  -> Dense(256) -> LayerNorm -> tanh [critic/grasp critic에서 trainable]
+  -> Dense(256) -> LayerNorm -> tanh [sample time; critic/grasp critic에서 trainable]
 ```
 
-backbone map까지는 frozen이지만 뒤의 spatial/bottleneck head는 학습된다. actor는 encoder output에 stop-gradient를 쓰지만 critic/grasp critic은 head를 갱신한다. 현재 raw learner는 padding 4 random crop을 update마다 수행한다.
+즉 **GAP/pooling을 사용하지 않고**, trainable 256-D head 뒤의 값도 저장하지 않는다. head weight가 CTA 중 바뀌어도 과거 feature가 오염되지 않도록 frozen 경계 직후를 cache한다. 두 camera head와 proprio head는 계속 학습된다.
 
-### 6.3 pending GAP512 결정
+### 6.3 invariant와 두 input path
 
-메모리 절감을 위한 현재 우선 후보는 frozen `4x4x512` map에 deterministic global-average pooling을 적용한 camera당 `512 float32` feature다.
+- external actor policy: raw image를 받아 trunk + 현재 trainable head를 모두 실행
+- reward classifier: raw image를 계속 사용
+- learner update: cached trunk map을 받아 trunk를 skip하고 현재 trainable head부터 실행
+- offline demo: startup에 verified trunk를 한 번만 통과
+- online ingress: classifier finalize 후 current/next를 encode하고 raw array를 ring에 보유하지 않음
+- augmentation: `none`
 
-```text
-raw image -> frozen ResNet-10 -> 4x4x512 -> GAP -> 512-D
-```
-
-두 camera의 GAP512는 observation당 4 KiB이므로 raw 두 camera 96 KiB보다 약 24배 작다. physical 120,000 slot의 feature arrays는 단순 계산으로 약 469 MiB다. 실제 buffer RSS는 구현 후 계측해야 한다.
-
-이 선택은 단순 storage refactor가 아니다.
-
-- pixel random crop을 제거하고 기본 no-augmentation으로 바꾼다.
-- 기존 trainable spatial/Dense visual head를 제거하거나 별도 policy head로 재정의한다.
-- offline demo는 같은 pinned encoder/backend로 한 번 encode해야 한다.
-- online ingress는 classifier가 raw image를 먼저 사용한 뒤 feature만 replay에 commit해야 한다.
-- encoder SHA/tree/schema/backend를 buffer와 checkpoint fingerprint에 넣어야 한다.
-- raw checkpoint와 feature checkpoint를 자동 호환하지 않는다.
-
-GAP512, frozen `4x4x512` map 저장, 또는 전체 256-D head까지 동결하는 방식 중 하나를 명시적으로 승인하기 전에는 feature implementation을 시작하지 않는다. 현재 논의의 우선안은 **no-aug + immutable GAP512**지만 최종 결정은 아직 아니다.
+online trunk가 update로 변하면 cached feature 의미가 깨지므로 publish/checkpoint 경계에서 verified initial trunk과 exact tree equality를 검사한다. target-network Polyak update가 trunk leaf를 수치적으로 변형하지 않도록 각 CTA candidate의 target trunk를 verified trunk으로 repin한 뒤 invariant를 검사한다. raw/cached policy action 동치와 CTA 후 online/target trunk exact equality가 실제 JAX opt-in test로 검증됐다.
 
 ## 7. 남은 차단점
 
-### P0 — 다음 구현 전 결정/검증 필수
+### P0 — 실기 production 승인 전 필수
 
-1. **GAP512 feature boundary 승인**
-   - 정확한 cut point, pooling, dtype, no-augmentation, offline migration, fingerprint를 확정해야 한다.
-   - 이 결정이 raw replay schema, agent network, checkpoint format, memory budget을 모두 바꾼다.
-
-2. **Kanu JAX 0.5.3 GPU environment**
-   - SSH alias `kanu`와 기존 `il` environment에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, GPU backend를 read-only 확인했다.
-   - 실제 learner command에서도 `jax.default_backend() == "gpu"`를 fail-closed로 다시 확인한다.
+1. **production lifecycle bounded/continuous GPU acceptance**
+   - JAX/JAXLIB 0.5.3 GPU production dry-run, 단일 feature CTA, laptop→Kanu synthetic E2E step 1/resume step 2는 통과했다.
+   - production 기본 50-step publish + 5,000-step checkpoint는 아직 미검증이다.
+   - 기본 ring camera map `7,864,320,000 B` + offline demo + reserve 할당 후 장시간 RSS/VMS/GPU memory/compile/contention을 계측한다.
    - CPU용 `requirements-learner.lock`을 공유 Kanu env에 그대로 설치하지 않는다.
-   - classifier + policy inference + learner update의 GPU memory/compile/contention을 계측한다.
 
-3. **real serving용 canonical robot demo 부재**
-   - 사용자가 이번 acceptance artifact는 fake로 하기로 했다.
-   - fake는 dry-run에 충분하지만 live learner serving에는 의도적으로 차단된다.
+2. **real serving용 canonical robot demo 부재**
+   - 사용자가 지정한 현재 fake-data acceptance는 완료됐다.
+   - fake는 bounded `--synthetic-e2e`에서만 live learner에 허용되고 production robot-data scope에는 의도적으로 차단된다.
    - 실제 robot serving 단계에는 canonical EEF/action/grasp-penalty demo가 필요하다.
 
-4. **실제 robot/task/camera E2E**
+3. **실제 robot/task/camera E2E**
    - task config의 `GRASP_PENALTY`, action convention, camera key/shape/timing을 확인한다.
    - robot laptop → SSH tunnel → Kanu → classifier/replay → policy response를 검증한다.
 
-5. **continuous learner degraded monitoring**
+4. **continuous learner degraded monitoring**
    - 현재 learner fault는 stdout/JSONL event로만 확인하며 gRPC health는 last-known-good serving 때문에 ready일 수 있다.
    - heartbeat/status/alert 또는 운영 supervisor 정책이 필요하다.
 
@@ -477,15 +587,13 @@ GAP512, frozen `4x4x512` map 저장, 또는 전체 256-D head까지 동결하는
 
 ## 8. 권장 다음 순서
 
-1. GAP512 ADR을 승인한다: feature key/schema, no-aug, encoder freeze, offline encoding, fingerprint.
-2. current hardening과 feature 변경을 완료한 뒤 기본 suite와 opt-in real-agent test를 clean 재실행한다.
-3. fake canonical demo로 Kanu `--dry-run`을 실행한다.
-4. 실제 classifier + GPU backend + W&B offline artifact + RSS를 확인한다.
-5. 실제 canonical robot demo가 준비되면 5,000-step bounded learner run을 수행한다.
-6. SSH tunnel을 통해 fake-env actor loopback을 먼저 검증한다.
-7. task/camera/safety review 후 실제 robot actor를 연결한다.
-8. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
-9. 검증된 production learner commit을 canonical `feat/gello-ur7e-humble-22.04`에 통합하고 임시 branch/worktree를 정리한다.
+1. frozen-feature + synthetic E2E diff를 final review하고 기본 suite + 세 opt-in actual test 결과를 commit에 연결한다.
+2. 검증된 implementation/문서를 snapshot commit으로 남긴다.
+3. production learner commit을 canonical `feat/gello-ur7e-humble-22.04`에 통합하고 server/learner/local-hardware 변경을 하나의 branch로 정리한다.
+4. 실제 canonical robot demo가 준비되면 production-scope 5,000-step bounded learner run을 수행한다.
+5. 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
+6. task/camera/safety review 후 실제 robot actor를 연결한다.
+7. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
 
 ## 9. 재현 명령
 
@@ -521,10 +629,47 @@ PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
   serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py
 ```
 
+실제 frozen-trunk raw/cached agent opt-in test:
+
+```bash
+cd /home/laptop3/gello_worktrees/hil-production-learner
+
+RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTHONDONTWRITEBYTECODE=1 \
+PYTEST_ADDOPTS='-p no:cacheprovider' \
+MPLCONFIGDIR=/tmp/gello-hil-production-matplotlib \
+PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
+/tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
+  serl_ur_infra/tests/test_actual_frozen_trunk_feature_agent.py
+```
+
+실제 localhost gRPC fake learning/resume opt-in test:
+
+```bash
+cd /home/laptop3/gello_worktrees/hil-production-learner
+
+RUN_HIL_SERL_FAKE_E2E=1 \
+JAX_PLATFORMS=cpu \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTHONDONTWRITEBYTECODE=1 \
+PYTEST_ADDOPTS='-p no:cacheprovider' \
+MPLCONFIGDIR=/tmp/gello-hil-production-matplotlib \
+PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
+/tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
+  serl_ur_infra/tests/test_actual_fake_data_e2e_learning.py
+```
+
 ## 10. handoff 불변식
 
-- fake demo는 acceptance `--dry-run` 전용이다.
-- 실제 serving에서 fake marker를 제거하거나 우회하지 않는다.
+- fake demo는 construction `--dry-run` 또는 bounded `--synthetic-e2e` 전용이다.
+- production robot serving에서 fake marker를 제거하거나 우회하지 않는다.
+- synthetic E2E는 target 1..10이자 restored step +1, replay capacity 100 이상, exact 100 inserts, all-synthetic demo, exact actor/run allowlist, timeout 1..1,800초, batch 256/training-starts 100/CTA 2를 유지한다.
+- synthetic-only policy model ID와 cleanup 후 checkpoint roundtrip/trunk invariant pass gate를 우회하지 않는다.
+- synthetic E2E checkpoint와 production robot checkpoint의 execution-scope fingerprint를 섞지 않는다.
 - loopback bind와 SSH tunnel 경계를 유지한다.
 - Kanu에서는 GPU backend를 명시하고 CPU fallback을 허용하지 않는다.
 - `third_party/hil-serl`, proto, generated binding을 직접 수정하지 않는다.
@@ -532,4 +677,7 @@ PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
 - resume는 fingerprint/counter/RNG 검사를 우회하지 않는다.
 - learner fault가 나도 last-known-good policy를 오염시키지 않는다.
 - replay가 RAM-only라는 사실을 checkpoint resume와 혼동하지 않는다.
-- feature buffer는 GAP512/freeze/no-aug 결정 전까지 구현 완료라고 기록하지 않는다.
+- replay/demo에 raw image, GAP512, 또는 trainable 256-D head 출력을 저장하지 않는다.
+- verified frozen trunk 직후 `float32 (1,4,4,512)` current/next 계약과 augmentation `none`을 유지한다.
+- online/target trunk invariant 검사와 target repin을 우회하지 않는다.
+- raw/random-crop checkpoint를 feature/no-aug lineage에 resume하지 않는다.
