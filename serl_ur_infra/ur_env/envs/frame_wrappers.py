@@ -181,9 +181,11 @@ class Quat2EulerWrapper(gym.ObservationWrapper):
     ``gym.ObservationWrapper.__init__`` assigns ``self.observation_space =
     env.observation_space`` — the *same object* — so upstream's in-place
     assignment also rewrites the wrapped env's advertised space, leaving the
-    inner env claiming a (6,) ``tcp_pose`` it never produces.  That matters
-    here because ``assert_actor_environment_state_layout`` walks the wrapper
-    stack and compares spaces.
+    inner env claiming a (6,) ``tcp_pose`` it never produces.  Nothing in this
+    repo currently depends on that aliasing -- ``assert_actor_environment_state_layout``
+    stops at the first wrapper exposing ``proprio_space`` and does not compare
+    spaces -- so this is a correctness cleanup rather than a fix for a live bug:
+    an env should not advertise a space it cannot emit.
     """
 
     def __init__(self, env: gym.Env):

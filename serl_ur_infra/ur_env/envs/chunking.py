@@ -15,11 +15,13 @@ out in the same file as::
     def post_stack_obs(obs, obs_horizon=1):
         obs = {k: v[None] for k, v in obs.items()}
 
-``np.stack`` over a one-element list and ``v[None]`` produce byte-identical
-arrays, so a trajectory recorded through this wrapper is interchangeable with
-one recorded through upstream's.  Any other horizon raises rather than silently
-diverging: stacking a real history needs the deque semantics, and getting that
-subtly wrong would corrupt every transition without failing a shape check.
+``np.stack`` over a one-element list and ``v[None].copy()`` produce equal,
+contiguous, independently-owned arrays, so a trajectory recorded through this
+wrapper is interchangeable with one recorded through upstream's.
+
+Any other horizon raises rather than silently diverging: stacking a real
+history needs the deque semantics, and getting that subtly wrong would corrupt
+every transition without failing a shape check.
 
 This axis is what turns ``state (19,)`` into the canonical ``(1, 19)`` and
 ``cam (128,128,3)`` into ``(1,128,128,3)``.
@@ -54,7 +56,12 @@ def space_stack(space: gym.Space, repeat: int) -> gym.Space:
 def _stack_one(obs: Mapping[str, Any]) -> dict:
     """``obs_horizon=1`` case of upstream ``stack_obs``: prepend a time axis."""
 
-    return {k: np.asarray(v)[None] for k, v in obs.items()}
+    # .copy() rather than the bare view: upstream's jax.tree_map(np.stack, ...)
+    # allocates, and UR7eEnv.get_im returns resized[..., ::-1], a negative-stride
+    # view.  Handing that straight through would make the canonical tensors
+    # non-contiguous and aliased to the env's buffers -- harmless only for as
+    # long as the env never reuses a frame buffer.
+    return {k: np.asarray(v)[None].copy() for k, v in obs.items()}
 
 
 class ChunkingWrapper(gym.Wrapper):

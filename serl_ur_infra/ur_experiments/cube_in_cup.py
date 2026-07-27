@@ -70,21 +70,32 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     # the robust choice.  Per-joint spread is 0.05-0.10 rad, i.e. the operator
     # really did return the arm to one pose between takes -- unlike the banana
     # session, whose shoulder spread is 0.32 rad (no fixed reset pose).
-    # The resulting TCP (0.506, 0.136, 0.423) sits inside ABS_POSE_LIMIT below.
+    # fk(RESET_JOINTS) = (0.5036, 0.1365, 0.4138), inside ABS_POSE_LIMIT below.
+    # (Not (0.506, 0.136, 0.423) -- that is the mean of the per-take FK
+    # positions, which is a different quantity and 9 mm off in z.)
     #
-    # WRAP HAZARD: shoulder_pan sits ~0.003 rad past +pi and wrist_3 ~0.008 rad
-    # past -pi.  Any comparison against this pose must be branch-cut safe (see
-    # ur_gello_bringup.angle_utils.nearest_equivalent); a naive difference
-    # reports these joints as ~2*pi away from an identical physical pose.
+    # WRAP HAZARD: shoulder_pan sits ~0.003 rad *inside* +pi and wrist_3 ~0.008
+    # rad inside -pi, i.e. both are just within (-pi, pi] -- but the task is
+    # not: 96% of demonstrated samples have wrist_3 < -pi and 4% have
+    # shoulder_pan > +pi, so the work manifold straddles the branch cut even
+    # though the reset pose does not.  Any comparison against this pose must be
+    # branch-cut safe (ur_kin.wrapped_nearest); a naive difference reports
+    # these joints as ~2*pi away from an identical physical pose, which is
+    # exactly what made go_to_reset refuse a pose 0.30 rad away.
     RESET_JOINTS: np.ndarray = np.array(
         [3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331]
     )
 
     # Reset streams to RESET_JOINTS through the same 250 Hz upsampler used for
-    # normal steps, sweeping blindly through whatever is on the way.  Keep this
-    # tight so a reset from an unexpected pose is refused rather than executed;
-    # pre-position with the proven move-to-start tooling instead.
-    RESET_MAX_DIST_RAD: float = 0.5
+    # normal steps, sweeping blindly through whatever is on the way, so this is
+    # a real limit and not a formality.  It still has to clear the poses the
+    # task actually ends in: measured over the 23 cube_in_cup takes, the
+    # branch-safe distance from the final frame back to RESET_JOINTS has median
+    # 0.615 rad and max 0.774 (wrist_1 dominates).  0.5 -- the value this
+    # started at -- refuses 16 of 23 takes, i.e. reset() raises after most
+    # normal episodes.  0.9 clears every recorded take with headroom while
+    # still refusing a reset from an arbitrary parked pose.
+    RESET_MAX_DIST_RAD: float = 0.9
     RESET_TOLERANCE_RAD: float = 0.02
     RESET_TIMEOUT_S: float = 10.0
 
@@ -98,8 +109,8 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     # replaying ur_joint_states through UR7e forward kinematics reproduces the
     # recorded /tcp_pose_broadcaster/pose to a median 0.6 mm as the *flange*,
     # versus 174.2 mm under the gripper-tip hypothesis.  Cross-check: the
-    # measured flange z floor of 0.1785 minus 0.174 is 0.0045 m, i.e. the
-    # fingertips exactly touching the table.
+    # contact-free flange z floor of 0.1808 minus 0.174 is 0.0068 m, i.e. the
+    # fingertips just above the table.
     #
     # We therefore stay in the flange frame end to end.  PolicyDeltaController
     # also integrates at the flange (fk(q_now), no T_tool), so this is the only
@@ -119,19 +130,32 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     #
     # Derived from 23 cube_in_cup takes (19,802 samples; take_23 dropped, it is
     # a 1.64 s recording with the arm parked).  Position: x/y expanded to
-    # 1.5x the demonstrated range about its centre for exploration headroom;
-    # z_low left at the measured minimum because that is the table, a physical
-    # hard stop with no headroom to give.  Rotation follows the same 1.5x rule
-    # rather than being opened up: a large tilt slides the fingertips sideways
-    # while still respecting z_low, and pushes wrist_3 toward its limit.
-    # 100% of the demonstrated samples fall inside this box.
+    # 1.5x the demonstrated range about its centre for exploration headroom.
+    # Rotation is NOT opened up beyond roughly the same rule: a large tilt
+    # slides the fingertips sideways while still respecting z_low, and pushes
+    # wrist_3 toward its limit.
+    #
+    # z_low is NOT the demonstrated minimum.  That minimum (0.1785) comes from
+    # a single take: all 40 samples at it are take_11, where the gripper closed
+    # on nothing (grip_pos 0.05-0.18) and pressed the table at -24 to -133 N for
+    # 0.4 s.  It is a failed grasp driven into the surface, not the surface.
+    # Filtering to contact-free samples (fz > -5 N) puts the actual table at
+    # 0.1808, i.e. the demonstrated minimum is 2.3 mm *below* it.  That matters
+    # more than it looks: PolicyDeltaController writes the clamped pose back
+    # into its integrator, so a policy pushing down would park the commanded
+    # flange at exactly the depth that took 133 N, and nothing in this loop
+    # limits force.  0.185 clears the free-space surface, drops only take_11's
+    # 73 samples (0.37%), and still sits 9 mm below the lowest successful grasp
+    # (0.1941).  Use 0.190 if the table or base mount is ever re-seated -- 0.5
+    # degrees of tilt across this box is 5 mm of z.
+    # Every other demonstrated sample falls inside this box.
     #
     # Index 3 is |rx|: the tool points straight down, so rx lives near +-pi and
     # clip_safety_box clips the magnitude and restores the sign.  A naive
     # np.clip(rx, low, high) would flip the wrist on the ~12% of samples that
     # land on the negative branch.
     ABS_POSE_LIMIT_LOW: Optional[np.ndarray] = np.array(
-        [0.375, -0.229, 0.1785, 2.60, -0.30, 1.10]
+        [0.375, -0.229, 0.185, 2.60, -0.30, 1.10]
     )
     ABS_POSE_LIMIT_HIGH: Optional[np.ndarray] = np.array(
         [0.642, 0.272, 0.550, np.pi, 0.35, 2.20]

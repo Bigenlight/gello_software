@@ -121,8 +121,16 @@ class _PosedEnv(gym.Env):
     orientation on every call.
     """
 
-    def __init__(self, rotations):
+    def __init__(self, rotations, positions=None, tcp_vel=None):
         self._rotations = list(rotations)
+        self._positions = (
+            [np.asarray(p, dtype=float) for p in positions]
+            if positions is not None
+            else [np.array([0.1, 0.2, 0.3])]
+        )
+        self._tcp_vel = (
+            np.asarray(tcp_vel, dtype=float) if tcp_vel is not None else np.zeros(6)
+        )
         self._index = 0
         self.seen_actions = []
         self.observation_space = gym.spaces.Dict(
@@ -138,13 +146,15 @@ class _PosedEnv(gym.Env):
         self.action_space = gym.spaces.Box(-1.0, 1.0, (7,), np.float32)
 
     def _obs(self):
-        euler = self._rotations[min(self._index, len(self._rotations) - 1)]
+        i = self._index
+        euler = self._rotations[min(i, len(self._rotations) - 1)]
+        position = self._positions[min(i, len(self._positions) - 1)]
         self._index += 1
         quat = R.from_euler("xyz", euler).as_quat()
         return {
             "state": {
-                "tcp_pose": np.concatenate(([0.1, 0.2, 0.3], quat)),
-                "tcp_vel": np.zeros(6),
+                "tcp_pose": np.concatenate((position, quat)),
+                "tcp_vel": self._tcp_vel.copy(),
             }
         }
 
@@ -182,7 +192,12 @@ def test_action_is_rotated_from_tool_frame_into_base_frame():
 
 
 def test_intervene_action_is_converted_back_into_the_tool_frame():
-    """The human acts in base frame below; replay must store tool frame."""
+    """The human acts in base frame below; replay must store tool frame.
+
+    Uses _PosedEnv rather than the fake env: the fake env reports an identity
+    orientation, so every "did we rotate this?" assertion passes even with the
+    conversion deleted.
+    """
 
     base_action = np.array([0.3, -0.2, 0.1, 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
 
@@ -192,17 +207,73 @@ def test_intervene_action_is_converted_back_into_the_tool_frame():
             info["intervene_action"] = base_action.copy()
             return obs, reward, done, trunc, info
 
-    env = RelativeFrame(Intervener(_fake_env()))
-    try:
-        env.reset()
-        matrix_at_issue = env.transform_matrix.copy()
-        _, _, _, _, info = env.step(np.zeros(7, dtype=np.float32))
+    inner = _PosedEnv([(0.0, 0.0, np.pi / 2)])
+    env = RelativeFrame(Intervener(inner))
+    env.reset()
 
-        expected = np.linalg.inv(matrix_at_issue) @ base_action[:6]
-        np.testing.assert_allclose(info["intervene_action"][:6], expected, atol=1e-9)
-        assert info["intervene_action"][6] == base_action[6]
-    finally:
-        env.close()
+    matrix_at_issue = env.transform_matrix.copy()
+    assert not np.allclose(matrix_at_issue, np.eye(6), atol=1e-6)
+
+    _, _, _, _, info = env.step(np.zeros(7, dtype=np.float32))
+
+    expected = np.linalg.inv(matrix_at_issue) @ base_action[:6]
+    np.testing.assert_allclose(info["intervene_action"][:6], expected, atol=1e-9)
+    # A 90 deg yaw sends base +x to tool -y, so the stored action must differ
+    # from the base-frame one -- this is what fails if the conversion is gone.
+    assert not np.allclose(info["intervene_action"][:3], base_action[:3], atol=1e-6)
+    np.testing.assert_allclose(
+        info["intervene_action"][:3], [-0.2, -0.3, 0.1], atol=1e-9
+    )
+    assert info["intervene_action"][6] == base_action[6]
+
+
+def test_tcp_vel_is_rotated_into_the_tool_frame():
+    """inv(transform), not transform: the forward matrix passes on the fake env."""
+
+    inner = _PosedEnv([(0.0, 0.0, np.pi / 2)], tcp_vel=np.array([1.0, 0, 0, 0, 0, 0]))
+    env = RelativeFrame(inner)
+    obs, _ = env.reset()
+
+    rotation = env.transform_matrix[:3, :3]
+    expected = rotation.T @ np.array([1.0, 0.0, 0.0])
+    np.testing.assert_allclose(obs["state"]["tcp_vel"][:3], expected, atol=1e-9)
+    # base +x velocity under a 90 deg yaw reads as -y in the tool frame.
+    np.testing.assert_allclose(obs["state"]["tcp_vel"][:3], [0, -1, 0], atol=1e-9)
+
+
+def test_relative_pose_composes_reset_inverse_on_the_left():
+    """T_r_o_inv @ T_b_o, not the other way round."""
+
+    inner = _PosedEnv(
+        [(0.0, 0.0, 0.0), (0.0, 0.0, np.pi / 2)],
+        positions=[np.array([0.1, 0.2, 0.3]), np.array([0.4, 0.2, 0.3])],
+    )
+    env = RelativeFrame(inner)
+    env.reset()
+    obs, *_ = env.step(np.zeros(7, dtype=np.float32))
+
+    # Reset frame is the identity at (0.1,0.2,0.3); the arm then moved +0.3 in
+    # base x and yawed 90 deg.  Expressed in the reset frame that is +0.3 x.
+    np.testing.assert_allclose(obs["state"]["tcp_pose"][:3], [0.3, 0.0, 0.0], atol=1e-9)
+
+
+def test_reset_frame_is_latched_at_reset_not_refreshed_each_step():
+    """If T_r_o_inv tracked every step the relative pose would stay at zero."""
+
+    inner = _PosedEnv(
+        [(0.0, 0.0, 0.0)] * 3,
+        positions=[
+            np.array([0.1, 0.2, 0.3]),
+            np.array([0.2, 0.2, 0.3]),
+            np.array([0.3, 0.2, 0.3]),
+        ],
+    )
+    env = RelativeFrame(inner)
+    env.reset()
+    env.step(np.zeros(7, dtype=np.float32))
+    obs, *_ = env.step(np.zeros(7, dtype=np.float32))
+
+    np.testing.assert_allclose(obs["state"]["tcp_pose"][:3], [0.2, 0.0, 0.0], atol=1e-9)
 
 
 def test_action_and_observation_use_matrices_one_step_apart():
@@ -274,18 +345,24 @@ def test_quat2euler_shrinks_tcp_pose_without_editing_the_wrapped_space():
 
 
 def test_quat2euler_values_are_the_xyz_euler_of_the_quaternion():
-    env = Quat2EulerWrapper(RelativeFrame(_fake_env()))
-    try:
-        obs, info = env.reset()
-        quat_pose = info["original_state_obs"]["tcp_pose"]
-        # info holds the pre-RelativeFrame pose, so compare shapes/semantics
-        # rather than values: what matters is that we emitted 6 numbers whose
-        # tail is a valid xyz-euler triple.
-        assert np.shape(obs["state"]["tcp_pose"]) == (6,)
-        assert np.shape(quat_pose) == (7,)
-        assert np.all(np.isfinite(obs["state"]["tcp_pose"]))
-    finally:
-        env.close()
+    """Values, not just shapes -- "zyx" instead of "xyz" must fail here.
+
+    Applied without RelativeFrame so the quaternion reaching the wrapper is the
+    one _PosedEnv reports, and an asymmetric rotation so the two conventions
+    actually disagree.
+    """
+
+    euler = (0.3, -0.4, 0.5)
+    env = Quat2EulerWrapper(_PosedEnv([euler], positions=[np.array([0.1, 0.2, 0.3])]))
+    obs, _ = env.reset()
+
+    pose = obs["state"]["tcp_pose"]
+    assert np.shape(pose) == (6,)
+    np.testing.assert_allclose(pose[:3], [0.1, 0.2, 0.3], atol=1e-12)
+    np.testing.assert_allclose(pose[3:], euler, atol=1e-9)
+
+    zyx = R.from_euler("xyz", euler).as_euler("zyx")
+    assert not np.allclose(pose[3:], zyx, atol=1e-6), "xyz and zyx must differ here"
 
 
 def test_quat2euler_rejects_a_pose_that_is_already_euler():

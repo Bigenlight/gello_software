@@ -109,7 +109,31 @@ def test_pose_reference_point_stays_coupled():
     config = _Commissioned()
     assert config.TCP_POSE_SOURCE == "driver"
     assert list(config.TCP_OFFSET_XYZ_RPY) == [0.0] * 6
-    assert float(config.ABS_POSE_LIMIT_LOW[2]) == pytest.approx(0.1785)
+    assert float(config.ABS_POSE_LIMIT_LOW[2]) == pytest.approx(0.185)
+
+
+def test_z_floor_clears_the_contact_free_table_surface():
+    """0.1785 is a 133 N collision, not the table.
+
+    The demonstrated z minimum comes entirely from take_11, where the gripper
+    closed empty and pressed the table.  Filtering to contact-free samples puts
+    the surface at 0.1808, so the floor has to sit above that -- and below the
+    lowest successful grasp (0.1941) or the task becomes unreachable.
+    """
+
+    z_floor = float(_Commissioned().ABS_POSE_LIMIT_LOW[2])
+    assert z_floor > 0.1808, "floor is below the free-space table surface"
+    assert z_floor < 0.1941, "floor is above the lowest successful grasp"
+
+
+def test_reset_gate_clears_recorded_episode_end_poses():
+    """0.5 refuses 16 of 23 takes; the gate must survive a normal episode end.
+
+    Measured branch-safe distance from each take's final frame back to
+    RESET_JOINTS: median 0.615 rad, max 0.774.
+    """
+
+    assert _Commissioned().RESET_MAX_DIST_RAD > 0.774
 
 
 def test_reset_pose_is_the_cube_dataset_not_the_banana_one():
