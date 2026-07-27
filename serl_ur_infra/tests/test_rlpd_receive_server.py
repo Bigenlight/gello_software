@@ -458,6 +458,24 @@ def test_replay_ingress_status_reports_logical_circular_overwrites():
     assert len(ingress.intervention_sidecar()) == 1
 
 
+def test_replay_ingress_learner_mode_requires_explicit_grasp_penalty():
+    factory = _StoreFactory()
+    ingress = ReplayIngress(
+        replay_capacity=4,
+        intervention_capacity=4,
+        store_factory=factory,
+        learner_mode=True,
+    )
+    missing = _finalized_data(step=0)
+    with pytest.raises(ActorProtocolError, match="required in learner mode"):
+        ingress(missing, False)
+
+    present = _finalized_data(step=1)
+    present["transition"]["grasp_penalty"] = -0.02
+    ingress(present, False)
+    assert ingress.status().replay_size == 1
+
+
 def _actual_hil_serl_root() -> str:
     root = os.environ.get(
         "HIL_SERL_ROOT", os.path.join(_REPO_ROOT, "third_party", "hil-serl")

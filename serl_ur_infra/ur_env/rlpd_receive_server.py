@@ -674,7 +674,24 @@ class ReplayIngress:
         hil_serl_root: Optional[str] = None,
         store_factory: Optional[StoreFactory] = None,
         ledger_capacity: Optional[int] = None,
+        learner_mode: bool = False,
+        require_grasp_penalty: Optional[bool] = None,
     ) -> None:
+        if not isinstance(learner_mode, bool):
+            raise ValueError("learner_mode must be bool")
+        if require_grasp_penalty is not None and not isinstance(
+            require_grasp_penalty, bool
+        ):
+            raise ValueError("require_grasp_penalty must be bool when provided")
+        if learner_mode and require_grasp_penalty is False:
+            raise ValueError(
+                "learner_mode cannot disable the grasp_penalty contract"
+            )
+        self.require_grasp_penalty = (
+            learner_mode
+            if require_grasp_penalty is None
+            else require_grasp_penalty
+        )
         self.replay_capacity = _positive_int(
             replay_capacity, name="replay_capacity"
         )
@@ -750,7 +767,11 @@ class ReplayIngress:
         self._last_env_step: Optional[int] = None
 
     def __call__(self, data: dict[str, Any], intervened: bool) -> None:
-        record, transition = self._convert(data, intervened=intervened)
+        record, transition = self._convert(
+            data,
+            intervened=intervened,
+            require_grasp_penalty=self.require_grasp_penalty,
+        )
         signature = self._signature(record, transition)
         with self._lock:
             route = self._ledger.get(record.transition_id)
@@ -1051,7 +1072,10 @@ class ReplayIngress:
 
     @staticmethod
     def _convert(
-        data: Mapping[str, Any], *, intervened: bool
+        data: Mapping[str, Any],
+        *,
+        intervened: bool,
+        require_grasp_penalty: bool = False,
     ) -> tuple[IngressRecord, dict[str, Any]]:
         if not isinstance(data, Mapping) or set(data) != {"meta", "transition"}:
             raise ActorProtocolError("data must contain exactly meta and transition")
@@ -1131,6 +1155,10 @@ class ReplayIngress:
             )
 
         has_grasp_penalty = "grasp_penalty" in source
+        if require_grasp_penalty and not has_grasp_penalty:
+            raise ActorProtocolError(
+                "transition.grasp_penalty is required in learner mode"
+            )
         grasp_penalty = _finite_float(
             source.get("grasp_penalty", 0.0), name="transition.grasp_penalty"
         )

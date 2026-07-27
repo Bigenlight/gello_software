@@ -30,6 +30,7 @@ TODO(together):
   T_tool_L/R from the bridge config for TCP-accurate mapping.
 """
 
+import math
 import threading
 import time
 from typing import Optional, Tuple
@@ -316,3 +317,88 @@ class GelloIntervention(gym.ActionWrapper):
         self._disengage()
         self._grip_cmd = 0.0
         return self.env.reset(**kwargs)
+
+
+class GripperPenaltyWrapper(gym.Wrapper):
+    """Penalize only redundant discrete gripper commands.
+
+    Place this outside ``GelloIntervention`` and after the canonical
+    observation wrappers.  It therefore sees ``state`` as ``(1, 19)`` and can
+    use ``info['intervene_action']`` whenever a human action replaced the
+    policy action.  The penalty describes the action that physically ran, not
+    the counterfactual policy proposal.
+    """
+
+    def __init__(
+        self,
+        env,
+        *,
+        penalty: float = -0.02,
+        open_threshold: float = 0.15,
+        closed_threshold: float = 0.85,
+    ):
+        super().__init__(env)
+        if tuple(env.action_space.shape) != (7,):
+            raise ValueError("GripperPenaltyWrapper requires a 7D action space")
+        self.penalty = float(penalty)
+        if not math.isfinite(self.penalty) or self.penalty > 0.0:
+            raise ValueError("penalty must be finite and non-positive")
+        self.open_threshold = float(open_threshold)
+        self.closed_threshold = float(closed_threshold)
+        if not (
+            0.0
+            <= self.open_threshold
+            < self.closed_threshold
+            <= 1.0
+        ):
+            raise ValueError(
+                "gripper thresholds must satisfy 0 <= open < closed <= 1"
+            )
+        self._last_gripper_position: Optional[float] = None
+
+    @staticmethod
+    def _gripper_position(observation) -> float:
+        if not isinstance(observation, dict) or "state" not in observation:
+            raise ValueError("canonical observation with state is required")
+        state = np.asarray(observation["state"])
+        if state.shape != (1, 19) or state.dtype != np.float32:
+            raise ValueError(
+                "canonical state must have shape (1, 19) and dtype float32"
+            )
+        position = float(state[0, -1])
+        if not math.isfinite(position) or not 0.0 <= position <= 1.0:
+            raise ValueError("gripper position must be finite and in [0, 1]")
+        return position
+
+    def reset(self, **kwargs):
+        observation, info = self.env.reset(**kwargs)
+        self._last_gripper_position = self._gripper_position(observation)
+        return observation, info
+
+    def step(self, action):
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        if self._last_gripper_position is None:
+            raise RuntimeError("GripperPenaltyWrapper.step called before reset")
+        result_info = dict(info)
+        executed = np.asarray(
+            result_info.get("intervene_action", action)
+        )
+        if executed.shape != (7,) or executed.dtype.kind not in "fiu":
+            raise ValueError("executed gripper action must have shape (7,)")
+        if not np.all(np.isfinite(executed)):
+            raise ValueError("executed gripper action must be finite")
+
+        gripper_action = float(executed[-1])
+        redundant_close = (
+            gripper_action < -0.5
+            and self._last_gripper_position >= self.closed_threshold
+        )
+        redundant_open = (
+            gripper_action > 0.5
+            and self._last_gripper_position <= self.open_threshold
+        )
+        result_info["grasp_penalty"] = (
+            self.penalty if redundant_close or redundant_open else 0.0
+        )
+        self._last_gripper_position = self._gripper_position(observation)
+        return observation, reward, terminated, truncated, result_info

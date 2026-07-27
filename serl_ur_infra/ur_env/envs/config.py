@@ -122,6 +122,9 @@ class DefaultUR7eEnvConfig:
 
     # ---- gripper ---- #
     GRIPPER_SLEEP: float = 0.6   # debounce between binary open/close commands
+    # Learned-gripper auxiliary reward.  This matches the upstream task
+    # configs and is emitted on every transition by GripperPenaltyWrapper.
+    GRASP_PENALTY: float = -0.02
 
     # Safety default for the skeleton phase: compute everything but do NOT
     # publish robot commands unless explicitly armed.
