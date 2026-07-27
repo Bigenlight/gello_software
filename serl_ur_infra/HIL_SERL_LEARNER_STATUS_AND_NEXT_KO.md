@@ -1,5 +1,7 @@
 # HIL-SERL production learner 현황과 다음 작업
 
+> 🚩 **이어서 작업하러 왔다면 [HANDOFF_NEXT_SESSION_KO.md](./HANDOFF_NEXT_SESSION_KO.md)를 먼저 읽어라.** 이 문서는 전체 상태 기록이고, 그쪽이 "지금 무엇을 하면 되는가"다.
+>
 > 기준일: 2026-07-27 KST
 >
 > 문서상 최종 운영 checkout: `/home/laptop3/gello_software`

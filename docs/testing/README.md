@@ -1,5 +1,7 @@
 # HIL-SERL 실기 투입 — 통신·하드웨어 검증 런북 (인덱스)
 
+> 🚩 **새 세션이라면 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](../../serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 먼저 읽어라.** 현재 상태·다음 할 일·안전 규칙이 거기 모여 있다. 이 디렉터리는 개별 검증 절차다.
+
 이 디렉터리는 **HIL-SERL을 실제 UR7e에 올리기 전에 통신·하드웨어 경로를 사람이 직접
 확인하는 절차**를 담는다. 학습 모델(learner/policy)은 이 문서의 범위가 **아니다**.
 
