@@ -118,6 +118,10 @@ class DefaultUR7eEnvConfig:
     TCP_OFFSET_XYZ_RPY: list = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     # robot /joint_states older than this -> unsafe to act on
+    # How long __init__ waits for the first /joint_states before giving up.
+    # DDS discovery plus the first message costs about a second; callers
+    # reset() immediately, so without this the env fails on a healthy rig.
+    ROBOT_STATE_WAIT_S: float = 15.0
     JOINT_STATE_STALE_S: float = 0.2
 
     # ---- gripper ---- #

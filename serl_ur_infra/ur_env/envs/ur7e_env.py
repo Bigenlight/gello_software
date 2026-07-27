@@ -192,6 +192,7 @@ class UR7eEnv(gym.Env):
                 upsampler_cfg=self.config.UPSAMPLER,
                 dry_run=self.config.DRY_RUN,
             )
+        self._await_robot_state()
         self.controller = PolicyDeltaController(self.config.GOVERNOR, self.hz)
         self.last_gripper_act = time.time()
 
@@ -265,6 +266,31 @@ class UR7eEnv(gym.Env):
         info = {"succeed": bool(reward)}
         info.update(ctrl_info)
         return ob, int(reward), done, False, info
+
+    def _await_robot_state(self) -> None:
+        """Block until the robot state stream is live, or fail with a diagnosis.
+
+        DDS discovery plus the first /joint_states message takes on the order of
+        a second, and reset() is the very first thing every caller does.  Without
+        this wait the env raises "no /joint_states -- cannot reset" on a rig that
+        is in fact perfectly healthy, which reads as a wiring fault and sends
+        people looking at QoS.  Waiting here rather than in each entry point
+        keeps the contract with the caller simple: once the constructor returns,
+        the env is usable.
+        """
+
+        deadline = time.time() + float(self.config.ROBOT_STATE_WAIT_S)
+        while time.time() < deadline:
+            q, _, _ = self.backend.get_joint_state()
+            if q is not None:
+                return
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"no /joint_states within {self.config.ROBOT_STATE_WAIT_S}s of "
+            f"subscribing to '{self.config.ROS.get('joint_states_topic', '/joint_states')}'. "
+            "Is the UR driver running (ros2 topic hz /joint_states), and does "
+            "this process share its ROS_DOMAIN_ID?"
+        )
 
     def reset(self, **kwargs):
         if self.save_video:
