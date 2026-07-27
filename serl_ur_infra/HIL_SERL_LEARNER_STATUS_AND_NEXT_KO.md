@@ -4,12 +4,15 @@
 >
 > canonical 통합 브랜치/작업 위치: `feat/gello-ur7e-humble-22.04` / `/home/laptop3/gello_software`
 >
-> 이번 후속 작업 시작 기준 HEAD: `c67c3278d8c6cb9bd0245a24c0595811118d12bb`
+> stable actor/server/learner code·test 통합 완료 커밋: `a01b6652ea93971df229f1806c1540257fdfa2d1`
+>
+> canonical handoff 확인 커밋: `e5ec01baea3d0eebbbfe98a90c0a1337b5872dd3`
 
 ## 한눈에 보기
 
 - 실제 작업 위치는 `/home/laptop3/gello_software`, 단일 canonical 브랜치는 `feat/gello-ur7e-humble-22.04`이다. 이 브랜치의 선형 이력에 local actor adapter, 검증된 gRPC actor transport, server-authoritative protocol/receive server, learner foundation과 실제 checkpoint integration test가 모두 들어 있다.
-- 통합 이력의 현재 기준점은 `a01b665` (`test(hil): verify real learner checkpoint resume`)이다. 이전 단계 브랜치는 이 선형 이력의 중간 label일 뿐이며 local/remote에서 정리했다.
+- 2026-07-27 이 문서 갱신 전 재확인 시점에 local branch, remote tracking branch, GitHub default branch는 모두 `e5ec01b` (`docs(hil): record unified branch handoff`)를 가리켰다. 실제 actor/server/learner code와 checkpoint integration test의 통합 경계는 그 직전 `a01b665` (`test(hil): verify real learner checkpoint resume`)이며, `e5ec01b`는 통합 위치와 정리 결과를 기록한 문서 커밋이다.
+- 이전 단계의 HIL local/remote branch와 별도 worktree는 정리됐다. `git worktree list`에는 `/home/laptop3/gello_software` 하나만 남아 있으며, 안정 HIL 후속 작업은 이 canonical branch에서만 진행한다.
 - 친구가 작성한 remote inference split 초안은 `be0ffdc` (`wip(hil): snapshot remote inference split draft`)로 따로 스냅샷 보존했다. 이 커밋은 canonical lineage에 merge/cherry-pick하지 않았으며 원격 tag `archive/hil-grpc-actor-transport-wip-20260727`이 정확히 이 커밋을 가리킨다.
 - CPU JAX/JAXLIB `0.5.3` 환경에서 실제 `SACAgentHybridSingleArm` 생성, CTA update, policy publish, 전체 Flax train state checkpoint 저장·복원, 복원 후 추가 학습까지 통과했다.
 - `c67c327` 기준 전체 테스트는 기존 74개와 신규 19개를 합쳐 `93 passed`였다. 이번에 실제 agent checkpoint/resume/continue 절차를 opt-in integration test로 저장소에 고정했고, 최종 통합 workspace의 CPU JAX에서 `1 passed, 92 warnings in 40.83s`를 확인했다. 기본 전체 suite는 이 비싼 테스트를 skip하여 `93 passed, 1 skipped in 1.31s`다.
@@ -38,9 +41,9 @@
 
 ### 2.1 Git worktree와 branch
 
-| 용도 | 디렉터리 또는 보존 위치 | 브랜치/tag | HEAD | 최종 상태 |
+| 용도 | 디렉터리 또는 보존 위치 | 브랜치/tag | 통합/정리 확인 기준 | 최종 상태 |
 | --- | --- | --- | --- | --- |
-| **canonical HIL-SERL 통합** | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | `a01b6652ea93971df229f1806c1540257fdfa2d1` | GitHub default branch와 로컬 작업 브랜치가 같은 commit을 가리킨다. actor/server/learner 후속 작업은 여기서만 진행한다. |
+| **canonical HIL-SERL 통합** | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | `e5ec01baea3d0eebbbfe98a90c0a1337b5872dd3` | 문서 갱신 전 재확인 시 local branch, `origin/feat/gello-ur7e-humble-22.04`, `origin/HEAD`가 같은 handoff commit을 가리켰다. code·test 통합 경계는 직전 `a01b665`이며 후속 작업은 여기서만 진행한다. |
 | 이전 learner worktree | `/home/laptop3/gello_worktrees/hil-rl-learner` | 삭제된 `feat/hil-rl-learner` | `a01b6652ea93971df229f1806c1540257fdfa2d1` | canonical을 원격에 push한 뒤 루트 workspace로 옮기고 worktree와 local/remote alias를 제거했다. |
 | 이전 receive server worktree | 삭제된 `/tmp/gello-hil-rl-receive-server` | 삭제된 `feat/hil-rl-receive-server` | `e42dbf3848f16a97cffe9ce9ca8ccfdfc2b4265b` | canonical의 ancestor이므로 local/remote branch와 worktree를 제거했다. |
 | 친구 WIP archive | 원격 Git tag | `archive/hil-grpc-actor-transport-wip-20260727` | `be0ffdc95354d3206780b5245857f7c350a0dbeb` | WIP branch/worktree는 제거했지만 exact commit은 tag로 보존했다. canonical에는 병합하지 않았다. |
@@ -54,11 +57,19 @@ dc25cbe  robot-local intervention metadata
           └─ 9cc994f..e42dbf3  server-authoritative protocol + receive server
               └─ c67c327  local hybrid SAC learner foundation
                   └─ a01b665  real-agent checkpoint integration regression
+                      └─ e5ec01b  unified branch handoff documentation
 ```
 
 `feat/hil-actor-adapter`, `feat/hil-grpc-actor-transport`, `feat/hil-rl-receive-server`, `feat/hil-rl-learner`는 정리 전 단계별 label이었다. 안정 커밋은 모두 canonical 선형 이력에 보존돼 있어 별도 merge가 필요하지 않다. `be0ffdc`만 `5709bb5`에서 갈라진 별도 WIP이므로 tag로 보존하고 canonical lineage에는 포함하지 않았다.
 
-GitHub의 기존 default branch가 `feat/gello-ur7e-humble-22.04`였고 현재 로그인 계정에는 default branch를 바꿀 admin 권한이 없었다. 두 원격 branch를 남기지 않기 위해 기존 default branch를 `a01b665`까지 **fast-forward**하고 임시 `feat/hil-rl-learner` alias를 삭제했다. force-push는 사용하지 않았다. 최종적으로 local actor, transport/server, learner는 하나의 local/remote branch에 있다.
+GitHub의 기존 default branch가 `feat/gello-ur7e-humble-22.04`였고 현재 로그인 계정에는 default branch를 바꿀 admin 권한이 없었다. 두 원격 branch를 남기지 않기 위해 기존 default branch를 `a01b665`까지 **fast-forward**하고 임시 `feat/hil-rl-learner` alias를 삭제했다. 이어서 통합 handoff 문서 커밋 `e5ec01b`를 같은 canonical branch에 반영했다. force-push는 사용하지 않았다. 최종적으로 local actor, transport/server, learner는 하나의 local/remote branch에 있다.
+
+2026-07-27 재확인 결과는 다음과 같다.
+
+- `git worktree list`: `/home/laptop3/gello_software` 한 개만 존재
+- `git branch --all --contains a01b665`: local canonical branch와 그 remote tracking/default ref만 출력
+- `git rev-parse feat/gello-ur7e-humble-22.04 origin/feat/gello-ur7e-humble-22.04`: 둘 다 `e5ec01b`
+- `archive/hil-grpc-actor-transport-wip-20260727^{}`: `be0ffdc`; stable 통합 대상이 아닌 WIP은 branch가 아니라 tag로만 보존
 
 ### 2.2 third-party와 생성 코드
 
