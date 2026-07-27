@@ -108,13 +108,46 @@ def _build_actor_environment(config: Any, args: argparse.Namespace) -> Any:
     return EnvTimestampAdapter(RecordEpisodeStatistics(task_env))
 
 
+def _load_config_mapping(ur_config_module: str | None) -> dict:
+    """Upstream's task registry if it imports, ours either way.
+
+    ``experiments.mappings`` eagerly imports all four Franka task configs, and
+    those pull in jax, pyspacemouse, hidapi and pyrealsense2.  The robot laptop
+    has none of them on purpose -- inference and learning live on the remote
+    GPU, and this process must stay a plain rclpy/numpy actor.  Requiring the
+    Franka registry just to look up a UR task name would make jax a hard
+    dependency of the robot side.
+
+    So a failed upstream import is downgraded to a warning, but only when a UR
+    registry was supplied: without one there is nothing left to look up and the
+    original error is the useful message.
+    """
+
+    mapping: dict = {}
+    try:
+        from experiments.mappings import CONFIG_MAPPING as upstream_mapping
+    except Exception as exc:  # noqa: BLE001 - any import error is equivalent here
+        if not ur_config_module:
+            raise
+        print(
+            f"[remote-actor] upstream experiments.mappings unavailable "
+            f"({type(exc).__name__}: {exc}); continuing with "
+            f"{ur_config_module} only",
+            flush=True,
+        )
+    else:
+        mapping.update(upstream_mapping)
+
+    if ur_config_module:
+        module = importlib.import_module(ur_config_module)
+        mapping.update(module.CONFIG_MAPPING)
+    return mapping
+
+
 def main() -> int:
     args = _parse_args()
-    from experiments.mappings import CONFIG_MAPPING
+    CONFIG_MAPPING = _load_config_mapping(args.ur_config_module)
 
-    if args.ur_config_module:
-        module = importlib.import_module(args.ur_config_module)
-        CONFIG_MAPPING.update(module.CONFIG_MAPPING)
     if args.exp_name not in CONFIG_MAPPING:
         raise KeyError(f"unknown experiment {args.exp_name!r}")
 
