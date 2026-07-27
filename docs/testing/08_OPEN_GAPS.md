@@ -8,7 +8,7 @@
 > `DRY_RUN`은 기본값 `True`로 둔다 (`serl_ur_infra/ur_env/envs/config.py:130`).
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---
@@ -187,12 +187,12 @@ ros2 topic info /forward_position_controller/commands --verbose | grep -c "Node 
 
 ---
 
-## G5 — 19-D `state` 순서 계약 (변경 **진행 중**) 🟠
+## G5 — 19-D `state` 순서 계약 (코드 통합 완료, runtime pin 유지) 🟢
 
 ### 사실
 
-문서 작성 시점(2026-07-27 17:15~17:16) `serl_ur_infra/ur_env/observation_schema.py`가
-**커밋되지 않은 채** 수정되어 있다:
+`serl_ur_infra/ur_env/observation_schema.py`의 다음 변경은 hardware commit `6a0b127`과
+learner/hardware merge `248255f`에 통합됐다:
 
 - 스키마 ID `hil-serl-ur-canonical-observation-v1` → **`-v2`**
 - 평탄 레이아웃이 **알파벳순**으로 재정의됨:
@@ -205,11 +205,9 @@ ros2 topic info /forward_position_controller/commands --verbose | grep -c "Node 
 
 ### 남은 위험
 
-1. `serl_ur_infra/RL_RECEIVE_SERVER.md`는 **아직 옛 순서**("TCP pose 6, TCP velocity 6,
-   TCP force 3, TCP torque 3, gripper 1")를 적고 있다. **문서가 코드와 어긋나 있다.**
-2. 이 워크트리에는 `third_party/hil-serl`이 없어 **실제 `SERLObsWrapper`를 통과시켜 본 적이
-   없다.** 서브모듈이 있는 환경에서 `tests/test_state_layout_contract.py`를 반드시 한 번 돌려야 한다.
-3. **수치가 바뀌는 중이므로 어떤 문서·코드에도 해시나 인덱스를 하드코딩하지 말 것.**
+runtime dependency/gymnasium 변경으로 실제 flatten 순서가 달라질 수 있다. 그래서 live env
+layout assertion과 laptop/server schema hash pin을 계속 유지하고, gripper index를 call site에
+숫자로 재작성하지 않는다.
 
 ### 완화책
 
@@ -305,28 +303,22 @@ env는 `TCP_OFFSET_XYZ_RPY`로 `self.T_tool`을 만들어 두었지만 (`ur7e_en
 
 ---
 
-## G10 — 이 워크트리에 `third_party/hil-serl`이 없다 🟡
+## G10 — pinned `third_party/hil-serl` 초기화 확인 🟡
 
 ```bash
 cd $WT && git submodule status
-# -c32939bcc... third_party/hil-serl     ← 미초기화
+# 앞의 '-'는 미초기화 상태
 ```
 
-`serl_launcher`를 import하는 모든 것이 실패한다: `SERLObsWrapper`, `RelativeFrame`,
-`Quat2EulerWrapper`, `ChunkingWrapper`, 수신 서버의 replay store.
-따라서 **wrapper 체인 전체를 이 워크트리에서 통과시켜 본 적이 없다.**
-
-**완화책:** `00_SETUP_AND_SAFETY.md` §2.3의 (a) 또는 (b).
+canonical/Kanu 검증에서는 pinned submodule을 사용했다. 새 checkout에서 앞에 `-`가 붙으면
+`serl_launcher` import가 실패하므로 `00_SETUP_AND_SAFETY.md` §2.3에 따라 초기화한다.
 
 ---
 
-## G11 — 스크립트 수정이 **커밋되지 않았다** 🟡
+## G11 — build/gripper shell 수정 통합 완료 🟢
 
-`run_ur7e_gripper.sh` / `build_ur7e.sh`의 `set -u` 버그 수정이 워킹트리에만 있다
-(`00_SETUP_AND_SAFETY.md` §3.3).
-`git checkout .` / `git stash` / `git clean -fd` 한 번이면 **그리퍼 브링업과 빌드가 다시 깨진다.**
-
-**완화책:** 세션 시작 시 `git status`. 그리고 이 수정을 소유한 담당자가 커밋할 것.
+`run_ur7e_gripper.sh` / `build_ur7e.sh`의 `set -u` 수정은 hardware snapshot `4171e7a`에
+포함됐다. 세션 시작 시 `git status`로 별도 사용자 변경을 보존하는 원칙은 계속 적용한다.
 
 ---
 

@@ -2,23 +2,23 @@
 
 > 기준일: 2026-07-27 KST
 >
-> 현재 구현 worktree: `/home/laptop3/gello_worktrees/hil-production-learner`
+> 문서상 최종 운영 checkout: `/home/laptop3/gello_software`
 >
-> 현재 구현 branch: `feat/hil-production-learner`
+> 문서상 최종 운영 branch: `feat/gello-ur7e-humble-22.04`
 >
-> 분기 기준 commit: `f0dd3e7deb6f96a51889b6e9d9d41812d34b26b8`
+> learner/hardware 통합 merge: `248255f` (schema v2 검증 및 canonical branch 통합 완료)
 >
 > Kanu 실행 절차: [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)
 
 ## 한눈에 보기
 
-- receive server, 실제 hybrid SAC learner, versioned policy, strict replay ingress, gripper penalty, checkpoint/resume, JSONL/W&B를 **하나의 production CLI**로 조립하는 코드는 현재 `feat/hil-production-learner` worktree에 구현돼 있다.
+- receive server, 실제 hybrid SAC learner, versioned policy, strict replay ingress, gripper penalty, checkpoint/resume, JSONL/W&B를 **하나의 production CLI**로 조립하는 구현은 learner/hardware 통합 merge `248255f` 계열에 모였다. schema v2 검증과 최종 운영 위치 `/home/laptop3/gello_software`의 `feat/gello-ur7e-humble-22.04` 통합을 완료했다.
 - robot actor의 실제 실행 action을 기준으로 `grasp_penalty`를 생성하는 wrapper도 두 actor entrypoint에 배선됐다. learner ingress는 penalty 누락을 허용하지 않는다.
 - 실제 `SACAgentHybridSingleArm`을 사용해 CTA update → publish → checkpoint → fresh agent restore → production composition 재조립 → action/RNG/counter 확인 → 추가 update/checkpoint까지 검증했다.
 - 실제 reward classifier checkpoint는 로컬에서 SHA 검증, load, warm-up까지 성공했다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했다.
 - fake canonical demo generator가 추가됐다. 이 raw artifact는 construction `--dry-run` 또는 명시적으로 bounded된 `--synthetic-e2e` acceptance에만 허용된다. 일반 robot-data learner serving은 계속 거부한다.
-- frozen-trunk + synthetic E2E 변경 뒤 fresh-process 기본 전체 suite는 `200 passed, 4 skipped, 6 warnings in 2.82s`다. 실제 frozen-trunk agent `2 passed`, agent checkpoint/resume `1 passed`, 실제 local fake E2E `1 passed`를 별도 opt-in 통과했다.
-- 사용자가 현재 milestone 완료 조건으로 지정한 **fake data laptop→SSH tunnel→Kanu 전체 learning E2E**는 pre-hardware schema v1에서 fresh step 1 + fresh-process resume step 2까지 통과했다. 다만 hardware branch 통합이 canonical state layout을 v2로 바꾸므로, 최종 통합 branch의 v2 fresh/resume 재검증이 완료 조건이다.
+- unified schema v2 기본 suite는 `253 passed, 4 skipped, 6 warnings`, UR/GELLO suite는 `436 passed`다. 실제 frozen-trunk agent `2 passed`, checkpoint/resume `1 passed`, local fake E2E `1 passed`도 다시 통과했다.
+- 사용자가 현재 milestone 완료 조건으로 지정한 **fake data laptop→SSH tunnel→Kanu learning E2E**는 schema v2에서 exact 100 ingress→actual classifier→feature replay→CTA update→publish→checkpoint full-load roundtrip까지 통과했다. 새 Kanu process가 checkpoint를 `1/2/1`로 restore하고 policy version 1의 finite 7D action을 serving하는 것도 확인했다. 사용자 요청에 따라 v2 resume process의 불필요한 두 번째 SAC update는 생략했다.
 - 아직 실제 robot/task/camera E2E, production 50-step publish/5,000-step checkpoint bounded run, 장시간 GPU contention/latency, 운영 heartbeat는 검증되지 않았다. 따라서 현재 fake-data milestone은 완료됐지만 “실기 운용 승인 완료” 상태는 아니다.
 - external policy/classifier는 canonical raw `uint8 (1,128,128,3)` image를 계속 받지만, replay/demo에는 frozen ResNet-10의 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` map의 current/next만 저장한다. GAP은 적용하지 않고 augmentation은 `none`이다.
 - `SpatialLearnedEmbeddings(8) -> Dropout(0.1) -> Dense(256) -> LayerNorm -> tanh`는 동결하지 않았다. learner가 feature batch를 꺼낼 때 현재 weight로 적용하므로 critic/grasp critic CTA update가 유지된다.
@@ -41,24 +41,23 @@
 | fake canonical demo | 생성기·strict loader·dry-run/synthetic-E2E scope gate 자동 검증 |
 | Kanu GPU production dry-run | actual classifier/agent, feature demo conversion, 128/32 RAM preflight 통과 |
 | Kanu GPU feature CTA smoke | 1 learner step/2 gradient step, raw/cached action, trunk invariant 통과 |
-| laptop→Kanu fake learning E2E | schema v1 fresh/resume 통과; final unified schema v2 재검증 필수 |
+| laptop→Kanu fake learning E2E | unified schema v2 fresh actual update/checkpoint + fresh-process resume serving 통과 |
 | Kanu GPU continuous learner | 미검증 |
 | 실제 robot actor → Kanu learner E2E | 미검증 |
 | frozen-trunk feature replay/demo | 구현·자동 검증; Kanu GPU dry-run/CTA smoke 통과 |
 
-즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, schema v1 bounded fake learning/resume acceptance는 확인했다. learner+hardware 통합 후 schema v2 E2E를 다시 통과한 뒤에 현재 milestone을 최종 완료로 판정한다.
+즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, unified schema v2 bounded fake learning/checkpoint/resume serving까지 확인했다. fake-data milestone은 완료다.
 
 ## 2. 작업 위치와 branch
 
-### 2.1 현재 작업 위치
+### 2.1 최종 운영 위치와 통합 기준점
 
-| 용도 | 위치 | branch | 상태 |
+| 용도 | 위치 | branch/commit | 상태 |
 | --- | --- | --- | --- |
-| production learner 구현 | `/home/laptop3/gello_worktrees/hil-production-learner` | `feat/hil-production-learner` | 이 문서와 현재 미커밋 구현의 작업 위치 |
-| canonical 통합 workspace | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | 현재 구현 검증 후 fast-forward/cherry-pick 대상. 다른 세션 변경을 임의로 덮어쓰면 안 됨 |
-| hardware 통신 검증 | `/home/laptop3/gello_worktrees/hil-hardware-comms` | `test/hil-hardware-comms` | 별도 worktree. learner 문서 작업 대상 아님 |
+| canonical 운영 checkout | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | 최종 server/learner/local-hardware 통합 위치 |
+| learner/hardware 통합 기준점 | 위 canonical branch에 포함 | `248255f` | learner `8f242d8` 계열과 hardware `6a0b127`을 병합; schema v2 검증 완료 |
 
-production learner branch는 `f0dd3e7`에서 분기한 뒤 `3e64fd4`, `4ac98df`를 쌓았고, 현재 frozen-trunk feature 변경은 이 worktree의 미커밋 상태다. canonical/hardware branch는 `f0dd3e7`에 남아 있다. feature 변경을 검증·commit한 뒤에만 통합한다.
+통합 lineage는 historical base `f0dd3e7` 위의 learner snapshot `8f242d8`, synthetic acceptance 문서 `5322119`, hardware contract fix `6a0b127`을 `248255f`에서 합쳤다. 최종 작업 branch는 `feat/gello-ur7e-humble-22.04` 하나다.
 
 ### 2.2 역사적 통합 이력
 
@@ -82,7 +81,7 @@ dc25cbe  robot-local intervention metadata
 - `.proto`와 generated `*_pb2.py`, `*_pb2_grpc.py`는 수정하지 않는다.
 - 기존 checkpoint를 덮어쓰거나 삭제하지 않는다.
 - replay/intervention buffer를 checkpoint에 포함한다고 가정하지 않는다.
-- canonical workspace나 다른 worktree의 dirty 변경을 learner 작업으로 흡수하지 않는다.
+- canonical checkout의 기존 dirty 변경을 통합 작업으로 임의 흡수하거나 덮어쓰지 않는다.
 
 ## 3. 현재 production data flow
 
@@ -233,7 +232,7 @@ state groups: gripper_pose, tcp_force, tcp_pose, tcp_torque, tcp_vel
 gripper_position index: 0
 ```
 
-즉 `state[0,-1]`은 gripper가 아니라 `tcp_angular_velocity_z`다. gripper는 `GRIPPER_POSITION_INDEX`/`gripper_position_from_state()`로만 읽어야 한다. shape가 같아도 ordered feature/schema hash가 다르므로 v1 checkpoint/fingerprint와 v2를 섞지 않는다. 5.5의 v1 Kanu E2E는 interim 근거이며 final unified branch에서 v2 fresh/resume E2E를 다시 실행해야 한다.
+즉 `state[0,-1]`은 gripper가 아니라 `tcp_angular_velocity_z`다. gripper는 `GRIPPER_POSITION_INDEX`/`gripper_position_from_state()`로만 읽어야 한다. shape가 같아도 ordered feature/schema hash가 다르므로 v1 checkpoint/fingerprint와 v2를 섞지 않는다. 5.5의 v1 Kanu E2E는 interim이고 5.6의 v2 결과만 최종 통합 근거로 사용한다.
 
 external canonical observation shape와 learner storage shape는 구분한다. actor policy와 reward classifier는 raw image를 소비한다. ingress는 classifier가 reward/termination을 finalize한 뒤 current/next raw observation을 frozen trunk로 encode하고, ring에는 explicit `observations`/`next_observations`의 state와 두 camera map만 보유한다. raw image packing과 upstream `pack_batch()`는 feature learner path에서 사용하지 않는다.
 
@@ -308,7 +307,7 @@ production CLI는 `--resume-latest`뿐 아니라 explicit `--resume-path`에도 
 - fresh start와 resume lineage 혼합 거부
 - resume 시 exact counter/publish boundary 검사
 
-실제 agent checkpoint payload는 약 305 MiB였고 pre-hardware schema v1 Kanu synthetic E2E의 step 1/2 payload는 각각 `320,100,609 B`였다. final v2 payload는 통합 재검증 후 다시 기록한다. pruning이 없으므로 production 5,000-step checkpoint마다 이 정도가 누적된다고 가정하고 disk를 계획해야 한다. synthetic scope는 검증용으로 period 1이므로 target을 1..10으로 제한한다.
+실제 agent checkpoint payload는 약 305 MiB였고 schema v1과 최종 v2 Kanu synthetic E2E에서 `320,100,609 B`를 관측했다. pruning이 없으므로 production 5,000-step checkpoint마다 이 정도가 누적된다고 가정하고 disk를 계획해야 한다. synthetic scope는 검증용으로 period 1이므로 target을 1..10으로 제한한다.
 
 ### 4.7 fingerprint
 
@@ -402,17 +401,16 @@ fake data로도 확인할 수 없는 것:
 
 ## 5. 검증 현황
 
-### 5.1 현재 확정 회귀 기준
+### 5.1 unified schema v2 최종 회귀
 
-frozen-trunk feature + synthetic E2E 통합 뒤 기본 전체 suite 결과는 다음과 같다.
+learner/hardware 통합 merge `248255f`에서 확인한 최종 결과는 다음과 같다.
 
 ```text
-200 passed, 4 skipped, 6 warnings in 2.82s
+serl_ur_infra: 253 passed, 4 skipped, 6 warnings in 3.10s
+ur_gello_bringup: 436 passed in 7.35s
 ```
 
-skip은 JAX 비용이 큰 opt-in 실제 agent/E2E 경로다. 기본 suite에는 production composition, synthetic CLI scope/fingerprint gate, fake E2E actor, feature demo conversion, feature replay/schema/memory preflight, gripper wiring, exact penalty contract, ingress fault gate, classifier local-I/O, actor server-identity pinning, 실제 W&B offline/protobuf smoke가 포함된다.
-
-역사적으로 feature 전 hardening 기준은 `158 passed, 1 skipped, 6 warnings`였다. 현재 운영 기준은 위 feature suite이며, 이전 숫자를 현재 계약의 근거로 사용하지 않는다.
+skip은 JAX 비용이 큰 opt-in 실제 agent/E2E 경로다. 같은 unified tree에서 실제 frozen-feature agent `2 passed in 22.66s`, 실제 checkpoint `1 passed in 33.61s`, 실제 localhost fake E2E `1 passed in 32.77s`를 별도 실행했다. 실패는 0이었다. UR/GELLO suite는 system pytest/anyio plugin 충돌을 피하기 위해 문서대로 `-p no:anyio`를 사용했다.
 
 ### 5.2 opt-in 실제 agent checkpoint/resume
 
@@ -430,11 +428,11 @@ skip은 JAX 비용이 큰 opt-in 실제 agent/E2E 경로다. 기본 suite에는 
 
 비용을 줄이기 위해 test config의 publish/checkpoint period는 1이다. 따라서 boundary 구현을 검증하지만 default 50/5,000 장시간 run을 대체하지는 않는다.
 
-opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. CPU JAX 0.5.3에서 frozen-trunk feature checkpoint save/resume/continued CTA 통합 검증 `1 passed in 31.01s`를 확인했다.
+opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. unified schema v2에서 CPU JAX 0.5.3 frozen-trunk feature checkpoint save/resume/continued CTA 통합 검증 `1 passed in 33.61s`를 확인했다.
 
 ### 5.3 opt-in 실제 frozen-trunk agent
 
-`tests/test_actual_frozen_trunk_feature_agent.py`는 `RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1`로 실행하며 `2 passed in 20.30s`를 확인했다.
+`tests/test_actual_frozen_trunk_feature_agent.py`는 `RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1`로 실행하며 unified schema v2에서 `2 passed in 22.66s`를 확인했다.
 
 - raw path와 cached-map path의 deterministic/stochastic 7D action 수치 동치
 - feature shape/dtype/finite/no-augmentation contract
@@ -462,7 +460,7 @@ opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. CPU JAX 0.5.3�
 
 처음 사용한 `kanu_junhyeong`은 등록되지 않은 이름이었고 실제 SSH alias는 `kanu`였다. read-only preflight에서 RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장과 `/home/junhyeong/miniconda3/envs/il/bin/python`의 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개를 확인했다.
 
-Kanu의 기존 repository가 dirty detached 상태였으므로 그 workspace를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 검증 tree를 구성했다. `CUDA_VISIBLE_DEVICES=0`으로 실제 classifier + agent production dry-run(128/32 capacity)이 통과했고 당시 pre-execution-scope fingerprint는 `8465e464b3f4eb638513eaa4ab3daea85a9435a9ddf47bdbf841a2c2f2aacce9`였다. 별도 실제 GPU feature CTA smoke는 backend `gpu`, device 1개, feature `[1,4,4,512]`, `gradient_step=2`, `augmentation_function=None`(JSON `null`)을 확인했다. raw/cached deterministic action의 max absolute difference는 `0.00012614415027201176`였고 online/target trunk invariant도 통과했다. 현재 execution-scope fingerprint의 authoritative Kanu E2E 값은 5.5의 `d2cbbad...` 값이다. 이는 bounded synthetic 결과이며 continuous server/robot E2E로 확대 해석하지 않는다.
+Kanu의 기존 repository가 dirty detached 상태였으므로 그 workspace를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 검증 tree를 구성했다. `CUDA_VISIBLE_DEVICES=0`으로 실제 classifier + agent production dry-run(128/32 capacity)이 통과했고 당시 pre-execution-scope fingerprint는 `8465e464b3f4eb638513eaa4ab3daea85a9435a9ddf47bdbf841a2c2f2aacce9`였다. 별도 실제 GPU feature CTA smoke는 backend `gpu`, device 1개, feature `[1,4,4,512]`, `gradient_step=2`, `augmentation_function=None`(JSON `null`)을 확인했다. raw/cached deterministic action의 max absolute difference는 `0.00012614415027201176`였고 online/target trunk invariant도 통과했다. 5.5의 `defda67...`는 pre-hardware schema v1 interim이고, unified schema v2 authoritative fingerprint는 아래 `fa198537...`다. 어느 결과도 continuous server/robot E2E로 확대 해석하지 않는다.
 
 ### 5.5 laptop→Kanu 실제 fake-data learning E2E (schema v1 interim)
 
@@ -492,23 +490,29 @@ fresh-process resume run:
 - `checkpoint_000000000002`; cleanup 후 full load roundtrip/counter/trunk invariant 통과
 - update loss 모두 finite, publish/checkpoint/`learner_process_stopped(exit_code=0)` event 확인
 
-위 hardened run은 schema v1에서 exact actor/run allowlist, exact 100 insert, synthetic-only model ID, timeout, target +1, post-cleanup checkpoint roundtrip까지 통과했다. 그러나 hardware branch의 schema v2/hash/gripper index 변경이 fingerprint와 state 의미를 바꾸므로 **최종 통합 branch v2 fresh/resume E2E는 아직 pending**이다. 위 v1 fingerprint/checkpoint를 v2 authoritative 산출물로 사용하지 않는다. RTT는 일회 관측값이며 SLA가 아니다.
+위 결과는 schema v1 역사적 근거이며 v2 checkpoint lineage에 사용하지 않는다.
 
-final v2 rerun 후 이 문서에 다음을 교체·기록해야 한다.
+### 5.6 laptop→Kanu 최종 fake-data learning E2E (schema v2)
 
-- unified commit/branch
-- schema v2 fingerprint
-- fresh/resume sender RTT·counter·checkpoint roundtrip
-- v2 default suite와 opt-in actual test 최종 수치
+- fingerprint: `fa1985378ad2729f466783e4f112d54022e14090430374a6531e4fb715440fcd`
+- sender: exact 100 ACK/insert, RTT mean `84.88630425 ms`, max `372.820324 ms`
+- 실제 batch 256 CTA: learner/gradient/policy `0/0/0 -> 1/2/1`; online/demo 128:128, 모든 loss finite
+- timing: learner `83,997.304 ms`, critic `36,496.960 ms`, full `36,822.142 ms`, sample `1,754.703 ms`
+- checkpoint: `checkpoint_000000000001`, payload `320,100,609 B`; cleanup 후 full-load counter/trunk invariant roundtrip 통과
+- fresh Kanu process `--resume-latest`: learner/gradient/policy `1/2/1` 복원, policy version 1의 finite `(7,)` deterministic action과 gripper `-1` serving, RTT `133.65432 ms`, JSONL clean stop `exit_code=0`
 
-### 5.6 local opt-in actual fake E2E
+사용자 요청에 따라 resume process에서 같은 SAC update를 한 번 더 수행하지 않았다. 실제 continued-update/checkpoint 경계는 local actual integration test와 schema v1 Kanu full resume run에서 이미 검증됐다. RTT/timing은 일회 관측값이며 SLA가 아니다.
+
+### 5.7 local opt-in actual fake E2E
 
 `tests/test_actual_fake_data_e2e_learning.py`는 실제 localhost gRPC server/client, canonical raw pixels, frozen feature ingress, CTA, publish, checkpoint, server restart/resume를 하나의 opt-in test로 검증한다.
 
 ```text
 RUN_HIL_SERL_FAKE_E2E=1
-1 passed, 92 warnings in 29.17s
+1 passed, 92 warnings in 32.77s
 ```
+
+이 수치는 unified schema v2 통합 tree의 최종 재실행 값이다.
 
 ## 6. frozen-trunk feature replay와 메모리
 
@@ -575,7 +579,7 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 
 ### P1 — production 장기 운용 전 보강
 
-1. actor가 server model/reward/schema identity를 pin하는 기능은 구현됐다. 반대 방향의 actor ID/task/run allowlist 또는 별도 인증은 없으며 현재 보안 경계는 Kanu loopback + SSH access다.
+1. actor가 server model/reward/schema identity를 pin하는 기능은 구현됐다. bounded synthetic acceptance는 server가 exact actor/run allowlist를 강제한다. 반면 production robot scope에는 아직 actor ID/task/run reverse allowlist나 별도 인증이 없으며, 현재 production 보안 경계는 Kanu loopback + SSH access다.
 2. run fingerprint에 exact source commit/upstream revision/task identity를 최종 포함해야 한다.
 3. JAX update가 native backend에서 영구 hang하면 graceful shutdown이 worker join을 계속 기다릴 수 있다.
 4. replay/intervention은 RAM-only라 restart 후 training distribution이 달라진다.
@@ -587,13 +591,10 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 
 ## 8. 권장 다음 순서
 
-1. frozen-feature + synthetic E2E diff를 final review하고 기본 suite + 세 opt-in actual test 결과를 commit에 연결한다.
-2. 검증된 implementation/문서를 snapshot commit으로 남긴다.
-3. production learner commit을 canonical `feat/gello-ur7e-humble-22.04`에 통합하고 server/learner/local-hardware 변경을 하나의 branch로 정리한다.
-4. 실제 canonical robot demo가 준비되면 production-scope 5,000-step bounded learner run을 수행한다.
-5. 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
-6. task/camera/safety review 후 실제 robot actor를 연결한다.
-7. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
+1. 실제 canonical robot demo가 준비되면 production-scope 5,000-step bounded learner run을 수행한다.
+2. 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
+3. task/camera/safety review 후 실제 robot actor를 연결한다.
+4. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
 
 ## 9. 재현 명령
 
@@ -602,12 +603,12 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 로컬 빠른 suite의 권장 형태는 다음과 같다.
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-production-learner
+cd /home/laptop3/gello_software
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONDONTWRITEBYTECODE=1 \
 PYTEST_ADDOPTS='-p no:cacheprovider' \
-PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
+PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 /tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
   serl_ur_infra/tests
 ```
@@ -615,7 +616,7 @@ PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
 실제 agent opt-in test:
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-production-learner
+cd /home/laptop3/gello_software
 
 RUN_HIL_SERL_ACTUAL_CHECKPOINT=1 \
 JAX_PLATFORMS=cpu \
@@ -624,7 +625,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONDONTWRITEBYTECODE=1 \
 PYTEST_ADDOPTS='-p no:cacheprovider' \
 MPLCONFIGDIR=/tmp/gello-hil-production-matplotlib \
-PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
+PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 /tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
   serl_ur_infra/tests/test_actual_agent_checkpoint_integration.py
 ```
@@ -632,7 +633,7 @@ PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
 실제 frozen-trunk raw/cached agent opt-in test:
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-production-learner
+cd /home/laptop3/gello_software
 
 RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1 \
 JAX_PLATFORMS=cpu \
@@ -641,7 +642,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONDONTWRITEBYTECODE=1 \
 PYTEST_ADDOPTS='-p no:cacheprovider' \
 MPLCONFIGDIR=/tmp/gello-hil-production-matplotlib \
-PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
+PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 /tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
   serl_ur_infra/tests/test_actual_frozen_trunk_feature_agent.py
 ```
@@ -649,7 +650,7 @@ PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
 실제 localhost gRPC fake learning/resume opt-in test:
 
 ```bash
-cd /home/laptop3/gello_worktrees/hil-production-learner
+cd /home/laptop3/gello_software
 
 RUN_HIL_SERL_FAKE_E2E=1 \
 JAX_PLATFORMS=cpu \
@@ -658,7 +659,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONDONTWRITEBYTECODE=1 \
 PYTEST_ADDOPTS='-p no:cacheprovider' \
 MPLCONFIGDIR=/tmp/gello-hil-production-matplotlib \
-PYTHONPATH=/home/laptop3/gello_worktrees/hil-production-learner/serl_ur_infra \
+PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 /tmp/gello-hil-rl-learner-venv/bin/python -m pytest -q \
   serl_ur_infra/tests/test_actual_fake_data_e2e_learning.py
 ```

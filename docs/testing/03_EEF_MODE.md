@@ -6,7 +6,7 @@
 정본: `docs/ros2/GELLO_UR7E_EEF_MODE.md`. 여기서는 테스트 관점의 요약 + 이 브랜치의 실행 명령만 담는다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 cd $WT/ros2_ur_ws
 ```
 

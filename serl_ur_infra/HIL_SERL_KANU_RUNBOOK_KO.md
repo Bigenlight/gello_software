@@ -19,7 +19,7 @@
 - external policy/classifier는 raw `uint8 (1,128,128,3)`를 사용하고, learner replay/demo는 frozen ResNet-10 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` current/next map을 저장한다. GAP은 없고 augmentation은 `none`이다.
 - trainable `SpatialLearnedEmbeddings/Dropout/Dense256/LayerNorm/tanh`는 sample time에 적용된다. frozen trunk의 online/target exact invariant와 target repin을 유지한다.
 - 기본 50k/10k ring camera tensor는 `7,864,320,000 B = 7.32421875 GiB`다. `--feature-memory-reserve-gib`를 포함한 startup RAM preflight가 fail-closed한다.
-- Kanu GPU actual classifier/agent production dry-run과 feature CTA smoke는 통과했다. laptop→SSH tunnel→Kanu fresh step 1 + process restart/resume step 2 synthetic learning E2E는 pre-hardware schema v1에서 통과했고, final unified schema v2 재검증은 pending이다. production robot E2E와 continuous learner도 아직 미검증이다.
+- Kanu GPU actual classifier/agent production dry-run과 feature CTA smoke는 통과했다. unified schema v2에서 laptop→SSH tunnel→Kanu exact 100 transition, 실제 CTA step 1, publish/checkpoint full-load roundtrip, fresh-process resume와 version 1 inference까지 통과했다. production robot E2E와 continuous learner는 아직 미검증이다.
 
 ---
 
@@ -165,7 +165,7 @@ fi
 
 ### 1.4 final unified observation schema
 
-learner `8f242d8`의 Kanu E2E는 pre-hardware schema v1 interim run이다. hardware `6a0b127`을 통합한 final branch의 재검증은 다음 v2를 기준으로 한다.
+learner `8f242d8`의 Kanu E2E는 pre-hardware schema v1 interim run이다. hardware `6a0b127`은 unified merge `248255f`에 통합됐으며, 최종 검증은 다음 v2 schema/hash와 5.4의 final acceptance 결과를 기준으로 한다.
 
 ```text
 schema id: hil-serl-ur-canonical-observation-v2
@@ -196,7 +196,7 @@ df -B1 "$HIL_RUN_ROOT"
 
 fresh run의 checkpoint root에는 기존 `checkpoint_*` entry가 없어야 한다. CLI가 root를 만들 수 있으므로 미리 만들 필요는 없다.
 
-checkpoint 하나의 payload는 약 305 MiB다. Kanu synthetic E2E step 1/2에서는 각각 `320,100,609 B`를 관측했다. production은 기본 5,000-step 주기이고 pruning하지 않는다. 예상 checkpoint 수에 payload 총량과 `--checkpoint-reserve-gib`를 더해 disk를 잡는다. synthetic E2E는 period 1이므로 target 1..10 제한을 우회하지 않는다.
+checkpoint 하나의 payload는 약 305 MiB다. schema v1과 최종 v2 Kanu synthetic E2E에서 `320,100,609 B`를 관측했다. production은 기본 5,000-step 주기이고 pruning하지 않는다. 예상 checkpoint 수에 payload 총량과 `--checkpoint-reserve-gib`를 더해 disk를 잡는다. synthetic E2E는 period 1이므로 target 1..10 제한을 우회하지 않는다.
 
 동일 checkpoint root에는 learner process 하나만 허용된다. `.learner-writer.lock`은 advisory lock metadata file이며 process 종료 후 파일 자체가 남아도 lock은 해제된다. 파일 존재 여부만 보고 임의 삭제하지 않는다.
 
@@ -511,7 +511,23 @@ resume fresh process:
 
 두 JSONL의 learner update loss는 모두 finite였다. replay 100/offline demo 2에서 batch 256의 online/demo 128:128 샘플링이 확인됐고 `policy_published`, `checkpoint_saved`, `learner_process_stopped(exit_code=0)` event가 모두 존재했다. 최종 pass stdout event는 gRPC/worker/logger cleanup 후 checkpoint full-load roundtrip과 trunk invariant을 통과한 경우에만 `checkpoint_roundtrip_verified=true`로 출력됐다.
 
-이 결과는 learner staging commit `8f242d8`의 pre-hardware canonical schema v1 interim 근거다. hardware commit `6a0b127`은 schema ID를 v2, gripper index를 0, hash를 `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`으로 바꾸므로 위 fingerprint/checkpoint는 final unified branch에서 authoritative하지 않다. merge 후 5.1∼5.3을 v2로 다시 실행하고 fingerprint/RTT/counter/checkpoint/test count를 이 블록에 교체한다.
+이 결과는 learner staging commit `8f242d8`의 pre-hardware canonical schema v1 interim 근거다. hardware commit `6a0b127`이 unified merge `248255f`에 병합되면서 schema ID는 v2, gripper index는 0, hash는 `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`이 됐다. 따라서 위 fingerprint/checkpoint는 final unified branch에서 authoritative하지 않다.
+
+```text
+final unified schema v2 acceptance (merge 248255f):
+  fingerprint: fa1985378ad2729f466783e4f112d54022e14090430374a6531e4fb715440fcd
+  serl default suite: 253 passed, 4 skipped, 6 warnings in 3.10s
+  ur_gello suite: 436 passed in 7.35s
+  actual opt-in: feature 2 passed / checkpoint 1 passed / local E2E 1 passed
+  fresh sender: exact 100 inserts, RTT max/mean 372.820324 / 84.88630425 ms
+  fresh counters: learner/gradient/policy 0/0/0 -> 1/2/1
+  checkpoint: checkpoint_000000000001, 320100609 B, full-load roundtrip passed
+  update timing ms: learner 83997.304 / critic 36496.960 / full 36822.142 / sample 1754.703
+  resume smoke: fresh process restored 1/2/1, served finite 7D policy v1 action,
+                gripper -1, RTT 133.65432 ms, clean stop exit_code=0
+```
+
+사용자 요청에 따라 final v2 resume process의 두 번째 SAC update는 생략했다. continued update/checkpoint는 local actual integration test와 위 schema v1 full resume run에서 이미 검증됐다.
 
 ## 6. real canonical demo가 준비된 뒤 bounded learner run
 

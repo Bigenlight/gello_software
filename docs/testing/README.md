@@ -3,11 +3,11 @@
 이 디렉터리는 **HIL-SERL을 실제 UR7e에 올리기 전에 통신·하드웨어 경로를 사람이 직접
 확인하는 절차**를 담는다. 학습 모델(learner/policy)은 이 문서의 범위가 **아니다**.
 
-- 작업 워크트리: `/home/laptop3/gello_worktrees/hil-hardware-comms` (브랜치 `test/hil-hardware-comms`)
+- 통합 checkout: `/home/laptop3/gello_software` (브랜치 `feat/gello-ur7e-humble-22.04`)
 - 이 문서들의 모든 명령은 위 경로 기준이다. 아래처럼 셸 변수를 잡아두고 복사해서 쓰면 된다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 > ### 이 문서의 규칙
@@ -22,22 +22,20 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 1. **`clip_safety_box`는 구현되어 있지 않다.** 워크스페이스 박스는 객체로 만들어지기만 하고
    (`serl_ur_infra/ur_env/envs/ur7e_env.py:118`, `:123`) 코드 어디에서도 다시 참조되지 않는다.
    즉 RL 정책/개입이 명령하는 TCP 위치에 **소프트웨어 경계가 없다.** → `08_OPEN_GAPS.md`
-2. **19-D `state` 레이아웃 계약이 지금 이 워크트리에서 바뀌는 중이다** (커밋 안 된 수정).
-   `serl_ur_infra/ur_env/observation_schema.py`가 v1 → v2로 올라갔고 그리퍼 스칼라의 인덱스가
+2. **19-D `state` 레이아웃 계약은 v2로 확정·통합됐다.**
+   `serl_ur_infra/ur_env/observation_schema.py`의 그리퍼 스칼라 인덱스는
    **-1이 아니라 0**이 되었다. 값을 문서에 박아 넣지 말고 항상 라이브로 출력해서 확인할 것.
    → `05_COMMS_GRPC.md` §4, `08_OPEN_GAPS.md`
-3. **그리퍼 개입 데드코드는 방금 고쳐졌다 — 단, 커밋도 실기 검증도 안 됐다.**
+3. **그리퍼 개입 데드코드는 수정·통합됐지만 실기 검증은 아직이다.**
    `/gello/joint_states`의 `position` 길이는 여전히 6이지만
    (`gello_publisher_node.py:190`), `URRosBackend`가 트리거 토픽을 **추가로 구독**해서
    7-요소로 합쳐 주게 바뀌었다 (`ros_backend.py:64-124`, `:162-172`).
    → `04_HIL_INTERVENTION.md` §6, `08_OPEN_GAPS.md` G3
 
-> ### ⚠️ 이 워크트리는 **지금 이 순간에도** 다른 담당자가 고치고 있다
-> 문서 작성 중(2026-07-27 17:15~17:30)에 `observation_schema.py`, `ros_backend.py`,
-> `wrappers.py`가 커밋 없이 바뀌었고 `tests/run_real_hil.py`,
-> `tests/test_gello_gripper_wiring.py`, `tests/test_state_layout_contract.py`가 새로 생겼다.
-> **작업 전 반드시 `git status`와 `git diff`를 먼저 볼 것.** 이 문서의 `파일:줄` 근거는
-> 그 시점 기준이며, 줄 번호는 어긋날 수 있다 (내용은 grep으로 재확인 가능).
+> ### 통합 상태
+> 위 변경은 hardware commit `6a0b127`과 learner/hardware merge `248255f`에 포함됐다.
+> 작업 전 `git status`를 확인하고 기존 사용자 변경을 지우지 않는 원칙은 그대로다.
+> 파일 줄 번호는 이후 commit에 따라 어긋날 수 있으므로 내용은 `rg`로 재확인한다.
 
 ---
 
@@ -54,8 +52,8 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 | 7 | 오프라인 단위 테스트 `ur_gello_bringup` | **PASS** | 436 tests collected / passed (§4에 재현 명령) |
 | 8 | 타이밍 baseline | **측정됨(참고치)** | `step()` p99 = 94 µs(정지) / 538 µs(이동), worst-case tick 0.644 ms. **리포에 산출물이 커밋되어 있지 않다** — 재측정 가능한 스크립트 없음 |
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
-| 9b | HIL 개입 루프 (**실기**, DRY_RUN) | **미검증 / 러너 신규** | `serl_ur_infra/tests/run_real_hil.py` (untracked, 방금 추가됨). 기본 `DRY_RUN=True`, `--arm` 없이는 명령 미발행 |
-| 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 수정됨, 하드웨어 미검증** | `ros_backend.py:64-124`, `wrappers.py:179-196`, `tests/test_gello_gripper_wiring.py`. 전부 커밋 안 됨 |
+| 9b | HIL 개입 루프 (**실기**, DRY_RUN) | **코드 통합, 실기 미검증** | `serl_ur_infra/tests/run_real_hil.py`. 기본 `DRY_RUN=True`, `--arm` 없이는 명령 미발행 |
+| 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합, 하드웨어 미검증** | `ros_backend.py`, `wrappers.py`, `tests/test_gello_gripper_wiring.py`; hardware commit `6a0b127` |
 | 10 | gRPC actor 루프백 스모크 | **미검증(이 브랜치에서)** | 절차 존재. → `05_COMMS_GRPC.md` |
 | 11 | RealSense 2대 동시 스트림 | **미검증(이 브랜치에서)** | → `06_SENSORS.md` |
 | 12 | 장애 주입 매트릭스 | **미검증 (전 항목)** | → `07_FAILURE_INJECTION.md` |
@@ -66,42 +64,16 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 
 ---
 
-## 2. 워크트리 구성
+## 2. 통합 checkout
 
 | 역할 | 경로 | 브랜치 |
 |---|---|---|
-| 메인 (통합) | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` |
-| **통신·하드웨어 검증 (여기)** | `/home/laptop3/gello_worktrees/hil-hardware-comms` | `test/hil-hardware-comms` |
-| 학습 (다른 담당자) | `/home/laptop3/gello_worktrees/hil-production-learner` | `feat/hil-production-learner` |
+| **통신·하드웨어·학습 통합** | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` |
 
-세 워크트리 모두 시작 시점 커밋은 `f0dd3e7`이다 (`git worktree list`로 확인).
-
-> ### ⚠️ 이 워크트리는 여러 사람/에이전트가 동시에 만진다
-> 문서 작성 시점(2026-07-27 17:30)에 커밋되지 않은 수정:
-> ```
->  M ros2_ur_ws/build_ur7e.sh                        # set -u 버그 수정
->  M ros2_ur_ws/run_ur7e_gripper.sh                  # set -u 버그 수정
->  M serl_ur_infra/tests/test_observation_schema.py
->  M serl_ur_infra/ur_env/envs/ros_backend.py        # 리더 트리거 토픽 구독 (G3 수정)
->  M serl_ur_infra/ur_env/envs/wrappers.py           # NaN 트리거 처리 (G3 수정)
->  M serl_ur_infra/ur_env/observation_schema.py      # 19-D 레이아웃 v1 -> v2
-> ?? serl_ur_infra/tests/run_real_hil.py             # 실기 HIL 러너 (신규)
-> ?? serl_ur_infra/tests/test_gello_gripper_wiring.py
-> ?? serl_ur_infra/tests/test_state_layout_contract.py
-> ```
-> **세션을 시작할 때마다 `git status`를 먼저 찍어라.** 특히 `git checkout .` / `git stash`는
-> 위 스크립트 수정(§`00_SETUP_AND_SAFETY.md` §3)을 날려버린다.
-
-> ### ⚠️ 이 워크트리에는 `third_party/hil-serl` 서브모듈이 **체크아웃되어 있지 않다**
-> ```bash
-> cd $WT && git submodule status     # 앞에 '-'가 붙어 있으면 미초기화
-> ls $WT/third_party/hil-serl/       # 비어 있음
-> ls /home/laptop3/gello_software/third_party/hil-serl/   # 메인에는 있음
-> ```
-> `serl_launcher`(= `SERLObsWrapper`, `RelativeFrame`, `Quat2EulerWrapper`, `ChunkingWrapper`)를
-> import하는 것은 이 워크트리에서 전부 실패한다. 필요하면
-> `git -C $WT submodule update --init third_party/hil-serl` 또는 메인 워크트리의 것을
-> `PYTHONPATH`로 빌려 쓴다.
+임시 learner/hardware worktree의 코드는 이 branch에 통합됐다. 세션 시작마다 `git status`와
+`git submodule status`를 확인하고, canonical checkout에 이미 있던 사용자 변경이나 submodule
+내 산출물을 `reset`, `clean`, `stash`로 지우지 않는다. `third_party/hil-serl`은 pinned submodule이며
+직접 수정하지 않는다.
 
 ---
 

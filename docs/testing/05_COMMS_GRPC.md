@@ -7,7 +7,7 @@
 `serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md`.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---
@@ -132,11 +132,12 @@ Server → Local  :  ACK(D(t)) + TransitionOutcome + A(t+1)
 `json.dumps(sort_keys=True)`는 dict **키**만 정렬하고 **리스트 원소**는 정렬하지 않으므로,
 **순서를 바꾸면 해시가 바뀐다 — 그게 의도다** (`observation_schema.py`의 `_schema_document()` 주석).
 
-### 4.2 ⚠️ 계약이 지금(2026-07-27) 이 워크트리에서 바뀌고 있다
+### 4.2 canonical v2 계약
 
-`serl_ur_infra/ur_env/observation_schema.py`가 **커밋되지 않은 상태로** 수정되어 있다:
+`serl_ur_infra/ur_env/observation_schema.py`의 v2 계약은 hardware commit `6a0b127`과
+learner/hardware merge `248255f`에 통합됐다:
 
-| | 이전 (v1) | 현재 워킹트리 (v2) |
+| | 이전 (v1, 사용 금지) | 현재 canonical (v2) |
 |---|---|---|
 | `OBSERVATION_SCHEMA_ID` | `hil-serl-ur-canonical-observation-v1` | `...-v2` |
 | state 순서 | pose6, vel6, force3, torque3, **gripper(마지막)** | **알파벳순**: `gripper_pose`, `tcp_force`, `tcp_pose`, `tcp_torque`, `tcp_vel` |
@@ -151,8 +152,7 @@ Server → Local  :  ACK(D(t)) + TransitionOutcome + A(t+1)
 > - **해시나 인덱스를 문서/코드에 하드코딩하지 말 것.** 항상 라이브로 출력한다.
 > - `state[..., -1]`로 그리퍼를 읽는 코드는 **틀렸다.** 그건 TCP 각속도 z다.
 >   `GRIPPER_POSITION_INDEX` / `gripper_position_from_state()`를 쓴다.
-> - **`serl_ur_infra/RL_RECEIVE_SERVER.md`는 아직 옛 순서**("TCP pose 6, TCP velocity 6,
->   TCP force 3, TCP torque 3, gripper 1")를 적고 있다. 그 문서는 이 변경 이후 낡았다.
+> - laptop/server 모두 live `CANONICAL_OBSERVATION_SCHEMA_HASH`를 사용한다.
 
 라이브 확인:
 
@@ -274,9 +274,10 @@ PYTHONPATH=$WT/serl_ur_infra \
 2. `observation_schema_hash` 일치
 3. `reward_authority == "server_classifier"`
 
-> ### ⚠️ 이 워크트리에는 `third_party/hil-serl`이 없다
+> ### upstream submodule 확인
 > 수신 서버는 upstream replay store를 쓰므로 `serl_launcher`가 필요하다.
-> `00_SETUP_AND_SAFETY.md` §2.3 참조. (서버는 Kanu에서 돌므로 Kanu 쪽 체크아웃이 관건이다.)
+> `git submodule status third_party/hil-serl`에 `-`가 붙으면 `00_SETUP_AND_SAFETY.md` §2.3에
+> 따라 초기화한다. Kanu도 동일한 pinned revision을 사용한다.
 
 ---
 

@@ -4,7 +4,7 @@
 실행하기 전에 기대 동작을 먼저 읽고, 다르게 나오면 그것이 발견이다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---

@@ -97,7 +97,7 @@ base class), LZ4 (imported by Agentlace), and protobuf `3.20.3` (required by the
 checked-in generated gRPC module). This avoids duplicating the multi-gigabyte
 CUDA/Python environment or creating a Docker image.
 
-Run the receive server from the isolated branch worktree:
+Run the historical receive-only server from the canonical checkout:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
@@ -119,7 +119,7 @@ is still free.
 
 ## Optional reproducible container
 
-Initialize the pinned upstream submodule in this branch's isolated worktree:
+Initialize the pinned upstream submodule in the canonical checkout:
 
 ```bash
 git submodule update --init --recursive third_party/hil-serl
@@ -169,7 +169,7 @@ ssh -N -T -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:50053:127.0.0.1:50053 kanu
 ```
 
-Then, from this branch and the isolated gRPC client environment:
+Then, from the canonical checkout and the isolated gRPC client environment:
 
 ```bash
 PYTHONPATH=serl_ur_infra \

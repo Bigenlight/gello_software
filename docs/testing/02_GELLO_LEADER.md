@@ -3,7 +3,7 @@
 **상태: 실기 검증 완료.** 모터 응답, 발행 주기, 드롭, 트리거 스팬 전부 통과.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---

@@ -1,9 +1,9 @@
 # 00 — 셋업 · 빌드 · 안전
 
-대상 워크트리: `/home/laptop3/gello_worktrees/hil-hardware-comms` (브랜치 `test/hil-hardware-comms`)
+대상 checkout: `/home/laptop3/gello_software` (브랜치 `feat/gello-ur7e-humble-22.04`)
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---
@@ -17,25 +17,10 @@ git log --oneline -3
 git worktree list
 ```
 
-**커밋 안 된 수정이 보이면 지우지 말 것.** 이 워크트리는 여러 담당자가 동시에 쓴다.
-문서 작성 시점(2026-07-27)에 이미 다음이 커밋되지 않은 채 존재했다:
-
-| 파일 | 무엇 |
-|---|---|
-| `ros2_ur_ws/run_ur7e_gripper.sh` | `set -u` 버그 수정 (§3.3) |
-| `ros2_ur_ws/build_ur7e.sh` | 같은 `set -u` 버그 수정 (§3.3) |
-| `serl_ur_infra/ur_env/observation_schema.py` | 19-D state 레이아웃 계약 v1→v2 |
-| `serl_ur_infra/tests/test_observation_schema.py` | 위에 맞춘 테스트 수정 |
-| `serl_ur_infra/ur_env/envs/ros_backend.py` | 리더 트리거 토픽 추가 구독 + `merge_gello_state()` |
-| `serl_ur_infra/ur_env/envs/wrappers.py` | NaN 트리거 → `None` 매핑 |
-| `serl_ur_infra/tests/run_real_hil.py` (신규, untracked) | **실기** HIL 개입 러너 |
-| `serl_ur_infra/tests/test_gello_gripper_wiring.py` (신규, untracked) | 트리거 배선 회귀 테스트 |
-| `serl_ur_infra/tests/test_state_layout_contract.py` (신규, untracked) | 레이아웃 회귀 테스트 |
-
-> 위 목록은 **2026-07-27 17:30 스냅샷**이다. 이 디렉터리의 `파일:줄` 근거는 그 시점 기준이며,
-> 계속 바뀌고 있으므로 줄 번호가 어긋나면 내용을 grep해서 다시 찾을 것.
-
-`git checkout .` / `git stash` / `git clean -fd`는 이걸 전부 날린다. 하지 말 것.
+**커밋 안 된 수정이 보이면 지우지 말 것.** 위 hardware 변경은 commits `4171e7a`,
+`6a0b127`과 learner/hardware merge `248255f`에 통합됐다. canonical checkout에는 별도의
+사용자 산출물이 있을 수 있으므로 `git checkout .`, `git stash`, `git clean -fd`를 자동으로
+실행하지 않는다. 이 디렉터리의 `파일:줄` 근거가 어긋나면 `rg`로 내용을 다시 찾는다.
 
 ---
 
@@ -74,29 +59,24 @@ python3 -m pip install --user -e $WT/serl_ur_infra --no-deps
 
 ### 2.3 (필요할 때만) upstream hil-serl 서브모듈
 
-이 워크트리에는 **체크아웃되어 있지 않다.**
+canonical checkout에서 다음으로 상태를 확인한다.
 
 ```bash
 cd $WT && git submodule status
-# -c32939bcc... third_party/hil-serl     <- 앞의 '-' = 미초기화
+# 앞의 '-' = 미초기화
 ```
 
-`serl_launcher`를 import하는 것(= `SERLObsWrapper`, `RelativeFrame`, `Quat2EulerWrapper`,
-`ChunkingWrapper`, 수신서버 replay store)은 전부 실패한다. 둘 중 하나:
+앞에 `-`가 붙었다면 `serl_launcher` import 전 다음으로 초기화한다.
 
 ```bash
-# (a) 이 워크트리에 초기화
 git -C $WT submodule update --init third_party/hil-serl
-
-# (b) 메인 워크트리 것을 빌려 쓰기 (읽기 전용 용도)
-export PYTHONPATH=/home/laptop3/gello_software/third_party/hil-serl/serl_launcher:$PYTHONPATH
 ```
 
 ---
 
 ## 3. 환경변수 함정
 
-### 3.1 `GELLO_REPO_ROOT` — 워크트리를 쓸 때 반드시 신경 쓸 것
+### 3.1 `GELLO_REPO_ROOT` — checkout을 바꿀 때 반드시 신경 쓸 것
 
 `gello_publisher` 노드는 리포 루트의 파이썬 패키지 `gello/`를 import한다.
 `ros2 run`으로 직접 띄우면 cwd가 `sys.path`에 안 올라가서 `No module named 'gello'`로 죽는다.
@@ -107,14 +87,13 @@ export PYTHONPATH=/home/laptop3/gello_software/third_party/hil-serl/serl_launche
   `run_operator_console.sh:20`, `remote_helpers.sh:49`.
 - **함정:** `${GELLO_REPO_ROOT:-...}`는 *이미 설정된 값이 있으면 그것을 쓴다*.
   셸에 예전 `GELLO_REPO_ROOT=$HOME/gello_software`가 export되어 있으면,
-  워크트리의 스크립트를 실행해도 **메인 리포의 `gello/` 코드가 로드된다.**
-  워크트리에서 `gello/`를 고쳤는데 반영이 안 되면 100% 이것이다.
+  다른 checkout의 스크립트를 실행해도 **예전 경로의 `gello/` 코드가 로드될 수 있다.**
 
 ```bash
 # 확인
 echo "GELLO_REPO_ROOT=${GELLO_REPO_ROOT:-<unset>}"
 
-# 워크트리 세션에서는 명시적으로 덮어쓰는 편이 안전하다
+# 세션에서는 명시적으로 canonical root를 지정한다
 export GELLO_REPO_ROOT=$WT
 ```
 
@@ -180,8 +159,8 @@ python3 -m pytest tests -q -p no:anyio --ignore=tests/test_learner_policy_checkp
 ### 4.3 JAX가 필요한 테스트
 
 로봇 랩톱에는 jax가 없다. `test_learner_policy_checkpoint.py`,
-`test_actual_agent_checkpoint_integration.py`는 학습 담당자 워크트리
-(`/home/laptop3/gello_worktrees/hil-production-learner`) 또는 Kanu에서 돌린다.
+`test_actual_agent_checkpoint_integration.py`는 canonical checkout
+(`/home/laptop3/gello_software`) 또는 Kanu에서 돌린다.
 
 ---
 

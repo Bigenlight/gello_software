@@ -4,7 +4,7 @@
 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`다. 이 문서는 **판정 기준과 함정**에 집중한다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---
@@ -196,7 +196,7 @@ ros2 topic info /forward_position_controller/commands --verbose | grep -c "Node 
 ## 4.5 실기 HIL 러너 (`run_real_hil.py`) — 신규, 미검증
 
 `run_rviz_hil.py`는 **mock 전용**이라("Never point this at a real robot") 실기에서
-개입 경로를 검증할 러너가 없었다. `serl_ur_infra/tests/run_real_hil.py`(untracked)가
+개입 경로를 검증할 러너가 없었다. 현재는 `serl_ur_infra/tests/run_real_hil.py`가
 그 자리를 채운다.
 
 설계 원칙 세 가지 (`run_real_hil.py:14-24`):

@@ -5,7 +5,7 @@
 정본 문서: `docs/ros2/GELLO_UR7E_GRIPPER.md`. 이 문서는 HIL 관점의 검증 절차/판정 기준만 다룬다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---

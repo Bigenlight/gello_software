@@ -3,7 +3,7 @@
 **상태: 이 브랜치에서 미검증.**
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
 ---
@@ -218,16 +218,14 @@ env는 `state`를 **중첩 dict**로 낸다 (`ur7e_env.py:404-416`):
 
 - `OBSERVATION_SCHEMA_ID`가 `...-v1` → `...-v2`로 올라갔고 해시가 바뀌었다.
   **랩톱과 Kanu 양쪽을 같이 올려야 통신이 된다** → `05_COMMS_GRPC.md` §4.
-- 회귀 테스트 `serl_ur_infra/tests/test_state_layout_contract.py`(신규, untracked)가
+- 회귀 테스트 `serl_ur_infra/tests/test_state_layout_contract.py`가
   **살아 있는 env + 살아 있는 gymnasium**에서 레이아웃을 다시 유도해서 대조한다.
   "알파벳순"을 하드코딩하지 않으므로, gymnasium이 바뀌면 테스트가 새 진실을 알려준다.
 
 ### 5.3 아직 남은 위험
 
-- `serl_ur_infra/RL_RECEIVE_SERVER.md`는 **아직 옛 순서**를 적고 있다 (문서 낡음).
-- 이 워크트리에 `third_party/hil-serl`이 없어서 `SERLObsWrapper`를 **실제로 통과시켜 본
-  적이 없다.** 레이아웃 테스트는 upstream을 찾으면 쓰고 없으면 건너뛴다 —
-  서브모듈이 있는 환경(메인 워크트리 / Kanu)에서 반드시 한 번 돌려야 한다.
+- canonical v2 layout과 실제 upstream wrapper 경로는 통합 suite 및 Kanu fake-data E2E에서
+  검증됐다. 실행 전 laptop/Kanu가 같은 schema hash를 광고하는지는 계속 확인한다.
 - **F/T 브로드캐스터가 없으면 force/torque 6개가 전부 0으로 들어간다** (§3.2).
   레이아웃은 맞지만 값이 죽어 있는 것 — 스키마 해시로는 절대 잡히지 않는다.
 
