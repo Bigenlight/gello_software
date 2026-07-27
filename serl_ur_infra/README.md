@@ -6,6 +6,8 @@
 > ⚠️ **UNTESTED SKELETON** — 실기 경로는 `config.DRY_RUN=True`(명령 미발행)가 기본.
 > 검증 전까지 실기 대상 사용 금지.
 
+HIL-SERL actor/server/learner의 canonical 통합 브랜치, 현재 검증 범위, checkpoint 상태, 브랜치 정리 방침과 raw-image→feature-vector algorithm v2 후속 설계는 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)를 기준으로 한다. 새 HIL-SERL 작업은 `/home/laptop3/gello_worktrees/hil-rl-learner`의 `feat/hil-rl-learner`에서 계속한다.
+
 ## 구조
 
 | 파일 | 대응하는 hil-serl 코드 | 역할 |
