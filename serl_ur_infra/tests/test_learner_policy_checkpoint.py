@@ -163,6 +163,44 @@ def test_policy_snapshot_is_atomic_monotonic_and_rejects_bad_candidates():
     assert runtime.snapshot is before
 
 
+def test_policy_runtime_supports_a_distinct_acceptance_model_identity():
+    runtime = VersionedPolicyRuntime(
+        _agent(),
+        sample_action=_sample_action,
+        model_id="synthetic-e2e-policy-v1",
+    )
+    assert runtime.model_id == "synthetic-e2e-policy-v1"
+
+    with pytest.raises(ValueError, match="model_id"):
+        VersionedPolicyRuntime(
+            _agent(), sample_action=_sample_action, model_id=""
+        )
+
+
+def test_policy_parameter_invariant_rejects_publish_and_keeps_snapshot():
+    agent = _agent()
+
+    def invariant(params):
+        if float(params["weight"][0]) != 0.0:
+            raise ValueError("scripted frozen trunk drift")
+
+    runtime = VersionedPolicyRuntime(
+        agent,
+        sample_action=_sample_action,
+        parameter_validator=invariant,
+    )
+    before = runtime.snapshot
+
+    with pytest.raises(PolicyValidationError, match="frozen trunk drift"):
+        runtime.publish(
+            freeze({"weight": jnp.array([0.1], dtype=jnp.float32)}),
+            learner_step=50,
+        )
+
+    assert runtime.snapshot is before
+    assert runtime.policy_version == 0
+
+
 def test_learner_fault_keeps_last_published_policy():
     config = LearnerConfig(
         batch_size=4,

@@ -241,7 +241,7 @@ def _load_resnet10_params_from_file(
     return agent.replace(state=agent.state.replace(params=new_params))
 
 
-def create_hybrid_sac_agent(
+def _create_legacy_raw_augmented_hybrid_sac_agent(
     *,
     config: LearnerConfig = LearnerConfig(),
     hil_serl_root: os.PathLike[str] | str | None = None,
@@ -249,7 +249,7 @@ def create_hybrid_sac_agent(
     resnet_cache_path: os.PathLike[str] | str | None = None,
     validate_versions: bool = True,
 ) -> Any:
-    """Construct the real upstream ``SACAgentHybridSingleArm`` on CPU/GPU."""
+    """Construct upstream's raw/random-crop agent for equivalence tests only."""
 
     if validate_versions:
         validate_learner_dependencies(include_logging=False)
@@ -317,3 +317,30 @@ def create_hybrid_sac_agent(
         )
     finally:
         train_utils.load_resnet10_params = original_loader
+
+
+def create_hybrid_sac_agent(
+    *,
+    config: LearnerConfig = LearnerConfig(),
+    hil_serl_root: os.PathLike[str] | str | None = None,
+    resnet_source_path: os.PathLike[str] | str | None = None,
+    resnet_cache_path: os.PathLike[str] | str | None = None,
+    validate_versions: bool = True,
+) -> Any:
+    """Construct the production no-augmentation frozen-feature SAC agent.
+
+    The old public name remains as a compatibility entry point, but it may no
+    longer silently create an augmented raw-pixel learner under the feature
+    config.  The legacy factory is private and used only by an architecture
+    equivalence test.
+    """
+
+    from ur_env.learner.frozen_trunk import create_frozen_trunk_feature_agent
+
+    return create_frozen_trunk_feature_agent(
+        config=config,
+        hil_serl_root=hil_serl_root,
+        resnet_source_path=resnet_source_path,
+        resnet_cache_path=resnet_cache_path,
+        validate_versions=validate_versions,
+    )

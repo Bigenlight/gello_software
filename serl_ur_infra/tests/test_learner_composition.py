@@ -25,7 +25,6 @@ from test_learner_policy_checkpoint import (  # noqa: E402
     _sample_action,
     _transition,
 )
-from test_rlpd_receive_server import _StoreFactory  # noqa: E402
 from ur_env.actor_network import ActorTransportError  # noqa: E402
 from ur_env.actor_smoke import synthetic_observation  # noqa: E402
 from ur_env.grpc_actor_transport import (  # noqa: E402
@@ -33,10 +32,12 @@ from ur_env.grpc_actor_transport import (  # noqa: E402
     create_grpc_server,
 )
 from ur_env.learner import (  # noqa: E402
-    CanonicalTransitionPool,
     CheckpointCorruptError,
     CheckpointManager,
+    FROZEN_TRUNK_FEATURE_SHAPE,
     FaultGatedReplayIngress,
+    FeatureReplayIngress,
+    FeatureTransitionRing,
     LearnerCompositionError,
     LearnerConfig,
     LearnerFingerprint,
@@ -50,10 +51,7 @@ from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
 )
 from ur_env.remote_actor import build_data  # noqa: E402
-from ur_env.rlpd_receive_server import (  # noqa: E402
-    ReplayIngress,
-    ScriptedRewardClassifierRuntime,
-)
+from ur_env.rlpd_receive_server import ScriptedRewardClassifierRuntime  # noqa: E402
 
 
 _FINGERPRINT = LearnerFingerprint(
@@ -66,14 +64,17 @@ class _PoolIngress:
     """Strict in-memory source using the existing canonical pool helper."""
 
     require_grasp_penalty = True
+    observation_representation = "resnet10_frozen_trunk_map_f32_v1"
+    augmentation = "none"
 
     def __init__(self, replay_count: int = 4, intervention_count: int = 1):
-        self.replay = CanonicalTransitionPool(
-            [_transition(index) for index in range(replay_count)], seed=11
+        self.replay = _feature_pool(
+            [_feature_transition(index) for index in range(replay_count)],
+            seed=11,
         )
-        self.interventions = CanonicalTransitionPool(
+        self.interventions = _feature_pool(
             [
-                _transition(100 + index)
+                _feature_transition(100 + index)
                 for index in range(intervention_count)
             ],
             seed=12,
@@ -94,8 +95,38 @@ class _PoolIngress:
         return self.interventions.sample(batch_size)
 
 
-def _offline_pool() -> CanonicalTransitionPool:
-    return CanonicalTransitionPool([_transition(200)], seed=13)
+def _feature_transition(value: int) -> dict:
+    raw = _transition(value)
+
+    def observation(raw_observation, marker):
+        return {
+            "state": raw_observation["state"].copy(),
+            "cam1": np.full(
+                FROZEN_TRUNK_FEATURE_SHAPE, marker, dtype=np.float32
+            ),
+            "cam2": np.full(
+                FROZEN_TRUNK_FEATURE_SHAPE, marker + 1, dtype=np.float32
+            ),
+        }
+
+    return {
+        **raw,
+        "observations": observation(raw["observations"], float(value)),
+        "next_observations": observation(
+            raw["next_observations"], float(value + 1)
+        ),
+    }
+
+
+def _feature_pool(transitions, *, seed: int):
+    ring = FeatureTransitionRing(max(1, len(transitions)), seed=seed)
+    for transition in transitions:
+        ring.insert(transition)
+    return ring
+
+
+def _offline_pool():
+    return _feature_pool([_feature_transition(200)], seed=13)
 
 
 def _compose_fresh(
@@ -146,6 +177,13 @@ def test_fresh_composition_rejects_nonzero_agent_and_nonstrict_ingress(
     ingress.require_grasp_penalty = False
     with pytest.raises(LearnerCompositionError, match="require grasp_penalty"):
         _compose_fresh(tmp_path / "nonstrict", ingress=ingress)
+
+    ingress = _PoolIngress()
+    ingress.observation_representation = "raw_pixels_packed_uint8_v1"
+    with pytest.raises(
+        LearnerCompositionError, match="representation/augmentation"
+    ):
+        _compose_fresh(tmp_path / "raw-ingress", ingress=ingress)
 
 
 def test_checkpoint_preflight_refuses_implicit_or_mixed_lineages(tmp_path):
@@ -316,11 +354,25 @@ def test_worker_fault_keeps_last_known_good_policy_callable(tmp_path):
 def test_production_service_shares_policy_and_strict_ingress_over_grpc(
     tmp_path,
 ):
-    raw_ingress = ReplayIngress(
+    class Extractor:
+        def __call__(self, observation):
+            marker = float(observation["cam1"][0, 0, 0, 0])
+            return {
+                "state": observation["state"].copy(),
+                "cam1": np.full(
+                    FROZEN_TRUNK_FEATURE_SHAPE, marker, np.float32
+                ),
+                "cam2": np.full(
+                    FROZEN_TRUNK_FEATURE_SHAPE, marker + 1.0, np.float32
+                ),
+            }
+
+    raw_ingress = FeatureReplayIngress(
+        feature_extractor=Extractor(),
         replay_capacity=8,
         intervention_capacity=4,
-        store_factory=_StoreFactory(),
-        learner_mode=True,
+        available_memory_bytes=16 * 1024**2,
+        memory_reserve_bytes=0,
     )
     ingress = FaultGatedReplayIngress(raw_ingress)
     assembly = _compose_fresh(
@@ -383,6 +435,9 @@ def test_production_service_shares_policy_and_strict_ingress_over_grpc(
         )
         assert result.ack.accepted
         assert client.get_buffer_status().replay_size == 1
+        sampled = raw_ingress.sample_replay(1)
+        assert sampled["observations"]["cam1"].shape == (1, 1, 4, 4, 512)
+        assert sampled["next_observations"]["cam2"].dtype == np.float32
 
         assembly.policy_runtime.publish(
             assembly.learner.agent.state.params,

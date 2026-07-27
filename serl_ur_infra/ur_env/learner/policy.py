@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol, runtime_checkable
 import numpy as np
 
 from ur_env.actor_network import PolicyInferenceError, validate_action
+from ur_env.learner.config import FROZEN_TRUNK_MODEL_REVISION
 from ur_env.observation_schema import validate_canonical_observation
 
 
@@ -111,7 +112,7 @@ class VersionedPolicyRuntime:
     tree itself is never copied or serialized during publication.
     """
 
-    model_id = "hil-serl-hybrid-sac-resnet10"
+    model_id = FROZEN_TRUNK_MODEL_REVISION
 
     def __init__(
         self,
@@ -124,6 +125,8 @@ class VersionedPolicyRuntime:
         sample_action: Optional[
             Callable[[Any, Mapping[str, Any], Any, bool], Any]
         ] = None,
+        parameter_validator: Callable[[Any], None] | None = None,
+        model_id: str = FROZEN_TRUNK_MODEL_REVISION,
     ) -> None:
         if isinstance(policy_version, bool) or not isinstance(policy_version, int):
             raise ValueError("policy_version must be an integer")
@@ -133,20 +136,27 @@ class VersionedPolicyRuntime:
             raise ValueError("learner_step must be an integer")
         if learner_step < 0:
             raise ValueError("learner_step must be non-negative")
+        if not isinstance(model_id, str) or not model_id:
+            raise ValueError("model_id is required")
 
         import jax
 
         self._agent = agent
+        self.model_id = model_id
         initial_params = agent.state.params if params is None else params
         self._reference_params = agent.state.params
         self._expected_signature = _leaf_signature(self._reference_params)
         self._sample_action = sample_action or self._sample_with_agent
+        if parameter_validator is not None and not callable(parameter_validator):
+            raise TypeError("parameter_validator must be callable")
+        self._parameter_validator = parameter_validator
         self._lock = threading.Lock()
         self._inference_rng = (
             jax.random.PRNGKey(42) if inference_rng is None else inference_rng
         )
         self._validate_rng(self._inference_rng)
         validate_parameter_tree(initial_params, self._reference_params)
+        self._validate_parameter_invariant(initial_params)
         self._smoke(initial_params)
         self._snapshot = PolicySnapshot(
             params=initial_params,
@@ -210,6 +220,16 @@ class VersionedPolicyRuntime:
         )
         self._validated_policy_action(action, name="policy smoke action")
 
+    def _validate_parameter_invariant(self, params: Any) -> None:
+        if self._parameter_validator is None:
+            return
+        try:
+            self._parameter_validator(params)
+        except Exception as exc:
+            raise PolicyValidationError(
+                f"parameter invariant failed: {type(exc).__name__}: {exc}"
+            ) from exc
+
     @property
     def policy_version(self) -> int:
         with self._lock:
@@ -234,6 +254,7 @@ class VersionedPolicyRuntime:
         if isinstance(learner_step, bool) or not isinstance(learner_step, int):
             raise PolicyValidationError("learner_step must be an integer")
         validate_parameter_tree(params, self._reference_params)
+        self._validate_parameter_invariant(params)
         self._smoke(params)
         with self._lock:
             if learner_step <= self._snapshot.learner_step:

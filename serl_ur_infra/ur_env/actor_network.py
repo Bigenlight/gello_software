@@ -395,6 +395,8 @@ class ActorSessionService:
         ] = None,
         buffer_status_provider: Optional[Callable[[], BufferStatus]] = None,
         in_memory_capacity: int = 256,
+        allowed_actor_ids: Optional[Tuple[str, ...]] = None,
+        allowed_run_ids: Optional[Tuple[str, ...]] = None,
     ) -> None:
         if not action_shape or any(int(dim) <= 0 for dim in action_shape):
             raise ValueError("action_shape must contain positive dimensions")
@@ -404,6 +406,12 @@ class ActorSessionService:
             raise ValueError("in_memory_capacity must be positive")
         if not isinstance(reward_authority, str) or not reward_authority:
             raise ValueError("reward_authority is required")
+        self._allowed_actor_ids = self._validated_allowlist(
+            allowed_actor_ids, name="allowed_actor_ids"
+        )
+        self._allowed_run_ids = self._validated_allowlist(
+            allowed_run_ids, name="allowed_run_ids"
+        )
         self._sample_action = sample_action
         self._action_shape = tuple(int(dim) for dim in action_shape)
         self._model_id = str(model_id)
@@ -433,6 +441,21 @@ class ActorSessionService:
         self.inference_count = 0
         self._last_transition_id = ""
         self._last_env_step: Optional[int] = None
+
+    @staticmethod
+    def _validated_allowlist(
+        values: Optional[Tuple[str, ...]], *, name: str
+    ) -> Optional[frozenset[str]]:
+        if values is None:
+            return None
+        if isinstance(values, (str, bytes)):
+            raise ValueError(f"{name} must be a non-empty tuple of strings")
+        normalized = tuple(values)
+        if not normalized or any(
+            not isinstance(value, str) or not value for value in normalized
+        ):
+            raise ValueError(f"{name} must be a non-empty tuple of strings")
+        return frozenset(normalized)
 
     def health(self) -> tuple[bool, bool, str]:
         with self._lock:
@@ -474,6 +497,20 @@ class ActorSessionService:
                 return _copy_action_result(cached)
             self._require_ready()
             self._validate_begin(command)
+            if (
+                self._allowed_actor_ids is not None
+                and command.actor_id not in self._allowed_actor_ids
+            ):
+                raise FailedPreconditionError(
+                    f"actor_id {command.actor_id!r} is not allowed by this server"
+                )
+            if (
+                self._allowed_run_ids is not None
+                and command.run_id not in self._allowed_run_ids
+            ):
+                raise FailedPreconditionError(
+                    f"run_id {command.run_id!r} is not allowed by this server"
+                )
 
             run_key = (command.actor_id, command.run_id)
             run = self._runs.setdefault(run_key, _RunState())

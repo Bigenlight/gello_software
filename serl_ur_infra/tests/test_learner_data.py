@@ -17,11 +17,15 @@ sys.path.insert(0, os.path.join(_HERE, ".."))
 from ur_env.learner import (  # noqa: E402
     CanonicalTransitionPool,
     DemoContractError,
+    FROZEN_TRUNK_FEATURE_SHAPE,
+    FROZEN_TRUNK_REPRESENTATION,
+    LearnerBatchError,
     RLPDBatchSampler,
     load_demo_object,
     load_demo_pickle,
     proportional_sample_counts,
     sample_proportional_counts,
+    sanitize_learner_batch,
 )
 
 
@@ -147,6 +151,67 @@ def test_canonical_pool_packs_image_pairs_and_keeps_only_learner_fields():
     assert batch["observations"]["cam1"].shape == (4, 2, 128, 128, 3)
     assert batch["observations"]["state"].shape == (4, 1, 19)
     assert set(batch["next_observations"]) == {"state"}
+
+
+def _feature_batch(batch_size: int = 2) -> dict:
+    feature_shape = (batch_size, *FROZEN_TRUNK_FEATURE_SHAPE)
+    return {
+        "observations": {
+            "state": np.zeros((batch_size, 1, 19), dtype=np.float32),
+            "cam1": np.zeros(feature_shape, dtype=np.float32),
+            "cam2": np.ones(feature_shape, dtype=np.float32),
+        },
+        "next_observations": {
+            "state": np.ones((batch_size, 1, 19), dtype=np.float32),
+            "cam1": np.full(feature_shape, 2.0, dtype=np.float32),
+            "cam2": np.full(feature_shape, 3.0, dtype=np.float32),
+        },
+        "actions": np.zeros((batch_size, 7), dtype=np.float32),
+        "rewards": np.zeros((batch_size,), dtype=np.float32),
+        "masks": np.ones((batch_size,), dtype=np.float32),
+        "grasp_penalty": np.zeros((batch_size,), dtype=np.float32),
+        "timestamp_ns": np.arange(batch_size, dtype=np.int64),
+    }
+
+
+def test_feature_batch_keeps_explicit_current_next_maps_and_drops_sidecars():
+    batch = _feature_batch()
+
+    clean = sanitize_learner_batch(
+        batch,
+        expected_batch_size=2,
+        observation_representation=FROZEN_TRUNK_REPRESENTATION,
+    )
+
+    assert set(clean) == {
+        "observations",
+        "next_observations",
+        "actions",
+        "rewards",
+        "masks",
+        "grasp_penalty",
+    }
+    assert set(clean["next_observations"]) == {"state", "cam1", "cam2"}
+    assert clean["observations"]["cam1"].shape == (2, 1, 4, 4, 512)
+
+
+def test_feature_batch_mode_rejects_raw_packed_images_and_feature_drift():
+    raw = CanonicalTransitionPool([_transition()], seed=9).sample(2)
+    with pytest.raises(LearnerBatchError, match="frozen-trunk"):
+        sanitize_learner_batch(
+            raw,
+            observation_representation=FROZEN_TRUNK_REPRESENTATION,
+        )
+
+    bad = _feature_batch()
+    bad["next_observations"]["cam1"] = bad["next_observations"][
+        "cam1"
+    ].astype(np.float16)
+    with pytest.raises(LearnerBatchError, match="dtype float32"):
+        sanitize_learner_batch(
+            bad,
+            observation_representation=FROZEN_TRUNK_REPRESENTATION,
+        )
 
 
 def test_rlpd_sampler_is_half_replay_and_proportional_demo_union():

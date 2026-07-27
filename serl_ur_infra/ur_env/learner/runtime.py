@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 import threading
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import numpy as np
 
@@ -97,6 +97,8 @@ class HILSERLLearner:
         learner_step: int = 0,
         gradient_step: int | None = None,
         policy_version: int = 0,
+        parameter_validator: Callable[[Any], None] | None = None,
+        candidate_postprocessor: Callable[[Any], Any] | None = None,
     ) -> None:
         self.agent = agent
         self.sampler = sampler
@@ -119,9 +121,22 @@ class HILSERLLearner:
                 "gradient_step must equal learner_step * cta_ratio"
             )
         self.policy_version = self._counter(policy_version, "policy_version")
+        if parameter_validator is not None and not callable(parameter_validator):
+            raise TypeError("parameter_validator must be callable")
+        self._parameter_validator = parameter_validator
+        if candidate_postprocessor is not None and not callable(
+            candidate_postprocessor
+        ):
+            raise TypeError("candidate_postprocessor must be callable")
+        self._candidate_postprocessor = candidate_postprocessor
         self._fault: LearnerFault | None = None
         self._lock = threading.Lock()
         validate_tree_finite(agent.state, name="initial agent state")
+        self._validate_parameter_invariant(agent.state.params)
+
+    def _validate_parameter_invariant(self, params: Any) -> None:
+        if self._parameter_validator is not None:
+            self._parameter_validator(params)
 
     @staticmethod
     def _counter(value: Any, name: str) -> int:
@@ -193,8 +208,11 @@ class HILSERLLearner:
             batch,
             networks_to_update=networks,
         )
+        if self._candidate_postprocessor is not None:
+            candidate = self._candidate_postprocessor(candidate)
         _block_tree((candidate, info))
         validate_tree_finite(candidate.state, name="updated agent state")
+        self._validate_parameter_invariant(candidate.state.params)
         _flatten_scalars(info)
         return candidate, info
 

@@ -77,6 +77,14 @@ class FaultGatedReplayIngress:
         return getattr(self._ingress, "require_grasp_penalty", False) is True
 
     @property
+    def observation_representation(self) -> str | None:
+        return getattr(self._ingress, "observation_representation", None)
+
+    @property
+    def augmentation(self) -> str | None:
+        return getattr(self._ingress, "augmentation", None)
+
+    @property
     def fault(self) -> ReplayIngressFault | None:
         with self._lock:
             return self._fault

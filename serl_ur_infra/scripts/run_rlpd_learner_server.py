@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -29,22 +30,31 @@ configure_pure_python_protobuf()
 
 from ur_env.grpc_actor_transport import create_grpc_server  # noqa: E402
 from ur_env.learner import (  # noqa: E402
-    CanonicalTransitionPool,
     CheckpointManager,
     CheckpointRunLock,
+    FROZEN_TRUNK_CONTRACT,
+    FROZEN_TRUNK_MODEL_REVISION,
+    FROZEN_TRUNK_SYNTHETIC_E2E_MODEL_REVISION,
     FaultGatedReplayIngress,
+    FeatureReplayIngress,
+    FeatureReplayMemoryError,
+    FrozenResNet10TrunkExtractor,
     JsonlWandbLogger,
     LearnerConfig,
     LearnerFingerprint,
     LearnerWorker,
     build_actor_service,
     compose_learner,
-    create_hybrid_sac_agent,
+    convert_loaded_demos_to_feature_pool,
+    create_frozen_trunk_feature_agent,
     default_resnet_source,
+    estimate_feature_demo_memory,
+    estimate_feature_replay_memory,
     file_sha256,
     load_demo_pickles,
     preflight_checkpoint_run,
     prepare_learner_state,
+    system_available_memory_bytes,
     validate_learner_dependencies,
 )
 from ur_env.learner.demo import SYNTHETIC_ACCEPTANCE_ONLY_KEY  # noqa: E402
@@ -55,7 +65,6 @@ from ur_env.rlpd_receive_server import (  # noqa: E402
     DEFAULT_INTERVENTION_CAPACITY,
     DEFAULT_REPLAY_CAPACITY,
     DEFAULT_REWARD_THRESHOLD,
-    ReplayIngress,
     RewardClassifierRuntime,
 )
 
@@ -134,6 +143,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_INTERVENTION_CAPACITY,
     )
     parser.add_argument(
+        "--feature-memory-reserve-gib",
+        type=float,
+        default=2.0,
+        help=(
+            "minimum RAM left beyond persistent feature replay/demo tensors; "
+            "raw images are never stored in learner buffers"
+        ),
+    )
+    parser.add_argument(
+        "--demo-extraction-batch-size",
+        type=int,
+        default=64,
+        help="one-time frozen-trunk demo conversion batch size",
+    )
+    parser.add_argument(
         "--grasp-penalty",
         type=float,
         default=-0.02,
@@ -157,14 +181,46 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         help=(
             "absolute, checkpoint-aligned learner step at which to stop; "
-            "omit for continuous training"
+            "omit for continuous production training; synthetic E2E mode "
+            "requires a bounded target"
         ),
     )
     parser.add_argument("--poll-interval", type=float, default=0.1)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--dry-run",
         action="store_true",
         help="build and smoke every component, log preflight, but do not bind",
+    )
+    mode.add_argument(
+        "--synthetic-e2e",
+        action="store_true",
+        help=(
+            "accept only synthetic acceptance demos, bind the real gRPC "
+            "learner, and use one-step publish/checkpoint periods for a "
+            "bounded laptop-to-server learning acceptance run"
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-actor-id",
+        default="fake-e2e-actor",
+        help="only actor identity accepted by --synthetic-e2e",
+    )
+    parser.add_argument(
+        "--synthetic-run-id",
+        help="only run identity accepted by --synthetic-e2e",
+    )
+    parser.add_argument(
+        "--synthetic-transition-count",
+        type=int,
+        default=100,
+        help="exact accepted transition count required by --synthetic-e2e",
+    )
+    parser.add_argument(
+        "--synthetic-timeout-s",
+        type=float,
+        default=300.0,
+        help="wall-clock deadline for a bounded --synthetic-e2e run",
     )
     return parser.parse_args(argv)
 
@@ -195,6 +251,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     for name in (
         "replay_capacity",
         "intervention_capacity",
+        "demo_extraction_batch_size",
         "max_workers",
         "max_message_bytes",
     ):
@@ -202,6 +259,40 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{name} must be positive")
     if args.target_learner_step is not None and args.target_learner_step < 0:
         raise ValueError("target_learner_step must be non-negative")
+    if args.synthetic_e2e:
+        if (
+            args.target_learner_step is None
+            or args.target_learner_step <= 0
+            or args.target_learner_step > 10
+        ):
+            raise ValueError(
+                "synthetic_e2e requires target_learner_step in [1, 10]"
+            )
+        if args.replay_capacity < LearnerConfig().training_starts:
+            raise ValueError(
+                "synthetic_e2e replay_capacity must be at least the "
+                "production training_starts threshold"
+            )
+        if not isinstance(args.synthetic_actor_id, str) or not args.synthetic_actor_id:
+            raise ValueError("synthetic_e2e requires synthetic_actor_id")
+        if not isinstance(args.synthetic_run_id, str) or not args.synthetic_run_id:
+            raise ValueError("synthetic_e2e requires synthetic_run_id")
+        if args.synthetic_transition_count != LearnerConfig().training_starts:
+            raise ValueError(
+                "synthetic_transition_count must equal the production "
+                "training_starts threshold"
+            )
+        if args.synthetic_transition_count > args.replay_capacity:
+            raise ValueError(
+                "synthetic_transition_count cannot exceed replay_capacity"
+            )
+        if (
+            not math.isfinite(args.synthetic_timeout_s)
+            or not 1.0 <= args.synthetic_timeout_s <= 1_800.0
+        ):
+            raise ValueError("synthetic_timeout_s must be in [1, 1800]")
+    elif args.synthetic_run_id is not None:
+        raise ValueError("synthetic_run_id requires --synthetic-e2e")
     if (
         not math.isfinite(args.checkpoint_reserve_gib)
         or args.checkpoint_reserve_gib < 0.0
@@ -211,6 +302,78 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("poll_interval must be positive and finite")
     if not math.isfinite(args.grasp_penalty) or args.grasp_penalty > 0.0:
         raise ValueError("grasp_penalty must be finite and non-positive")
+    if (
+        not math.isfinite(args.feature_memory_reserve_gib)
+        or args.feature_memory_reserve_gib < 0.0
+    ):
+        raise ValueError(
+            "feature_memory_reserve_gib must be finite and non-negative"
+        )
+
+
+def _learner_config(args: argparse.Namespace) -> LearnerConfig:
+    """Build the fingerprinted algorithm config for production or acceptance."""
+
+    config_options: dict[str, object] = {"wandb_mode": args.wandb_mode}
+    if args.synthetic_e2e:
+        # Keep the real batch=256, replay threshold=100, CTA ratio, optimizer,
+        # and model.  Only lifecycle periods are shortened so one bounded fake
+        # run proves publish and checkpoint without pretending to be a
+        # 5,000-step robot experiment.
+        config_options.update(publish_period=1, checkpoint_period=1)
+    return LearnerConfig(**config_options)
+
+
+def _validate_synthetic_progress_target(
+    args: argparse.Namespace, prepared_state: object
+) -> None:
+    if not args.synthetic_e2e:
+        return
+    start = getattr(prepared_state, "learner_step", None)
+    if args.target_learner_step != start + 1:
+        raise ValueError(
+            "synthetic_e2e target_learner_step must be exactly one step "
+            "beyond the fresh/restored learner step"
+        )
+
+
+def _preflight_combined_feature_memory(
+    *,
+    replay_bytes: int,
+    demo_bytes: int,
+    reserve_bytes: int,
+    available_bytes: int | None = None,
+) -> int:
+    """Fail before conversion/allocation unless persistent feature RAM fits."""
+
+    values = {
+        "replay_bytes": replay_bytes,
+        "demo_bytes": demo_bytes,
+        "reserve_bytes": reserve_bytes,
+    }
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    available = (
+        system_available_memory_bytes()
+        if available_bytes is None
+        else available_bytes
+    )
+    if (
+        isinstance(available, bool)
+        or not isinstance(available, int)
+        or available < 0
+    ):
+        raise ValueError("available_bytes must be a non-negative integer")
+    required = replay_bytes + demo_bytes + reserve_bytes
+    if available < required:
+        raise FeatureReplayMemoryError(
+            "feature learner needs "
+            f"{(replay_bytes + demo_bytes) / 1024**3:.3f} GiB persistent "
+            f"tensors plus {reserve_bytes / 1024**3:.3f} GiB reserve, but "
+            f"only {available / 1024**3:.3f} GiB is available"
+        )
+    return available
 
 
 def _validate_jax_backend(actual: str, required: str) -> str:
@@ -222,7 +385,12 @@ def _validate_jax_backend(actual: str, required: str) -> str:
     return actual
 
 
-def _validate_demo_serving_scope(demos: object, *, dry_run: bool) -> int:
+def _validate_demo_serving_scope(
+    demos: object,
+    *,
+    dry_run: bool,
+    synthetic_e2e: bool = False,
+) -> int:
     """Reject synthetic acceptance artifacts before allocating live services."""
 
     sidecars = getattr(demos, "sidecars", None)
@@ -233,11 +401,18 @@ def _validate_demo_serving_scope(demos: object, *, dry_run: bool) -> int:
         for sidecar in sidecars
         if sidecar.metadata.get(SYNTHETIC_ACCEPTANCE_ONLY_KEY) is True
     )
-    if synthetic and not dry_run:
+    if synthetic_e2e:
+        if not synthetic or len(synthetic) != len(sidecars):
+            raise ValueError(
+                "--synthetic-e2e requires every offline demo item to carry "
+                "the synthetic acceptance-only marker"
+            )
+    elif synthetic and not dry_run:
         first = synthetic[0]
         raise ValueError(
             "synthetic acceptance-only demo data is permitted only with "
-            "--dry-run; real learner serving requires robot demo data "
+            "--dry-run or bounded --synthetic-e2e; real learner serving "
+            "requires robot demo data "
             f"(first synthetic item: {first.source_path}[{first.item_index}])"
         )
     return len(synthetic)
@@ -289,7 +464,15 @@ def _run_locked(
     args: argparse.Namespace,
     checkpoint_manager: CheckpointManager,
 ) -> int:
-    config = LearnerConfig(wandb_mode=args.wandb_mode)
+    config = _learner_config(args)
+    policy_model_id = (
+        FROZEN_TRUNK_SYNTHETIC_E2E_MODEL_REVISION
+        if args.synthetic_e2e
+        else FROZEN_TRUNK_MODEL_REVISION
+    )
+    feature_memory_reserve_bytes = int(
+        args.feature_memory_reserve_gib * 1024**3
+    )
     if (
         args.target_learner_step is not None
         and args.target_learner_step % config.checkpoint_period
@@ -321,8 +504,15 @@ def _run_locked(
     synthetic_demo_count = _validate_demo_serving_scope(
         demos,
         dry_run=args.dry_run,
+        synthetic_e2e=args.synthetic_e2e,
     )
     _validate_demo_grasp_penalty(demos, expected=args.grasp_penalty)
+    demo_count = len(demos.transitions)
+    replay_memory_estimate = estimate_feature_replay_memory(
+        replay_capacity=args.replay_capacity,
+        intervention_capacity=args.intervention_capacity,
+    )
+    demo_memory_estimate = estimate_feature_demo_memory(demo_count)
     resnet_source = Path(
         args.resnet_source or default_resnet_source()
     ).expanduser().resolve()
@@ -336,8 +526,19 @@ def _run_locked(
         resnet_cache_path=args.resnet_cache,
     )
     run_contract = {
-        "contract_revision": "raw_pixels_hybrid_sac_v1",
-        "augmentation": "random_crop_pad4",
+        "contract_revision": "frozen_trunk_feature_hybrid_sac_v1",
+        "execution_scope": (
+            "synthetic_laptop_server_e2e_v1"
+            if args.synthetic_e2e
+            else "production_robot_data_v1"
+        ),
+        "policy_model_id": policy_model_id,
+        "augmentation": config.augmentation,
+        "policy_observations": {
+            "representation": "canonical_raw_uint8_v1",
+            "schema_hash": CANONICAL_OBSERVATION_SCHEMA_HASH,
+        },
+        "learner_observations": FROZEN_TRUNK_CONTRACT.document(),
         "action": {
             "dtype": "float32",
             "shape": [7],
@@ -350,7 +551,7 @@ def _run_locked(
             "reward_model_id": classifier.reward_model_id,
         },
         "offline_demo_sha256": demo_sha256,
-        "offline_demo_transition_count": len(demos.transitions),
+        "offline_demo_transition_count": demo_count,
         "grasp_penalty": {
             "allowed_values": [0.0, args.grasp_penalty],
             "contract_revision": "configured_redundant_command_v1",
@@ -371,7 +572,7 @@ def _run_locked(
         resnet_asset_path=resnet_source,
         run_contract=run_contract,
     )
-    agent_template = create_hybrid_sac_agent(
+    agent_template = create_frozen_trunk_feature_agent(
         config=config,
         hil_serl_root=args.hil_serl_root,
         resnet_source_path=resnet_source,
@@ -385,12 +586,43 @@ def _run_locked(
         config=config,
         resume_path=resume_path,
     )
-    raw_ingress = ReplayIngress(
+    _validate_synthetic_progress_target(args, prepared_state)
+    available_memory_bytes = _preflight_combined_feature_memory(
+        replay_bytes=replay_memory_estimate.fixed_tensor_bytes,
+        demo_bytes=demo_memory_estimate.total_bytes,
+        reserve_bytes=feature_memory_reserve_bytes,
+    )
+    feature_extractor = FrozenResNet10TrunkExtractor(
+        agent_template,
+        resnet_asset_path=resnet_source,
+        image_keys=config.image_keys,
+    )
+    # A checkpoint may never redefine the trunk named by the verified asset
+    # SHA: every persistent feature is meaningful only under these exact
+    # weights.  This also rejects legacy/bad checkpoints before conversion.
+    feature_extractor.validate_agent_invariant(prepared_state.agent)
+    feature_demos = convert_loaded_demos_to_feature_pool(
+        demos,
+        feature_extractor=feature_extractor,
+        seed=config.seed,
+        extraction_batch_size=args.demo_extraction_batch_size,
+    )
+    if feature_demos.storage_nbytes != demo_memory_estimate.total_bytes:
+        raise RuntimeError(
+            "converted demo allocation differs from its preflight estimate"
+        )
+    # The long-lived pool owns only float32 features and copied provenance.
+    # Drop all canonical raw demo references before allocating live rings.
+    del demos
+    gc.collect()
+
+    raw_ingress = FeatureReplayIngress(
+        feature_extractor=feature_extractor,
         replay_capacity=args.replay_capacity,
         intervention_capacity=args.intervention_capacity,
-        hil_serl_root=args.hil_serl_root,
-        learner_mode=True,
+        seed=config.seed,
         expected_grasp_penalty=args.grasp_penalty,
+        memory_reserve_bytes=feature_memory_reserve_bytes,
     )
     ingress = FaultGatedReplayIngress(raw_ingress)
 
@@ -408,7 +640,7 @@ def _run_locked(
             "learner": config.fingerprint_values(),
             "fingerprint_sha256": fingerprint.sha256,
             "run_contract": run_contract,
-            "demo_count": len(demos.transitions),
+            "demo_count": demo_count,
             "synthetic_acceptance_demo_count": synthetic_demo_count,
             "observation_schema_hash": CANONICAL_OBSERVATION_SCHEMA_HASH,
             "dependencies": versions,
@@ -416,6 +648,15 @@ def _run_locked(
             "checkpoint_reserve_bytes": (
                 checkpoint_manager.minimum_free_bytes_after_save
             ),
+            "feature_memory": {
+                "available_at_preflight_bytes": available_memory_bytes,
+                "replay_fixed_tensor_bytes": (
+                    replay_memory_estimate.fixed_tensor_bytes
+                ),
+                "replay_camera_bytes": replay_memory_estimate.camera_bytes,
+                "offline_demo_tensor_bytes": demo_memory_estimate.total_bytes,
+                "reserve_bytes": feature_memory_reserve_bytes,
+            },
         },
         enable_wandb=args.wandb_mode != "disabled",
     )
@@ -426,24 +667,33 @@ def _run_locked(
     old_handlers: dict[int, object] = {}
     exit_code = 0
     logger_closed = False
+    synthetic_candidate = False
+    synthetic_event_fields: dict[str, object] | None = None
     try:
-        offline_pool = CanonicalTransitionPool(
-            demos.transitions,
-            seed=config.seed,
-        )
         assembly = compose_learner(
             agent_template=agent_template,
             ingress=ingress,
-            offline_demos=offline_pool,
+            offline_demos=feature_demos,
             checkpoint_manager=checkpoint_manager,
             fingerprint=fingerprint,
             config=config,
             logger=logger,
             prepared_state=prepared_state,
+            parameter_validator=(
+                feature_extractor.validate_parameter_invariant
+            ),
+            candidate_postprocessor=feature_extractor.repin_target_trunk,
+            policy_model_id=policy_model_id,
         )
         service = build_actor_service(
             assembly=assembly,
             classifier=classifier,
+            allowed_actor_ids=(
+                (args.synthetic_actor_id,) if args.synthetic_e2e else None
+            ),
+            allowed_run_ids=(
+                (args.synthetic_run_id,) if args.synthetic_e2e else None
+            ),
         )
         restored_path = (
             str(assembly.restored_checkpoint.path)
@@ -456,7 +706,7 @@ def _run_locked(
             gradient_step=assembly.learner.gradient_step,
             policy_version=assembly.policy_runtime.policy_version,
             restored_checkpoint=restored_path,
-            demo_count=len(demos.transitions),
+            demo_count=demo_count,
             synthetic_acceptance_demo_count=synthetic_demo_count,
             jax_backend=jax_backend,
         )
@@ -467,7 +717,7 @@ def _run_locked(
                 gradient_step=assembly.learner.gradient_step,
                 policy_version=assembly.policy_runtime.policy_version,
                 restored_checkpoint=restored_path,
-                demo_count=len(demos.transitions),
+                demo_count=demo_count,
                 synthetic_acceptance_demo_count=synthetic_demo_count,
                 fingerprint_sha256=fingerprint.sha256,
                 jsonl_path=str(logger.path),
@@ -511,6 +761,11 @@ def _run_locked(
 
         server.start()
         worker.start()
+        synthetic_deadline = (
+            time.monotonic() + args.synthetic_timeout_s
+            if args.synthetic_e2e
+            else None
+        )
         _emit(
             "rlpd_learner_server_ready",
             host=args.host,
@@ -518,17 +773,47 @@ def _run_locked(
             policy_version=assembly.policy_runtime.policy_version,
             learner_step=assembly.learner.learner_step,
             reward_model_id=classifier.reward_model_id,
+            policy_model_id=assembly.policy_runtime.model_id,
             replay_capacity=raw_ingress.replay_capacity,
             intervention_capacity=raw_ingress.intervention_capacity,
-            demo_count=len(demos.transitions),
+            demo_count=demo_count,
             fingerprint_sha256=fingerprint.sha256,
             jax_backend=jax_backend,
             jax_device_count=len(jax.devices()),
+            feature_encoding=raw_ingress.feature_encoding_id,
+            feature_replay_fixed_tensor_bytes=(
+                replay_memory_estimate.fixed_tensor_bytes
+            ),
+            offline_demo_tensor_bytes=demo_memory_estimate.total_bytes,
             persistence="learner_checkpoints_only_replay_ram",
+            synthetic_actor_id=(
+                args.synthetic_actor_id if args.synthetic_e2e else None
+            ),
+            synthetic_run_id=(
+                args.synthetic_run_id if args.synthetic_e2e else None
+            ),
+            synthetic_transition_count=(
+                args.synthetic_transition_count if args.synthetic_e2e else None
+            ),
         )
 
         learner_fault_reported = False
         while not shutdown_event.wait(args.poll_interval):
+            if (
+                synthetic_deadline is not None
+                and time.monotonic() >= synthetic_deadline
+            ):
+                exit_code = 6
+                worker.request_stop()
+                _emit(
+                    "rlpd_learner_synthetic_e2e_timeout",
+                    timeout_s=args.synthetic_timeout_s,
+                    replay_insert_count=(
+                        raw_ingress.status().replay_insert_count
+                    ),
+                    expected_transition_count=args.synthetic_transition_count,
+                )
+                break
             alive, ready, detail = service.health()
             if not alive or not ready:
                 exit_code = 3
@@ -562,6 +847,53 @@ def _run_locked(
                 and status.state == "completed"
             ):
                 break
+        if args.synthetic_e2e:
+            status = worker.status
+            target = int(args.target_learner_step)
+            ingress_status = raw_ingress.status()
+            checkpoint_path = None
+            checkpoint_selection_error = None
+            if status.state == "completed":
+                try:
+                    checkpoint_path = checkpoint_manager.latest_path()
+                except Exception as exc:
+                    checkpoint_selection_error = (
+                        f"{type(exc).__name__}: {str(exc)[:2_000]}"
+                    )
+            synthetic_candidate = (
+                exit_code == 0
+                and status.state == "completed"
+                and status.learner_step == target
+                and status.learner_step - prepared_state.learner_step == 1
+                and status.gradient_step - prepared_state.gradient_step
+                == config.cta_ratio
+                and status.policy_version - prepared_state.policy_version == 1
+                and ingress_status.replay_insert_count
+                == args.synthetic_transition_count
+                and checkpoint_path is not None
+                and checkpoint_path.name == f"checkpoint_{target:012d}"
+            )
+            synthetic_event_fields = {
+                "target_learner_step": target,
+                "start_learner_step": prepared_state.learner_step,
+                "learner_step": status.learner_step,
+                "start_gradient_step": prepared_state.gradient_step,
+                "gradient_step": status.gradient_step,
+                "start_policy_version": prepared_state.policy_version,
+                "policy_version": status.policy_version,
+                "worker_state": status.state,
+                "checkpoint_path": (
+                    None if checkpoint_path is None else str(checkpoint_path)
+                ),
+                "replay_size": ingress_status.replay_size,
+                "replay_insert_count": ingress_status.replay_insert_count,
+                "expected_transition_count": args.synthetic_transition_count,
+                "fingerprint_sha256": fingerprint.sha256,
+            }
+            if checkpoint_selection_error is not None:
+                synthetic_event_fields["checkpoint_selection_error"] = (
+                    checkpoint_selection_error
+                )
     finally:
         shutdown_event.set()
         if worker is not None:
@@ -621,6 +953,56 @@ def _run_locked(
                     error_type=type(exc).__name__,
                     detail=str(exc)[:2_000],
                 )
+    if args.synthetic_e2e:
+        if synthetic_event_fields is None:
+            synthetic_event_fields = {
+                "target_learner_step": args.target_learner_step,
+                "start_learner_step": prepared_state.learner_step,
+                "start_gradient_step": prepared_state.gradient_step,
+                "start_policy_version": prepared_state.policy_version,
+                "fingerprint_sha256": fingerprint.sha256,
+            }
+        checkpoint_verified = False
+        if synthetic_candidate and exit_code == 0:
+            try:
+                restored = checkpoint_manager.load(
+                    agent_template=agent_template,
+                    fingerprint=fingerprint,
+                    path=synthetic_event_fields["checkpoint_path"],
+                )
+                if (
+                    restored.learner_step != args.target_learner_step
+                    or restored.gradient_step
+                    != prepared_state.gradient_step + config.cta_ratio
+                    or restored.policy_version
+                    != prepared_state.policy_version + 1
+                ):
+                    raise RuntimeError(
+                        "round-trip checkpoint counters do not match the "
+                        "completed synthetic E2E step"
+                    )
+                feature_extractor.validate_agent_invariant(restored.agent)
+                checkpoint_verified = True
+            except Exception as exc:
+                synthetic_event_fields["checkpoint_roundtrip_error"] = (
+                    f"{type(exc).__name__}: {str(exc)[:2_000]}"
+                )
+                exit_code = max(exit_code, 6)
+        synthetic_event_fields["checkpoint_roundtrip_verified"] = (
+            checkpoint_verified
+        )
+        if synthetic_candidate and checkpoint_verified and exit_code == 0:
+            _emit(
+                "rlpd_learner_synthetic_e2e_passed",
+                **synthetic_event_fields,
+            )
+        else:
+            exit_code = max(exit_code, 6)
+            synthetic_event_fields["exit_code"] = exit_code
+            _emit(
+                "rlpd_learner_synthetic_e2e_failed",
+                **synthetic_event_fields,
+            )
     return exit_code
 
 

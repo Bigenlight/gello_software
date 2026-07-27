@@ -8,7 +8,14 @@ from typing import Any, Mapping, Protocol
 
 import numpy as np
 
+from ur_env.learner.config import (
+    FROZEN_TRUNK_FEATURE_SHAPE,
+    FROZEN_TRUNK_REPRESENTATION,
+)
 from ur_env.learner.demo import LEARNER_BATCH_KEYS
+
+
+RAW_PACKED_REPRESENTATION = "raw_pixels_packed_uint8_v1"
 
 
 class LearnerBatchError(ValueError):
@@ -80,9 +87,18 @@ def _array(value: Any, *, name: str) -> np.ndarray:
 
 
 def sanitize_learner_batch(
-    batch: Mapping[str, Any], *, expected_batch_size: int | None = None
+    batch: Mapping[str, Any],
+    *,
+    expected_batch_size: int | None = None,
+    observation_representation: str | None = None,
 ) -> dict[str, Any]:
-    """Drop sidecar fields and validate the packed upstream batch layout."""
+    """Drop sidecars and validate one explicit learner tensor layout.
+
+    Production composition supplies ``FROZEN_TRUNK_REPRESENTATION`` and thus
+    fails closed on raw images.  ``None`` retains shape-based compatibility
+    for the receive-server and synthetic-agent unit tests; it never converts
+    one representation into the other.
+    """
 
     if not isinstance(batch, Mapping):
         raise LearnerBatchError("batch must be a mapping")
@@ -102,13 +118,10 @@ def sanitize_learner_batch(
         next_observations, Mapping
     ):
         raise LearnerBatchError("observations and next_observations must be mappings")
-    if set(observations) != {"state", "cam1", "cam2"}:
+    observation_keys = {"state", "cam1", "cam2"}
+    if set(observations) != observation_keys:
         raise LearnerBatchError(
-            "packed observations must contain exactly state, cam1, and cam2"
-        )
-    if set(next_observations) != {"state"}:
-        raise LearnerBatchError(
-            "packed next_observations must contain exactly state"
+            "observations must contain exactly state, cam1, and cam2"
         )
 
     actions = _array(batch["actions"], name="actions")
@@ -117,22 +130,60 @@ def sanitize_learner_batch(
         raise LearnerBatchError(
             f"expected batch size {expected_batch_size}, got {batch_size}"
         )
-    expected_shapes = {
-        "state": (batch_size, 1, 19),
-        "cam1": (batch_size, 2, 128, 128, 3),
-        "cam2": (batch_size, 2, 128, 128, 3),
-    }
+    if observation_representation is None:
+        if set(next_observations) == {"state"}:
+            representation = RAW_PACKED_REPRESENTATION
+        elif set(next_observations) == observation_keys:
+            representation = FROZEN_TRUNK_REPRESENTATION
+        else:
+            raise LearnerBatchError(
+                "cannot infer learner observation representation from "
+                "next_observations keys"
+            )
+    else:
+        representation = observation_representation
+
+    if representation == RAW_PACKED_REPRESENTATION:
+        if set(next_observations) != {"state"}:
+            raise LearnerBatchError(
+                "packed raw next_observations must contain exactly state"
+            )
+        expected_shapes = {
+            "state": (batch_size, 1, 19),
+            "cam1": (batch_size, 2, 128, 128, 3),
+            "cam2": (batch_size, 2, 128, 128, 3),
+        }
+        camera_dtype = np.dtype(np.uint8)
+    elif representation == FROZEN_TRUNK_REPRESENTATION:
+        if set(next_observations) != observation_keys:
+            raise LearnerBatchError(
+                "frozen-trunk next_observations must contain exactly state, "
+                "cam1, and cam2"
+            )
+        expected_shapes = {
+            "state": (batch_size, 1, 19),
+            "cam1": (batch_size, *FROZEN_TRUNK_FEATURE_SHAPE),
+            "cam2": (batch_size, *FROZEN_TRUNK_FEATURE_SHAPE),
+        }
+        camera_dtype = np.dtype(np.float32)
+    else:
+        raise LearnerBatchError(
+            f"unsupported observation representation: {representation!r}"
+        )
+
     for key, shape in expected_shapes.items():
         array = _array(observations[key], name=f"observations.{key}")
         if array.shape != shape:
             raise LearnerBatchError(
                 f"observations.{key} must have shape {shape}, got {array.shape}"
             )
-        expected_dtype = np.uint8 if key.startswith("cam") else np.float32
-        if array.dtype != np.dtype(expected_dtype):
+        expected_dtype = (
+            camera_dtype if key.startswith("cam") else np.dtype(np.float32)
+        )
+        if array.dtype != expected_dtype:
             raise LearnerBatchError(
                 f"observations.{key} must have dtype "
-                f"{np.dtype(expected_dtype).name}, got {array.dtype}"
+                f"{expected_dtype.name}, got {array.dtype}"
             )
         if array.dtype.kind == "f" and not np.all(np.isfinite(array)):
             raise LearnerBatchError(f"observations.{key} contains non-finite data")
@@ -144,6 +195,22 @@ def sanitize_learner_batch(
         )
     if not np.all(np.isfinite(next_state)):
         raise LearnerBatchError("next_observations.state contains non-finite data")
+
+    if representation == FROZEN_TRUNK_REPRESENTATION:
+        for key in ("cam1", "cam2"):
+            array = _array(
+                next_observations[key], name=f"next_observations.{key}"
+            )
+            expected_shape = (batch_size, *FROZEN_TRUNK_FEATURE_SHAPE)
+            if array.shape != expected_shape or array.dtype != np.float32:
+                raise LearnerBatchError(
+                    f"next_observations.{key} must have shape "
+                    f"{expected_shape} and dtype float32"
+                )
+            if not np.all(np.isfinite(array)):
+                raise LearnerBatchError(
+                    f"next_observations.{key} contains non-finite data"
+                )
 
     if actions.shape != (batch_size, 7) or actions.dtype != np.float32:
         raise LearnerBatchError("actions must have shape (B, 7) and dtype float32")
@@ -167,9 +234,14 @@ def sanitize_learner_batch(
     if not np.all(np.isin(_array(batch["masks"], name="masks"), (0.0, 1.0))):
         raise LearnerBatchError("masks must be 0 or 1")
 
+    clean_next_observations = {"state": next_observations["state"]}
+    if representation == FROZEN_TRUNK_REPRESENTATION:
+        clean_next_observations.update(
+            {key: next_observations[key] for key in ("cam1", "cam2")}
+        )
     return {
         "observations": {key: observations[key] for key in ("state", "cam1", "cam2")},
-        "next_observations": {"state": next_observations["state"]},
+        "next_observations": clean_next_observations,
         "actions": batch["actions"],
         "rewards": batch["rewards"],
         "masks": batch["masks"],
@@ -259,6 +331,7 @@ class RLPDBatchSampler:
         batch_size: int = 256,
         training_starts: int = 100,
         seed: int = 42,
+        observation_representation: str | None = None,
     ) -> None:
         if isinstance(batch_size, bool) or not isinstance(batch_size, int):
             raise ValueError("batch_size must be an integer")
@@ -275,6 +348,13 @@ class RLPDBatchSampler:
         self.online_interventions = online_interventions
         self.batch_size = batch_size
         self.training_starts = training_starts
+        if observation_representation not in {
+            None,
+            RAW_PACKED_REPRESENTATION,
+            FROZEN_TRUNK_REPRESENTATION,
+        }:
+            raise ValueError("unsupported observation_representation")
+        self.observation_representation = observation_representation
         self._rng = np.random.default_rng(seed)
         self.last_metrics = self.metrics()
 
@@ -328,6 +408,7 @@ class RLPDBatchSampler:
         replay = sanitize_learner_batch(
             self.online_replay.sample(metrics.replay_batch_size),
             expected_batch_size=metrics.replay_batch_size,
+            observation_representation=self.observation_representation,
         )
         demo_parts: list[dict[str, Any]] = []
         if metrics.offline_demo_batch_size:
@@ -335,6 +416,7 @@ class RLPDBatchSampler:
                 sanitize_learner_batch(
                     self.offline_demos.sample(metrics.offline_demo_batch_size),
                     expected_batch_size=metrics.offline_demo_batch_size,
+                    observation_representation=self.observation_representation,
                 )
             )
         if metrics.online_intervention_batch_size:
@@ -344,6 +426,7 @@ class RLPDBatchSampler:
                         metrics.online_intervention_batch_size
                     ),
                     expected_batch_size=metrics.online_intervention_batch_size,
+                    observation_representation=self.observation_representation,
                 )
             )
         demos = demo_parts[0]
@@ -352,7 +435,11 @@ class RLPDBatchSampler:
         demos = _permute(demos, self._rng.permutation(metrics.demo_batch_size))
         result = _concat(replay, demos)
         self.last_metrics = metrics
-        return sanitize_learner_batch(result, expected_batch_size=self.batch_size)
+        return sanitize_learner_batch(
+            result,
+            expected_batch_size=self.batch_size,
+            observation_representation=self.observation_representation,
+        )
 
 
 def freeze_for_agent(batch: Mapping[str, Any]) -> Any:

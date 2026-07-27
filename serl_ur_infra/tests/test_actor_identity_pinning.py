@@ -15,7 +15,11 @@ _HERE = Path(__file__).resolve().parent
 _INFRA = _HERE.parent
 sys.path.insert(0, str(_INFRA))
 
-from ur_env.actor_network import ActorProtocolError, ActorSessionService  # noqa: E402
+from ur_env.actor_network import (  # noqa: E402
+    ActorProtocolError,
+    ActorSessionService,
+    ActorTransportError,
+)
 from ur_env.grpc_actor_transport import (  # noqa: E402
     GrpcActorNetwork,
     create_grpc_server,
@@ -128,6 +132,45 @@ def test_all_matching_pins_are_rechecked_at_each_episode_boundary() -> None:
 def test_empty_identity_pin_is_rejected(keyword: str) -> None:
     with pytest.raises(ValueError, match=keyword):
         GrpcActorNetwork("unused", actor_id="actor", **{keyword: ""})
+
+
+@pytest.mark.parametrize(
+    ("actor_id", "run_id", "detail"),
+    (
+        ("robot-actor", "fake-run", "actor_id"),
+        ("fake-actor", "robot-run", "run_id"),
+    ),
+)
+def test_server_allowlists_gate_before_policy_inference(
+    actor_id: str,
+    run_id: str,
+    detail: str,
+) -> None:
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        allowed_actor_ids=("fake-actor",),
+        allowed_run_ids=("fake-run",),
+    )
+    server, port = create_grpc_server(service)
+    server.start()
+    client = GrpcActorNetwork(
+        f"127.0.0.1:{port}", actor_id=actor_id, timeout_s=1.0
+    )
+    try:
+        with pytest.raises(ActorTransportError, match=detail):
+            client.begin_episode(
+                _observation(),
+                run_id=run_id,
+                session_id="session",
+                episode_id=0,
+                observation_id="observation",
+                timestamp_ns=1_000,
+            )
+        assert service.inference_count == 0
+        assert service.health() == (True, True, "ready")
+    finally:
+        client.close()
+        server.stop(grace=0).wait()
 
 
 def _load_actor_script():

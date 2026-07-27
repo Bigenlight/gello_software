@@ -10,6 +10,13 @@ from typing import Any
 RESNET10_SHA256 = (
     "175745d43d30233eb01b5369465d1c24c11b8ee71ccb734cc1c1bca13e07f57b"
 )
+FROZEN_TRUNK_REPRESENTATION = "resnet10_frozen_trunk_map_f32_v1"
+FROZEN_TRUNK_MODEL_REVISION = "hil-serl-hybrid-sac-resnet10-trunk-cache-v1"
+FROZEN_TRUNK_SYNTHETIC_E2E_MODEL_REVISION = (
+    "hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1"
+)
+FROZEN_TRUNK_FEATURE_SHAPE = (1, 4, 4, 512)
+LEARNER_AUGMENTATION = "none"
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,8 @@ class LearnerConfig:
     discount: float = 0.97
     encoder_type: str = "resnet-pretrained"
     image_keys: tuple[str, str] = ("cam1", "cam2")
+    observation_representation: str = FROZEN_TRUNK_REPRESENTATION
+    augmentation: str = LEARNER_AUGMENTATION
     wandb_mode: str = "offline"
 
     def __post_init__(self) -> None:
@@ -57,6 +66,13 @@ class LearnerConfig:
             raise ValueError("encoder_type must remain 'resnet-pretrained'")
         if tuple(self.image_keys) != ("cam1", "cam2"):
             raise ValueError("image_keys must be exactly ('cam1', 'cam2')")
+        if self.observation_representation != FROZEN_TRUNK_REPRESENTATION:
+            raise ValueError(
+                "observation_representation must be "
+                f"{FROZEN_TRUNK_REPRESENTATION!r}"
+            )
+        if self.augmentation != LEARNER_AUGMENTATION:
+            raise ValueError("augmentation must remain 'none'")
         if self.wandb_mode not in {"offline", "online", "disabled"}:
             raise ValueError("wandb_mode must be offline, online, or disabled")
 

@@ -25,7 +25,7 @@ from ur_env.learner.checkpoint import (
     LearnerFingerprint,
     RestoredCheckpoint,
 )
-from ur_env.learner.config import LearnerConfig
+from ur_env.learner.config import FROZEN_TRUNK_MODEL_REVISION, LearnerConfig
 from ur_env.learner.policy import VersionedPolicyRuntime
 from ur_env.learner.runtime import (
     HILSERLLearner,
@@ -259,6 +259,9 @@ def compose_learner(
     sample_action: Optional[
         Callable[[Any, Mapping[str, Any], Any, bool], Any]
     ] = None,
+    parameter_validator: Callable[[Any], None] | None = None,
+    candidate_postprocessor: Callable[[Any], Any] | None = None,
+    policy_model_id: str = FROZEN_TRUNK_MODEL_REVISION,
 ) -> LearnerAssembly:
     """Create a mutually consistent policy runtime, sampler, and learner.
 
@@ -272,9 +275,27 @@ def compose_learner(
         raise LearnerCompositionError(
             "production learner ingress must require grasp_penalty"
         )
+    if (
+        getattr(ingress, "observation_representation", None)
+        != config.observation_representation
+        or getattr(ingress, "augmentation", None) != config.augmentation
+    ):
+        raise LearnerCompositionError(
+            "production ingress representation/augmentation does not match "
+            "the learner config"
+        )
     if len(offline_demos) <= 0:
         raise LearnerCompositionError(
             "at least one canonical offline demonstration is required"
+        )
+    if (
+        getattr(offline_demos, "observation_representation", None)
+        != config.observation_representation
+        or getattr(offline_demos, "augmentation", None) != config.augmentation
+    ):
+        raise LearnerCompositionError(
+            "offline demo representation/augmentation does not match the "
+            "learner config"
         )
     if prepared_state is not None:
         if resume_path is not None or inference_rng is not None:
@@ -348,6 +369,8 @@ def compose_learner(
         learner_step=learner_step,
         inference_rng=inference_rng,
         sample_action=sample_action,
+        parameter_validator=parameter_validator,
+        model_id=policy_model_id,
     )
     sampler = RLPDBatchSampler(
         online_replay=ReplayIngressView(ingress, "replay"),
@@ -356,6 +379,7 @@ def compose_learner(
         batch_size=config.batch_size,
         training_starts=config.training_starts,
         seed=config.seed,
+        observation_representation=config.observation_representation,
     )
     learner = HILSERLLearner(
         agent=agent,
@@ -368,6 +392,8 @@ def compose_learner(
         learner_step=learner_step,
         gradient_step=gradient_step,
         policy_version=policy_version,
+        parameter_validator=parameter_validator,
+        candidate_postprocessor=candidate_postprocessor,
     )
     if policy_runtime.learner_step != learner.learner_step:
         raise LearnerCompositionError("policy and learner steps diverged")
@@ -386,6 +412,8 @@ def build_actor_service(
     *,
     assembly: LearnerAssembly,
     classifier: Any,
+    allowed_actor_ids: tuple[str, ...] | None = None,
+    allowed_run_ids: tuple[str, ...] | None = None,
 ) -> Any:
     """Bind the shared policy and ingress to the transport-neutral service."""
 
@@ -408,6 +436,8 @@ def build_actor_service(
         finalize_transition=RewardTransitionFinalizer(classifier),
         accept_data=ingress,
         buffer_status_provider=ingress.status,
+        allowed_actor_ids=allowed_actor_ids,
+        allowed_run_ids=allowed_run_ids,
     )
 
 

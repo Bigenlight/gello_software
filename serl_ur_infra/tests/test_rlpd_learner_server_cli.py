@@ -46,6 +46,9 @@ def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
     assert args.require_jax_backend == "cpu"
     assert args.wandb_mode == "offline"
     assert args.grasp_penalty == pytest.approx(-0.02)
+    assert args.feature_memory_reserve_gib == pytest.approx(2.0)
+    assert args.demo_extraction_batch_size == 64
+    assert args.synthetic_e2e is False
     assert not hasattr(args, "require_grasp_penalty")
     assert not hasattr(args, "learner_mode")
     _MODULE._validate_args(args)
@@ -83,7 +86,110 @@ def test_cli_bounded_target_must_be_checkpoint_aligned(tmp_path):
         _MODULE.main(args)
 
 
-def test_cli_main_always_constructs_learner_mode_ingress(
+def test_cli_synthetic_e2e_is_bounded_and_keeps_real_learning_scale(tmp_path):
+    args = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--synthetic-e2e",
+            "--synthetic-run-id",
+            "fake-run",
+            "--target-learner-step",
+            "1",
+        ]
+    )
+    _MODULE._validate_args(args)
+    config = _MODULE._learner_config(args)
+
+    assert config.batch_size == 256
+    assert config.training_starts == 100
+    assert config.cta_ratio == 2
+    assert config.publish_period == 1
+    assert config.checkpoint_period == 1
+
+    missing_target = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--synthetic-e2e",
+            "--synthetic-run-id",
+            "fake-run",
+        ]
+    )
+    with pytest.raises(ValueError, match=r"target_learner_step in \[1, 10\]"):
+        _MODULE._validate_args(missing_target)
+
+    small_replay = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--synthetic-e2e",
+            "--synthetic-run-id",
+            "fake-run",
+            "--target-learner-step",
+            "1",
+            "--replay-capacity",
+            "99",
+        ]
+    )
+    with pytest.raises(ValueError, match="training_starts"):
+        _MODULE._validate_args(small_replay)
+
+
+def test_cli_synthetic_e2e_and_dry_run_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit):
+        _MODULE._parse_args(
+            [*_required_args(tmp_path), "--synthetic-e2e", "--dry-run"]
+        )
+
+
+def test_cli_synthetic_e2e_requires_explicit_run_and_deadline(tmp_path):
+    missing_run = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--synthetic-e2e",
+            "--target-learner-step",
+            "1",
+        ]
+    )
+    with pytest.raises(ValueError, match="synthetic_run_id"):
+        _MODULE._validate_args(missing_run)
+
+    bad_timeout = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--synthetic-e2e",
+            "--synthetic-run-id",
+            "fake-run",
+            "--target-learner-step",
+            "1",
+            "--synthetic-timeout-s",
+            "0.5",
+        ]
+    )
+    with pytest.raises(ValueError, match="synthetic_timeout_s"):
+        _MODULE._validate_args(bad_timeout)
+
+
+def test_synthetic_resume_target_requires_one_new_learner_step(tmp_path):
+    args = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--synthetic-e2e",
+            "--synthetic-run-id",
+            "resume-run",
+            "--target-learner-step",
+            "2",
+        ]
+    )
+    _MODULE._validate_args(args)
+    _MODULE._validate_synthetic_progress_target(
+        args, SimpleNamespace(learner_step=1)
+    )
+    with pytest.raises(ValueError, match="exactly one step"):
+        _MODULE._validate_synthetic_progress_target(
+            args, SimpleNamespace(learner_step=2)
+        )
+
+
+def test_cli_main_constructs_feature_ingress_from_restored_agent_contract(
     tmp_path,
     monkeypatch,
 ):
@@ -94,7 +200,7 @@ def test_cli_main_always_constructs_learner_mode_ingress(
     class StopAfterIngress(RuntimeError):
         pass
 
-    def replay_ingress(**kwargs):
+    def feature_replay_ingress(**kwargs):
         captured.update(kwargs)
         raise StopAfterIngress
 
@@ -129,8 +235,9 @@ def test_cli_main_always_constructs_learner_mode_ingress(
             ),
         ),
     )
+    agent = SimpleNamespace(state=SimpleNamespace(params=object()))
     monkeypatch.setattr(
-        _MODULE, "create_hybrid_sac_agent", lambda **kwargs: object()
+        _MODULE, "create_frozen_trunk_feature_agent", lambda **kwargs: agent
     )
     monkeypatch.setattr(
         _MODULE,
@@ -138,7 +245,30 @@ def test_cli_main_always_constructs_learner_mode_ingress(
         SimpleNamespace(create=lambda **kwargs: object()),
     )
     monkeypatch.setattr(
-        _MODULE, "prepare_learner_state", lambda **kwargs: object()
+        _MODULE,
+        "prepare_learner_state",
+        lambda **kwargs: SimpleNamespace(agent=agent),
+    )
+    extractor = SimpleNamespace(
+        validate_parameter_invariant=lambda params: None,
+        validate_agent_invariant=lambda candidate: None,
+        repin_target_trunk=lambda candidate: candidate,
+    )
+    monkeypatch.setattr(
+        _MODULE,
+        "FrozenResNet10TrunkExtractor",
+        lambda *args, **kwargs: extractor,
+    )
+    demo_bytes = _MODULE.estimate_feature_demo_memory(1).total_bytes
+    monkeypatch.setattr(
+        _MODULE,
+        "convert_loaded_demos_to_feature_pool",
+        lambda *args, **kwargs: SimpleNamespace(storage_nbytes=demo_bytes),
+    )
+    monkeypatch.setattr(
+        _MODULE,
+        "_preflight_combined_feature_memory",
+        lambda **kwargs: 32 * 1024**3,
     )
     def reward_classifier_runtime(**kwargs):
         classifier_kwargs.update(kwargs)
@@ -151,7 +281,9 @@ def test_cli_main_always_constructs_learner_mode_ingress(
     monkeypatch.setattr(
         _MODULE, "RewardClassifierRuntime", reward_classifier_runtime
     )
-    monkeypatch.setattr(_MODULE, "ReplayIngress", replay_ingress)
+    monkeypatch.setattr(
+        _MODULE, "FeatureReplayIngress", feature_replay_ingress
+    )
 
     args = [
         *_required_args(tmp_path),
@@ -166,9 +298,11 @@ def test_cli_main_always_constructs_learner_mode_ingress(
     with pytest.raises(StopAfterIngress):
         _MODULE.main(args)
 
-    assert captured["learner_mode"] is True
+    assert captured["feature_extractor"] is extractor
     assert captured["expected_grasp_penalty"] == pytest.approx(-0.02)
-    assert "require_grasp_penalty" not in captured
+    assert captured["memory_reserve_bytes"] == 2 * 1024**3
+    assert "learner_mode" not in captured
+    assert "hil_serl_root" not in captured
     assert classifier_kwargs["resnet_source_path"] == (
         tmp_path / "resnet10.pkl"
     ).resolve()
@@ -223,7 +357,7 @@ def test_cli_rejects_synthetic_demo_before_real_serving(
     )
     monkeypatch.setattr(
         _MODULE,
-        "create_hybrid_sac_agent",
+        "create_frozen_trunk_feature_agent",
         lambda **kwargs: pytest.fail("agent must not be allocated"),
     )
 
@@ -234,4 +368,53 @@ def test_cli_rejects_synthetic_demo_before_real_serving(
                 "--wandb-mode",
                 "disabled",
             ]
+        )
+
+
+def test_synthetic_e2e_requires_an_all_synthetic_demo_pool():
+    synthetic = SimpleNamespace(
+        source_path="fake.pkl",
+        item_index=0,
+        metadata={SYNTHETIC_ACCEPTANCE_ONLY_KEY: True},
+    )
+    real = SimpleNamespace(
+        source_path="real.pkl",
+        item_index=1,
+        metadata={},
+    )
+
+    assert _MODULE._validate_demo_serving_scope(
+        SimpleNamespace(sidecars=(synthetic,)),
+        dry_run=False,
+        synthetic_e2e=True,
+    ) == 1
+    with pytest.raises(ValueError, match="every offline demo item"):
+        _MODULE._validate_demo_serving_scope(
+            SimpleNamespace(sidecars=(synthetic, real)),
+            dry_run=False,
+            synthetic_e2e=True,
+        )
+    with pytest.raises(ValueError, match="every offline demo item"):
+        _MODULE._validate_demo_serving_scope(
+            SimpleNamespace(sidecars=(real,)),
+            dry_run=False,
+            synthetic_e2e=True,
+        )
+
+
+def test_combined_feature_memory_preflight_accounts_for_demo_and_reserve():
+    assert _MODULE._preflight_combined_feature_memory(
+        replay_bytes=10,
+        demo_bytes=20,
+        reserve_bytes=30,
+        available_bytes=60,
+    ) == 60
+    with pytest.raises(
+        _MODULE.FeatureReplayMemoryError, match="persistent tensors"
+    ):
+        _MODULE._preflight_combined_feature_memory(
+            replay_bytes=10,
+            demo_bytes=20,
+            reserve_bytes=30,
+            available_bytes=59,
         )

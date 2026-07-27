@@ -846,13 +846,13 @@ class ReplayIngress:
         self._last_env_step: Optional[int] = None
 
     def __call__(self, data: dict[str, Any], intervened: bool) -> None:
-        record, transition = self._convert(
+        record, transition = self.validate_data(
             data,
             intervened=intervened,
             require_grasp_penalty=self.require_grasp_penalty,
             expected_grasp_penalty=self.expected_grasp_penalty,
         )
-        signature = self._signature(record, transition)
+        signature = self.fingerprint(record, transition)
         with self._lock:
             route = self._ledger.get(record.transition_id)
             if route is None:
@@ -947,6 +947,38 @@ class ReplayIngress:
     def intervention_sidecar(self) -> tuple[IngressRecord, ...]:
         with self._lock:
             return tuple(self._intervention_sidecar)
+
+    @classmethod
+    def validate_data(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        intervened: bool,
+        require_grasp_penalty: bool = False,
+        expected_grasp_penalty: float = -0.02,
+    ) -> tuple[IngressRecord, dict[str, Any]]:
+        """Validate canonical ingress data without retaining the raw input.
+
+        This public validation boundary is shared by alternate infra-owned
+        replay backends.  In particular, the feature-native replay backend
+        must enforce exactly the same actor, classifier, and gripper contracts
+        before replacing camera images with frozen-trunk feature maps.
+        """
+
+        return cls._convert(
+            data,
+            intervened=intervened,
+            require_grasp_penalty=require_grasp_penalty,
+            expected_grasp_penalty=expected_grasp_penalty,
+        )
+
+    @classmethod
+    def fingerprint(
+        cls, record: IngressRecord, transition: Mapping[str, Any]
+    ) -> bytes:
+        """Return the collision fingerprint used by the idempotency ledger."""
+
+        return cls._signature(record, transition)
 
     def _sample(self, store: _ReplayStore, *, batch_size: int, **kwargs: Any) -> Any:
         size = _positive_int(batch_size, name="batch_size")

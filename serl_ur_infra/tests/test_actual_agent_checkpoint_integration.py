@@ -60,20 +60,43 @@ def _transition(
     }
 
 
-def _sampler(*, seed: int, offline_transitions):
-    from ur_env.learner import CanonicalTransitionPool, RLPDBatchSampler
+def _feature_transition(extractor, transition):
+    return {
+        "observations": extractor(transition["observations"]),
+        "next_observations": extractor(transition["next_observations"]),
+        "actions": transition["actions"],
+        "rewards": transition["rewards"],
+        "masks": transition["masks"],
+        "grasp_penalty": transition["grasp_penalty"],
+    }
+
+
+def _feature_ring(transitions, *, seed: int):
+    from ur_env.learner import FeatureTransitionRing
+
+    ring = FeatureTransitionRing(max(1, len(transitions)), seed=seed)
+    for transition in transitions:
+        ring.insert(transition)
+    return ring
+
+
+def _sampler(*, seed: int, offline_pool, extractor):
+    from ur_env.learner import (
+        FROZEN_TRUNK_REPRESENTATION,
+        RLPDBatchSampler,
+    )
 
     return RLPDBatchSampler(
-        online_replay=CanonicalTransitionPool(
-            [_transition(1, reward=0.0)], seed=seed + 1
+        online_replay=_feature_ring(
+            [_feature_transition(extractor, _transition(1, reward=0.0))],
+            seed=seed + 1,
         ),
-        offline_demos=CanonicalTransitionPool(
-            offline_transitions, seed=seed + 2
-        ),
-        online_interventions=CanonicalTransitionPool([], seed=seed + 3),
+        offline_demos=offline_pool,
+        online_interventions=_feature_ring([], seed=seed + 3),
         batch_size=2,
         training_starts=1,
         seed=seed,
+        observation_representation=FROZEN_TRUNK_REPRESENTATION,
     )
 
 
@@ -81,6 +104,8 @@ class _PoolIngress:
     """Minimal strict ingress implementing the production composition contract."""
 
     require_grasp_penalty = True
+    observation_representation = "resnet10_frozen_trunk_map_f32_v1"
+    augmentation = "none"
 
     def __init__(self, replay, interventions) -> None:
         self._replay = replay
@@ -137,15 +162,17 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     import jax
 
     from ur_env.learner import (
-        CanonicalTransitionPool,
         CheckpointManager,
+        FROZEN_TRUNK_CONTRACT,
+        FrozenResNet10TrunkExtractor,
         HILSERLLearner,
         LearnerConfig,
         LearnerFingerprint,
         VersionedPolicyRuntime,
         canonical_policy_observation,
         compose_learner,
-        create_hybrid_sac_agent,
+        convert_loaded_demos_to_feature_pool,
+        create_frozen_trunk_feature_agent,
         load_demo_pickle,
         prepare_learner_state,
         validate_learner_dependencies,
@@ -201,7 +228,7 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     )
 
     def create_agent():
-        return create_hybrid_sac_agent(
+        return create_frozen_trunk_feature_agent(
             config=config,
             resnet_source_path=resnet_source,
             resnet_cache_path=resnet_cache,
@@ -215,25 +242,44 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
 
     assert isinstance(agent, SACAgentHybridSingleArm)
     assert int(np.asarray(agent.state.step)) == 0
+    assert agent.config["augmentation_function"] is None
+    extractor = FrozenResNet10TrunkExtractor(
+        agent, resnet_asset_path=resnet_source
+    )
+    feature_demos = convert_loaded_demos_to_feature_pool(
+        loaded_demos,
+        feature_extractor=extractor,
+        seed=102,
+        extraction_batch_size=2,
+    )
 
     fingerprint = LearnerFingerprint.create(
-        config=config, resnet_asset_path=resnet_source
+        config=config,
+        resnet_asset_path=resnet_source,
+        run_contract={
+            "learner_observations": FROZEN_TRUNK_CONTRACT.document(),
+            "augmentation": "none",
+        },
     )
     manager = CheckpointManager(tmp_path / "checkpoints")
     publisher = VersionedPolicyRuntime(
         agent,
         inference_rng=jax.random.PRNGKey(710),
+        parameter_validator=extractor.validate_parameter_invariant,
     )
     learner = HILSERLLearner(
         agent=agent,
         sampler=_sampler(
             seed=100,
-            offline_transitions=loaded_demos.transitions,
+            offline_pool=feature_demos,
+            extractor=extractor,
         ),
         publisher=publisher,
         config=config,
         checkpoint_manager=manager,
         fingerprint=fingerprint,
+        parameter_validator=extractor.validate_parameter_invariant,
+        candidate_postprocessor=extractor.repin_target_trunk,
     )
 
     first = learner.train_once()
@@ -257,21 +303,30 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     )
     assert prepared.restored_checkpoint is not None
     restored = prepared.restored_checkpoint
+    fresh_extractor = FrozenResNet10TrunkExtractor(
+        fresh_agent, resnet_asset_path=resnet_source
+    )
+    fresh_extractor.validate_agent_invariant(prepared.agent)
     assembly = compose_learner(
         agent_template=fresh_agent,
         ingress=_PoolIngress(
-            CanonicalTransitionPool(
-                [_transition(4, reward=0.0)], seed=201
+            _feature_ring(
+                [
+                    _feature_transition(
+                        fresh_extractor, _transition(4, reward=0.0)
+                    )
+                ],
+                seed=201,
             ),
-            CanonicalTransitionPool([], seed=202),
+            _feature_ring([], seed=202),
         ),
-        offline_demos=CanonicalTransitionPool(
-            loaded_demos.transitions, seed=203
-        ),
+        offline_demos=feature_demos,
         checkpoint_manager=manager,
         fingerprint=fingerprint,
         config=config,
         prepared_state=prepared,
+        parameter_validator=fresh_extractor.validate_parameter_invariant,
+        candidate_postprocessor=fresh_extractor.repin_target_trunk,
     )
     assert assembly.restored_checkpoint is restored
 
@@ -294,6 +349,7 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
         policy_version=learner.policy_version,
         learner_step=learner.learner_step,
         inference_rng=checkpoint_inference_rng,
+        parameter_validator=extractor.validate_parameter_invariant,
     )
     restored_runtime = assembly.policy_runtime
     observation = canonical_policy_observation(value=17)
