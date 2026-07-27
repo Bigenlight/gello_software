@@ -21,12 +21,14 @@
 
 ## 1. 사전 조건
 
-이번 문서 갱신 세션의 Kanu 접속 시도는 `kanu_junhyeong` hostname resolution에서 실패했다. remote command나 GPU 검증은 실행되지 않았다. 먼저 사용자 terminal에서 alias가 실제 host로 해석되는지 확인한다.
+이 PC의 실제 SSH alias는 `kanu`다. 2026-07-27 read-only preflight에서 접속, host RAM, GPU, 기존 `il` Python 환경을 확인했다. production learner dry-run 자체는 아직 실행하지 않았다.
 
 ```bash
-ssh -G kanu_junhyeong | sed -n '1,40p'
-ssh -T kanu_junhyeong true
+ssh -G kanu | sed -n '1,40p'
+ssh -T kanu true
 ```
+
+확인 당시 Kanu는 RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장을 제공했고 `/home/junhyeong/miniconda3/envs/il/bin/python`에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개를 확인했다. 이 값은 실행 직전에 다시 확인한다.
 
 두 번째 command가 성공하기 전에는 아래 Kanu command를 실행 가능하다고 간주하지 않는다. 조직 VPN, SSH config 또는 실제 hostname은 사용자가 관리하는 값이므로 문서에서 추측해 바꾸지 않는다.
 
@@ -337,7 +339,7 @@ Kanu server는 loopback에만 bind된다. laptop terminal에서 다음 tunnel을
 ```bash
 ssh -N -T -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:50053:127.0.0.1:50053 \
-  kanu_junhyeong
+  kanu
 ```
 
 다른 local process가 50053을 쓰고 있으면 양쪽에서 비어 있는 다른 port를 선택하고 server `--port`, tunnel 두 port, actor `--server-port`를 모두 같은 값으로 바꾼다.

@@ -384,7 +384,7 @@ opt-in 환경 변수는 `RUN_HIL_SERL_ACTUAL_CHECKPOINT=1`이다. current produc
 
 이 결과는 production construction의 실제 dependency/artifact smoke다. 최신 run은 W&B를 disabled로 실행했으므로 실제 W&B offline artifact 검증은 별도 자동 테스트가 근거다. server bind나 training을 실행하지 않으므로 Kanu/robot E2E 결과로 확대 해석하지 않는다.
 
-이번 세션에서 Kanu SSH 접속도 시도했지만 `kanu_junhyeong` hostname을 DNS/SSH config 단계에서 해석하지 못해 remote command를 실행하지 못했다. 따라서 Kanu filesystem/GPU/process에는 변경이 없었고 Kanu GPU 상태는 여전히 미검증이다.
+처음 사용한 `kanu_junhyeong`은 등록되지 않은 이름이었고 실제 SSH alias는 `kanu`였다. 수정 후 read-only 접속에 성공해 RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장과 `/home/junhyeong/miniconda3/envs/il/bin/python`의 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개를 확인했다. Kanu filesystem이나 process는 변경하지 않았다. 실제 production learner GPU dry-run은 아직 미실행이다.
 
 ## 6. 현재 raw replay의 메모리와 visual encoder 사실관계
 
@@ -445,8 +445,8 @@ GAP512, frozen `4x4x512` map 저장, 또는 전체 256-D head까지 동결하는
    - 이 결정이 raw replay schema, agent network, checkpoint format, memory budget을 모두 바꾼다.
 
 2. **Kanu JAX 0.5.3 GPU environment**
-   - 이번 세션은 `kanu_junhyeong` hostname resolution 단계에서 막혔다. 먼저 사용자 shell의 SSH alias/config/network를 복구해야 한다.
-   - `jax.default_backend() == "gpu"`를 fail-closed로 확인한다.
+   - SSH alias `kanu`와 기존 `il` environment에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, GPU backend를 read-only 확인했다.
+   - 실제 learner command에서도 `jax.default_backend() == "gpu"`를 fail-closed로 다시 확인한다.
    - CPU용 `requirements-learner.lock`을 공유 Kanu env에 그대로 설치하지 않는다.
    - classifier + policy inference + learner update의 GPU memory/compile/contention을 계측한다.
 
