@@ -26,6 +26,9 @@ sys.path.insert(
 import train_rlpd as upstream  # noqa: E402
 
 from ur_env.rlpd_actor import run_actor  # noqa: E402
+from ur_env.observation_schema import (  # noqa: E402
+    assert_actor_environment_state_layout,
+)
 
 upstream.flags.DEFINE_string(
     "ur_config_module",
@@ -38,6 +41,7 @@ _upstream_actor = upstream.actor
 
 
 def _local_actor(agent, replay_store, intervention_store, env, sampling_rng):
+    assert_actor_environment_state_layout(env)
     if upstream.FLAGS.eval_checkpoint_step:
         return _upstream_actor(
             agent, replay_store, intervention_store, env, sampling_rng

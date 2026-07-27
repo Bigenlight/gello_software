@@ -42,6 +42,7 @@ from ur_env.observation_schema import (  # noqa: E402
     STATE_DIM,
     STATE_FEATURES,
     STATE_GROUPS,
+    assert_actor_environment_state_layout,
     assert_state_layout_matches,
     flatten_state_layout,
     gripper_position_from_state,
@@ -119,6 +120,27 @@ def test_real_env_flattens_to_the_declared_layout():
     assert layout == CANONICAL_STATE_LAYOUT
     assert layout[-1][2] == STATE_DIM
     assert_state_layout_matches(_euler_proprio_space(), source="UR7eEnv proprio")
+
+
+def test_actor_environment_walks_wrappers_and_checks_live_proprio_space():
+    class Inner:
+        proprio_space = _euler_proprio_space()
+
+    class Outer:
+        env = Inner()
+
+    assert (
+        assert_actor_environment_state_layout(Outer())
+        == CANONICAL_STATE_LAYOUT
+    )
+
+
+def test_actor_environment_rejects_missing_live_layout_probe():
+    class Wrapper:
+        env = object()
+
+    with pytest.raises(ActorProtocolError, match="no wrapper exposing"):
+        assert_actor_environment_state_layout(Wrapper())
 
 
 def test_declared_groups_cover_the_env_groups_exactly():

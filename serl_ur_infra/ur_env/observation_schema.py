@@ -316,6 +316,34 @@ def assert_state_layout_matches(
     return actual
 
 
+def assert_actor_environment_state_layout(
+    env: Any,
+) -> tuple[tuple[str, int, int], ...]:
+    """Find the live SERL observation wrapper and verify it before acting.
+
+    Both laptop actor entry points call this after the task environment is
+    fully constructed.  Merely comparing peers' schema hashes is insufficient:
+    both peers can import the same stale document while gymnasium flattens the
+    real proprioception in a different order.
+    """
+
+    current = env
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        proprio_space = getattr(current, "proprio_space", None)
+        if proprio_space is not None:
+            return assert_state_layout_matches(
+                proprio_space,
+                source=f"{type(current).__name__}.proprio_space",
+            )
+        current = getattr(current, "env", None)
+    raise ActorProtocolError(
+        "actor environment has no wrapper exposing proprio_space; cannot "
+        "verify the canonical flat-state layout before policy inference"
+    )
+
+
 def state_slice(proprio_key: str) -> slice:
     """Flat-vector slice for one proprio group (e.g. ``state[..., state_slice('tcp_pose')]``)."""
     try:

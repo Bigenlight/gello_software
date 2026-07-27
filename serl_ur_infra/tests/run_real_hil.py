@@ -452,6 +452,18 @@ def preflight_command_topic(node, topic, arming):
     return ok
 
 
+def preflight_command_topics(node, ros_config, *, arming, gripper_enabled):
+    """Check every actuator topic this process can publish before arming."""
+
+    topics = [ros_config["command_topic"]]
+    if gripper_enabled:
+        topics.append(ros_config["gripper_command_topic"])
+    results = [
+        preflight_command_topic(node, topic, arming) for topic in topics
+    ]
+    return all(results)
+
+
 # ---------------------------------------------------------------------------- #
 # 종료 시 자동 채점                                                             #
 # ---------------------------------------------------------------------------- #
@@ -494,11 +506,14 @@ def summarize(rows):
             )
             if len(vals) > 1 and np.all(np.isfinite(vals)):
                 worst_anchor = max(worst_anchor, float(np.max(np.ptp(vals, axis=0))))
-    ok_a = (len(segs) == 0) or (worst_anchor < 1e-9)
-    out["anchor_latch"] = ok_a
-    print(f"  {'PASS' if ok_a else 'FAIL'} anchor-latch : 구간 내 앵커 최대 변동 "
-          f"{worst_anchor:.3e} m (기준 <1e-9)"
-          + ("  [개입 구간 없음 — 미검증]" if not segs else ""))
+    if segs:
+        ok_a = worst_anchor < 1e-9
+        out["anchor_latch"] = ok_a
+        print(f"  {'PASS' if ok_a else 'FAIL'} anchor-latch : 구간 내 앵커 최대 변동 "
+              f"{worst_anchor:.3e} m (기준 <1e-9)")
+    else:
+        out["anchor_latch"] = None
+        print("  SKIP anchor-latch : 개입 구간 없음")
 
     # ---- (b) gain 래치 ---- #
     worst_gain = 0.0
@@ -506,11 +521,14 @@ def summarize(rows):
         g = np.array([rows[i]["gain_latched"] for i in seg], dtype=float)
         if len(g) > 1 and np.all(np.isfinite(g)):
             worst_gain = max(worst_gain, float(np.ptp(g)))
-    ok_b = (len(segs) == 0) or (worst_gain < 1e-12)
-    out["gain_latch"] = ok_b
-    print(f"  {'PASS' if ok_b else 'FAIL'} gain-latch    : 구간 내 gain_latched 최대 "
-          f"변동 {worst_gain:.3e}"
-          + ("  [개입 구간 없음 — 미검증]" if not segs else ""))
+    if segs:
+        ok_b = worst_gain < 1e-12
+        out["gain_latch"] = ok_b
+        print(f"  {'PASS' if ok_b else 'FAIL'} gain-latch    : 구간 내 "
+              f"gain_latched 최대 변동 {worst_gain:.3e}")
+    else:
+        out["gain_latch"] = None
+        print("  SKIP gain-latch    : 개입 구간 없음")
 
     # ---- (c) 좌표계 3x3 매핑 ---- #
     L, R = [], []
@@ -592,7 +610,14 @@ def summarize(rows):
     print(f"  {'PASS' if ok_h else 'FAIL'} held-rate     : {held_rate * 100:.1f}% "
           "(기준 <10%)")
 
-    verdict = all(v for v in out.values() if v is not None)
+    required_checks = (
+        "anchor_latch",
+        "gain_latch",
+        "frame_map",
+        "action_exec",
+        "held_rate",
+    )
+    verdict = all(out.get(name) is True for name in required_checks)
     out["pass"] = verdict
     print(f"\n  전체: {'PASS' if verdict else 'FAIL / 미검증 항목 있음'}")
     print("=============================================\n")
@@ -718,8 +743,11 @@ def main(argv=None):
 
         # ---- commands 토픽 충돌 검사 ---- #
         print("[preflight] 명령 토픽 점검...")
-        topic_ok = preflight_command_topic(
-            base_env.backend._node, cfg.ROS["command_topic"], args.arm
+        topic_ok = preflight_command_topics(
+            base_env.backend._node,
+            cfg.ROS,
+            arming=args.arm,
+            gripper_enabled=args.gripper,
         )
         if args.arm and not topic_ok:
             sys.exit("명령 토픽 상태가 arm하기에 안전하지 않다 — 중단.")

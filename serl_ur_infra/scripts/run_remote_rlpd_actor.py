@@ -20,6 +20,7 @@ sys.path.insert(
 from ur_env.actor_network import create_actor_network  # noqa: E402
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
+    assert_actor_environment_state_layout,
 )
 from ur_env.remote_actor import EnvTimestampAdapter, run_remote_actor  # noqa: E402
 
@@ -83,15 +84,19 @@ def main() -> int:
         raise KeyError(f"unknown experiment {args.exp_name!r}")
 
     config = CONFIG_MAPPING[args.exp_name]()
+    task_env = config.get_environment(
+        fake_env=args.fake_env,
+        save_video=args.save_video,
+        # Reward/termination is authoritative on the remote server.
+        classifier=False,
+    )
+    try:
+        assert_actor_environment_state_layout(task_env)
+    except Exception:
+        task_env.close()
+        raise
     env = EnvTimestampAdapter(
-        RecordEpisodeStatistics(
-            config.get_environment(
-                fake_env=args.fake_env,
-                save_video=args.save_video,
-                # Reward/termination is authoritative on the remote server.
-                classifier=False,
-            )
-        )
+        RecordEpisodeStatistics(task_env)
     )
     network_config = _network_config(config, args)
     network = create_actor_network(

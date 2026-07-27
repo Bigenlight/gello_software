@@ -38,6 +38,8 @@ from typing import Optional, Tuple
 import gymnasium as gym
 import numpy as np
 
+from ur_env.observation_schema import gripper_position_from_state
+
 try:
     from ur_gello_bringup.ur_kin import fk, so3_log
 
@@ -389,12 +391,7 @@ class GripperPenaltyWrapper(gym.Wrapper):
     def _gripper_position(observation) -> float:
         if not isinstance(observation, dict) or "state" not in observation:
             raise ValueError("canonical observation with state is required")
-        state = np.asarray(observation["state"])
-        if state.shape != (1, 19) or state.dtype != np.float32:
-            raise ValueError(
-                "canonical state must have shape (1, 19) and dtype float32"
-            )
-        position = float(state[0, -1])
+        position = gripper_position_from_state(observation["state"])
         if not math.isfinite(position) or not 0.0 <= position <= 1.0:
             raise ValueError("gripper position must be finite and in [0, 1]")
         return position
