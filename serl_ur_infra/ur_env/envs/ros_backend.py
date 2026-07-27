@@ -7,10 +7,19 @@ its server:
 
     get_joint_state()      <- /joint_states        (POST /getstate analog)
     get_gripper_percent()  <- ~/position_percent
-    get_gello_state()      <- /gello/joint_states  (leader, for intervention)
+    get_gello_state()      <- /gello/joint_states + the leader trigger topic
+    get_gello_trigger()    <- /gripper/gripper_client/target_gripper_width_percent
     get_image()            <- /camX/.../compressed (realsense2_camera driver)
     send_joint_command()   -> /forward_position_controller/commands
     send_gripper_percent() -> ~/command_percent
+
+The leader arrives on TWO topics, not one: gello_publisher_node publishes only
+the 6 arm joints on /gello/joint_states (``position`` has length 6) and the
+trigger separately as std_msgs/Float32 on
+/gripper/gripper_client/target_gripper_width_percent (0.0 open .. 1.0 closed,
+30 Hz). fake_gello_node mirrors that split exactly. get_gello_state() joins the
+two streams so callers still see one (7,) leader vector; see merge_gello_state
+for the staleness policy.
 
 Cameras are consumed the same way as the rest of the UR7e line
 (policy_leader_node, recorder, camera_viewer): JPEG CompressedImage topics
@@ -52,6 +61,68 @@ UR_JOINT_NAMES = [
     "wrist_3_joint",
 ]
 
+# Leader trigger topic published by gello_publisher_node / fake_gello_node.
+# Kept as a module default (not a config.py key) so the backend works against
+# the existing DefaultUR7eEnvConfig.ROS dict unchanged; ros_cfg may still
+# override it with the same key name.
+GELLO_TRIGGER_TOPIC = "/gripper/gripper_client/target_gripper_width_percent"
+
+# Newest trigger older than this -> treated as absent. Matches
+# GelloIntervention.LEADER_STALE_S: both streams come from the same 30 Hz node
+# timer, so one going quiet while the other keeps up means the trigger read
+# itself failed, and a stale trigger must not be replayed as human intent.
+GELLO_TRIGGER_STALE_S = 0.3
+
+
+def merge_gello_state(
+    q,
+    age_q: float,
+    trigger: Optional[float],
+    age_trigger: float,
+    stale_s: float = GELLO_TRIGGER_STALE_S,
+):
+    """Join the two leader streams into one ``((7,), age)`` reading.
+
+    ``arr[:6]`` are the leader joints, ``arr[6]`` the trigger in [0, 1]
+    (0 = open, 1 = closed), or **NaN** when no usable trigger exists.
+
+    Decisions, and why:
+
+    * NaN, not 0.0, for a missing trigger. 0.0 is a legal trigger value
+      ("fully open"), so using it as the sentinel would silently command the
+      gripper open every time the trigger topic dies — exactly the failure the
+      caller must be able to detect. NaN is unambiguous and float-typed, so the
+      return stays a plain (7,) ndarray and every existing ``arr[:6]`` caller
+      is unaffected.
+    * The returned age is the JOINT age only. The joints gate whether the human
+      may drive the arm at all (GelloIntervention.LEADER_STALE_S); folding an
+      infinite trigger age into it would disable arm teleop entirely whenever
+      the trigger is merely absent. Trigger freshness is handled here, locally,
+      and is also exposed raw via URRosBackend.get_gello_trigger().
+    * Legacy fallback: if the trigger topic has NEVER produced a message but
+      the JointState carries a 7th position element, that element is used. No
+      publisher in this repo does that today (both gello_publisher_node and
+      fake_gello_node send exactly 6), but it is the layout the previous
+      ``arr[6] if len(arr) > 6`` code assumed, so honouring it keeps any
+      out-of-tree or replayed 7-element publisher working. It deliberately does
+      NOT apply once the trigger topic has spoken and then gone stale — that is
+      a live-signal failure, and falling back there would mask it.
+    """
+    if q is None:
+        return None, age_q
+    q = np.asarray(q, dtype=float).ravel()
+    if q.size < 6:
+        # Malformed leader message: report "no leader" rather than hand back a
+        # short array the caller would silently slice into a bad q_lead.
+        return None, float("inf")
+    if trigger is None:
+        grip = float(q[6]) if q.size > 6 else float("nan")  # legacy fallback
+    elif age_trigger > stale_s:
+        grip = float("nan")
+    else:
+        grip = float(trigger)
+    return np.concatenate([q[:6], [grip]]), age_q
+
 
 class URRosBackend:
     def __init__(
@@ -72,7 +143,8 @@ class URRosBackend:
         self._q: Optional[Tuple[np.ndarray, float]] = None          # (6,) robot joints
         self._dq: Optional[Tuple[np.ndarray, float]] = None         # (6,) robot joint vel
         self._gripper: Optional[Tuple[float, float]] = None         # 0.0 open..1.0 closed
-        self._gello: Optional[Tuple[np.ndarray, float]] = None      # (7,) leader q + grip
+        self._gello: Optional[Tuple[np.ndarray, float]] = None      # (6,) leader q
+        self._gello_trigger: Optional[Tuple[float, float]] = None   # leader trigger 0..1
         self._wrench: Optional[Tuple[np.ndarray, float]] = None     # (6,) fx..tz, TCP F/T
         self._tcp_pose: Optional[Tuple[np.ndarray, float]] = None   # (7,) xyz + quat
         self._images: Dict[str, Tuple[bytes, float]] = {}           # name -> raw JPEG
@@ -86,6 +158,17 @@ class URRosBackend:
         )
         self._node.create_subscription(
             JointState, ros_cfg["gello_topic"], self._on_gello, 10
+        )
+        # Leader trigger: a SEPARATE topic, not a 7th element of gello_topic.
+        # Subscribing here (rather than widening gello_publisher's JointState)
+        # leaves the /gello/joint_states contract — position length 6 — intact
+        # for its existing consumers (gello_ur_bridge, gello_gripper_bridge,
+        # the recorder, the GUI), which is the lower-risk side of the change.
+        self._node.create_subscription(
+            Float32,
+            ros_cfg.get("gello_gripper_topic", GELLO_TRIGGER_TOPIC),
+            self._on_gello_trigger,
+            10,
         )
         self._node.create_subscription(
             Float32, ros_cfg["gripper_state_topic"], self._on_gripper, 10
@@ -153,9 +236,15 @@ class URRosBackend:
             self._dq = (dq, now)
 
     def _on_gello(self, msg: "JointState"):
-        arr = np.asarray(msg.position, dtype=float)  # 6 joints (+ gripper)
+        # 6 arm joints; the trigger arrives on its own topic (see _on_gello_trigger).
+        arr = np.asarray(msg.position, dtype=float)
         with self._lock:
             self._gello = (arr, time.monotonic())
+
+    def _on_gello_trigger(self, msg: "Float32"):
+        """Leader trigger, 0.0 = OPEN .. 1.0 = CLOSED (same span as the URCap)."""
+        with self._lock:
+            self._gello_trigger = (float(msg.data), time.monotonic())
 
     def _on_gripper(self, msg: "Float32"):
         with self._lock:
@@ -202,8 +291,22 @@ class URRosBackend:
             return self._aged(self._gripper)
 
     def get_gello_state(self):
+        """Returns ((7,) leader joints + trigger, joint age) — see merge_gello_state.
+
+        arr[6] is NaN when the trigger topic has not delivered a usable value;
+        callers must test it (GelloExpert.get_leader turns NaN into None).
+        """
         with self._lock:
-            return self._aged(self._gello)
+            q, age_q = self._aged(self._gello)
+            trig, age_trig = self._aged(self._gello_trigger)
+        return merge_gello_state(
+            q, age_q, trig, age_trig, stale_s=GELLO_TRIGGER_STALE_S
+        )
+
+    def get_gello_trigger(self):
+        """Returns (trigger 0..1 or None, age_seconds) — raw, no staleness policy."""
+        with self._lock:
+            return self._aged(self._gello_trigger)
 
     def get_wrench(self):
         with self._lock:

@@ -177,12 +177,22 @@ class GelloExpert:
         return self.deadman.gain()
 
     def get_leader(self) -> Tuple[Optional[np.ndarray], Optional[float], float]:
-        """Returns (q_lead(6,), gripper in [0,1] or None, age_seconds)."""
+        """Returns (q_lead(6,), trigger in [0,1] or None, joint age_seconds).
+
+        The backend joins /gello/joint_states (6 joints) with the separate
+        trigger topic and reports an unusable trigger — never received, or
+        stale — as NaN in arr[6]. NaN is mapped to None here so the single
+        "no trigger right now" case has one representation for callers.
+        """
         arr, age = self._backend.get_gello_state()
         if arr is None:
             return None, None, age
         q = np.asarray(arr[:6], dtype=float)
-        grip = float(arr[6]) if len(arr) > 6 else None
+        grip = None
+        if len(arr) > 6:
+            g = float(arr[6])
+            if math.isfinite(g):
+                grip = g
         return q, grip, age
 
 
@@ -272,6 +282,25 @@ class GelloIntervention(gym.ActionWrapper):
         return np.clip(act, -1.0, 1.0)
 
     def _expert_gripper(self, grip: Optional[float]) -> float:
+        """Leader trigger (0 open .. 1 closed) -> 3-state action in {-1, 0, +1}.
+
+        UR7eEnv._send_gripper_command reads this as: <= -0.5 CLOSE, >= +0.5
+        OPEN, anything between is a no-op. So the three states are close / hold
+        / open, and the mid-band latch below means "keep doing what the human
+        last asked" rather than chattering around a single threshold.
+
+        No trigger (topic silent or stale) -> 0.0 = HOLD, and the latch is left
+        untouched. Rationale: 0.0 is the only value that cannot move the
+        gripper, so a dead trigger topic can neither drop a held payload nor
+        clamp on something. Replaying the latch instead would keep re-issuing a
+        grasp command derived from a signal we no longer have — the same
+        fail-safe-to-inert rule RosTopicDeadman applies to /hil/deadman. The
+        latch is preserved (not zeroed) so a brief dropout resumes the human's
+        last intent instead of forcing them to re-cross a threshold; a real
+        release is a fresh trigger value, which arrives on the next message.
+        Arm teleop is deliberately NOT gated on the trigger: losing the gripper
+        signal must not also yank the arm away from the human mid-motion.
+        """
         if grip is None:
             return 0.0
         if grip >= self.GRIP_CLOSE_THR:
