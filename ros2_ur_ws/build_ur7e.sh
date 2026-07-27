@@ -16,7 +16,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ROS Humble's setup scripts read optional variables before defining them
+# (AMENT_TRACE_SETUP_FILES, AMENT_PYTHON_EXECUTABLE, ...), so they abort under
+# `set -u`. Keep strict nounset checking for the rest of this script and
+# disable it only while the upstream/generated environment scripts are sourced.
+# Same treatment as run_ur7e_diffusion_remote.sh.
+set +u
 source /opt/ros/humble/setup.bash
+set -u
 
 rosdep install --from-paths src --ignore-src -r -y --skip-keys dynamixel_sdk
 

@@ -26,6 +26,7 @@ sys.path.insert(
 )
 
 from ur_env.envs.wrappers import GripperPenaltyWrapper  # noqa: E402
+from ur_env.observation_schema import GRIPPER_POSITION_INDEX  # noqa: E402
 
 
 def _load_script(filename: str, module_name: str):
@@ -39,7 +40,7 @@ def _load_script(filename: str, module_name: str):
 
 def _observation(gripper: float) -> dict[str, np.ndarray]:
     state = np.zeros((1, 19), np.float32)
-    state[0, -1] = gripper
+    state[0, GRIPPER_POSITION_INDEX] = gripper
     return {
         "state": state,
         "cam1": np.zeros((1, 128, 128, 3), np.uint8),
@@ -54,6 +55,15 @@ class _TaskEnv(gym.Env):
             "state": gym.spaces.Box(-np.inf, np.inf, (1, 19), np.float32),
             "cam1": gym.spaces.Box(0, 255, (1, 128, 128, 3), np.uint8),
             "cam2": gym.spaces.Box(0, 255, (1, 128, 128, 3), np.uint8),
+        }
+    )
+    proprio_space = gym.spaces.Dict(
+        {
+            "gripper_pose": gym.spaces.Box(-np.inf, np.inf, (1,), np.float32),
+            "tcp_force": gym.spaces.Box(-np.inf, np.inf, (3,), np.float32),
+            "tcp_pose": gym.spaces.Box(-np.inf, np.inf, (6,), np.float32),
+            "tcp_torque": gym.spaces.Box(-np.inf, np.inf, (3,), np.float32),
+            "tcp_vel": gym.spaces.Box(-np.inf, np.inf, (6,), np.float32),
         }
     )
 

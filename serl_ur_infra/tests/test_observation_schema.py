@@ -37,10 +37,16 @@ def test_canonical_observation_validates_and_copies():
     assert all(result[key].flags.c_contiguous for key in result)
     assert all(result[key] is not source[key] for key in result)
     assert len(CANONICAL_OBSERVATION_SCHEMA_HASH) == 64
-    assert observation_schema_document()["schema_id"].endswith("-v1")
+    assert observation_schema_document()["schema_id"].endswith("-v2")
     assert len(STATE_FEATURES) == 19
     assert observation_schema_document()["state_features"] == list(STATE_FEATURES)
-    assert STATE_FEATURES[:6] == (
+    # NOTE: this ordering is dictated by gymnasium's alphabetical spaces.Dict
+    # sorting inside upstream SERLObsWrapper, NOT by anything we choose.  These
+    # asserts only restate the document; the layout is verified against the live
+    # pipeline in tests/test_state_layout_contract.py.
+    assert STATE_FEATURES[0] == "gripper_position"
+    assert STATE_FEATURES[1:4] == ("tcp_force_x", "tcp_force_y", "tcp_force_z")
+    assert STATE_FEATURES[4:10] == (
         "tcp_position_x",
         "tcp_position_y",
         "tcp_position_z",
@@ -48,7 +54,7 @@ def test_canonical_observation_validates_and_copies():
         "tcp_euler_y",
         "tcp_euler_z",
     )
-    assert STATE_FEATURES[-1] == "gripper_position"
+    assert STATE_FEATURES[-1] == "tcp_angular_velocity_z"
 
 
 @pytest.mark.parametrize(

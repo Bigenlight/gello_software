@@ -23,6 +23,7 @@ from ur_env.envs.wrappers import (  # noqa: E402
 )
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
+    assert_actor_environment_state_layout,
 )
 from ur_env.remote_actor import EnvTimestampAdapter, run_remote_actor  # noqa: E402
 
@@ -91,6 +92,11 @@ def _build_actor_environment(config: Any, args: argparse.Namespace) -> Any:
         # Reward/termination is authoritative on the remote server.
         classifier=False,
     )
+    try:
+        assert_actor_environment_state_layout(task_env)
+    except Exception:
+        task_env.close()
+        raise
     task_env = wrap_gripper_penalty_from_task_config(
         task_env,
         experiment_config=config,

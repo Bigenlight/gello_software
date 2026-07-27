@@ -29,6 +29,9 @@ from ur_env.envs.wrappers import (  # noqa: E402
     wrap_gripper_penalty_from_task_config,
 )
 from ur_env.rlpd_actor import run_actor  # noqa: E402
+from ur_env.observation_schema import (  # noqa: E402
+    assert_actor_environment_state_layout,
+)
 
 upstream.flags.DEFINE_string(
     "ur_config_module",
@@ -41,6 +44,7 @@ _upstream_actor = upstream.actor
 
 
 def _local_actor(agent, replay_store, intervention_store, env, sampling_rng):
+    assert_actor_environment_state_layout(env)
     env = wrap_gripper_penalty_from_task_config(
         env,
         experiment_config=upstream.config,

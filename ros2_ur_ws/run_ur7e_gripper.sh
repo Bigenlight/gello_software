@@ -16,13 +16,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROBOT_IP="${ROBOT_IP:-192.168.10.11}"
 
-source /opt/ros/humble/setup.bash
-if [[ -f "$SCRIPT_DIR/install/setup.bash" ]]; then
-  source "$SCRIPT_DIR/install/setup.bash"
-else
+if [[ ! -f "$SCRIPT_DIR/install/setup.bash" ]]; then
   echo "ERROR: $SCRIPT_DIR/install/setup.bash not found — build first: ./build_ur7e.sh" >&2
   exit 1
 fi
+
+# ROS Humble's setup scripts read optional variables before defining them
+# (AMENT_TRACE_SETUP_FILES, AMENT_PYTHON_EXECUTABLE, ...), so they abort under
+# `set -u`. Keep strict nounset checking for the rest of this script and
+# disable it only while the upstream/generated environment scripts are sourced.
+# Same treatment as run_ur7e_diffusion_remote.sh.
+set +u
+source /opt/ros/humble/setup.bash
+source "$SCRIPT_DIR/install/setup.bash"
+set -u
 
 echo "Bringing up gripper-only for UR7e at $ROBOT_IP (Modbus over tool-comm :54321)."
 echo "Reminder: the robot must be POWERED ON for the gripper to answer."
