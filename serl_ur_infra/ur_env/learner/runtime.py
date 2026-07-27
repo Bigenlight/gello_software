@@ -113,6 +113,11 @@ class HILSERLLearner:
         )
         if self.gradient_step != state_step:
             raise ValueError("gradient_step must match agent.state.step")
+        expected_gradient_step = self.learner_step * self.config.cta_ratio
+        if self.gradient_step != expected_gradient_step:
+            raise ValueError(
+                "gradient_step must equal learner_step * cta_ratio"
+            )
         self.policy_version = self._counter(policy_version, "policy_version")
         self._fault: LearnerFault | None = None
         self._lock = threading.Lock()
@@ -162,6 +167,26 @@ class HILSERLLearner:
             "learner entered fault state; last known good policy remains active: "
             f"{fault.detail}"
         )
+
+    def enter_fault(self, exc: BaseException) -> LearnerFaultError:
+        """Permanently fault this learner after a supervisor-side failure.
+
+        ``train_once`` already converts update, publish, checkpoint, and log
+        failures into the learner-only fault state.  A production worker also
+        evaluates readiness outside that method, where a failed ingress can
+        raise before an update starts.  This public boundary lets the worker
+        record that failure with exactly the same last-known-good semantics.
+        """
+
+        if not isinstance(exc, BaseException):
+            raise TypeError("exc must be an exception")
+        existing = self.fault
+        if existing is not None:
+            return LearnerFaultError(
+                "learner entered fault state; last known good policy remains "
+                f"active: {existing.detail}"
+            )
+        return self._set_fault(exc)
 
     def _update(self, batch: Any, networks: frozenset[str]) -> tuple[Any, Any]:
         candidate, info = self.agent.update(
@@ -216,11 +241,9 @@ class HILSERLLearner:
             self.learner_step += 1
 
             expected_gradient_step = self.learner_step * self.config.cta_ratio
-            # Resumed checkpoints can begin at a non-zero offset, but within a
-            # run the public counters must still advance two-for-one.
-            if self.gradient_step < expected_gradient_step:
+            if self.gradient_step != expected_gradient_step:
                 raise LearnerFaultError(
-                    "gradient_step did not advance for both CTA updates"
+                    "gradient_step must advance exactly once per CTA update"
                 )
 
             published = False

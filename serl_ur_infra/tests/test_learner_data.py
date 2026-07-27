@@ -21,6 +21,7 @@ from ur_env.learner import (  # noqa: E402
     load_demo_object,
     load_demo_pickle,
     proportional_sample_counts,
+    sample_proportional_counts,
 )
 
 
@@ -173,11 +174,32 @@ def test_rlpd_sampler_is_half_replay_and_proportional_demo_union():
     assert batch["actions"].shape == (8, 7)
     penalties = batch["grasp_penalty"]
     assert np.count_nonzero(penalties == np.float32(-0.3)) == 4
-    assert np.count_nonzero(penalties == np.float32(-0.1)) == 3
-    assert np.count_nonzero(penalties == np.float32(-0.2)) == 1
+    offline_count = np.count_nonzero(penalties == np.float32(-0.1))
+    intervention_count = np.count_nonzero(penalties == np.float32(-0.2))
+    assert offline_count + intervention_count == 4
     assert sampler.last_metrics.replay_batch_size == 4
-    assert sampler.last_metrics.offline_demo_batch_size == 3
-    assert sampler.last_metrics.online_intervention_batch_size == 1
+    assert sampler.last_metrics.offline_demo_batch_size == offline_count
+    assert (
+        sampler.last_metrics.online_intervention_batch_size
+        == intervention_count
+    )
+
+
+def test_demo_union_sampling_does_not_starve_a_small_intervention_pool():
+    first = sample_proportional_counts(
+        200_000,
+        (1_000, 1),
+        rng=np.random.default_rng(123),
+    )
+    repeated = sample_proportional_counts(
+        200_000,
+        (1_000, 1),
+        rng=np.random.default_rng(123),
+    )
+
+    assert first == repeated
+    assert first[0] + first[1] == 200_000
+    assert 100 < first[1] < 300
 
 
 def test_training_requires_online_threshold_and_nonempty_offline_demo():

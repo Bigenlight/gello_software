@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import socket
 import time
 from typing import Any, Mapping
 
@@ -22,6 +24,8 @@ from ur_env.observation_schema import (
 
 
 CHECKPOINT_FORMAT_VERSION = 1
+COMPLETION_MARKER_VERSION = 1
+COMPLETION_MARKER_NAME = "completion.json"
 
 
 class CheckpointError(RuntimeError):
@@ -38,6 +42,14 @@ class CheckpointCorruptError(CheckpointError):
 
 class CheckpointFingerprintError(CheckpointError):
     """A checkpoint belongs to a different learner/schema/asset contract."""
+
+
+class CheckpointSpaceError(CheckpointError):
+    """The checkpoint filesystem cannot preserve the configured reserve."""
+
+
+class CheckpointLockError(CheckpointError):
+    """Another learner process already owns this checkpoint root."""
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -61,16 +73,25 @@ class LearnerFingerprint:
         *,
         config: LearnerConfig,
         resnet_asset_path: os.PathLike[str] | str,
+        run_contract: Mapping[str, Any] | None = None,
     ) -> "LearnerFingerprint":
+        if run_contract is not None and not isinstance(run_contract, Mapping):
+            raise TypeError("run_contract must be a mapping")
         resnet_sha256 = verify_resnet10_asset(resnet_asset_path)
         document = {
             "observation_schema_hash": CANONICAL_OBSERVATION_SCHEMA_HASH,
             "observation_schema": observation_schema_document(),
             "learner_config": config.fingerprint_values(),
             "resnet10_sha256": resnet_sha256,
+            "run_contract": dict(run_contract or {}),
         }
-        digest = hashlib.sha256(_canonical_json(document)).hexdigest()
-        return cls(document=document, sha256=digest)
+        encoded = _canonical_json(document)
+        # Detach the immutable fingerprint record from caller-owned nested
+        # mappings/lists.  Otherwise a later mutation could make ``document``
+        # disagree with the digest that was already computed.
+        normalized = json.loads(encoded.decode("utf-8"))
+        digest = hashlib.sha256(encoded).hexdigest()
+        return cls(document=normalized, sha256=digest)
 
 
 @dataclass(frozen=True)
@@ -83,6 +104,16 @@ class RestoredCheckpoint:
     path: Path
 
 
+@dataclass(frozen=True)
+class _CheckpointContents:
+    metadata: Mapping[str, Any]
+    state_bytes: bytes
+    learner_step: int
+    gradient_step: int
+    policy_version: int
+    inference_rng: np.ndarray
+
+
 def _nonnegative_int(value: Any, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise CheckpointCorruptError(f"{name} must be a non-negative integer")
@@ -92,9 +123,23 @@ def _nonnegative_int(value: Any, *, name: str) -> int:
 class CheckpointManager:
     """Write immutable ``checkpoint_<learner_step>`` directories."""
 
-    def __init__(self, root: os.PathLike[str] | str) -> None:
+    def __init__(
+        self,
+        root: os.PathLike[str] | str,
+        *,
+        minimum_free_bytes_after_save: int = 0,
+    ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        if (
+            isinstance(minimum_free_bytes_after_save, bool)
+            or not isinstance(minimum_free_bytes_after_save, int)
+            or minimum_free_bytes_after_save < 0
+        ):
+            raise ValueError(
+                "minimum_free_bytes_after_save must be a non-negative integer"
+            )
+        self.minimum_free_bytes_after_save = minimum_free_bytes_after_save
 
     @staticmethod
     def checkpoint_name(learner_step: int) -> str:
@@ -125,18 +170,27 @@ class CheckpointManager:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
         destination = self.path_for_step(learner_step)
-        try:
-            destination.mkdir()
-        except FileExistsError as exc:
+        if destination.exists() or destination.is_symlink():
             raise CheckpointExistsError(
                 f"checkpoint already exists and will not be overwritten: {destination}"
-            ) from exc
+            )
 
         from flax import serialization
         import jax
 
         validate_tree_finite(agent.state, name="agent state")
         state_bytes = serialization.to_bytes(agent.state)
+        free_bytes = shutil.disk_usage(self.root).free
+        required_bytes = (
+            len(state_bytes) + self.minimum_free_bytes_after_save
+        )
+        if free_bytes < required_bytes:
+            raise CheckpointSpaceError(
+                "insufficient checkpoint filesystem space: "
+                f"free={free_bytes}, next_checkpoint={len(state_bytes)}, "
+                "required_reserve_after_save="
+                f"{self.minimum_free_bytes_after_save}, root={self.root}"
+            )
         state_sha256 = hashlib.sha256(state_bytes).hexdigest()
         rng_array = np.asarray(jax.device_get(inference_rng))
         if rng_array.dtype.kind not in "ui" or rng_array.size == 0:
@@ -156,9 +210,30 @@ class CheckpointManager:
             "fingerprint": fingerprint.document,
             "agent_state_sha256": state_sha256,
         }
+        metadata_bytes = _canonical_json(metadata)
+        completion = {
+            "completion_marker_version": COMPLETION_MARKER_VERSION,
+            "checkpoint_format_version": CHECKPOINT_FORMAT_VERSION,
+            "learner_step": learner_step,
+            "agent_state_sha256": state_sha256,
+            "metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+        }
         try:
+            destination.mkdir()
             self._write_new_file(destination / "agent_state.msgpack", state_bytes)
-            self._write_new_file(destination / "metadata.json", _canonical_json(metadata))
+            self._write_new_file(destination / "metadata.json", metadata_bytes)
+            # This marker is deliberately the final file.  Automatic resume
+            # never considers a directory which did not reach this point.
+            self._write_new_file(
+                destination / COMPLETION_MARKER_NAME,
+                _canonical_json(completion),
+            )
+            self._fsync_directory(destination)
+            self._fsync_directory(self.root)
+        except FileExistsError as exc:
+            raise CheckpointExistsError(
+                f"checkpoint already exists and will not be overwritten: {destination}"
+            ) from exc
         except Exception as exc:
             raise CheckpointError(
                 f"checkpoint write failed; incomplete directory retained at {destination}: {exc}"
@@ -172,32 +247,26 @@ class CheckpointManager:
             stream.flush()
             os.fsync(stream.fileno())
 
-    def latest_path(self) -> Path:
-        candidates: list[tuple[int, Path]] = []
-        for path in self.root.iterdir():
-            if not path.is_dir() or not path.name.startswith("checkpoint_"):
-                continue
-            suffix = path.name.removeprefix("checkpoint_")
-            if suffix.isdigit():
-                candidates.append((int(suffix), path))
-        if not candidates:
-            raise FileNotFoundError(f"no learner checkpoints under {self.root}")
-        return max(candidates, key=lambda item: item[0])[1]
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
-    def load(
+    def _read_contents(
         self,
+        checkpoint_path: Path,
         *,
-        agent_template: Any,
-        fingerprint: LearnerFingerprint,
-        path: os.PathLike[str] | str | None = None,
-    ) -> RestoredCheckpoint:
-        checkpoint_path = (
-            Path(path).expanduser().resolve() if path is not None else self.latest_path()
-        )
+        require_completion_marker: bool,
+    ) -> _CheckpointContents:
         metadata_path = checkpoint_path / "metadata.json"
         state_path = checkpoint_path / "agent_state.msgpack"
+        marker_path = checkpoint_path / COMPLETION_MARKER_NAME
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata_bytes = metadata_path.read_bytes()
+            metadata = json.loads(metadata_bytes.decode("utf-8"))
             state_bytes = state_path.read_bytes()
         except Exception as exc:
             raise CheckpointCorruptError(
@@ -207,17 +276,6 @@ class CheckpointManager:
             raise CheckpointCorruptError("checkpoint metadata must be an object")
         if metadata.get("format_version") != CHECKPOINT_FORMAT_VERSION:
             raise CheckpointCorruptError("unsupported checkpoint format version")
-        actual_state_sha = hashlib.sha256(state_bytes).hexdigest()
-        if metadata.get("agent_state_sha256") != actual_state_sha:
-            raise CheckpointCorruptError("agent state checksum mismatch")
-        if metadata.get("fingerprint_sha256") != fingerprint.sha256:
-            raise CheckpointFingerprintError(
-                "learner checkpoint fingerprint mismatch"
-            )
-        if metadata.get("fingerprint") != fingerprint.document:
-            raise CheckpointFingerprintError(
-                "learner checkpoint fingerprint document mismatch"
-            )
 
         learner_step = _nonnegative_int(
             metadata.get("learner_step"), name="learner_step"
@@ -233,6 +291,26 @@ class CheckpointManager:
                 "checkpoint directory name does not match learner_step"
             )
 
+        actual_state_sha = hashlib.sha256(state_bytes).hexdigest()
+        if metadata.get("agent_state_sha256") != actual_state_sha:
+            raise CheckpointCorruptError("agent state checksum mismatch")
+        fingerprint_sha256 = metadata.get("fingerprint_sha256")
+        if (
+            not isinstance(fingerprint_sha256, str)
+            or len(fingerprint_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in fingerprint_sha256
+            )
+        ):
+            raise CheckpointCorruptError(
+                "checkpoint fingerprint checksum is malformed"
+            )
+        if not isinstance(metadata.get("fingerprint"), Mapping):
+            raise CheckpointCorruptError(
+                "checkpoint fingerprint document is malformed"
+            )
+
         rng_document = metadata.get("inference_rng")
         if not isinstance(rng_document, dict):
             raise CheckpointCorruptError("inference_rng metadata is missing")
@@ -241,9 +319,99 @@ class CheckpointManager:
             shape = tuple(int(dim) for dim in rng_document["shape"])
             values = np.asarray(rng_document["values"], dtype=dtype).reshape(shape)
         except Exception as exc:
-            raise CheckpointCorruptError("inference_rng metadata is malformed") from exc
+            raise CheckpointCorruptError(
+                "inference_rng metadata is malformed"
+            ) from exc
         if dtype.kind not in "ui" or values.size == 0:
             raise CheckpointCorruptError("inference_rng metadata is invalid")
+
+        if marker_path.exists():
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise CheckpointCorruptError(
+                    f"checkpoint completion marker is unreadable: {checkpoint_path}"
+                ) from exc
+            expected_marker = {
+                "completion_marker_version": COMPLETION_MARKER_VERSION,
+                "checkpoint_format_version": CHECKPOINT_FORMAT_VERSION,
+                "learner_step": learner_step,
+                "agent_state_sha256": actual_state_sha,
+                "metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+            }
+            if marker != expected_marker:
+                raise CheckpointCorruptError(
+                    "checkpoint completion marker does not match its payload"
+                )
+        elif require_completion_marker:
+            raise CheckpointCorruptError(
+                f"checkpoint completion marker is missing: {checkpoint_path}"
+            )
+
+        return _CheckpointContents(
+            metadata=metadata,
+            state_bytes=state_bytes,
+            learner_step=learner_step,
+            gradient_step=gradient_step,
+            policy_version=policy_version,
+            inference_rng=values,
+        )
+
+    def latest_path(self) -> Path:
+        candidates: list[tuple[int, Path]] = []
+        for path in self.root.iterdir():
+            if not path.is_dir() or not path.name.startswith("checkpoint_"):
+                continue
+            suffix = path.name.removeprefix("checkpoint_")
+            if suffix.isdigit():
+                candidates.append((int(suffix), path))
+        if not candidates:
+            raise FileNotFoundError(f"no learner checkpoints under {self.root}")
+        skipped: list[str] = []
+        for _, path in sorted(candidates, key=lambda item: item[0], reverse=True):
+            try:
+                self._read_contents(path, require_completion_marker=True)
+            except CheckpointCorruptError:
+                skipped.append(path.name)
+                continue
+            return path
+        detail = f"; skipped={','.join(skipped)}" if skipped else ""
+        raise FileNotFoundError(
+            "no complete, structurally valid learner checkpoints under "
+            f"{self.root}{detail}"
+        )
+
+    def load(
+        self,
+        *,
+        agent_template: Any,
+        fingerprint: LearnerFingerprint,
+        path: os.PathLike[str] | str | None = None,
+        allow_legacy_markerless: bool = False,
+    ) -> RestoredCheckpoint:
+        if not isinstance(allow_legacy_markerless, bool):
+            raise TypeError("allow_legacy_markerless must be a bool")
+        checkpoint_path = (
+            Path(path).expanduser().resolve() if path is not None else self.latest_path()
+        )
+        contents = self._read_contents(
+            checkpoint_path,
+            # A named path is not proof that the writer completed.  Production
+            # resume is therefore strict for both automatic and explicit
+            # selection.  Legacy markerless v1 artifacts remain readable only
+            # behind an operator-visible opt-in for one-off migration.
+            require_completion_marker=not allow_legacy_markerless,
+        )
+        metadata = contents.metadata
+        state_bytes = contents.state_bytes
+        if metadata.get("fingerprint_sha256") != fingerprint.sha256:
+            raise CheckpointFingerprintError(
+                "learner checkpoint fingerprint mismatch"
+            )
+        if metadata.get("fingerprint") != fingerprint.document:
+            raise CheckpointFingerprintError(
+                "learner checkpoint fingerprint document mismatch"
+            )
 
         from flax import serialization
         import jax.numpy as jnp
@@ -256,15 +424,84 @@ class CheckpointManager:
                 raise
             raise CheckpointCorruptError("agent state deserialization failed") from exc
         state_step = int(np.asarray(state.step))
-        if state_step != gradient_step:
+        if state_step != contents.gradient_step:
             raise CheckpointCorruptError(
                 "gradient_step does not match serialized agent state"
             )
         return RestoredCheckpoint(
             agent=agent_template.replace(state=state),
-            learner_step=learner_step,
-            gradient_step=gradient_step,
-            policy_version=policy_version,
-            inference_rng=jnp.asarray(values),
+            learner_step=contents.learner_step,
+            gradient_step=contents.gradient_step,
+            policy_version=contents.policy_version,
+            inference_rng=jnp.asarray(contents.inference_rng),
             path=checkpoint_path,
         )
+
+
+class CheckpointRunLock:
+    """Hold one advisory single-writer lock for a checkpoint root."""
+
+    LOCK_FILE_NAME = ".learner-writer.lock"
+
+    def __init__(self, root: os.PathLike[str] | str) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path = self.root / self.LOCK_FILE_NAME
+        self._stream: Any | None = None
+
+    @property
+    def acquired(self) -> bool:
+        return self._stream is not None
+
+    def acquire(self) -> None:
+        if self._stream is not None:
+            raise RuntimeError("checkpoint run lock is already acquired")
+        import fcntl
+
+        stream = open(self.path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            stream.seek(0)
+            owner = stream.read(2_000).strip() or "unknown owner"
+            stream.close()
+            raise CheckpointLockError(
+                f"checkpoint root already has an active learner: {owner}"
+            ) from exc
+        try:
+            owner = _canonical_json(
+                {
+                    "hostname": socket.gethostname(),
+                    "pid": os.getpid(),
+                    "started_time_ns": time.time_ns(),
+                }
+            ).decode("ascii")
+            stream.seek(0)
+            stream.truncate()
+            stream.write(owner + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        except Exception:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            stream.close()
+            raise
+        self._stream = stream
+
+    def release(self) -> None:
+        stream = self._stream
+        if stream is None:
+            return
+        import fcntl
+
+        self._stream = None
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
+
+    def __enter__(self) -> "CheckpointRunLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.release()

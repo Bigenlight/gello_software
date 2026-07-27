@@ -25,6 +25,9 @@ sys.path.insert(
 
 import train_rlpd as upstream  # noqa: E402
 
+from ur_env.envs.wrappers import (  # noqa: E402
+    wrap_gripper_penalty_from_task_config,
+)
 from ur_env.rlpd_actor import run_actor  # noqa: E402
 
 upstream.flags.DEFINE_string(
@@ -38,6 +41,10 @@ _upstream_actor = upstream.actor
 
 
 def _local_actor(agent, replay_store, intervention_store, env, sampling_rng):
+    env = wrap_gripper_penalty_from_task_config(
+        env,
+        experiment_config=upstream.config,
+    )
     if upstream.FLAGS.eval_checkpoint_step:
         return _upstream_actor(
             agent, replay_store, intervention_store, env, sampling_rng

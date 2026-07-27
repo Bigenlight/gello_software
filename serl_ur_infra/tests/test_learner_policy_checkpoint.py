@@ -30,7 +30,10 @@ from ur_env.learner import (  # noqa: E402
     CheckpointCorruptError,
     CheckpointExistsError,
     CheckpointFingerprintError,
+    CheckpointLockError,
     CheckpointManager,
+    CheckpointRunLock,
+    CheckpointSpaceError,
     HILSERLLearner,
     JsonlWandbLogger,
     LearnerConfig,
@@ -40,6 +43,7 @@ from ur_env.learner import (  # noqa: E402
     RLPDBatchSampler,
     VersionedPolicyRuntime,
 )
+from ur_env.learner.checkpoint import COMPLETION_MARKER_NAME  # noqa: E402
 
 
 @flax.struct.dataclass
@@ -223,6 +227,7 @@ def test_checkpoint_roundtrip_counters_rng_and_corruption(tmp_path):
         inference_rng=inference_rng,
         fingerprint=fingerprint,
     )
+    assert (path / COMPLETION_MARKER_NAME).is_file()
     restored = manager.load(
         agent_template=_agent(), fingerprint=fingerprint, path=path
     )
@@ -267,6 +272,73 @@ def test_checkpoint_roundtrip_counters_rng_and_corruption(tmp_path):
         manager.load(agent_template=_agent(), fingerprint=fingerprint, path=path)
 
 
+def test_latest_checkpoint_skips_incomplete_and_corrupt_higher_steps(tmp_path):
+    config = LearnerConfig(
+        batch_size=4,
+        training_starts=4,
+        publish_period=2,
+        checkpoint_period=4,
+    )
+    fingerprint = _fingerprint(config)
+    manager = CheckpointManager(tmp_path / "checkpoints")
+    inference_rng = jax.random.PRNGKey(91)
+
+    valid = manager.save(
+        agent=_agent(step=4, value=0.2),
+        learner_step=2,
+        gradient_step=4,
+        policy_version=1,
+        inference_rng=inference_rng,
+        fingerprint=fingerprint,
+    )
+    markerless = manager.save(
+        agent=_agent(step=8, value=0.4),
+        learner_step=4,
+        gradient_step=8,
+        policy_version=2,
+        inference_rng=inference_rng,
+        fingerprint=fingerprint,
+    )
+    (markerless / COMPLETION_MARKER_NAME).unlink()
+
+    # Naming a directory explicitly is not evidence that its writer finished.
+    # Production resume rejects it unless an operator opts into one-off legacy
+    # migration semantics.
+    with pytest.raises(CheckpointCorruptError, match="marker is missing"):
+        manager.load(
+            agent_template=_agent(), fingerprint=fingerprint, path=markerless
+        )
+    legacy = manager.load(
+        agent_template=_agent(),
+        fingerprint=fingerprint,
+        path=markerless,
+        allow_legacy_markerless=True,
+    )
+    assert legacy.learner_step == 4
+
+    corrupt = manager.save(
+        agent=_agent(step=12, value=0.6),
+        learner_step=6,
+        gradient_step=12,
+        policy_version=3,
+        inference_rng=inference_rng,
+        fingerprint=fingerprint,
+    )
+    state_path = corrupt / "agent_state.msgpack"
+    payload = bytearray(state_path.read_bytes())
+    payload[-1] ^= 0x01
+    state_path.write_bytes(payload)
+
+    assert manager.latest_path() == valid
+    restored = manager.load(agent_template=_agent(), fingerprint=fingerprint)
+    assert restored.path == valid
+    assert restored.learner_step == 2
+    # Invalid directories are forensic evidence and are never removed.
+    assert markerless.is_dir()
+    assert corrupt.is_dir()
+    assert (corrupt / COMPLETION_MARKER_NAME).is_file()
+
+
 def test_checkpoint_rejects_fingerprint_mismatch(tmp_path):
     config = LearnerConfig(
         batch_size=4,
@@ -294,6 +366,121 @@ def test_checkpoint_rejects_fingerprint_mismatch(tmp_path):
         manager.load(
             agent_template=_agent(), fingerprint=_fingerprint(different), path=path
         )
+
+
+def test_checkpoint_rejects_run_contract_mismatch(tmp_path):
+    config = LearnerConfig(
+        batch_size=4,
+        training_starts=4,
+        publish_period=2,
+        checkpoint_period=4,
+    )
+    resnet = (
+        Path(_REPO)
+        / "third_party"
+        / "hil-serl"
+        / "examples"
+        / "experiments"
+        / "resnet10_params.pkl"
+    )
+    expected = LearnerFingerprint.create(
+        config=config,
+        resnet_asset_path=resnet,
+        run_contract={"demo_sha256": ["a" * 64]},
+    )
+    manager = CheckpointManager(tmp_path)
+    path = manager.save(
+        agent=_agent(step=4),
+        learner_step=2,
+        gradient_step=4,
+        policy_version=1,
+        inference_rng=jax.random.PRNGKey(1),
+        fingerprint=expected,
+    )
+    changed = LearnerFingerprint.create(
+        config=config,
+        resnet_asset_path=resnet,
+        run_contract={"demo_sha256": ["b" * 64]},
+    )
+    with pytest.raises(CheckpointFingerprintError, match="mismatch"):
+        manager.load(
+            agent_template=_agent(), fingerprint=changed, path=path
+        )
+
+
+def test_logging_mode_is_not_part_of_algorithm_fingerprint():
+    offline = _fingerprint(LearnerConfig(wandb_mode="offline"))
+    disabled = _fingerprint(LearnerConfig(wandb_mode="disabled"))
+
+    assert offline.sha256 == disabled.sha256
+    assert "wandb_mode" not in offline.document["learner_config"]
+
+
+def test_fingerprint_detaches_nested_run_contract_from_caller():
+    contract = {"demo_sha256": ["a" * 64]}
+    fingerprint = LearnerFingerprint.create(
+        config=LearnerConfig(),
+        resnet_asset_path=(
+            Path(_REPO)
+            / "third_party"
+            / "hil-serl"
+            / "examples"
+            / "experiments"
+            / "resnet10_params.pkl"
+        ),
+        run_contract=contract,
+    )
+
+    contract["demo_sha256"][0] = "b" * 64
+    assert fingerprint.document["run_contract"]["demo_sha256"] == [
+        "a" * 64
+    ]
+
+
+def test_checkpoint_run_lock_is_single_writer_and_releasable(tmp_path):
+    root = tmp_path / "single-writer"
+    first = CheckpointRunLock(root)
+    second = CheckpointRunLock(root)
+
+    first.acquire()
+    assert first.acquired
+    with pytest.raises(CheckpointLockError, match="active learner"):
+        second.acquire()
+    first.release()
+
+    second.acquire()
+    assert second.acquired
+    second.release()
+
+
+def test_checkpoint_space_reserve_fails_before_creating_directory(
+    tmp_path, monkeypatch
+):
+    import shutil
+    from types import SimpleNamespace
+
+    root = tmp_path / "space"
+    available = 1_024
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=available),
+    )
+    manager = CheckpointManager(
+        root,
+        minimum_free_bytes_after_save=available + 1,
+    )
+
+    with pytest.raises(CheckpointSpaceError, match="insufficient"):
+        manager.save(
+            agent=_agent(),
+            learner_step=0,
+            gradient_step=0,
+            policy_version=0,
+            inference_rng=jax.random.PRNGKey(1),
+            fingerprint=_fingerprint(LearnerConfig()),
+        )
+    assert not manager.path_for_step(0).exists()
 
 
 class _FakeRun:
@@ -341,3 +528,43 @@ def test_jsonl_and_wandb_receive_the_same_structured_event(tmp_path):
     assert wandb.run.records[0][0] == record
     assert wandb.run.records[0][1] == 3
     assert wandb.run.finished
+
+
+def test_real_wandb_offline_artifact_and_checked_in_protobuf_coexist(
+    tmp_path,
+    monkeypatch,
+):
+    from ur_env.compat import configure_pure_python_protobuf
+
+    configure_pure_python_protobuf()
+    wandb = pytest.importorskip("wandb")
+    monkeypatch.setenv("WANDB_SILENT", "true")
+    monkeypatch.setenv("WANDB_DISABLE_CODE", "true")
+    logger = JsonlWandbLogger(
+        tmp_path / "actual-offline.jsonl",
+        wandb_mode="offline",
+        wandb_dir=tmp_path,
+        project="hil-serl-test",
+        run_name="protobuf-coexistence",
+        config={"purpose": "offline-integration"},
+        wandb_module=wandb,
+    )
+    try:
+        from ur_env.proto import actor_transport_pb2
+
+        message = actor_transport_pb2.HealthReply(
+            alive=True,
+            ready=True,
+            detail="offline-wandb-compatible",
+        )
+        logger.log(
+            "protobuf_import_smoke",
+            learner_step=0,
+            proto_ready=message.ready,
+        )
+    finally:
+        logger.close()
+
+    offline_runs = tuple((tmp_path / "wandb").glob("offline-run-*"))
+    assert offline_runs
+    assert any(path.is_dir() for path in offline_runs)

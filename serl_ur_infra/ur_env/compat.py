@@ -11,6 +11,32 @@ class CompatibilityError(RuntimeError):
     """The process imported an incompatible dependency runtime."""
 
 
+def configure_flax_local_io() -> None:
+    """Force Flax checkpoint operations onto its local filesystem backend.
+
+    Flax 0.10.5 selects TensorFlow I/O merely when ``tensorflow`` is
+    importable.  This repository intentionally provides an annotation-only
+    TensorFlow shim, so that auto-detection would select an unusable backend.
+    Learner/server process entrypoints must call this idempotent compatibility
+    contract before any Flax checkpoint restore or save.
+    """
+
+    try:
+        import flax.io as flax_io
+    except ImportError as exc:
+        raise CompatibilityError(
+            "Flax is required before configuring local checkpoint I/O"
+        ) from exc
+    try:
+        flax_io.set_mode(flax_io.BackendMode.DEFAULT)
+    except Exception as exc:
+        raise CompatibilityError(
+            f"failed to select Flax local checkpoint I/O: {exc}"
+        ) from exc
+    if flax_io.io_mode is not flax_io.BackendMode.DEFAULT:
+        raise CompatibilityError("Flax refused the local checkpoint I/O backend")
+
+
 def configure_pure_python_protobuf() -> None:
     """Select protobuf's pure-Python implementation, or fail if it is too late.
 

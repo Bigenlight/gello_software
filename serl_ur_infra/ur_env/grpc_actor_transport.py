@@ -388,6 +388,9 @@ class GrpcActorNetwork:
         channel: Any = None,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
         expected_observation_schema_hash: Optional[str] = None,
+        expected_model_id: Optional[str] = None,
+        expected_reward_authority: Optional[str] = None,
+        expected_reward_model_id: Optional[str] = None,
     ) -> None:
         if not target:
             raise ValueError("gRPC target is required")
@@ -413,7 +416,35 @@ class GrpcActorNetwork:
         )
         if self._expected_observation_schema_hash == "":
             raise ValueError("expected_observation_schema_hash cannot be empty")
-        self._server_info_verified = False
+        self._expected_model_id = (
+            None if expected_model_id is None else str(expected_model_id)
+        )
+        self._expected_reward_authority = (
+            None
+            if expected_reward_authority is None
+            else str(expected_reward_authority)
+        )
+        self._expected_reward_model_id = (
+            None
+            if expected_reward_model_id is None
+            else str(expected_reward_model_id)
+        )
+        for name, value in (
+            ("expected_model_id", self._expected_model_id),
+            ("expected_reward_authority", self._expected_reward_authority),
+            ("expected_reward_model_id", self._expected_reward_model_id),
+        ):
+            if value == "":
+                raise ValueError(f"{name} cannot be empty")
+        self._requires_server_info_verification = any(
+            value is not None
+            for value in (
+                self._expected_observation_schema_hash,
+                self._expected_model_id,
+                self._expected_reward_authority,
+                self._expected_reward_model_id,
+            )
+        )
         self._server_info: Optional[ServerInfo] = None
         self._channel = channel or grpc.insecure_channel(
             target,
@@ -467,6 +498,9 @@ class GrpcActorNetwork:
                 config.get("max_message_bytes", DEFAULT_MAX_MESSAGE_BYTES)
             ),
             expected_observation_schema_hash=expected_hash,
+            expected_model_id=config.get("expected_model_id"),
+            expected_reward_authority=config.get("expected_reward_authority"),
+            expected_reward_model_id=config.get("expected_reward_model_id"),
         )
 
     @property
@@ -480,6 +514,9 @@ class GrpcActorNetwork:
         return bool(reply.alive), bool(reply.ready), reply.detail
 
     def get_server_info(self) -> ServerInfo:
+        # A failed refresh must never leave a stale verification usable by a
+        # later episode after the endpoint has changed or restarted.
+        self._server_info = None
         reply, _ = self._call(
             self._stub.GetServerInfo, pb.ServerInfoRequest(), "GetServerInfo"
         )
@@ -511,6 +548,32 @@ class GrpcActorNetwork:
         if not info.reward_authority:
             raise ActorProtocolError("server reward_authority is empty")
         if (
+            self._expected_model_id is not None
+            and info.model_id != self._expected_model_id
+        ):
+            raise ActorProtocolError(
+                f"server model_id is {info.model_id!r}, expected "
+                f"{self._expected_model_id!r}"
+            )
+        if (
+            self._expected_reward_authority is not None
+            and info.reward_authority != self._expected_reward_authority
+        ):
+            raise ActorProtocolError(
+                "server reward_authority is "
+                f"{info.reward_authority!r}, expected "
+                f"{self._expected_reward_authority!r}"
+            )
+        if (
+            self._expected_reward_model_id is not None
+            and info.reward_model_id != self._expected_reward_model_id
+        ):
+            raise ActorProtocolError(
+                "server reward_model_id is "
+                f"{info.reward_model_id!r}, expected "
+                f"{self._expected_reward_model_id!r}"
+            )
+        if (
             self._expected_observation_schema_hash is not None
             and info.observation_schema_hash
             != self._expected_observation_schema_hash
@@ -522,7 +585,6 @@ class GrpcActorNetwork:
             )
         if not info.ready:
             raise FailedPreconditionError("remote actor service is not ready")
-        self._server_info_verified = True
         self._server_info = info
         return info
 
@@ -545,10 +607,7 @@ class GrpcActorNetwork:
         timestamp_ns: int,
         deterministic: bool = False,
     ) -> ActionResult:
-        if (
-            self._expected_observation_schema_hash is not None
-            and not self._server_info_verified
-        ):
+        if self._requires_server_info_verification:
             self.get_server_info()
         if self._pending_step is not None:
             raise FailedPreconditionError(

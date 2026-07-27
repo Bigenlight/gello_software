@@ -18,6 +18,9 @@ sys.path.insert(
 )
 
 from ur_env.actor_network import create_actor_network  # noqa: E402
+from ur_env.envs.wrappers import (  # noqa: E402
+    wrap_gripper_penalty_from_task_config,
+)
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
 )
@@ -38,6 +41,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-s", type=float)
     parser.add_argument("--max-response-age-s", type=float)
     parser.add_argument("--observation-schema-hash")
+    parser.add_argument("--expected-model-id")
+    parser.add_argument("--expected-reward-authority")
+    parser.add_argument("--expected-reward-model-id")
     return parser.parse_args()
 
 
@@ -55,6 +61,9 @@ def _network_config(config: Any, args: argparse.Namespace) -> dict[str, Any]:
         "timeout_s": args.timeout_s,
         "max_response_age_s": args.max_response_age_s,
         "observation_schema_hash": args.observation_schema_hash,
+        "expected_model_id": args.expected_model_id,
+        "expected_reward_authority": args.expected_reward_authority,
+        "expected_reward_model_id": args.expected_reward_model_id,
     }
     for key, value in overrides.items():
         if value is not None:
@@ -71,10 +80,27 @@ def _network_config(config: Any, args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _build_actor_environment(config: Any, args: argparse.Namespace) -> Any:
+    """Build the robot-local wrapper chain with an explicit task penalty."""
+
+    from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+
+    task_env = config.get_environment(
+        fake_env=args.fake_env,
+        save_video=args.save_video,
+        # Reward/termination is authoritative on the remote server.
+        classifier=False,
+    )
+    task_env = wrap_gripper_penalty_from_task_config(
+        task_env,
+        experiment_config=config,
+    )
+    return EnvTimestampAdapter(RecordEpisodeStatistics(task_env))
+
+
 def main() -> int:
     args = _parse_args()
     from experiments.mappings import CONFIG_MAPPING
-    from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
 
     if args.ur_config_module:
         module = importlib.import_module(args.ur_config_module)
@@ -83,16 +109,7 @@ def main() -> int:
         raise KeyError(f"unknown experiment {args.exp_name!r}")
 
     config = CONFIG_MAPPING[args.exp_name]()
-    env = EnvTimestampAdapter(
-        RecordEpisodeStatistics(
-            config.get_environment(
-                fake_env=args.fake_env,
-                save_video=args.save_video,
-                # Reward/termination is authoritative on the remote server.
-                classifier=False,
-            )
-        )
-    )
+    env = _build_actor_environment(config, args)
     network_config = _network_config(config, args)
     network = create_actor_network(
         network_config,

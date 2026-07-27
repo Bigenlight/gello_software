@@ -23,6 +23,10 @@ LEARNER_BATCH_KEYS = (
     "grasp_penalty",
 )
 
+# Artifact provenance only.  This value is retained in ``DemoSidecar`` and is
+# deliberately excluded from the tensor batch passed to the learner.
+SYNTHETIC_ACCEPTANCE_ONLY_KEY = "synthetic_acceptance_only"
+
 
 class DemoContractError(ValueError):
     """A pickle item is not a canonical learner transition."""
@@ -97,6 +101,33 @@ def _normalise_transition(
     else:
         meta = {}
         source = item
+
+    provenance_markers: list[tuple[str, bool]] = []
+    for marker_source, container in (("meta", meta), ("transition", source)):
+        if SYNTHETIC_ACCEPTANCE_ONLY_KEY in container:
+            provenance_markers.append(
+                (
+                    marker_source,
+                    _strict_bool(
+                        container[SYNTHETIC_ACCEPTANCE_ONLY_KEY],
+                        name=(
+                            f"{marker_source}."
+                            f"{SYNTHETIC_ACCEPTANCE_ONLY_KEY}"
+                        ),
+                    ),
+                )
+            )
+    synthetic_acceptance_only: bool | None = None
+    if provenance_markers:
+        synthetic_acceptance_only = provenance_markers[0][1]
+        if any(
+            value != synthetic_acceptance_only
+            for _, value in provenance_markers[1:]
+        ):
+            raise DemoContractError(
+                "meta and transition synthetic_acceptance_only markers "
+                "disagree"
+            )
 
     if _looks_like_lerobot(source):
         raise DemoContractError(
@@ -235,6 +266,8 @@ def _normalise_transition(
             if isinstance(value, (str, int, float, bool, type(None))):
                 metadata[key] = value
     metadata["success"] = normalised_success
+    if synthetic_acceptance_only is not None:
+        metadata[SYNTHETIC_ACCEPTANCE_ONLY_KEY] = synthetic_acceptance_only
     if done is not None:
         metadata["done"] = done
 

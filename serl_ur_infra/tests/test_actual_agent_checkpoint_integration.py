@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -38,31 +39,64 @@ def _observation(value: int) -> dict[str, np.ndarray]:
     }
 
 
-def _transition(value: int) -> dict[str, object]:
+def _transition(
+    value: int,
+    *,
+    reward: float = 0.0,
+    penalty: float = -0.02,
+) -> dict[str, object]:
     action = np.zeros((7,), dtype=np.float32)
     action[:6] = np.float32((value % 5) / 10.0)
     action[-1] = np.float32((-1.0, 0.0, 1.0)[value % 3])
+    terminal = bool(reward)
     return {
         "observations": _observation(value),
         "next_observations": _observation(value + 1),
         "actions": action,
-        "rewards": np.float32(value % 2),
-        "masks": np.float32(1.0),
-        "grasp_penalty": np.float32(-0.02),
+        "rewards": np.float32(reward),
+        "masks": np.float32(0.0 if terminal else 1.0),
+        "dones": terminal,
+        "grasp_penalty": np.float32(penalty),
     }
 
 
-def _sampler(*, seed: int):
+def _sampler(*, seed: int, offline_transitions):
     from ur_env.learner import CanonicalTransitionPool, RLPDBatchSampler
 
     return RLPDBatchSampler(
-        online_replay=CanonicalTransitionPool([_transition(1)], seed=seed + 1),
-        offline_demos=CanonicalTransitionPool([_transition(2)], seed=seed + 2),
+        online_replay=CanonicalTransitionPool(
+            [_transition(1, reward=0.0)], seed=seed + 1
+        ),
+        offline_demos=CanonicalTransitionPool(
+            offline_transitions, seed=seed + 2
+        ),
         online_interventions=CanonicalTransitionPool([], seed=seed + 3),
         batch_size=2,
         training_starts=1,
         seed=seed,
     )
+
+
+class _PoolIngress:
+    """Minimal strict ingress implementing the production composition contract."""
+
+    require_grasp_penalty = True
+
+    def __init__(self, replay, interventions) -> None:
+        self._replay = replay
+        self._interventions = interventions
+
+    def status(self):
+        return SimpleNamespace(
+            replay_size=len(self._replay),
+            intervention_size=len(self._interventions),
+        )
+
+    def sample_replay(self, batch_size: int):
+        return self._replay.sample(batch_size)
+
+    def sample_intervention(self, batch_size: int):
+        return self._interventions.sample(batch_size)
 
 
 def _assert_train_states_exact(source, restored) -> None:
@@ -103,15 +137,20 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     import jax
 
     from ur_env.learner import (
+        CanonicalTransitionPool,
         CheckpointManager,
         HILSERLLearner,
         LearnerConfig,
         LearnerFingerprint,
         VersionedPolicyRuntime,
         canonical_policy_observation,
+        compose_learner,
         create_hybrid_sac_agent,
+        load_demo_pickle,
+        prepare_learner_state,
         validate_learner_dependencies,
         verify_resnet10_asset,
+        write_fake_demo_pickle,
     )
 
     versions = validate_learner_dependencies(include_logging=False)
@@ -140,6 +179,26 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     )
     verify_resnet10_asset(resnet_source)
     resnet_cache = tmp_path / "resnet10_params.pkl"
+    fake_demo_path = tmp_path / "canonical_fake_demo.pkl"
+    write_fake_demo_pickle(fake_demo_path)
+    loaded_demos = load_demo_pickle(fake_demo_path)
+    assert len(loaded_demos) == 2
+    assert loaded_demos.sidecars[0].metadata["success"] is True
+    assert loaded_demos.sidecars[1].metadata["success"] is False
+    assert loaded_demos.sidecars[1].metadata["run_id"] == "fake-acceptance-run"
+    assert loaded_demos.sidecars[1].metadata["intervened"] == 1
+    assert all(
+        set(transition)
+        == {
+            "observations",
+            "next_observations",
+            "actions",
+            "rewards",
+            "masks",
+            "grasp_penalty",
+        }
+        for transition in loaded_demos.transitions
+    )
 
     def create_agent():
         return create_hybrid_sac_agent(
@@ -167,7 +226,10 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     )
     learner = HILSERLLearner(
         agent=agent,
-        sampler=_sampler(seed=100),
+        sampler=_sampler(
+            seed=100,
+            offline_transitions=loaded_demos.transitions,
+        ),
         publisher=publisher,
         config=config,
         checkpoint_manager=manager,
@@ -186,11 +248,32 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
     fresh_agent = create_agent()
     assert isinstance(fresh_agent, SACAgentHybridSingleArm)
     assert int(np.asarray(fresh_agent.state.step)) == 0
-    restored = manager.load(
+    prepared = prepare_learner_state(
         agent_template=fresh_agent,
+        checkpoint_manager=manager,
         fingerprint=fingerprint,
-        path=first.checkpoint_path,
+        config=config,
+        resume_path=first.checkpoint_path,
     )
+    assert prepared.restored_checkpoint is not None
+    restored = prepared.restored_checkpoint
+    assembly = compose_learner(
+        agent_template=fresh_agent,
+        ingress=_PoolIngress(
+            CanonicalTransitionPool(
+                [_transition(4, reward=0.0)], seed=201
+            ),
+            CanonicalTransitionPool([], seed=202),
+        ),
+        offline_demos=CanonicalTransitionPool(
+            loaded_demos.transitions, seed=203
+        ),
+        checkpoint_manager=manager,
+        fingerprint=fingerprint,
+        config=config,
+        prepared_state=prepared,
+    )
+    assert assembly.restored_checkpoint is restored
 
     assert restored.learner_step == learner.learner_step == 1
     assert restored.gradient_step == learner.gradient_step == 2
@@ -212,12 +295,7 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
         learner_step=learner.learner_step,
         inference_rng=checkpoint_inference_rng,
     )
-    restored_runtime = VersionedPolicyRuntime(
-        restored.agent,
-        policy_version=restored.policy_version,
-        learner_step=restored.learner_step,
-        inference_rng=restored.inference_rng,
-    )
+    restored_runtime = assembly.policy_runtime
     observation = canonical_policy_observation(value=17)
     for deterministic in (True, False):
         source_action, source_version = source_runtime(
@@ -233,17 +311,7 @@ def test_real_agent_checkpoint_resume_and_continue_cta(tmp_path):
         np.asarray(jax.device_get(restored_runtime.inference_rng)),
     )
 
-    resumed_learner = HILSERLLearner(
-        agent=restored.agent,
-        sampler=_sampler(seed=200),
-        publisher=restored_runtime,
-        config=config,
-        checkpoint_manager=manager,
-        fingerprint=fingerprint,
-        learner_step=restored.learner_step,
-        gradient_step=restored.gradient_step,
-        policy_version=restored.policy_version,
-    )
+    resumed_learner = assembly.learner
     second = resumed_learner.train_once()
     assert second.learner_step == 2
     assert second.gradient_step == 4

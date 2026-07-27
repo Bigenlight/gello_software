@@ -476,6 +476,40 @@ def test_replay_ingress_learner_mode_requires_explicit_grasp_penalty():
     assert ingress.status().replay_size == 1
 
 
+def test_replay_ingress_learner_mode_rejects_wrong_grasp_penalty_value():
+    ingress = ReplayIngress(
+        replay_capacity=4,
+        intervention_capacity=4,
+        store_factory=_StoreFactory(),
+        learner_mode=True,
+        expected_grasp_penalty=-0.07,
+    )
+    wrong = _finalized_data(step=0)
+    wrong["transition"]["grasp_penalty"] = -0.02
+    with pytest.raises(ActorProtocolError, match="configured penalty -0.07"):
+        ingress(wrong, False)
+
+    no_penalty_event = _finalized_data(step=1)
+    no_penalty_event["transition"]["grasp_penalty"] = 0.0
+    ingress(no_penalty_event, False)
+    matching = _finalized_data(step=2)
+    matching["transition"]["grasp_penalty"] = -0.07
+    ingress(matching, False)
+    assert ingress.status().replay_size == 2
+
+
+@pytest.mark.parametrize("value", [True, np.nan, 0.01, [0.0]])
+def test_replay_ingress_rejects_invalid_expected_grasp_penalty(value):
+    with pytest.raises(ValueError, match="expected_grasp_penalty"):
+        ReplayIngress(
+            replay_capacity=4,
+            intervention_capacity=4,
+            store_factory=_StoreFactory(),
+            learner_mode=True,
+            expected_grasp_penalty=value,
+        )
+
+
 def _actual_hil_serl_root() -> str:
     root = os.environ.get(
         "HIL_SERL_ROOT", os.path.join(_REPO_ROOT, "third_party", "hil-serl")

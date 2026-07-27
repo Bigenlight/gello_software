@@ -37,6 +37,7 @@ from ur_env.actor_network import (
     BufferStatus,
     TransitionOutcome,
 )
+from ur_env.compat import configure_flax_local_io
 from ur_env.observation_schema import (
     CANONICAL_OBSERVATION_SPEC,
     validate_canonical_observation,
@@ -254,6 +255,8 @@ class RewardClassifierRuntime:
         threshold: float = DEFAULT_REWARD_THRESHOLD,
         reward_model_id: Optional[str] = None,
         hil_serl_root: Optional[str] = None,
+        resnet_source_path: Optional[os.PathLike[str] | str] = None,
+        resnet_cache_path: Optional[os.PathLike[str] | str] = None,
         classifier_loader: Optional[
             Callable[[Mapping[str, np.ndarray]], Callable[[Mapping[str, Any]], Any]]
         ] = None,
@@ -287,7 +290,11 @@ class RewardClassifierRuntime:
             "cam2": np.zeros(CANONICAL_OBSERVATION_SPEC["cam2"][1], dtype=np.uint8),
         }
         try:
-            loader = classifier_loader or self._upstream_loader(hil_serl_root)
+            loader = classifier_loader or self._upstream_loader(
+                hil_serl_root,
+                resnet_source_path=resnet_source_path,
+                resnet_cache_path=resnet_cache_path,
+            )
             self._classifier = loader(sample)
             started = self._clock()
             warmup = self._classifier(sample)
@@ -359,16 +366,25 @@ class RewardClassifierRuntime:
             )
 
     def _upstream_loader(
-        self, hil_serl_root: Optional[str]
+        self,
+        hil_serl_root: Optional[str],
+        *,
+        resnet_source_path: Optional[os.PathLike[str] | str] = None,
+        resnet_cache_path: Optional[os.PathLike[str] | str] = None,
     ) -> Callable[[Mapping[str, np.ndarray]], Callable[[Mapping[str, Any]], Any]]:
         if hil_serl_root:
-            launcher_root = os.path.join(
-                os.path.abspath(os.path.expanduser(hil_serl_root)), "serl_launcher"
-            )
+            upstream_root = os.path.abspath(os.path.expanduser(hil_serl_root))
+            launcher_root = os.path.join(upstream_root, "serl_launcher")
             if launcher_root not in sys.path:
                 sys.path.insert(0, launcher_root)
+        else:
+            upstream_root = None
         try:
             import jax
+            from ur_env.learner.agent import (
+                default_hil_serl_root,
+                ensure_resnet10_cache,
+            )
             from serl_launcher.networks.reward_classifier import load_classifier_func
         except ImportError as exc:
             raise ReceiveRuntimeError(
@@ -376,9 +392,55 @@ class RewardClassifierRuntime:
                 "required on the receive server"
             ) from exc
 
+        if upstream_root is None:
+            upstream_root = os.fspath(default_hil_serl_root())
+        resnet_source = os.path.abspath(
+            os.path.expanduser(
+                resnet_source_path
+                or os.path.join(
+                    upstream_root,
+                    "examples",
+                    "experiments",
+                    "resnet10_params.pkl",
+                )
+            )
+        )
+        resnet_cache = (
+            os.path.abspath(os.path.expanduser(resnet_cache_path))
+            if resnet_cache_path
+            else None
+        )
+        upstream_cache = os.path.abspath(
+            os.path.expanduser("~/.serl/resnet10_params.pkl")
+        )
+
         def load(
             sample: Mapping[str, np.ndarray]
         ) -> Callable[[Mapping[str, Any]], Any]:
+            try:
+                # Upstream reads ~/.serl/resnet10_params.pkl directly while
+                # constructing the classifier.  Stage it only from the
+                # repository asset after both source and any existing cache
+                # satisfy the immutable SHA-256 contract.
+                verified_cache = ensure_resnet10_cache(
+                    source_path=resnet_source,
+                    cache_path=resnet_cache,
+                )
+                # The unmodified upstream classifier opens this fixed path.
+                # When the learner selected a custom cache, mirror only its
+                # already-verified bytes into the fixed cache.  The helper's
+                # exclusive create/no-overwrite contract still applies.
+                if os.path.abspath(os.fspath(verified_cache)) != upstream_cache:
+                    ensure_resnet10_cache(
+                        source_path=verified_cache,
+                        cache_path=upstream_cache,
+                    )
+            except Exception as exc:
+                raise RewardClassifierError(
+                    "verified ResNet-10 setup failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            configure_flax_local_io()
             return load_classifier_func(
                 key=jax.random.PRNGKey(0),
                 sample=dict(sample),
@@ -676,6 +738,7 @@ class ReplayIngress:
         ledger_capacity: Optional[int] = None,
         learner_mode: bool = False,
         require_grasp_penalty: Optional[bool] = None,
+        expected_grasp_penalty: float = -0.02,
     ) -> None:
         if not isinstance(learner_mode, bool):
             raise ValueError("learner_mode must be bool")
@@ -692,6 +755,22 @@ class ReplayIngress:
             if require_grasp_penalty is None
             else require_grasp_penalty
         )
+        if isinstance(expected_grasp_penalty, (bool, np.bool_)):
+            raise ValueError("expected_grasp_penalty must be numeric")
+        expected_penalty_array = np.asarray(expected_grasp_penalty)
+        if (
+            expected_penalty_array.shape != ()
+            or expected_penalty_array.dtype.kind not in "iuf"
+        ):
+            raise ValueError("expected_grasp_penalty must be numeric")
+        self.expected_grasp_penalty = float(expected_penalty_array)
+        if (
+            not math.isfinite(self.expected_grasp_penalty)
+            or self.expected_grasp_penalty > 0.0
+        ):
+            raise ValueError(
+                "expected_grasp_penalty must be finite and non-positive"
+            )
         self.replay_capacity = _positive_int(
             replay_capacity, name="replay_capacity"
         )
@@ -771,6 +850,7 @@ class ReplayIngress:
             data,
             intervened=intervened,
             require_grasp_penalty=self.require_grasp_penalty,
+            expected_grasp_penalty=self.expected_grasp_penalty,
         )
         signature = self._signature(record, transition)
         with self._lock:
@@ -1076,6 +1156,7 @@ class ReplayIngress:
         *,
         intervened: bool,
         require_grasp_penalty: bool = False,
+        expected_grasp_penalty: float = -0.02,
     ) -> tuple[IngressRecord, dict[str, Any]]:
         if not isinstance(data, Mapping) or set(data) != {"meta", "transition"}:
             raise ActorProtocolError("data must contain exactly meta and transition")
@@ -1162,6 +1243,19 @@ class ReplayIngress:
         grasp_penalty = _finite_float(
             source.get("grasp_penalty", 0.0), name="transition.grasp_penalty"
         )
+        if require_grasp_penalty and not (
+            math.isclose(grasp_penalty, 0.0, rel_tol=0.0, abs_tol=1e-7)
+            or math.isclose(
+                grasp_penalty,
+                expected_grasp_penalty,
+                rel_tol=0.0,
+                abs_tol=1e-7,
+            )
+        ):
+            raise ActorProtocolError(
+                "transition.grasp_penalty must be either 0 or the configured "
+                f"penalty {expected_grasp_penalty}"
+            )
         terminal_for_stack = done or truncated
         episode_id = _nonnegative_int(
             source.get("episode_id"), name="transition.episode_id"

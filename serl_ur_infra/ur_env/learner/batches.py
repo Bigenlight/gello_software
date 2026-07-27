@@ -49,7 +49,15 @@ class ReplayIngressView:
         self._ingress = ingress
         self._route = route
 
+    def _ensure_healthy(self) -> None:
+        ensure_healthy = getattr(self._ingress, "ensure_healthy", None)
+        if ensure_healthy is not None:
+            if not callable(ensure_healthy):
+                raise TypeError("ingress ensure_healthy must be callable")
+            ensure_healthy()
+
     def __len__(self) -> int:
+        self._ensure_healthy()
         status = self._ingress.status()
         return int(
             status.replay_size
@@ -58,6 +66,7 @@ class ReplayIngressView:
         )
 
     def sample(self, batch_size: int) -> Mapping[str, Any]:
+        self._ensure_healthy()
         if self._route == "replay":
             return self._ingress.sample_replay(batch_size=batch_size)
         return self._ingress.sample_intervention(batch_size=batch_size)
@@ -210,6 +219,34 @@ def proportional_sample_counts(total: int, sizes: tuple[int, ...]) -> tuple[int,
     return tuple(counts)
 
 
+def sample_proportional_counts(
+    total: int,
+    sizes: tuple[int, ...],
+    *,
+    rng: np.random.Generator,
+) -> tuple[int, ...]:
+    """Draw source counts as if sampling uniformly from the pool union.
+
+    A deterministic largest-remainder allocation can assign a small online
+    intervention pool zero samples forever.  A multinomial draw makes each of
+    the ``total`` demo selections equivalent to choosing one logical item
+    uniformly from the concatenated offline/intervention population.  The
+    caller-owned generator keeps the sequence reproducible for a fixed seed.
+    """
+
+    # Reuse the public validator, including the empty-population behavior.
+    proportional_sample_counts(total, sizes)
+    if not isinstance(rng, np.random.Generator):
+        raise TypeError("rng must be a numpy.random.Generator")
+    population = sum(sizes)
+    if population == 0:
+        return tuple(0 for _ in sizes)
+    probabilities = np.asarray(sizes, dtype=np.float64) / population
+    return tuple(
+        int(value) for value in rng.multinomial(total, probabilities)
+    )
+
+
 class RLPDBatchSampler:
     """Half online replay and half uniformly sampled demonstration union."""
 
@@ -273,7 +310,21 @@ class RLPDBatchSampler:
                 f"{self.training_starts} online replay transitions and one "
                 "offline demonstration"
             )
-        metrics = self.metrics()
+        preview = self.metrics()
+        offline_count, intervention_count = sample_proportional_counts(
+            preview.demo_batch_size,
+            (preview.offline_demo_size, preview.online_intervention_size),
+            rng=self._rng,
+        )
+        metrics = SamplingMetrics(
+            replay_size=preview.replay_size,
+            offline_demo_size=preview.offline_demo_size,
+            online_intervention_size=preview.online_intervention_size,
+            replay_batch_size=preview.replay_batch_size,
+            demo_batch_size=preview.demo_batch_size,
+            offline_demo_batch_size=offline_count,
+            online_intervention_batch_size=intervention_count,
+        )
         replay = sanitize_learner_batch(
             self.online_replay.sample(metrics.replay_batch_size),
             expected_batch_size=metrics.replay_batch_size,

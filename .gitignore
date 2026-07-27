@@ -12,6 +12,7 @@
 *logs*
 *runs*
 *tb_logs*
+tea_debug.log
 *wandb*
 *wandb_logs*
 outputs/*

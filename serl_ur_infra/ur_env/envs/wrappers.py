@@ -46,6 +46,22 @@ except ImportError:
     _KIN_AVAILABLE = False
 
 
+def _ensure_kinematics_available() -> None:
+    """Retry the optional workspace import after callers extend ``sys.path``."""
+
+    global _KIN_AVAILABLE, fk, so3_log
+    if _KIN_AVAILABLE:
+        return
+    try:
+        from ur_gello_bringup.ur_kin import fk as imported_fk
+        from ur_gello_bringup.ur_kin import so3_log as imported_so3_log
+    except ImportError as exc:
+        raise RuntimeError("ur_gello_bringup not importable") from exc
+    fk = imported_fk
+    so3_log = imported_so3_log
+    _KIN_AVAILABLE = True
+
+
 # ---------------------------------------------------------------------------- #
 # Deadman sources — the "engaged" signal + a sensitivity gain can come from     #
 # either the spacebar (default) or a ROS topic published by the HIL GUI.        #
@@ -193,8 +209,7 @@ class GelloIntervention(gym.ActionWrapper):
 
     def __init__(self, env, deadman: Optional[DeadmanSource] = None):
         super().__init__(env)
-        if not _KIN_AVAILABLE:
-            raise RuntimeError("ur_gello_bringup not importable")
+        _ensure_kinematics_available()
         self.expert = GelloExpert(env.unwrapped.backend, deadman=deadman)
         self.action_scale = env.unwrapped.action_scale
 
@@ -402,3 +417,68 @@ class GripperPenaltyWrapper(gym.Wrapper):
         )
         self._last_gripper_position = self._gripper_position(observation)
         return observation, reward, terminated, truncated, result_info
+
+
+def _validated_grasp_penalty(value, *, source: str) -> float:
+    """Return one task penalty without accepting implicit/bool coercions."""
+
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{source}.GRASP_PENALTY must be a numeric scalar")
+    array = np.asarray(value)
+    if array.shape != () or array.dtype.kind not in "iuf":
+        raise ValueError(f"{source}.GRASP_PENALTY must be a numeric scalar")
+    penalty = float(array)
+    if not math.isfinite(penalty) or penalty > 0.0:
+        raise ValueError(
+            f"{source}.GRASP_PENALTY must be finite and non-positive"
+        )
+    return penalty
+
+
+def wrap_gripper_penalty_from_task_config(env, *, experiment_config=None):
+    """Apply the robot task's explicit learned-gripper penalty contract.
+
+    The environment's unwrapped robot config is authoritative because it is
+    the config that controls the physical task.  An experiment config may
+    repeat ``GRASP_PENALTY`` for convenience; when it does, disagreement is a
+    startup error instead of silently selecting one value.  There is
+    deliberately no ``-0.02`` fallback here: learner-mode ingress requires
+    every actor transition to carry a penalty produced by an explicit task
+    configuration.
+    """
+
+    unwrapped = getattr(env, "unwrapped", None)
+    task_config = getattr(unwrapped, "config", None)
+    if task_config is None or not hasattr(task_config, "GRASP_PENALTY"):
+        raise ValueError(
+            "env.unwrapped.config.GRASP_PENALTY is required for the "
+            "learned-gripper actor"
+        )
+    penalty = _validated_grasp_penalty(
+        getattr(task_config, "GRASP_PENALTY"),
+        source="env.unwrapped.config",
+    )
+
+    if experiment_config is not None and hasattr(
+        experiment_config, "GRASP_PENALTY"
+    ):
+        configured = _validated_grasp_penalty(
+            getattr(experiment_config, "GRASP_PENALTY"),
+            source="experiment config",
+        )
+        if not math.isclose(configured, penalty, rel_tol=0.0, abs_tol=1e-8):
+            raise ValueError(
+                "experiment config GRASP_PENALTY disagrees with "
+                "env.unwrapped.config.GRASP_PENALTY"
+            )
+
+    if isinstance(env, GripperPenaltyWrapper):
+        if not math.isclose(
+            env.penalty, penalty, rel_tol=0.0, abs_tol=1e-8
+        ):
+            raise ValueError(
+                "existing GripperPenaltyWrapper penalty disagrees with "
+                "env.unwrapped.config.GRASP_PENALTY"
+            )
+        return env
+    return GripperPenaltyWrapper(env, penalty=penalty)

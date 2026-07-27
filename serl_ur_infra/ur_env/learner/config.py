@@ -64,5 +64,9 @@ class LearnerConfig:
         """Return algorithm values which must match when resuming."""
 
         values = asdict(self)
+        # Logging transport is operational state, not part of the learned
+        # policy or update rule.  A Kanu run may safely switch between W&B
+        # offline/disabled/online while resuming the same learner lineage.
+        values.pop("wandb_mode")
         values["image_keys"] = list(self.image_keys)
         return values
