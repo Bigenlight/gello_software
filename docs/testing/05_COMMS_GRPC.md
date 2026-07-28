@@ -254,7 +254,7 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --host 127.0.0.1 --port 50053 \
   --checkpoint <classifier checkpoint 경로> \
   --expected-checkpoint-sha256 <sha256> \
-  --threshold 0.85 \
+  --threshold 0.5 \
   --replay-capacity 50000 --intervention-capacity 10000 \
   --require-jax-backend gpu
 ```

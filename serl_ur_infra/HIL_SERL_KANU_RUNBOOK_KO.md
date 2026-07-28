@@ -265,7 +265,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --port 50053 \
   --classifier-checkpoint "$HIL_CLASSIFIER" \
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
-  --reward-threshold 0.85 \
+  --reward-threshold 0.5 \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --demo-path "$HIL_FAKE_DEMO" \
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
@@ -385,7 +385,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --port 50053 \
   --classifier-checkpoint "$HIL_CLASSIFIER" \
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
-  --reward-threshold 0.85 \
+  --reward-threshold 0.5 \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --demo-path "$HIL_SYNTH_FAKE_DEMO" \
   --checkpoint-root "$HIL_SYNTH_CHECKPOINT_ROOT" \
@@ -566,7 +566,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --port 50053 \
   --classifier-checkpoint "$HIL_CLASSIFIER" \
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
-  --reward-threshold 0.85 \
+  --reward-threshold 0.5 \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --demo-path "$HIL_REAL_DEMO" \
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \

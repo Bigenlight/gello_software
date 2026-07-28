@@ -48,7 +48,14 @@ IMAGE_KEYS = ("cam1", "cam2")
 ACTION_SHAPE = (7,)
 DEFAULT_REPLAY_CAPACITY = 50_000
 DEFAULT_INTERVENTION_CAPACITY = 10_000
-DEFAULT_REWARD_THRESHOLD = 0.85
+# Measured 2026-07-28 on the leakage-free leave-one-take-out folds: no failure
+# frame scored above 0.0086 while success medians sat at 0.99, so the whole
+# 0.01-0.85 band is empty.  Dropping 0.85 -> 0.5 lifted pooled held-out recall
+# 83.9% -> 90.5% (the weak take_03 fold 44.3% -> 65.7%) with the false-positive
+# rate still exactly 0%.  This value feeds the learner fingerprint, so changing
+# it breaks resume of checkpoints trained under the old value.
+# See REWARD_CLASSIFIER_THRESHOLD_KO.md.
+DEFAULT_REWARD_THRESHOLD = 0.5
 
 
 class ReceiveRuntimeError(RuntimeError):

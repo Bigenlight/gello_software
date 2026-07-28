@@ -99,7 +99,7 @@ force XYZ, torque XYZ, gripper position이다.
 
 Reward는 server classifier가 최종 권한을 가진다.
 
-- `probability > 0.85`: `reward=1`, `done=true`, `mask=0`
+- `probability > 0.5`: `reward=1`, `done=true`, `mask=0`
 - 그 외: `reward=0`
 - classifier 성공과 local time-limit truncation이 동시에 발생하면 성공 종료가
   우선한다.

@@ -38,7 +38,7 @@ same `O(t+1)` for all three purposes:
 `TransitionOutcome`, and optionally the next action. Images are not sent a
 second time for reward or replay insertion.
 
-Classifier probability strictly greater than `0.85` finalizes the transition
+Classifier probability strictly greater than `0.5` finalizes the transition
 as `reward=1`, `done=true`, `truncated=false`, and `mask=0`. One positive frame
 ends the episode immediately. If classifier success and a local time-limit
 truncation coincide, classifier success wins. Otherwise valid local
@@ -108,7 +108,7 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --port 50053 \
   --checkpoint /home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150 \
   --expected-checkpoint-sha256 e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997 \
-  --threshold 0.85 \
+  --threshold 0.5 \
   --replay-capacity 50000 \
   --intervention-capacity 10000 \
   --require-jax-backend gpu
@@ -148,7 +148,7 @@ docker run \
   --port 50053 \
   --checkpoint /checkpoint/checkpoint_150 \
   --expected-checkpoint-sha256 e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997 \
-  --threshold 0.85 \
+  --threshold 0.5 \
   --replay-capacity 50000 \
   --intervention-capacity 10000 \
   --require-jax-backend gpu
