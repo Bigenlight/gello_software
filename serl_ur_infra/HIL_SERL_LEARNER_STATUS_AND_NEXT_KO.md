@@ -2,7 +2,7 @@
 
 > 🚩 **이어서 작업하러 왔다면 [HANDOFF_NEXT_SESSION_KO.md](./HANDOFF_NEXT_SESSION_KO.md)를 먼저 읽어라.** 이 문서는 전체 상태 기록이고, 그쪽이 "지금 무엇을 하면 되는가"다.
 >
-> 기준일: 2026-07-27 KST
+> 기준일: **2026-07-28** KST (이전판 2026-07-27)
 >
 > 문서상 최종 운영 checkout: `/home/laptop3/gello_software`
 >
@@ -10,7 +10,7 @@
 >
 > learner/hardware 통합 merge: `248255f` (schema v2 검증 및 canonical branch 통합 완료)
 >
-> **robot actor 작업 branch: `test/hil-hardware-comms` @ `ee3240e`** — worktree `/home/laptop3/gello_worktrees/hil-hardware-comms`, `5fb716b` 대비 7 commit / +4,944−54 / 19 files. §11 참조
+> **robot actor 작업 branch: `test/hil-hardware-comms` @ `c069e79`** — worktree `/home/laptop3/gello_worktrees/hil-hardware-comms`, `5fb716b` 대비 12 commit. actor/하드웨어는 §11, **reward classifier 조사는 §12**
 >
 > Kanu 실행 절차: [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)
 >
@@ -31,7 +31,12 @@
 - checkpoint만 영속화되고 replay/intervention buffer는 RAM-only다. checkpoint는 덮어쓰기·삭제·자동 pruning을 하지 않는다.
 - **(2026-07-27 추가)** robot actor 쪽은 `5fb716b` 시점에 **실행 자체가 불가능**했다. 4개 층이 동시에 막고 있었고(§11.1) 전부 해소했다. 이제 actor가 기동해서 Kanu까지 왕복하고, workspace box와 reset branch-cut 두 안전 게이트가 실제로 동작한다.
 - **(2026-07-27 추가)** 실기 검증 완료: 2F-85 gripper 개폐 방향, GELLO leader 7 모터, laptop→Kanu 100-step gRPC 왕복(`replay_insert_count:100`, schema hash 일치), 왕복 지연 p50 58.6 / p95 75.8 / p99 97.1 ms. 미검증: 팔 실제 구동, 카메라(현재 하드웨어 고장), 개입 루프 실기.
-- **(2026-07-27 추가)** Kanu에는 **inference server가 없다**. 떠 있는 것은 `run_rlpd_receive_server.py`(PID 1096786, port 50053)뿐이고 이건 `FakeActionRuntime` — 항상 zero action을 돌려준다. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 하며, 그 유일한 하드 블로커는 여전히 §7 P0-2의 canonical robot demo 부재다. Kanu 환경 자체는 추가 설치 없이 준비돼 있다(§11.5).
+- **(2026-07-27 추가)** Kanu에는 **inference server가 없다**. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 하며, 그 유일한 하드 블로커는 여전히 §7 P0-2의 canonical robot demo 부재다. Kanu 환경 자체는 추가 설치 없이 준비돼 있다(§11.5).
+- **(2026-07-28 정정)** 위 항목의 "PID 1096786, port 50053, GPU 7에 12.3 GiB"는 **더 이상 사실이 아니다.** Kanu에 HIL 프로세스가 하나도 없고 port 50053은 미바인딩, GPU 5/6/7 전부 유휴다. 또한 **`/home/laptop3/gello_software`는 kanu에 존재하지 않는다** — 실제 경로는 §12.5 표를 볼 것.
+- **(2026-07-28 추가)** 실기에서 **팔이 처음으로 움직였고**(`--arm --scale 0.25`, 개입 64 스텝, `held=0`), **frame-map 측정을 마쳤다** — 좌표계 매핑은 **단위행렬**이고 부호 뒤집힘도 축 교환도 없다(§11.9). 속도 3층은 검증된 EEF 텔레옵 값에 정렬했다(균일 1.25배).
+- **(2026-07-28 추가)** actor entrypoint의 4개 결함을 고쳐 실기 투입 가능 상태가 됐다: `--deadman {topic,spacebar}` 배선(이전에는 전역 스페이스바/ESC로 조용히 fallback), `--arm`(`DRY_RUN` CLI 해제), `--mock-policy-noise`(zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증), 카메라 첫 프레임 대기. `--arm` 시 이중 퍼블리셔 거부 게이트도 추가했다. suite `333 passed, 11 skipped`.
+- **(2026-07-28 🔴 핵심)** **reward classifier가 학습 때와 다른 이미지를 받고 있다.** 학습은 크롭 없이 full-frame을 128×128로 찌그러뜨렸는데, 우리 actor는 `IMAGE_CROP`을 적용한 뒤 리사이즈한다. 픽셀 대조(MAE 0.00 vs 21–35)와 실제 체크포인트 실행(recall **100% → 33.3%**)으로 증명했다. **단 현재 프로덕션은 안 망가져 있다** — 크롭을 켜는 task config가 kanu 체크아웃 브랜치에 없다. **actor 브랜치를 머지하는 순간 유입된다.** 전체 내용은 §12.
+- **(2026-07-28 추가)** classifier 자체 성능은 held-out에서 처음으로 측정됐고 **좋다**: Jul-27 `cube_in_cup_all3` 체크포인트가 test split에서 threshold 0.5 기준 recall 100.0% / **FPR 0.0%** / acc 100.0%. FPR은 어느 문서에도 측정된 적이 없던 수치다(§12.3).
 
 ---
 
@@ -859,12 +864,63 @@ cam1/cam2가 공유 USB 허브 `4-4` 에서 동시에 죽었다: `uvcvideo Non-z
 
 **cam2는 손목 카메라다.** 이전 문서와 한 에이전트가 고정 데스크 카메라로 오판한 적이 있다. 두 카메라를 구별하려면 팔을 한 번 움직여 보면 된다.
 
-### 11.7 남은 actor 쪽 결함
+### 11.7 남은 actor 쪽 결함 — 2026-07-28 갱신
 
-1. **frame-map 측정 무효** — DRY RUN 잔차 0.864가 나왔으나 스텝의 **73.7%가 속도 제한에 포화**돼 있었다(`--scale 0.25` 에서 명령이 2.5 cm/s로 잘리는 동안 leader는 중앙값 24.5 cm 이동, 명령은 6.0 cm). 변환 행렬 M의 대각이 전부 양수여서 **부호 뒤집힘은 없다**는 것까지는 말할 수 있다. `--scale 1.0` + move-then-hold로 재측정해야 한다.
-2. **deadman GUI 무효** — `run_remote_rlpd_actor.py` 가 `deadman` 을 전혀 넘기지 않아 `GelloIntervention` 이 항상 `SpacebarDeadman()` 으로 떨어진다. pynput 리스너는 **전역**이라 아무 창에서나 스페이스바가 개입을 켜고 ESC가 에피소드를 종료시킨다. `test_deadman_wiring.py` 가 `--deadman` 플래그 부재를 strict xfail로 고정해 두었다.
-3. `_await_robot_state` 에 카메라 첫 프레임 대기가 없다.
-4. `DRY_RUN` 을 CLI로 뒤집을 방법이 없다.
+1. ~~frame-map 측정 무효~~ → **해결.** §11.9 참조.
+2. ~~deadman GUI 무효~~ → **해결** (`607e541`). `--deadman {topic,spacebar}`, 기본 `topic`. 문자열 spec으로 넘기는 이유는 `RosTopicDeadman` 이 backend의 rclpy 노드에 구독하는데 그 노드가 `UR7eEnv` 생성 이후에야 존재하기 때문이다. `strict xfail` 은 제거하고 회귀 가드로 전환했다.
+3. ~~`_await_robot_state` 에 카메라 첫 프레임 대기 없음~~ → **해결** (`607e541`). `_await_first_frames()`. `hasattr(backend, "get_image")` 가드는 필수다 — 테스트의 stub backend가 `get_image` 를 구현하지 않는다.
+4. ~~`DRY_RUN` 을 CLI로 뒤집을 방법이 없음~~ → **해결** (`607e541`). `--arm`. `_build_actor_environment` **이전에** 설정해야 한다 — `DRY_RUN` 은 `URRosBackend` 생성 시 한 번만 읽힌다.
+
+**남은 것:**
+
+1. **전역 ESC 리스너** (`ur7e_env.py:197-208`) — deadman 배선과 **별개**다. 아무 창에서 ESC를 누르면 `self.terminate` 가 서고 에피소드가 끝난다. 미수정.
+2. **`run_real_hil.py` 의 frame-map 판정이 포화 표본을 걸러내지 않는다.** 포화 구간에서는 명령 델타가 리더 변위와 무관하게 `ACTION_SCALE` 노름에 고정되므로 `robot_dp ≈ M @ leader_dp` 모델 자체가 성립하지 않는데, 판정은 그 표본을 넣고 최소자승을 돌린 뒤 FAIL을 띄우며 "좌표계를 의심하라"고 안내한다 — **오진 유도다.** `held`(거버너 거부)만 세고 ACTION_SCALE 노름 클립은 안 세는 것이 사각지대. 미수정.
+3. **workspace box가 `run_real_hil.py` 에서 비활성이다.** `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_* = zeros` 이고 측정된 박스는 `cube_in_cup.py` 에만 있다. 코드가 0-부피 박스를 감지해 끄는 것은 올바른 처리지만, 실측 결과 DRY RUN 300 스텝 중 **241 스텝(80%)이 측정 박스 밖**이었고 시작점에서 **최대 73.9 cm** 이탈했다. `--arm` 이었다면 팔이 실제로 거기까지 갔다. 속도 제한은 *얼마나 빨리* 가는지만 막지 *어디로* 가는지는 안 막는다.
+4. `buffer_period = 0` (`cube_in_cup.py:245`) 이라 `--checkpoint-path` 를 줘도 demo pickle이 하나도 안 쓰인다. CLI 플래그도 없다 — canonical demo 녹화의 선결 조건.
+
+### 11.9 실기 측정 결과 (2026-07-28)
+
+**frame-map — 매핑 = 단위행렬.** `--scale 1.0`, move-then-hold 프로토콜, 개입 267 스텝.
+
+포화(스텝 델타가 `ACTION_SCALE` 노름 클립에 붙음) 51.3%를 **제외하면**:
+
+| | 전체 267 | **포화 제외 130** |
+| --- | --- | --- |
+| 단위행렬 잔차 | 0.203 | **0.093** (기준 0.15) |
+| alpha (추종이득) | 0.914 | **0.984** |
+
+자유 9-파라미터 행렬이 전체 표본에서 0.165밖에 못 내려간다 — 단위행렬(파라미터 0개)의 0.203과 거의 차이가 없다. 진짜 회전이 있었다면 자유 행렬이 압도적으로 잘 맞았어야 한다. M의 대각 평균 0.871, 비대각 최대 0.084.
+
+**결론: 부호 뒤집힘 없음, 축 교환 없음, 매핑 = I.** `R_align = I` 라는 기존 판단이 실측으로 재확인됐다. **RViz에서 뒤집혀 보인다는 이유로 X/Y를 뒤집지 말 것.**
+
+포화 표본을 제외하는 것이 통계적으로 정당한 이유: 비포화 스텝 = 명령이 리더를 따라잡은 스텝 = move-then-hold의 "hold" 구간이다. 애초에 이 프로토콜이 만들어내려던 측정 조건 그 자체라 편향이 아니다.
+
+**첫 실물 구동.** `--arm --scale 0.25`, 100 스텝 중 개입 64 스텝, `held=0`. 운영자 육안 확인 통과. 개입 불변식 4종 중 **action-exec(저장 액션 == 실행 액션, 비율 1.000)** 이 통과한 것이 특히 중요하다 — 이게 깨지면 학습 서버가 거짓 데이터로 학습한다.
+
+**속도 정렬** (`a5f9890`). 3층을 **균일하게 1.25배**:
+
+| | 텔레옵 (검증됨) | 이전 | 현재 |
+| --- | --- | --- | --- |
+| `max_step_rad` | 0.0025 | 0.0020 | **0.0025** ← 동일 |
+| 유효 병진 | 0.16 m/s | 0.10 | **0.125** |
+| 유효 회전 | 1.0 rad/s | 0.50 | **0.625** |
+
+균일한 것이 핵심이다 — 한 층만 올리면 다음 층이 조용히 잘라먹어 버퍼 정합성 불변식이 깨진다. 헤드룸 1.200x 유지. 1.25배를 고른 이유는 `max_step_rad` 가 정확히 텔레옵 값에 떨어지기 때문이고, **더 올리면 안 된다** — `ur7e_gello.yaml:56-63` 이 250 Hz 업샘플 + 500 Hz 드라이버 사이클에서 ~0.00314를 천장으로 못박아 뒀다. 출처는 `ur7e_gello_eef.yaml:238,241`, `ur7e_gello.yaml:64`.
+
+### 11.10 카메라 — 복구됨, 단 시리얼이 교체됐다
+
+허브 `4-4` 는 고장이 아니었다. 재연결로 둘 다 정상 동작한다(`4-4.1`, `4-4.3`).
+
+```
+리포에 하드코딩돼 있던 것:  cam1 147122072740 (D435)   cam2 243222072700 (D435if)
+실제 연결된 것:             cam1 151623020789 (D435)   cam2 322743060038 (D435if)
+```
+
+**옛 시리얼은 이 PC가 커널 로그상 한 번도 본 적 없는 하드웨어다**(2026-07-05까지 소급 확인). 없는 시리얼로 바인딩하면 **조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다. `607e541` 에서 `launch_cameras.sh`, `run_recorder.sh`, `gello_recorder_gui.py` 3곳을 갱신했다. **아직 옛 시리얼이 남아 있는 곳**: `docs/ros2/GELLO_UR7E_{ACT,DIFFUSION,FM}_DEPLOY.md`, `docs/testing/06_SENSORS.md`, 그리고 별도 저장소 `gello_software_remote_classifier`.
+
+**cam2 = 손목 카메라 확정.** 녹화 데이터셋 영상에서 cam2는 그리퍼 손가락이 같은 픽셀에 고정된 채 배경만 흐른다(정지 픽셀 비율 0.4–1.0%, cam1은 32–43%). 저분산 컬럼이 `x[476,536]`·`x[1008,1149]` 에 몰려 `cube_in_cup.py:172` 의 손가락 측정치를 독립 재현했다. **`IMAGE_CROP` 값 자체는 정책 관점에서 올바르다.**
+
+**미확정**: 연결된 두 대 중 어느 개체가 손목에 달렸는지. 모델-클래스 추론일 뿐이고 USB 포트 순서도 녹화 당시와 뒤바뀌었다. 팔을 흔들어 cam2 창을 보면 끝난다.
 
 ### 11.8 환경 함정 (반복 발생)
 
@@ -872,3 +928,153 @@ cam1/cam2가 공유 USB 허브 `4-4` 에서 동시에 죽었다: `uvcvideo Non-z
 - **PYTHONPATH는 덮어쓰지 말고 이어붙일 것** — `PYTHONPATH=…` 는 ROS overlay를 날려 `ModuleNotFoundError: ur_gello_bringup` 을 만든다. `:$PYTHONPATH` 를 붙인다. **반대로 pytest는 ROS PYTHONPATH가 있으면 깨진다.** 원인은 ROS의 pytest 플러그인이므로 `-p no:launch_testing` 으로 해결한다(`--ignore=` 로는 막히지 않는다 — 다음 파일이 같은 자리를 물려받는다).
 - ROS setup.bash를 `set -u` 아래에서 source하면 `AMENT_TRACE_SETUP_FILES: unbound variable` 이 난다. `set +u` / `set -u` 로 감쌀 것.
 - 모든 절차는 **worktree에서만** 돈다. `/home/laptop3/gello_software` 에는 `serl_ur_infra/ur_experiments/` 가 아예 없다(다른 branch).
+
+---
+
+## 12. reward classifier 조사 (2026-07-28)
+
+이 절은 reward classifier의 **출처·전처리·실측 성능**을 기록한다. 결론부터: **classifier 자체는 좋고, 우리가 잘못된 이미지를 먹이고 있다.**
+
+### 12.1 크롭 불일치 — 증명됨
+
+**학습 전처리** (kanu `~/workspace/youngwoong/hil-serl/examples/cube_classifier_pipeline.py:290-297`):
+
+```python
+def preprocess_frame(frame_bgr, crop):
+    if crop:                       # <- export_0724.py:32 는 crop=None 을 넘긴다
+        x0, y0, x1, y1 = crop
+        frame_bgr = frame_bgr[y0:y1, x0:x1]
+    resized_bgr = cv2.resize(frame_bgr, (128, 128), interpolation=cv2.INTER_LINEAR)
+    return np.ascontiguousarray(resized_bgr[..., ::-1], dtype=np.uint8)
+```
+
+→ **크롭 없이** 1280×720 전체를 128×128로 찌그러뜨린다(가로가 0.5625배로 압축되는 종횡비 왜곡).
+
+**추론 전처리** (우리 `ur_env/envs/ur7e_env.py::get_im()`): JPEG decode(BGR) → **`IMAGE_CROP` 적용**(cam1 `img[20:670,340:990]` 650×650, cam2 `img[0:720,420:1140]` 720×720) → 128×128 리사이즈 → BGR→RGB.
+
+**서버는 이미지 변환을 하나도 하지 않는다.** `rlpd_receive_server.py::_classifier_observation()` 는 canonical `(1,128,128,3)` uint8 을 그대로 통과시키는 strict-validating passthrough다. `grep -n "1280\|720\|resize\|cv2\." rlpd_receive_server.py` 는 **0 hit**. 따라서 원인은 전적으로 **actor 쪽 `IMAGE_CROP`** 이다.
+
+> **🪤 원래 G15/B8 문구는 틀렸다.** `reward_classifier_runtime.decode_classifier_image()` 를 지목했는데, 그 함수는 ZMQ GUI 뷰어(port 5594) 전용 모듈에 있고 gRPC 경로(port 50053)와 **호출 관계가 전혀 없다.** 두 모듈은 서로 다른 파일·프로세스·전송이다. 고칠 위치가 다르므로 이 문구를 근거로 서버 코드를 건드리면 안 된다.
+
+### 12.2 3중 독립 검증
+
+| 방법 | 결과 |
+| --- | --- |
+| 코드 판독 | `export_0724.py:32` → `preprocess_frame(frame, None)` |
+| **픽셀 대조** | full-frame 리사이즈 가설 **MAE 0.00 / 100% 비트 일치**, 우리 크롭 **MAE 21–35 / 일치 픽셀 ~4%** |
+| **실제 체크포인트 실행** | 성공 프레임 36개에서 recall@0.85 **100.0% → 33.3%**, 평균 P 0.9990 → 0.6027, 개별 최저 P **0.0213** |
+
+**반증 시도 6종이 전부 실패했다:**
+
+1. "all3의 3개 소스 중 하나는 크롭됐을 것" → pkl 6개 전부 무크롭 확인(0720분도 비트 단위 검증)
+2. "프레임 정렬이 틀렸을 것" → 100% 완전 일치는 정렬 오류 시 발생 불가
+3. "체크포인트 출처가 다를 것" → wandb argv + 샘플 수 정확히 일치(§12.4)
+4. "종횡비 왜곡이 크롭과 비슷할 것" → 두 가설의 상관 0.43–0.48. cam1은 1.97배 확대이고 프레임 면적의 45.8%만 남긴다
+5. "학습 증강이 흡수할 것" → `batched_random_crop(padding=4)` 는 ±4 px 평행이동이고 프레임의 3.1%. 크롭은 44–54%를 버린다 — **증강 범위의 1.6–2.4배 초과**
+6. "다른 전처리 경로가 있을 것" → 하나 찾았으나(`decode_classifier_image`) 그건 **올바른** 쪽이고 gRPC 경로와 무관
+
+**현재 프로덕션은 안 망가져 있다.** `ur_experiments/cube_in_cup.py` 가 kanu 체크아웃 브랜치(`5fb716b`)에 존재하지 않아 거기서는 `IMAGE_CROP = {}` 기본값이 적용된다 — 즉 오늘 기준으로는 우연히 학습과 일치한다. **actor 브랜치를 머지하는 순간 결함이 유입된다.**
+
+`ur_experiments/cube_in_cup.py:181-190` 에 이미 `KNOWN CONFLICT` 주석이 있다: *"Harmless while reward is stubbed (our loop ignores it); must be resolved ... before any run that trusts the reward signal."* 작성자가 알고 무장해제 상태로 출하한 것이다.
+
+### 12.3 classifier 성능 — held-out 실측
+
+학습 로그의 `Train Accuracy: 1.0000` 이 take 암기를 시사해 직접 재측정했다. `dataset_manifest.json` 의 val/test 분할(학습에 **한 번도 안 들어간** take)과 사람이 프레임 단위로 리뷰한 정답 라벨을 사용했다. 스크립트는 ssh stdin으로 파이프해 실행했고 **kanu에는 아무것도 쓰지 않았다**(`CUDA_VISIBLE_DEVICES=6`, `XLA_PYTHON_CLIENT_PREALLOCATE=false`).
+
+| 체크포인트 | split | thr | recall | **FPR** | acc |
+| --- | --- | --- | --- | --- | --- |
+| **Jul-27 `cube_in_cup_all3`** | test | 0.5 | **100.0%** | **0.0%** | **100.0%** |
+| Jul-27 `cube_in_cup_all3` | test | 0.85 | 95.8% | 0.0% | 98.4% |
+| Jul-24 (legacy msgpack) | test | 0.85 | 93.4% | 0.0% | 97.6% |
+
+**FPR이 양쪽 체크포인트·양쪽 split 전부 0.0%다.** 어느 문서에도 측정된 적 없던 수치다. val failure 최대 확률은 Jul-27이 **0.086**, Jul-24가 **0.488** — 후자는 0.5 임계값에 위험할 만큼 붙어 있다.
+
+에피소드별 시간축으로도 **사람이 찍은 성공 프레임과 사실상 같은 프레임에서 발화**한다(Jul-24 6/6 정확, Jul-27 5/6 정확 + 1개 2프레임 지연).
+
+**채택: Jul-27 `cube_in_cup_all3` @ threshold 0.5.** 근거는 (a) Jul-24는 학습 데이터를 복구할 수 없어 held-out 수치를 신뢰할 근거가 없고, (b) Jul-27의 음성 마진이 약 6배 넓다.
+
+로드 검증: `LOAD OK 13.5s`, 워밍업 후 **1.03 ms/frame**.
+
+**약점**: `take_21` 은 양쪽 체크포인트 모두 약하다(Jul-27은 0.85에서 아예 발화하지 않음).
+
+### 12.4 체크포인트 출처 — 확정
+
+```
+repo:   github.com/YWhero/hil-serl        ← rail-berkeley 가 아니다
+경로:   kanu ~/workspace/youngwoong/hil-serl
+branch: agent/cube-in-cup-classifier
+commit: d753571702e8d0c0dc37e4989830f3c03a9a32db
+실행:   2026-07-27 11:14:38 UTC
+wandb:  examples/wandb/run-20260727_111438-yufxxoum/files/wandb-metadata.json
+소요:   46초 (150 epoch, 7375 샘플, A4000 1장)
+```
+
+wandb metadata에 program 경로·git SHA·전체 argv가 그대로 남아 있어 확정됐다. `--checkpoint_dir` 이 `dataset/cube_in_cup_all3/classifier_ckpt` 를 정확히 가리킨다.
+
+학습 데이터 정합도 맞아떨어진다: success `5186 = 527 + 1784 + 1752 + 1123`, failure `2189 = 601 + 1588` — 로그의 버퍼 크기와 pkl 6개의 샘플 수가 일치한다. "all3" = 0720 + 0724.
+
+uncommitted 수정 2개가 실행 시점에 살아 있었고 **둘 다 동작에 영향이 없음**을 확인했다: `train_reward_classifier.py` 에 wandb 로깅 플래그 추가, `mappings.py` 의 franka import를 `try/except ImportError` 로 감싼 것.
+
+**`5fb716b` 는 이 체크포인트를 만들 수 없다.** 서브모듈을 `c32939b`(rail-berkeley 업스트림 = `d753571` 의 **부모 커밋**)에 핀하고, 어느 gello_software checkout에도 `cube_in_cup` 실험 디렉터리가 아예 없다. 이전 문서가 `5fb716b` 를 기준으로 가정한 것은 **틀렸다.**
+
+### 12.5 kanu 실제 경로 — 문서와 다르다
+
+`/home/laptop3/gello_software` 는 **kanu에 존재하지 않는다.**
+
+| 경로 | 상태 |
+| --- | --- |
+| `~/workspace/youngwoong/hil-serl` | **`agent/cube-in-cup-classifier` @ `d753571`** — classifier 학습처 |
+| `~/workspace/youngwoong/gello_software` | detached `0c8a5a8`, **dirty** — 쓰지 말 것 |
+| `~/workspace/youngwoong/gello_software_remote_classifier` | `feat/remote-cube-classifier-viewer` @ `a2733ee` — ZMQ 뷰어 + Jul-24 체크포인트 |
+| `/tmp/gello-hil-rl-receive-server-v2` | `5fb716b`, clean (Kanu 전용 worktree) |
+
+### 12.6 함정
+
+1. **`checkpoint_150` 이 5개다.** 같은 12분 세션 산출물이고 크기까지 비슷하다:
+   `cube_in_cup_combined`(11:04:16), `cv/fold_take_01`(11:10:41), `fold_take_02`(11:11:59), `fold_take_03`(11:13:22), **`cube_in_cup_all3`(11:15:24) ← 이것만 우리 것**
+2. **서빙 코드는 세 번째 저장소에 있다** — `gello_software_remote_classifier @ a2733ee` 의 `serl_ur_infra/remote_reward_classifier_server.py` + `ros2_ur_ws/src/gello_recorder/gello_recorder/reward_classifier_runtime.py`. 그 서버의 `--checkpoint` **기본값이 Jul-24 옛 모델**을 가리키므로 명시적으로 경로를 주지 않으면 엉뚱한 모델을 서빙한다.
+3. **`checkpoint_sha256()` 이 `os.path.isfile` 을 요구한다** (`rlpd_receive_server.py:126-132`). Jul-27 체크포인트는 **orbax OCDBT 디렉터리**라 그대로 넣으면 즉시 `FileNotFoundError`. **최신 체크포인트를 gRPC 경로에 쓰려면 이 코드를 먼저 고쳐야 한다.**
+4. **`serl_launcher` 는 어디에도 pip 설치돼 있지 않다** — 순전히 `PYTHONPATH` 로 해결된다. 재현하려면 `PYTHONPATH=.../hil-serl/serl_launcher`, cwd `.../hil-serl/examples`.
+5. **환경 드리프트**: kanu `il` env의 numpy가 **2.2.5**인데 lock은 1.26.4(메이저 점프), orbax 0.11.12 vs 0.11.5, grpcio 1.80.0 vs 1.74.0. 런타임 fail-closed 강제 대상은 jax/flax/distrax/tfp/wandb뿐이라 **이 3개는 자동으로 안 걸린다.**
+
+### 12.7 수정 방향 — upstream이 이미 답을 갖고 있다
+
+upstream `usb_pickup_insertion` 은 **같은 물리 카메라를 두 키로 두 번 등록**해 분류기에 전용 크롭을 준다:
+
+```python
+"side_policy":     {"serial_number": "130322274175", ...}
+"side_classifier": {"serial_number": "130322274175", ...}   # 같은 카메라
+IMAGE_CROP = {"side_policy":     img[250:500, 350:650],
+              "side_classifier": img[270:398, 500:628]}     # 정확히 128×128 — 리샘플링 0
+image_keys      = ["side_policy", "wrist_1", "wrist_2"]
+classifier_keys = ["side_classifier"]
+```
+
+`object_handover` 도 동일하다. 반면 `ram_insertion` 은 `classifier_keys == image_keys` — 분류기가 정책 크롭을 그대로 먹는다. **둘 다 upstream 계약 안이며, 선택은 우리 몫이다.**
+
+| | (a) 크롭으로 재학습 | (b) 분류기용 이미지 별도 전송 |
+| --- | --- | --- |
+| canonical schema hash | 그대로 | **변경** (actor·server 동시 수정) |
+| gRPC 대역폭 | 그대로 96 KiB/step | **약 2배** ← RTT p99가 이미 97.1 ms / 100 ms 예산 |
+| upstream 패턴 | `ram_insertion` | `usb_pickup_insertion` |
+| 비용 | **46초** + 재export | 코드 변경 + 대역폭 |
+| 위험 | 크롭 값이 체크포인트에 각인 | 없음 |
+
+대역폭이 결정적이다 — WiFi 병목이 약 13 Mbit/s인데 현재 7.9 Mbit/s를 쓰고 있어 이미지 쌍을 하나 더 보내면 예산을 넘긴다. 유선이면 (b)도 실현 가능하다.
+
+`cube_classifier_pipeline.py` 에 **`--cam1-crop`/`--cam2-crop` 이 이미 배선돼 있다**(`preprocess_frame` 까지 연결됨 — 경로만 안 썼을 뿐). 변환:
+
+```
+cam1  img[20:670, 340:990]  →  --cam1-crop 340,20,990,670
+cam2  img[0:720, 420:1140]  →  --cam2-crop 420,0,1140,720
+```
+
+**(a)를 택하면 반드시 크롭 값을 체크포인트 옆에 sidecar로 기록하고, 서버가 불일치 시 fail-closed 하게 할 것.** 안 그러면 나중에 `IMAGE_CROP` 을 바꿨을 때 또 조용히 깨진다 — 이 결함이 정확히 그렇게 생겼다.
+
+미적용 패치 초안이 scratchpad에 있다(`git apply --check` 미실시):
+`01-actor-classifier-preprocessing-contract.diff`, `02-training-fork-crop-and-sidecar.diff`, `03-remote-classifier-repo-mirror.diff`
+
+### 12.8 남은 열린 질문
+
+1. **whole-take 라벨링의 영향.** 0724 데이터는 take 전체를 통째로 성공/실패로 라벨링했다. held-out FPR 0.0%가 이를 상당 부분 방어하지만, 프레임 단위 라벨과 whole-take 라벨이 섞인 학습이 경계 근처 판정에 어떤 영향을 주는지는 미측정.
+2. **실기 분포.** held-out은 전부 녹화 데이터다. **카메라 개체가 물리적으로 교체됐으므로**(§11.10) 렌즈 개체차·색감·장착 각도 미세 차이가 실기에서 어떻게 작용하는지는 실제로 돌려봐야 안다. ZMQ 뷰어로 텔레옵하며 `p(success)` 곡선을 보는 것이 가장 직접적인 확인이다.
