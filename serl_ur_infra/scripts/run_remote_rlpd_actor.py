@@ -152,6 +152,55 @@ def _mock_policy_transform(sigma: float):
     return transform
 
 
+def _preflight_command_topics(env: Any, robot_config: Any) -> None:
+    """Refuse to arm while another node publishes to the same controller.
+
+    ``forward_position_controller`` is a ForwardCommandController: it applies
+    whatever arrives last.  With the teleop bridge still up, two publishers
+    drive it toward different targets and the arm jitters between them.  The
+    reference runner has checked this since before it was ever armed
+    (tests/run_real_hil.py:preflight_command_topics); adding --arm here without
+    it would reopen the same hazard.
+
+    Read-only: counting publishers publishes nothing.
+    """
+
+    base = getattr(env, "unwrapped", None)
+    backend = getattr(base, "backend", None)
+    node = getattr(backend, "_node", None)
+    if node is None:
+        print(
+            "[remote-actor] cannot reach the rclpy node -- skipping the "
+            "command-topic preflight.",
+            flush=True,
+        )
+        return
+
+    ros_config = getattr(robot_config, "ROS", {}) or {}
+    topic = ros_config.get(
+        "command_topic", "/forward_position_controller/commands"
+    )
+    n_pub = node.count_publishers(topic)
+    n_sub = node.count_subscribers(topic)
+    print(
+        f"[remote-actor] {topic}: publishers={n_pub} (ours included), "
+        f"subscribers={n_sub}",
+        flush=True,
+    )
+    if n_pub > 1:
+        raise SystemExit(
+            f"--arm refused: {n_pub} publishers on {topic}. Another node "
+            "(the teleop bridge?) is driving the same controller; shut it "
+            "down before arming."
+        )
+    if n_sub < 1:
+        raise SystemExit(
+            f"--arm refused: nothing subscribes to {topic}. Is "
+            "forward_position_controller active? "
+            "(ros2 control list_controllers)"
+        )
+
+
 def _build_actor_environment(config: Any, args: argparse.Namespace) -> Any:
     """Build the robot-local wrapper chain with an explicit task penalty."""
 
@@ -251,6 +300,8 @@ def main() -> int:
             )
 
     env = _build_actor_environment(config, args)
+    if args.arm:
+        _preflight_command_topics(env, robot_config)
     network_config = _network_config(config, args)
     network = create_actor_network(
         network_config,
