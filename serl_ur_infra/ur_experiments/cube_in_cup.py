@@ -30,6 +30,7 @@ ahead of ``serl_ur_infra``, so an ``experiments`` package here would be
 shadowed by upstream's.
 """
 
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -38,7 +39,11 @@ from ur_env.envs.chunking import ChunkingWrapper
 from ur_env.envs.config import DefaultUR7eEnvConfig
 from ur_env.envs.frame_wrappers import Quat2EulerWrapper, RelativeFrame
 from ur_env.envs.ur7e_env import UR7eEnv
-from ur_env.envs.wrappers import GelloIntervention
+from ur_env.envs.wrappers import (
+    GelloIntervention,
+    RosTopicDeadman,
+    SpacebarDeadman,
+)
 from ur_env.observation_schema import PROPRIO_KEYS
 
 # ``UNSET`` marks a field that must be measured on the real rig before this
@@ -254,6 +259,50 @@ class CubeInCupConfig:
     def __init__(self) -> None:
         self.robot_config = CubeInCupEnvConfig()
 
+    @staticmethod
+    def _resolve_deadman(deadman: Any, env: Any) -> Any:
+        """Turn a ``--deadman`` string into a live DeadmanSource.
+
+        Callers cannot build ``RosTopicDeadman`` themselves: it subscribes on
+        the URRosBackend rclpy node, which does not exist until ``UR7eEnv`` has
+        been constructed.  So the entry point passes a *spec* and resolution
+        happens here, once the node is available.
+
+        A non-string is passed through untouched -- tests supply a stub object
+        and assert identity.  ``None`` keeps the historical fallback, which is
+        ``SpacebarDeadman``; that listener is global and has no watchdog, so
+        prefer ``"topic"`` on the real rig.
+        """
+
+        if not isinstance(deadman, str):
+            return deadman
+        if deadman == "spacebar":
+            print(
+                "[deadman] spacebar: global pynput listener, no heartbeat and "
+                "no watchdog -- SPACE in ANY window engages. Prefer 'topic'.",
+                flush=True,
+            )
+            return SpacebarDeadman()
+        if deadman != "topic":
+            raise ValueError(
+                f"unknown deadman {deadman!r}; expected 'topic' or 'spacebar'"
+            )
+
+        source = RosTopicDeadman(env.backend._node)
+        # A GUI that never started is otherwise SILENT: RosTopicDeadman fails
+        # safe to "not engaged", so the operator sees no error at all -- just an
+        # intervention that never triggers.  Wait for one heartbeat and say so.
+        deadline = time.monotonic() + 15.0
+        while source._last_rx is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if source._last_rx is None:
+            raise RuntimeError(
+                "no /hil/deadman message after 15 s -- start the HIL GUI "
+                "(ros2_ur_ws/run_hil_gui.sh) before the actor"
+            )
+        print(f"[deadman] /hil/deadman ok (gain={source.gain():.2f})", flush=True)
+        return source
+
     def get_environment(
         self,
         fake_env: bool = False,
@@ -278,7 +327,7 @@ class CubeInCupConfig:
             # the same way.  Must sit inside RelativeFrame: it emits base-frame
             # deltas, which RelativeFrame converts back to the policy frame
             # before they are stored.
-            env = GelloIntervention(env, deadman=deadman)
+            env = GelloIntervention(env, deadman=self._resolve_deadman(deadman, env))
         env = RelativeFrame(env)
         env = Quat2EulerWrapper(env)
 

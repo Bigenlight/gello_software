@@ -359,18 +359,14 @@ def test_fake_env_chain_has_no_intervention_wrapper_at_all(monkeypatch):
         env.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G12: run_remote_rlpd_actor.py has no --deadman flag and never "
-    "passes deadman=, so the GUI topic deadman is unreachable from the actor. "
-    "When that is fixed this test XPASSes and must be un-xfailed.",
-)
 def test_actor_entry_point_can_select_the_topic_deadman():
-    """Forcing function: this goes green the moment the entry point is fixed.
+    """G12 is closed: the entry point exposes --deadman and passes it through.
 
-    ``strict=True`` means an XPASS is a FAILURE, so whoever adds ``--deadman``
-    is made to come back here and drop the marker rather than leaving a stale
-    'known gap'.
+    This was a strict xfail while the flag was missing.  It is kept as a
+    regression guard because the failure it protects against is silent: with
+    no ``deadman=``, ``GelloIntervention`` falls back to ``SpacebarDeadman``
+    and the rig still runs -- just with a global, watchdog-less listener where
+    SPACE in any window engages intervention.
     """
 
     source = open(
@@ -379,6 +375,8 @@ def test_actor_entry_point_can_select_the_topic_deadman():
     ).read()
     assert "--deadman" in source
     assert re.search(r"deadman\s*=", source)
+    # The default must be the watchdog-backed source, not the global listener.
+    assert re.search(r'"--deadman"[\s\S]{0,400}default="topic"', source)
 
 
 # =========================================================================== #

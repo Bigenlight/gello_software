@@ -94,12 +94,13 @@ def test_remote_actor_builds_penalty_inside_stats_and_timestamp_wrappers():
                 "fake_env": True,
                 "save_video": False,
                 "classifier": False,
+                "deadman": "topic",
             }
             return task_env
 
     env = module._build_actor_environment(
         ExperimentConfig(),
-        SimpleNamespace(fake_env=True, save_video=False),
+        SimpleNamespace(fake_env=True, save_video=False, deadman="topic"),
     )
 
     assert isinstance(env.env.env, GripperPenaltyWrapper)

@@ -207,8 +207,17 @@ def run_remote_actor(
     checkpoint_path: Optional[str] = None,
     run_id: Optional[str] = None,
     session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+    policy_action_transform: Optional[Callable[[Any], Any]] = None,
 ) -> ActorRunSummary:
-    """Run synchronous remote inference and lossless transition delivery."""
+    """Run synchronous remote inference and lossless transition delivery.
+
+    ``policy_action_transform`` rewrites the server's action before it is used.
+    It is applied at the single point where the action enters the loop, so the
+    executed action and the stored action stay the same object -- the buffer
+    invariant that makes stored transitions trainable.  Its only intended use
+    is bring-up against a zero-action server, where the robot would otherwise
+    never move and the policy->robot->intervention path could not be exercised.
+    """
     max_steps = validate_counter(config.max_steps, name="max_steps")
     if max_steps <= 0:
         raise ValueError("config.max_steps must be positive")
@@ -258,6 +267,14 @@ def run_remote_actor(
             action_shape=action_shape,
             name="network policy action",
         )
+        if policy_action_transform is not None:
+            # Re-validate: the transform is caller-supplied, and an out-of-range
+            # or wrong-dtype action must fail here rather than reach the robot.
+            policy_action = validate_action(
+                policy_action_transform(policy_action),
+                action_shape=action_shape,
+                name="transformed policy action",
+            )
         next_observation, reward, done, truncated, info = env.step(policy_action)
         next_timestamp_ns = validate_timestamp_ns(info.get("timestamp_ns"))
         next_observation_id = f"{session_id}:{step_id + 1}"

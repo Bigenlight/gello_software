@@ -60,8 +60,9 @@ fi
 CAM1_PID=""
 CAM2_PID=""
 if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
-    CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
-    CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
+    # See launch_cameras.sh for why these changed on 2026-07-28.
+    CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
+    CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
     CAM1_NAME="${CAM1_NAME:-cam1}"
     CAM2_NAME="${CAM2_NAME:-cam2}"
     # Both cameras record at the same resolution/fps so the two MP4s line up

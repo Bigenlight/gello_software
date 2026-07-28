@@ -455,13 +455,45 @@ class UR7eEnv(gym.Env):
         while time.time() < deadline:
             q, _, _ = self.backend.get_joint_state()
             if q is not None:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                f"no /joint_states within {self.config.ROBOT_STATE_WAIT_S}s of "
+                f"subscribing to '{self.config.ROS.get('joint_states_topic', '/joint_states')}'. "
+                "Is the UR driver running (ros2 topic hz /joint_states), and does "
+                "this process share its ROS_DOMAIN_ID?"
+            )
+        self._await_first_frames(deadline)
+
+    def _await_first_frames(self, deadline: float) -> None:
+        """Block until every configured camera has delivered a frame.
+
+        Same argument as the joint-state wait above, and the same failure it
+        prevents: get_im() rejects any frame older than IMAGE_STALE_S (0.5 s),
+        but a RealSense needs seconds to produce its first one.  Without this,
+        reset() -- the first thing every caller does -- throws on a healthy rig
+        that has simply not finished starting its cameras.
+
+        The hasattr guard is load-bearing, not defensive: fake/stub backends in
+        the test suite implement get_joint_state() without get_image().
+        """
+
+        cameras = getattr(self.config, "CAMERAS", None)
+        if not cameras or not hasattr(self.backend, "get_image"):
+            return
+        pending = list(cameras)
+        while time.time() < deadline:
+            pending = [
+                key for key in pending if self.backend.get_image(key)[0] is None
+            ]
+            if not pending:
                 return
             time.sleep(0.05)
         raise RuntimeError(
-            f"no /joint_states within {self.config.ROBOT_STATE_WAIT_S}s of "
-            f"subscribing to '{self.config.ROS.get('joint_states_topic', '/joint_states')}'. "
-            "Is the UR driver running (ros2 topic hz /joint_states), and does "
-            "this process share its ROS_DOMAIN_ID?"
+            f"no frame from camera(s) {pending} within "
+            f"{self.config.ROBOT_STATE_WAIT_S}s. Is launch_cameras.sh running, "
+            "and do the configured serials match the connected cameras?"
         )
 
     def reset(self, **kwargs):
