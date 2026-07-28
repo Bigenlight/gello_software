@@ -237,7 +237,10 @@ from ur_env.envs.policy_delta_controller import PolicyDeltaController  # noqa: E
 
 GOVERNOR = DefaultUR7eEnvConfig.GOVERNOR
 HZ = 10.0
-DX = np.array([0.01, 0.0, 0.0, 0.0, 0.0, 0.0])  # one full-scale +x step
+# 0.0125 = ACTION_SCALE[0], i.e. exactly one full-scale +x step. Keep this
+# tied to the config value: it was 0.01 before the 1.25x speed retune, and a
+# stale literal here silently stops testing the full-scale case.
+DX = np.array([0.0125, 0.0, 0.0, 0.0, 0.0, 0.0])  # one full-scale +x step
 
 
 def _controller(env=None):
@@ -285,10 +288,10 @@ def test_no_integrator_windup_at_the_wall():
 
     The controller integrates its OWN output, so if the clamp were applied only
     to the outgoing command the internal target would keep running past the
-    wall at 0.01 m/step.  After 60 pinned steps it would sit 47 cm outside the
-    box, and the first reversing action would produce NO motion for ~47 more
-    steps before the arm suddenly moved.  Here the reversal must bite on the
-    very next tick.
+    wall at one full ACTION_SCALE step per tick.  After 60 pinned steps it
+    would sit more than half a metre outside the box, and the first reversing
+    action would produce NO motion for dozens more steps before the arm
+    suddenly moved.  Here the reversal must bite on the very next tick.
     """
     env = _env()
     ctrl = _controller(env)
@@ -300,7 +303,9 @@ def test_no_integrator_windup_at_the_wall():
 
     _, info = ctrl.step(-DX)
     moved = x_wall - ctrl.tcp_cmd()[0, 3]
-    assert moved == pytest.approx(0.01, abs=1e-3), (
+    # Derived from DX, not hardcoded: the expected travel IS one full-scale
+    # step, so a change to ACTION_SCALE must not require editing this number.
+    assert moved == pytest.approx(DX[0], abs=1e-3), (
         f"reversal moved {moved:.4f} m instead of a full step — windup"
     )
     assert not info["clipped"]
@@ -315,7 +320,7 @@ def test_the_clamp_is_a_wall_not_a_trap():
     for _ in range(40):
         ctrl.step(DX)
 
-    # 0.008 on each axis: norm 0.0113 < v_max*dt (0.012), so the governor does
+    # 0.008 on each axis: norm 0.0113 < v_max*dt (0.015), so the governor does
     # not scale it and the expected y travel is exactly 5 * 0.008.
     y0 = ctrl.tcp_cmd()[1, 3]
     for _ in range(5):

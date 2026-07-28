@@ -133,12 +133,21 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --port 50053 \
   --checkpoint /home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150 \
   --expected-checkpoint-sha256 e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997 \
-  --threshold 0.85 \
+  --threshold 0.5 \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --replay-capacity 50000 \
   --intervention-capacity 10000 \
   --require-jax-backend gpu
 ```
+
+> **`--threshold`는 0.5다** (2026-07-29 정정, 이전 판은 0.85). 대상 브랜치 `53d5cf6`이
+> `DEFAULT_REWARD_THRESHOLD`를 0.5로 낮췄고, 이 문서의 예시가 0.85로 남아 있으면 코드
+> 기본값과 어긋난다. **단 그 근거 수치는 전부 크롭 없는 입력에서 측정된 것이라, 크롭이
+> 활성인 상태에서는 재측정이 필요하다** (G15 — `08_OPEN_GAPS.md`).
+>
+> threshold는 learner fingerprint에 들어간다(`run_rlpd_learner_server.py:548-552`).
+> 0.85로 학습된 checkpoint를 resume하려면 `--reward-threshold 0.85`를 명시해야 하며,
+> 아니면 게이트에서 **fail-closed로 거부**된다.
 
 근거: `serl_ur_infra/RL_RECEIVE_SERVER.md` §"Preferred Kanu runtime",
 `serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md` §"Kanu 실행 환경".

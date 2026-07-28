@@ -463,6 +463,9 @@ cd ~/gello_software/ros2_ur_ws
 - **Humble colcon build** — `colcon build --packages-select gello_policy ur_gello_bringup`가 실제 로봇 PC의 Humble에서 성공(이전엔 가정이었으나 이제 실제로 수행됨).
 - **실제 handshake** — 실제 UR7e에서 **첫 시도에** 깔끔하게 수렴: 0.388 rad gap을 0.78s 트래젝토리로 chase → max gap 0.0001 rad(`chase_tol` 0.06 rad을 크게 하회)로 수렴 → 0.41s 유지(`chase_dwell_s` 0.4s 요건 충족) → 컨트롤러가 `forward_position_controller`로 깔끔히 전환 → 브리지 resume. dead-band livelock 없음, 튜닝 불필요 — **디폴트 그대로 통과**. ([`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md) §2의 tolerance 체인이 ACT 경로에서도 실기에서 성립함을 확인.)
 - **실제 카메라 시리얼 매핑** — cam1(D435, `147122072740`)·cam2(D435if, `243222072700`) 모두 `rs-enumerate-devices`로 정상 열거, arm 직전 `ros2 topic hz`로 압축 토픽이 ~29.7–29.9Hz 라이브 스트리밍 확인 — 문서의 예상 물리 배치와 일치.
+  > ⚠️ 이 시리얼은 **당시 장착돼 있던 개체**다. 2026-07-28에 카메라가 물리적으로 교체돼
+  > 현재는 `151623020789` / `322743060038`이다(§2 정정 박스). 이 줄은 그때의 검증 기록이라
+  > 일부러 그대로 두었다 — 오늘 이 값으로 실행하면 카메라가 조용히 안 뜬다.
 - **실제 그리퍼** — 공유 Modbus socat 브리지로 연결 후 fault 없이 자동 캘리브레이션 성공(`gACT:1, gFLT:0`). ~1.7s 활성화 창 동안 일시적 "dropped streaming setpoint" 경고 1회가 떴으나 스스로 해소된 benign 현상(실제 문제 아님).
 - **ACT 서버 / GPU 추론** — py3.12·`--device cuda`로 체크포인트 로드 후 `127.0.0.1:5591` listen 확인, GPU 추론 경로 라이브(RTX 3060 Mobile, CUDA 13.2, 드라이버 595.71.05).
 - **엔드투엔드 자율 시도** — 오퍼레이터가 `~/start_execution`을 호출, 로봇이 학습된 "put right banana in pot" 태스크를 실제로 자율 시도. **전체 시스템(안전 게이팅 → 실제 handshake → 실제 카메라 매핑 → ZMQ 라운드트립 → 실제 GPU 추론 → 실제 그리퍼 제어)이 물리 하드웨어에서 엔드투엔드로 올바르게 동작한 첫 확인 사례**다.

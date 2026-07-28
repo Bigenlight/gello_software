@@ -518,21 +518,45 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 
 ---
 
-## G15 — 분류기 전처리가 **크롭을 하지 않는다** 🟠
+## G15 — 분류기가 **크롭 없이 학습됐는데 액터는 크롭해서 먹인다** 🔴
+
+> 이 절은 2026-07-28에 전면 개정됐다. 이전 판은 원인을 `decode_classifier_image()`로
+> 지목했으나 **틀렸다** — 위 정정 박스 참조. 아래는 측정으로 확정된 내용이다.
 
 ### 사실
 
-- `reward_classifier_runtime.decode_classifier_image()`는 **풀 프레임**을 리사이즈하고,
-  docstring은 그것이 체크포인트 초기화에 쓴 관측 트리라고 말한다.
-- `rlpd_receive_server._classifier_observation()`은 분류기에 이 env의 **크롭된** canonical
-  관측을 먹인다.
-- `cube_in_cup`은 크롭을 켠다 (cam1 650×650, cam2 720×720).
+- **학습**은 크롭 없이 1280×720 full-frame을 128×128로 찌그러뜨렸다
+  (kanu `hil-serl/examples/cube_classifier_pipeline.py::preprocess_frame`,
+  `export_0724.py`가 `crop=None`을 넘긴다).
+- **액터**는 `ur7e_env.get_im()`에서 `IMAGE_CROP` 적용 후 리사이즈한다
+  (cam1 650×650, cam2 720×720 → 128×128).
+- **서버는 이미지 변환을 하나도 하지 않는다.** `_classifier_observation()`은 canonical
+  관측을 그대로 넘기는 passthrough다 (`grep "resize\|cv2\." rlpd_receive_server.py` → 0 hit).
 
 즉 **분류기 입력이 분포 밖으로 나간다.** 그리고 분류기는 보상·종단의 **권위**다.
 
+측정: 픽셀 대조 MAE **0.00**(무크롭 가설, 비트 일치) vs **21–35**(크롭),
+실제 체크포인트에서 recall@0.85 **100.0% → 33.3%**.
+
 ### 왜 지금 당장 터지지 않는가
 
-현재 루프는 보상을 무시한다(스텁). 그래서 무해하다 — **보상을 믿는 실행 전까지만.**
+`ur_experiments/`가 대상 브랜치(`feat/gello-ur7e-humble-22.04`)에 **없어서** 거기서는
+`IMAGE_CROP={}`가 적용된다 — 우연히 학습 조건과 일치한다. **액터 브랜치를 머지하는 순간
+크롭이 활성화된다.** 그리고 `DRY_RUN=True`가 마지막 방어선이다.
+
+### 해결 방향 — 크롭이 기준이다
+
+**`IMAGE_CROP`을 되돌리지 말 것.** 크롭 값은 데이터셋 측정에서 나왔고(테이블 z 바닥,
+손목 파지축 x=781) 1차 소비자는 RL 정책이다. **분류기를 그 크롭으로 재학습하는 것이
+정답이다** — 현 체크포인트를 만든 학습이 150 epoch에 46초였고,
+`cube_classifier_pipeline.py`에 `--cam1-crop`/`--cam2-crop`이 이미 배선돼 있다:
+
+```
+cam1  img[20:670, 340:990]  →  --cam1-crop 340,20,990,670
+cam2  img[0:720, 420:1140]  →  --cam2-crop 420,0,1140,720
+```
+
+재학습 시 크롭 값을 체크포인트 옆에 sidecar로 기록해 서버가 불일치를 감지하게 할 것.
 
 ### 해결 방향 (둘 중 하나, 미결정)
 
