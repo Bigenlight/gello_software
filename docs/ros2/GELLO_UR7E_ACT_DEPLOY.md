@@ -85,10 +85,20 @@ observation 방향 (팔 → 정책, 매 EXECUTE 틱):
 
 ## 2. 하드웨어 / 환경
 
+> ### 🔧 카메라 시리얼 정정 (2026-07-28)
+>
+> 카메라 **개체가 물리적으로 교체됐다.** 이전 판의 `147122072740` / `243222072700`은
+> 이 PC가 커널 로그상 한 번도 열거한 적 없는 하드웨어다(2026-07-05까지 소급 확인).
+> 이 문서의 시리얼은 실제 연결된 개체(`151623020789` / `322743060038`)로 갱신했다.
+> **없는 시리얼로 바인딩하면 조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다.
+> 모델 클래스(D435 / D435if)와 cam1·cam2 배정은 그대로지만, **어느 개체가 손목에 달렸는지는
+> 미확정**이다. 팔을 흔들어 cam2 화면에서 손가락이 고정되는지 확인할 것.
+> 아래 "검증 완료" 류의 과거 기록은 **옛 개체로 수행된 것**이라 그대로 두었다.
+
 - **팔**: UR7e, `ros-humble-ur`. **그리퍼**: Robotiq 2F-85 (Modbus RTU, 드라이버가 소유한 socat 브리지 `/tmp/ttyUR` 공유).
 - **카메라**: RealSense 2대, **시리얼로 바인딩** (혼동 시 정책이 조용히 열화됨 — §9 참고):
-  - cam1 = Intel RealSense **D435**, 시리얼 `147122072740`
-  - cam2 = Intel RealSense **D435if**, 시리얼 `243222072700`
+  - cam1 = Intel RealSense **D435**, 시리얼 `151623020789`
+  - cam2 = Intel RealSense **D435if**, 시리얼 `322743060038`
   - 공통 컬러 프로파일 `1280x720x30` (해상도/FPS는 두 카메라 동일해야 함)
 
   > **⚠️ 물리적 카메라 배치 = 학습 리그와 반드시 일치.** 하드웨어 스펙상 한 대는 **삼각대(tripod)에 올려 씬/3인칭 시점**을, 다른 한 대는 **작업공간을 근접(close-up)**으로 본다. **두 물리 시점과 cam1/cam2 시리얼 할당이 학습 당시 리그와 동일**해야 하며, 어긋나면 정책이 **에러 없이 조용히 열화**된다(정책은 cam1=씬, cam2=근접 같은 고정 배치를 가정하고 학습됨). 실기 첫 구동 전에 **라이브 뷰(`rqt_image_view` 등)를 학습 셋업 사진과 대조**해 어느 카메라가 어느 시점인지, 시리얼 할당이 맞는지 확인한 뒤에야 정책을 신뢰할 것. (§9의 cam1/cam2 swap 경고와 함께 읽을 것.)
@@ -174,14 +184,14 @@ ACT_CHECKPOINT="$CKPT" ./scripts/run_act_server.sh
 3. **RealSense 카메라 2대를 정확한 시리얼→네임스페이스 매핑으로 기동.** 별도 launch 파일이 없으므로 `ros2_ur_ws/run_recorder.sh`(레코더)가 카메라를 띄우는 방식(시리얼별 `realsense2_camera` 노드, `serial_no:='<serial>'`처럼 **작은따옴표로 감싼** all-digit 문자열, 공통 `color_profile:='1280x720x30'`)을 그대로 재사용한다:
 
    ```bash
-   # cam1 (D435, 147122072740) → 네임스페이스 cam1
+   # cam1 (D435, 151623020789) → 네임스페이스 cam1
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam1 camera_namespace:=cam1 \
-       serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
-   # cam2 (D435if, 243222072700) → 네임스페이스 cam2
+       serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
+   # cam2 (D435if, 322743060038) → 네임스페이스 cam2
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam2 camera_namespace:=cam2 \
-       serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+       serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
    ```
 
    기동 후 압축 이미지 토픽이 실제로 나오는지 확인:
@@ -322,10 +332,10 @@ source /opt/ros/humble/setup.bash
 cd ~/gello_software/ros2_ur_ws
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam1 camera_namespace:=cam1 \
-    serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam2 camera_namespace:=cam2 \
-    serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
 ```
 
 확인: `ros2 topic hz /cam1/cam1/color/image_raw/compressed` / `/cam2/...`로 ~30Hz 나오는지.
@@ -469,7 +479,7 @@ cd ~/gello_software/ros2_ur_ws
 ## 9. 트러블슈팅
 
 - **cam1/cam2 시리얼이 뒤바뀜.** 반드시 **시리얼로 바인딩**할 것(`serial_no`) — 이름/포트 순서에 의존하면 두 RealSense를 구분할 수 없다. 잘못 바인딩되면 정책은 크래시하지 않고 **조용히 열화**된다(어느 카메라가 어느 관측 슬롯인지 학습 시와 달라지므로).
-- **all-digit 시리얼의 정수 강제변환 버그.** `ros2 launch`의 CLI 인자 파서는 전부 숫자인 문자열(예: `147122072740`)을 정수로 오추론해 `serial_no`(string 파라미터)에 넣으려다 노드가 즉시 죽는다. 값을 **따옴표로 감쌀 것**: `serial_no:="'147122072740'"` (자세한 배경은 [`GELLO_UR7E_RECORDING.md`](./GELLO_UR7E_RECORDING.md)의 troubleshooting 항목 7 참고).
+- **all-digit 시리얼의 정수 강제변환 버그.** `ros2 launch`의 CLI 인자 파서는 전부 숫자인 문자열(예: `151623020789`)을 정수로 오추론해 `serial_no`(string 파라미터)에 넣으려다 노드가 즉시 죽는다. 값을 **따옴표로 감쌀 것**: `serial_no:="'151623020789'"` (자세한 배경은 [`GELLO_UR7E_RECORDING.md`](./GELLO_UR7E_RECORDING.md)의 troubleshooting 항목 7 참고).
 - **그리퍼 크러시(과도한 힘으로 닫힘).** `policy_leader_node`는 `action[6]`(0=open..1=closed)을 **그대로(identity)** `/robotiq_gripper/command_percent`에 발행한다 — threshold나 binarize를 절대 넣지 말 것(데이터셋의 grip_cmd가 연속값이므로). `ur_gello_bringup`의 `gello_gripper_bridge_node`에는 방향을 뒤집는 `invert` 파라미터(반드시 `false`로 유지해야 하는, crush hazard가 있는 옵션)가 있지만, **ACT 배포 경로는 이 노드를 아예 launch하지 않는다** — `policy_leader_node`가 `/robotiq_gripper/command_percent`의 유일한 publisher이고 그 사이에 invert 로직이 전혀 없다. 만약 launch 파일을 손대다 `gello_gripper_bridge`를 다시 끼워 넣으면 이중 writer + 잠재적 invert 위험이 함께 재발하므로, 트러블슈팅 시 **`gello_gripper_bridge`가 여전히 빠져 있는지**부터 확인할 것.
 - **첫 실행 시 torch 캐시 관련 멈춤/실패.** §4의 `TORCH_HOME`/`HF_HUB_OFFLINE=1` 참고 — ResNet18 백본 가중치를 오프라인 환경에서 인터넷으로 받으려다 멈추는 경우가 흔하다.
 - **가짜(spurious) FAULT가 시작 직후에 뜬다.** 서버의 워밍업이 실패했거나 건너뛰어졌을 가능성. 서버 로그에 `warmup done`이 찍혔는지 확인.

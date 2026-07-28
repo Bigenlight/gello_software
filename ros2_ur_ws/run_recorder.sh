@@ -22,8 +22,8 @@
 #     RATE=200 ./run_recorder.sh        # synchronized-table sample rate (Hz)
 #
 # Camera env vars (only used when CAMS=true or CAMS=1):
-#     CAM1_SERIAL    RealSense #1 serial (default 147122072740, a plain D435)
-#     CAM2_SERIAL    RealSense #2 serial (default 243222072700, a D435IF)
+#     CAM1_SERIAL    RealSense #1 serial (default 151623020789, a plain D435)
+#     CAM2_SERIAL    RealSense #2 serial (default 322743060038, a D435IF)
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)

@@ -1,5 +1,18 @@
 # 09 — HIL actor 기동 런북 (Stage A: fake-env / Stage B: 실센서 DRY_RUN)
 
+> ### 🔧 정정 (2026-07-28) — actor entrypoint에 CLI 플래그 3개가 생겼다
+> 이 문서는 그 이전에 쓰였다. 아래가 바뀌었다:
+> - **`--arm`** — `DRY_RUN`을 CLI로 해제한다. "DRY_RUN 해제는 이 문서의 범위가 아니다"(§4)는
+>   더 이상 맞지 않는다. `--arm` 사용 시 이중 퍼블리셔를 자동으로 거부한다.
+> - **`--deadman {topic,spacebar}`**, 기본 `topic` — 이전에는 `deadman`이 전혀 전달되지 않아
+>   `SpacebarDeadman`(전역 pynput, 워치독 없음)으로 조용히 fallback했다. **G12 해결.**
+> - **`--mock-policy-noise SIGMA`** — zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증한다.
+>
+> 또한 `clip_safety_box`는 **구현돼 있다**(§4의 "아직 구현되어 있지 않다"는 낡았다). 다만
+> `run_real_hil.py` 경로에서는 `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*`가 0이라 **비활성**이다.
+>
+> 현재 상태는 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](../../serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 볼 것.
+
 > 이 문서는 **로봇 랩톱(`laptop3`)에서 HIL-SERL actor 프로세스를 띄우는 절차**만 다룬다.
 > 학습 알고리즘, 보상 분류기 학습, 정책 성능은 범위 밖이다.
 > 실행은 전부 `ros2_ur_ws/run_hil_actor.sh` 하나로 통일한다. **손으로 python 명령을

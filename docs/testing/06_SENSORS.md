@@ -21,10 +21,20 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 
 ### 1.1 계약 — 🔧 **cam2는 손목 카메라다 (정정 2026-07-27)**
 
+> ### 🔧 시리얼 정정 (2026-07-28) — 카메라 개체가 교체됐다
+> 이전 판의 `147122072740` / `243222072700`은 **이 PC가 커널 로그상 한 번도 본 적 없는
+> 하드웨어**다(2026-07-05까지 소급 확인). 아래 표는 실제 연결된 개체로 갱신했다.
+> **없는 시리얼로 바인딩하면 조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다.
+> 아직 옛 시리얼이 남은 곳: `docs/ros2/GELLO_UR7E_{ACT,DIFFUSION,FM}_DEPLOY.md`,
+> `ros2_ur_ws/src/gello_{policy,recorder}/README.md`, 별도 저장소 `gello_software_remote_classifier`.
+>
+> **미확정**: 연결된 두 대 중 어느 개체가 손목에 달렸는지. 아래 배정은 모델 클래스 추론이고
+> USB 포트 순서도 녹화 당시와 뒤바뀌었다. 팔을 흔들어 cam2 창을 보면 끝난다.
+
 | | cam1 | cam2 |
 |---|---|---|
 | 역할 | **SCENE** (삼각대, 3인칭, 고정) | 🔧 **WRIST** — 그리퍼에 **강체로 장착**. 팔과 함께 움직인다 |
-| 시리얼 | `147122072740` (plain D435) | `243222072700` (D435IF) |
+| 시리얼 | `151623020789` (plain D435) | `322743060038` (D435IF) |
 | 토픽 | `/cam1/cam1/color/image_raw/compressed` | `/cam2/cam2/color/image_raw/compressed` |
 | 프로파일 | `1280x720x30` (둘 다 동일) | 동일 |
 | `cube_in_cup` 크롭 | `img[20:670, 340:990]` (650×650) | `img[0:720, 420:1140]` (720×720) |
@@ -84,7 +94,7 @@ VIEW=false ./launch_cameras.sh   # 뷰어 없이
 
 ```bash
 ros2 launch realsense2_camera rs_launch.py \
-    camera_name:=cam1 camera_namespace:=cam1 "serial_no:='147122072740'" \
+    camera_name:=cam1 camera_namespace:=cam1 "serial_no:='151623020789'" \
     "rgb_camera.color_profile:='1280x720x30'"
 ```
 
@@ -244,15 +254,25 @@ compressed JPEG → cv2.imdecode(BGR) → IMAGE_CROP[key](선택) → resize(128
   cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`.
   크롭이 없으면 1280×720이 1:1로 눌려 **가로가 세로의 0.5625로 압축**된다.
 
-> ### 🛑 알려진 충돌: 분류기 전처리는 크롭하지 않는다
-> `reward_classifier_runtime.decode_classifier_image()`는 **풀 프레임을 리사이즈**하고,
-> 그 docstring은 그것이 "체크포인트 초기화에 쓴 바로 그 관측 트리"라고 말한다. 그런데
-> `rlpd_receive_server._classifier_observation()`은 분류기에 **크롭된** canonical 관측을
-> 먹인다. 즉 크롭을 켜는 순간 **분류기 입력이 분포 밖으로 나간다.**
+> ### 🔴 알려진 충돌 (G15): 분류기는 크롭 없이 학습됐다 — **2026-07-28 증명됨**
+> 학습은 크롭 없이 1280×720 full-frame을 128×128로 찌그러뜨렸다
+> (kanu `hil-serl/examples/cube_classifier_pipeline.py::preprocess_frame`,
+> `export_0724.py`가 `crop=None`을 넘긴다). 그런데 actor의 `ur7e_env.get_im()`은
+> **`IMAGE_CROP` 적용 후** 리사이즈한다. 즉 크롭을 켜는 순간 **분류기 입력이 분포 밖으로 나간다.**
 >
-> 보상이 스텁인 동안(현재 루프가 보상을 무시함)은 무해하지만, **보상 신호를 믿는 실행
-> 전에는 반드시 해결**해야 한다 — 크롭으로 재학습하거나, 정책/분류기 전처리를 분리하거나.
-> 근거: `ur_experiments/cube_in_cup.py`의 `IMAGE_CROP` 주석 "KNOWN CONFLICT".
+> 증명: 픽셀 대조 MAE **0.00**(무크롭 가설, 100% 비트 일치) vs **21–35**(우리 크롭),
+> 실제 체크포인트 실행에서 recall@0.85 **100.0% → 33.3%**, 개별 최저 P 0.0213.
+>
+> **🔧 이 문서의 이전 판은 원인을 `reward_classifier_runtime.decode_classifier_image()`로
+> 지목했는데 그것은 틀렸다.** 그 함수는 ZMQ GUI 뷰어(port 5594) 전용이고 gRPC 경로와
+> **호출 관계가 없다.** 서버 `_classifier_observation()`은 이미지 변환을 하나도 하지 않는
+> passthrough다. **고칠 위치는 actor의 `IMAGE_CROP`이다.**
+>
+> **현재 프로덕션은 안 망가져 있다** — 크롭을 켜는 task config가 kanu 브랜치에 없다.
+> **actor 브랜치 머지 시 유입된다.** 수정 선택지(크롭으로 재학습 vs 전처리 분리)는
+> `serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md` §12.7.
+>
+> **`IMAGE_CROP` 값 자체는 정책 관점에서 올바르다 — 임의로 바꾸지 말 것.**
 - `DISPLAY_IMAGE`가 기본 `True` (`config.py:28`) → OpenCV 창이 뜬다. 헤드리스 세션에서는 끈다.
 - **RealSense를 두 번 열 수 없기 때문에** env는 pyrealsense2로 장치를 직접 열지 않고
   `launch_cameras.sh`의 토픽을 구독한다 (`config.py:17-21`). 즉 `launch_cameras.sh`가

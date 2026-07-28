@@ -23,11 +23,31 @@
 | G9 | 개입 앵커가 flange 기준 | 🟡 | 🟡 |
 | G10 | pinned submodule | 🟡 | 🟡 |
 | G11 | build/gripper shell | 🟢 | 🟢 |
-| G12 | 스페이스바 데드맨 기본값 | 🟡 | 🟡 |
+| G12 | 스페이스바 데드맨 기본값 | 🟡 | 🟢 **해결 (07-28)** — `--deadman topic` 배선, 기본값 `topic` |
 | **G13** | **리셋 branch-cut** | (미발견) | 🟡 **수정·단위검증**, 실기 미검증 |
 | **G14** | **시스템 grpcio 1.30.2 손상** | (미발견) | 🟠 **완화만 됨**(venv 강제), 근본 미해결 |
-| **G15** | **분류기 전처리 ↔ 크롭 불일치** | (미발견) | 🟠 보상을 믿기 전에 반드시 해결 |
+| **G15** | **분류기 전처리 ↔ 크롭 불일치** | (미발견) | 🔴 **07-28 증명됨** — recall 100%→33.3%. 미수정. **아래 정정 참조** |
 | **G16** | **10 Hz 레이턴시 예산 소진** | (미발견) | 🟠 유선 전환 필요 |
+
+> ### 🔧 G15 정정 (2026-07-28) — 원인 지목이 틀렸다
+>
+> 이 문서와 `06_SENSORS.md`가 원인으로 지목한 `reward_classifier_runtime.decode_classifier_image()`는
+> **ZMQ GUI 뷰어(port 5594) 전용 모듈**이고, gRPC 경로(port 50053)와 **호출 관계가 전혀 없다.**
+> 서버 `rlpd_receive_server._classifier_observation()`은 이미지 변환을 **하나도** 하지 않는
+> strict-validating passthrough다 (`grep -n "resize\|cv2\." rlpd_receive_server.py` → 0 hit).
+>
+> **진짜 원인은 actor 쪽 `IMAGE_CROP`이다.** 학습은 크롭 없이 full-frame을 128×128로 찌그러뜨렸는데
+> (`cube_classifier_pipeline.py::preprocess_frame` + `export_0724.py`가 `crop=None`), actor의
+> `ur7e_env.get_im()`은 크롭 후 리사이즈한다. 이 문구를 근거로 서버 코드를 고치면 **엉뚱한 모듈을
+> 건드리게 된다.**
+>
+> 증명: 픽셀 대조 MAE **0.00**(무크롭 가설, 비트 일치) vs **21–35**(크롭), 실제 체크포인트 실행에서
+> recall@0.85 **100.0% → 33.3%**. 반증 시도 6종 전부 실패.
+>
+> **단 현재 프로덕션은 안 망가져 있다** — `ur_experiments/cube_in_cup.py`가 kanu 체크아웃 브랜치에
+> 없어 거기서는 `IMAGE_CROP={}`가 적용된다. **actor 브랜치를 머지하는 순간 유입된다.**
+>
+> 전체 내용과 수정 선택지는 `serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md` §12.
 
 ```bash
 export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
