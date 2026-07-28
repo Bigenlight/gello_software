@@ -464,7 +464,13 @@ class UR7eEnv(gym.Env):
                 "Is the UR driver running (ros2 topic hz /joint_states), and does "
                 "this process share its ROS_DOMAIN_ID?"
             )
-        self._await_first_frames(deadline)
+        # Its OWN budget, not whatever the joint-state wait left over. DDS
+        # discovery can eat most of ROBOT_STATE_WAIT_S, which would leave the
+        # cameras near-zero seconds and time them out on a healthy rig -- the
+        # exact failure this wait exists to prevent.
+        self._await_first_frames(
+            time.time() + float(self.config.ROBOT_STATE_WAIT_S)
+        )
 
     def _await_first_frames(self, deadline: float) -> None:
         """Block until every configured camera has delivered a frame.

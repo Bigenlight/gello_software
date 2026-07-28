@@ -72,6 +72,7 @@ def build_data(
     timestamp_ns: int,
     policy_version: int,
     policy_action: Any,
+    policy_actions_synthetic: bool = False,
     episode_id: int,
     step_id: int,
     observation_id: str,
@@ -164,6 +165,10 @@ def build_data(
             ),
             "policy_action": requested_action,
             "intervened": intervened,
+            # Stamped per transition, not just in the run summary: once these
+            # pickles leave the process there is nothing else to distinguish a
+            # mock-noise action from a real policy action.
+            "policy_actions_synthetic": bool(policy_actions_synthetic),
         },
         "transition": transition,
     }
@@ -175,6 +180,10 @@ class ActorRunSummary:
     env_steps: int
     episodes_started: int
     intervention_steps: int
+    # True when policy actions were rewritten before execution. A run with a
+    # mock policy must stay identifiable AFTER the fact: the stored actions are
+    # indistinguishable from real policy output once the process exits.
+    policy_actions_synthetic: bool = False
 
 
 def _dump_data(
@@ -288,6 +297,7 @@ def run_remote_actor(
             timestamp_ns=source_timestamp_ns,
             policy_version=action_result.policy_version,
             policy_action=policy_action,
+            policy_actions_synthetic=policy_action_transform is not None,
             episode_id=episode_id,
             step_id=step_id,
             observation_id=observation_id,
@@ -400,4 +410,5 @@ def run_remote_actor(
         env_steps=max_steps,
         episodes_started=episodes_started,
         intervention_steps=total_intervention_steps,
+        policy_actions_synthetic=policy_action_transform is not None,
     )

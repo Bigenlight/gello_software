@@ -122,8 +122,13 @@ cd $WT/ros2_ur_ws
 ```bash
 # Kanu에서
 cd /tmp/gello-hil-rl-receive-server-v2
-git rev-parse --short HEAD          # -> 5fb716b 여야 한다
-nvidia-smi                          # GPU 7이 아직 비어 있는지 매번 다시 확인
+git rev-parse --short HEAD          # 아래 주석 참조 — 5fb716b 고정 아님
+nvidia-smi                          # 쓰려는 GPU가 비어 있는지 매번 다시 확인
+
+# 위 `5fb716b`는 2026-07-27 시점의 Kanu worktree HEAD였다. actor 브랜치가 머지되면
+# 그 값이 아니게 되므로 특정 SHA를 기대하지 말 것 — 확인해야 할 것은 "이 트리가
+# 랩톱 쪽과 같은 커밋인가"이지 특정 해시가 아니다. 랩톱에서 `git rev-parse --short HEAD`를
+# 찍어 같은 값인지 대조하라. GPU도 7번 고정이 아니다(2026-07-28 기준 5/6/7 전부 유휴).
 
 CUDA_VISIBLE_DEVICES=7 \
 PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \

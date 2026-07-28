@@ -338,6 +338,15 @@ def main() -> int:
             f"intervention_steps={summary.intervention_steps}",
             flush=True,
         )
+        if summary.policy_actions_synthetic:
+            print(
+                "[remote-actor] !! THIS RUN USED A MOCK POLICY "
+                f"(--mock-policy-noise {args.mock_policy_noise}). Its actions "
+                "are noise, not policy output. Every transition is stamped "
+                "meta.policy_actions_synthetic=true; do not use this data as "
+                "a demo or as evidence of policy behaviour.",
+                flush=True,
+            )
     finally:
         network.close()
         env.close()

@@ -178,16 +178,32 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     # than on a table region, because the fingers stay at fixed pixels while the
     # background moves with the arm.
     #
-    # KNOWN CONFLICT -- classifier preprocessing does NOT crop:
-    #   reward_classifier_runtime.decode_classifier_image() resizes the full
-    #   frame, and its docstring calls that "the exact observation tree used to
-    #   initialize the checkpoint".  But rlpd_receive_server._classifier_
-    #   observation() feeds the classifier this env's *cropped* canonical
-    #   observation.  Enabling a crop therefore takes classifier input out of
-    #   distribution, and the classifier is authoritative for reward/done.
-    #   Harmless while reward is stubbed (our loop ignores it); must be resolved
-    #   -- retrain on crops, or split policy/classifier preprocessing -- before
-    #   any run that trusts the reward signal.
+    # KNOWN CONFLICT (G15) -- the pinned classifier was trained WITHOUT a crop:
+    #   its training pipeline resized the full 1280x720 frame straight to
+    #   128x128 (kanu hil-serl examples/cube_classifier_pipeline.py, whose
+    #   export passes crop=None), while get_im() crops first.  Measured
+    #   2026-07-28: bit-exact pixel match to the no-crop hypothesis, and
+    #   recall@0.85 falls 100% -> 33.3% when the crop is applied.
+    #   rlpd_receive_server._classifier_observation() performs NO image
+    #   transform -- it forwards this env's cropped canonical observation
+    #   unchanged -- so the mismatch originates here, not on the server.
+    #
+    #   DO NOT "fix" this by removing the crop.  These boxes are measured and
+    #   serve the policy, which is the primary consumer.  The resolution is to
+    #   retrain the classifier against these crops (the run that produced the
+    #   current checkpoint took 46 s, and cube_classifier_pipeline.py already
+    #   accepts --cam1-crop/--cam2-crop):
+    #       cam1 -> --cam1-crop 340,20,990,670      (this file stores y0,y1,x0,x1;
+    #       cam2 -> --cam2-crop 420,0,1140,720       the pipeline takes x0,y0,x1,y1)
+    #
+    #   Until that lands the classifier is out of distribution, and it is
+    #   authoritative for reward AND done.  See docs/testing/08_OPEN_GAPS.md
+    #   G15 and HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md §12.
+    #
+    #   (An earlier version of this comment blamed
+    #   reward_classifier_runtime.decode_classifier_image().  That module is
+    #   not in this repo at all -- it belongs to a standalone ZMQ viewer and
+    #   has no call path to the gRPC server.  Chasing it wastes a session.)
     IMAGE_CROP: Optional[dict] = {
         "cam1": lambda img: img[20:670, 340:990],   # 650x650
         "cam2": lambda img: img[0:720, 420:1140],   # 720x720
