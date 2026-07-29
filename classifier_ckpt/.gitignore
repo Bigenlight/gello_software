@@ -1,0 +1,11 @@
+# Reward-classifier checkpoints are staged on the machine, never committed.
+#
+# The canonical cube-in-cup checkpoint is the orbax directory
+# `cube_in_cup_all3/checkpoint_150` (~43 MiB), rsynced from Kanu:
+#   rsync -a kanu:~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/ \
+#         cube_in_cup_all3/
+#
+# The older `cube_in_cup/checkpoint_150` (83 MiB) is retired -- 0% held-out
+# recall on the current domain -- and is deliberately no longer tracked.
+*
+!.gitignore
