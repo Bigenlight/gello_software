@@ -239,8 +239,8 @@ rs.config().enable_device('147122072740')  ->  MATCHED
 - **🔴 남은 진짜 결함 — 팔 가림(occlusion).** sidecar가 고치지 못한다. `take_21`은 @0.85 recall
   **0%**, @0.05에서도 57.9%. 팔이 cam1을 쓸고 갈 때 확률이 0.005↔1.0으로 진동한다.
   원인은 전처리도 라벨도 아닌 **시야**다. 정지 게이트가 완화할 뿐, 해결은 **카메라 재배치**다(§5.5).
-- **사람이 성공 outcome을 확인한 canonical demo artifact가 아직 없다.** 변환기와
-  23개/2,037-transition strict-load smoke는 완료됐다(§9,
+- ✅ **사람이 success로 승인한 canonical demo artifact를 만들었다.** `take_23` 제외
+  23개/2,037 transitions이며 laptop3/Kanu strict-load와 SHA256 일치를 확인했다(§9,
   `RECORDED_TAKE_DEMO_CONVERSION_KO.md`).
 
 ### 테스트 — 이 명령 그대로 (2026-07-29 canonical checkout에서 재실행, `fb48100` 이후 기준)
@@ -958,7 +958,7 @@ EXPECTED_MODEL_ID=fake-zero-action-v0 ./run_hil_actor.sh --deadman topic --arm -
 - **⚠️ overlay venv `/tmp/gello-hil-rl-receive-overlay-v2`를 재사용하지 말 것** —
   protobuf 3.20.3 핀이 wandb 0.26.0 import를 깨뜨린다.
 
-### 실제 정책 서빙의 하드 블로커: canonical robot demo의 사람 라벨·영구 artifact가 아직 없다
+### ✅ canonical robot demo 사람 라벨·영구 artifact 완료 (2026-07-29)
 
 `run_rlpd_learner_server.py`의 `--demo-path`가 required이고 3중 검증된다.
 `--synthetic-e2e`는 서버가 run_id 화이트리스트를 강제하는데 액터가 `uuid4()`로 매번 새로 만들어 우회 불가.
@@ -967,8 +967,8 @@ EXPECTED_MODEL_ID=fake-zero-action-v0 ./run_hil_actor.sh --deadman topic --arm -
 `scripts/convert_recorded_takes_to_demo.py`가 있다. `vectors.h5` native table과 두 MP4를
 10 Hz canonical transition으로 바꾸며, 자세한 계약은
 `RECORDED_TAKE_DEMO_CONVERSION_KO.md`를 따른다. 2026-07-20의 `take_23` 제외 23개는
-2,037 transitions로 변환·strict-load smoke까지 통과했지만, GUI가 성공 여부를 저장하지
-않았으므로 사람이 outcome을 확인하기 전에는 production demo artifact를 만들지 않는다.
+2,037 transitions로 변환했고 사용자가 `take_23` 제외 전부를 success로 승인했다. 영구
+artifact는 laptop3와 Kanu strict loader를 통과했고 SHA256 `f9718558…032fa`가 일치한다.
 
 새로 actor 형식으로 직접 녹화하는 경로도 있다 — `ur_env/remote_actor.py::_dump_data`(`:189`)가 `--checkpoint-path`를 받으면
 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고 `load_demo_pickles`가 그 형식을 받는다.

@@ -127,7 +127,7 @@ export WT=/home/laptop3/gello_software
 | 14 | **RL 정책** 경로로 실기 팔 구동 | **금지 / 미검증** | `DRY_RUN=True`가 기본(`config.py:153`, `cube_in_cup.py:227`). 07-28에 움직인 것은 **정책이 아니라 zero-policy + 사람 개입**이다. `08_OPEN_GAPS.md`의 갭이 닫히기 전에는 정책 경로 해제 금지 |
 | 15 | reward classifier ↔ 크롭 정합 | 🟢 **코드에서 해결 (2026-07-29) / 실기 미검증** | ~~학습은 무크롭, actor는 `IMAGE_CROP` 적용, recall@0.85 100% → 33.3%~~. **분리로 해결했다** — 분류기는 actor가 따로 붙이는 **무크롭 sidecar**를 먹고, 정책은 크롭을 유지한다. 그래서 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 무크롭 스윕이 **이 경로에 그대로 적용된다.** ⚠️ **실기 미검증**이고 확인 절차는 `09` §4.4 → `08` G15 |
 | 15b | 분류기 checkpoint SHA pin (orbax 디렉터리) | 🟢 **해결 (2026-07-29)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임. 두 `DEFAULT_*_SHA256`가 폐기된 `e329986b…`(새 도메인 recall 0%)에서 **`512b6575…62846d`**(= `classifier_ckpt/cube_in_cup_all3/checkpoint_150`, 정규 파일 14개)로 교체. **learner fingerprint가 한 번 깨진다 — 의도된 것** → `08` G19 |
-| 16 | canonical offline demo artifact | 🟡 **절반 해결 (`40b99f8`)** | 변환 경로는 생겼다(`scripts/convert_recorded_takes_to_demo.py`, 07-20 23개 take → 2,037 transitions 변환·strict-load 확인). **남은 것은 사람이 성공으로 라벨한 영구 artifact**이고, 그게 없으면 learner는 시작 게이트(online replay ≥ `training_starts` **AND** offline demo ≥ 1)를 통과하지 못한다 → `08` G20 |
+| 16 | canonical offline demo artifact | 🟢 **해결 (2026-07-29)** | 사용자가 `take_23` 제외 23개 take를 success로 승인했고 2,037-transition 영구 pickle을 생성했다. laptop3/Kanu strict-load와 SHA256 일치를 확인했다 → `08` G20 |
 
 ---
 
@@ -168,7 +168,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, 포트 기본값, schema fail-fast(v2), **분류기 sidecar 전송 계약(§3.2)**, **레이턴시·대역폭 실측(§5.3–5.4)**, Kanu 터널 |
 | [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대(시리얼·크롭·역할), QoS/TRANSIENT_LOCAL 함정, 토픽 유량 점검, 19-D state 계약, F/T 프레임 |
 | [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
-| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전 갭 **G1~G20**과 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록. G15/G19는 2026-07-29에 닫혔고 G20은 절반 닫혔다 |
+| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전 갭 **G1~G20**과 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록. G15/G19/G20은 2026-07-29에 닫혔다 |
 | [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — `run_hil_actor.sh` preflight, actor CLI(`--arm`/`--deadman`/`--mock-policy-noise`/**sidecar 플래그 4종**), Stage A fake-env / Stage B 실센서, **§4.4 뷰어↔서버 확률 대조**, Kanu 서버 기동 |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):

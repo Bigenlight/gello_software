@@ -35,7 +35,7 @@
 | **G17** | **전역 ESC 리스너** | (미기재) | 🟠 **신규 기재** — 데드맨과 별개, 아무 창의 ESC가 에피소드를 끝낸다 |
 | **G18** | **`ACTION_SCALE`이 learner fingerprint에 없다** | (미발견) | 🟠 **신규** — 스케일이 바뀌어도 경고 없이 resume된다 |
 | **G19** | **`checkpoint_sha256()`가 orbax 디렉터리를 pin 못 한다** | (미발견) | 🟢 **해결.** `directory_sha256()` 위임 + 두 기본 SHA 교체. G15과 **같은 변경**에서 처리됐다 |
-| **G20** | **canonical demo가 없다** | (미발견) | 🟡 **절반 해결(`40b99f8`)** — 변환 경로는 생겼다. 남은 것은 **사람이 성공이라고 라벨한 영구 artifact** |
+| **G20** | **canonical demo가 없다** | (미발견) | 🟢 **해결(2026-07-29)** — 사용자가 `take_23` 제외 23개를 success로 승인했고 2,037-transition 영구 artifact를 laptop3/Kanu에서 검증 |
 
 ```bash
 export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
@@ -1051,9 +1051,9 @@ DEFAULT_CHECKPOINT_SHA256 = (
 
 ---
 
-## G20 — canonical demo가 없다 🟡 **절반 해결 (2026-07-29, `40b99f8`)**
+## G20 — canonical demo가 없다 🟢 **해결 (2026-07-29)**
 
-> ### 🔧 상태 갱신 — 경로는 생겼고, **artifact는 아직 없다**
+> ### 🔧 상태 갱신 — 변환 경로와 사람 승인 artifact가 모두 생겼다
 > `40b99f8`("convert recorder takes to learner demos")이 recorder take를 learner가 직접 받는
 > canonical pickle로 바꾸는 경로를 넣었다:
 > `scripts/convert_recorded_takes_to_demo.py`, `ur_env/learner/recorded_demo.py`,
@@ -1061,25 +1061,23 @@ DEFAULT_CHECKPOINT_SHA256 = (
 > [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](../../serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md).
 > 출력 pickle은 learner의 `--demo-path`에 그대로 넘긴다.
 >
-> **검증된 것**(위 문서 §"현재 실데이터 smoke 결과"에서 인용):
-> `take_23`을 제외한 2026-07-20 **23개 take → 2,037 transitions** 생성 확인, pinned NumPy 1.26
-> learner strict loader로 재로딩 성공, frozen ResNet-10 encode까지 성공.
->
-> **🔴 그래도 닫히지 않은 이유는 하나다 — 라벨이다.** 같은 문서가 명시한다:
-> *"마지막 묶음은 품질 검사 목적으로 메모리에서 `truncated`로 변환했을 뿐, 성공이라고 라벨한
-> 영구 artifact는 아직 만들지 않았다."* GUI가 success/failure를 파일에 기록하지 않으므로
-> **변환기는 성공을 추측하지 않는다** — `--outcome success|truncated`를 사람이 명시해야 한다.
-> 즉 남은 작업은 코드가 아니라 **사람의 outcome 확인**이다.
+> 사용자가 `take_23_20260720_210316`을 제외한 2026-07-20의 23개 take를 success로
+> 승인했다. `--outcome success`로 만든 영구 artifact는 2,037 transitions이며 laptop3와
+> Kanu strict loader가 모두 통과했고 양쪽 SHA256은
+> `f97185582401ce7570d44fddc33d1bd64b215d7e32d6384d5fe13e1b405032fa`로 같다.
+> Kanu 경로는
+> `/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl`이다.
 >
 > learner의 시작 게이트는 online replay ≥ `training_starts` **그리고** offline demo ≥ 1을
 > 요구하므로(`ur_env/learner/runtime.py:228`의 `LearnerNotReadyError` 메시지가 두 수치를 같이 찍는다),
-> **성공 라벨 artifact가 없으면 learner는 학습을 시작하지 않는다.**
+> **성공 라벨 artifact가 없으면 learner는 학습을 시작하지 않는다.** 현재 artifact는 이
+> 조건을 만족한다.
 
 아래 actor 쪽 서술은 **여전히 유효하다** — 변환 경로는 learner 쪽이고, actor 쪽 배선은
 그대로 없다.
 
-HIL-SERL은 오프라인 데모로 replay를 시드하는 것을 전제로 한다. 지금 이 리그에는
-**사람이 성공으로 확인한 canonical demo artifact가 하나도 없다.** 그리고 actor 쪽 배선도 안 돼 있다:
+HIL-SERL은 오프라인 데모로 replay를 시드하는 것을 전제로 한다. 이 선결 조건은 위
+artifact로 충족됐다. 다만 actor 자체의 주기적 pickle 기록 배선은 여전히 꺼져 있다:
 
 - `cube_in_cup`의 **`buffer_period = 0`**이다 (`cube_in_cup.py:265`).
   actor의 주기적 pickle 덤프는 `if step > 0 and config.buffer_period > 0`으로 게이트돼
@@ -1094,8 +1092,8 @@ HIL-SERL은 오프라인 데모로 replay를 시드하는 것을 전제로 한�
 (`run_remote_rlpd_actor.py:341-346`), actor가 종료 시 그 사실을 경고한다.
 07-27 Kanu 왕복 100스텝도 **synthetic**이다 — 상대가 zero-action 서버였다.
 
-**완화책:** 데모 수집은 별도 작업으로 계획한다. 그 전까지 replay에 들어간 데이터가
-어떤 출처인지 `meta`로 구분해서 본다.
+**남은 주의:** 2,037개 중 action norm-clamp가 516개(25.33%)다. 현재 artifact의 출처와
+사람 라벨은 확정됐지만, 이 포화 비율은 production run 기록에 남기고 정책 품질과 별도로 본다.
 
 ---
 

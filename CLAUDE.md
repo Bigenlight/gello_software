@@ -88,7 +88,7 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 | **분류기를 개입·학습에 연결** | [`serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md`](serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md) — reward/termination 계약, 개입 이중 라우팅, RLPD 50:50, 연결 순서. **코드에서 직접 추적해 쓴 문서다.** 아래 두 블로커가 선행 조건 |
 | ~~크롭 불일치 해소~~ → **sidecar 실기 검증** | `08_OPEN_GAPS.md` G15 → `ur_env/classifier_sidecar.py` (모듈 docstring이 설계 근거 전부). 코드는 들어갔고 **실기 검증이 남았다**. **`IMAGE_CROP`을 지우는 건 여전히 해결이 아니다** |
 | ~~checkpoint 로딩~~ → **해결됨(G19)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임해 orbax **디렉터리**를 해시한다. 두 `DEFAULT_*_SHA256` 상수도 은퇴 체크포인트(`e329986b…`)에서 교체됐다 |
-| **canonical demo artifact 만들기** (learner 시작 조건) | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) + `08_OPEN_GAPS.md` G20. 변환 경로는 `40b99f8`에서 생겼고 23 take/2,037 transition까지 검증됐다. **남은 건 사람이 성공으로 라벨한 영구 artifact 하나다** |
+| **canonical demo artifact** (learner 시작 조건) | ✅ 2026-07-29 사람 승인·생성 완료. `take_23` 제외 23 take → 2,037 transition, SHA256 `f9718558…032fa`; laptop3와 Kanu strict-load 통과. 경로·품질 주의는 [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) + `08_OPEN_GAPS.md` G20 |
 | actor entrypoint 실기 첫 투입 | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) §7 (팔을 움직인 건 전부 `tests/run_real_hil.py`였다 — 다른 코드 경로다) |
 | 개입 루프·좌표계·메타데이터 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) |
 | 장애 주입 매트릭스 (거의 미검증) | [`docs/testing/07_FAILURE_INJECTION.md`](docs/testing/07_FAILURE_INJECTION.md) |

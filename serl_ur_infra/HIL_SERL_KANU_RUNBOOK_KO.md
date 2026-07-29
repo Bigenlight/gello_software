@@ -991,14 +991,14 @@ final unified schema v2 acceptance (merge 248255f) — 기록, 현재 무효:
 > `checkpoint_sha256()`이 이제 `ur_env.classifier_sidecar.directory_sha256()`에 위임한다 —
 > 디렉터리는 재귀 해시하고, 단일 파일은 **예전과 똑같은 digest**를 내므로 기존 단일 파일 pin도 그대로 유효하다.
 >
-> **남은 실행 전제는 하나다: 사람이 성공으로 라벨한 canonical demo artifact** (`08_OPEN_GAPS.md` G20).
-> 변환 경로 자체는 `40b99f8`에서 생겼다 — [RECORDED_TAKE_DEMO_CONVERSION_KO.md](./RECORDED_TAKE_DEMO_CONVERSION_KO.md).
+> **2026-07-29 이 실행 전제는 충족됐다.** 사람이 success로 승인한 canonical demo를
+> laptop3와 Kanu strict loader로 검증했다 (`08_OPEN_GAPS.md` G20).
 >
 > `--reward-threshold`에는 2.0절에서 코드로부터 읽은 `$HIL_REWARD_THRESHOLD`를 넣는다. 문서에서 숫자를 베끼지 않는다. threshold는 fingerprint에 포함되므로 **production run이 시작된 뒤에는 바꾸지 않는다** — 바꾸면 기존 lineage를 resume할 수 없다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
 >
 이 절은 fake demo로 실행하면 안 된다. strict loader를 통과하는 실제 EEF-space canonical robot demo path를 지정한다.
 
-### 6.0 `$HIL_REAL_DEMO`를 어디서 얻는가 — **경로는 생겼다, artifact는 아직 없다** (`40b99f8`)
+### 6.0 `$HIL_REAL_DEMO`를 어디서 얻는가 — **사람 승인 artifact 생성 완료**
 
 **learner의 시작 게이트는 두 조건의 AND다** (`ur_env/learner/runtime.py:228`의
 `LearnerNotReadyError` 메시지가 둘을 같이 찍는다):
@@ -1026,12 +1026,11 @@ python3 serl_ur_infra/scripts/convert_recorded_takes_to_demo.py \
   --outcome success
 ```
 
-> ### 🔴 이것이 게이트를 **닫지 않는다.** 남은 것은 코드가 아니라 **사람의 outcome 확인**이다
-> 변환기 문서가 스스로 명시한다: *"마지막 묶음은 품질 검사 목적으로 메모리에서 `truncated`로
-> 변환했을 뿐, 성공이라고 라벨한 영구 artifact는 아직 만들지 않았다."*
-> recorder GUI가 success/failure를 파일에 기록하지 않으므로 **변환기는 성공을 추측하지 않는다** —
-> `--outcome success|truncated`를 반드시 사람이 준다. 성공 묶음과 중단 묶음을 **한 라벨로 묶지 말고**
-> 별도 pickle로 만들어 `--demo-path`를 여러 번 넘긴다. → `08_OPEN_GAPS.md` G20
+> ### 🟢 2026-07-29 사람이 outcome을 승인해 G20을 닫았다
+> 사용자가 `take_23_20260720_210316` 제외 23개를 success로 승인했다. Kanu 정본은
+> `/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl`,
+> SHA256은 `f97185582401ce7570d44fddc33d1bd64b215d7e32d6384d5fe13e1b405032fa`다.
+> 이후 데이터에도 변환기가 outcome을 추측하지 않는 원칙은 그대로 적용한다.
 >
 > **검증된 것**(변환기 문서 §"현재 실데이터 smoke 결과" 인용): `take_23` 제외 2026-07-20
 > **23개 take → 2,037 transitions** 생성, pinned NumPy 1.26 learner strict loader 재로딩 성공,
@@ -1069,7 +1068,7 @@ df -h "$HIL_RUN_ROOT"
 첫 production acceptance는 continuous mode보다 `--target-learner-step 5000` bounded run을 권장한다. target은 checkpoint period의 배수여야 한다.
 
 ```bash
-export HIL_REAL_DEMO=/absolute/path/to/canonical-robot-demo.pkl
+export HIL_REAL_DEMO=/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl
 
 cd "$HIL_KANU_REPO"
 

@@ -54,7 +54,7 @@
   - ⚠️ 07-27 판본은 여기에 *"workspace box와 reset branch-cut 두 안전 게이트가 실제로 동작한다"* 를 덧붙였는데, **"동작한다"는 단위 테스트 기준이다.** 두 게이트는 2026-07-29 현재도 **실기에서 한 번도 작동한 적이 없다** — 팔이 움직인 07-28 세션은 박스가 꺼진 `run_real_hil.py` 경로였다(§11.7-3).
 - **(2026-07-27 실기 측정)** 검증 완료: 2F-85 gripper 개폐 방향, GELLO leader 7 모터, laptop→Kanu 100-step gRPC 왕복(`replay_insert_count:100`, schema hash 일치). 왕복 지연은 **WiFi·fake-env actor·zero-action receive server 조건**에서 RTT p50 58.6 / p95 75.8 / **p99 97.1 ms**, step당 96.1 KiB → 7.9 Mbit/s(§11.4).
   - ⚠️ 같은 항목의 "미검증: 팔 실제 구동, 카메라(하드웨어 고장), 개입 루프 실기"는 **2026-07-28에 셋 다 뒤집혔다** — 팔은 움직였고 개입 루프도 64 스텝 돌았으며(§11.9), 카메라는 허브 고장이 아니었다(§11.10). **단 그 세션은 `run_real_hil.py` 경로다.**
-- **(2026-07-27 추가 · 2026-07-29 이후 부분 정정)** Kanu에는 **실제 정책 inference server가 없다**. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 한다. 기존 recorder take 변환 경로와 23개/2,037-transition smoke는 추가됐지만, 사람이 성공 outcome을 확인한 영구 demo artifact는 아직 없다(§7 P0-2, `RECORDED_TAKE_DEMO_CONVERSION_KO.md`). Kanu 환경 자체는 추가 설치 없이 준비돼 있었다(§11.5, 2026-07-27 점검).
+- **(2026-07-29 갱신)** Kanu에는 아직 실행 중인 실제 정책 inference server가 없다. 다만 사용자가 `take_23` 제외 23개를 success로 승인해 2,037-transition 영구 demo artifact를 만들었고 laptop3/Kanu strict loader와 SHA 일치를 확인했다. Kanu 환경 자체도 준비돼 있다.
   - ⛔ **폐기:** 이 항목의 07-27 판본에 있던 "`run_rlpd_receive_server.py` PID 1096786이 port 50053에 떠 있고 GPU 7에 12.3 GiB를 잡고 있다"는 **2026-07-28 이후로는 사실이 아니다.** Kanu에 HIL 프로세스가 하나도 없고 port 50053은 미바인딩, GPU 유휴다(§11.5, §12.5). 즉 지금은 **zero-action 서버조차 떠 있지 않다.**
   - ⛔ **폐기:** `/home/laptop3/gello_software` 는 **kanu에 존재하지 않는다.** kanu의 실제 경로는 §12.5 표.
 - **(2026-07-28 실기 측정)** 실기에서 **팔이 처음으로 움직였다** — `run_real_hil.py --arm --scale 0.25`, 100 스텝 중 개입 64, `held=0`, 개입 불변식 4종 통과. 같은 세션에서 **frame-map 측정을 마쳤다**: 좌표계 매핑은 **단위행렬**이고 부호 뒤집힘도 축 교환도 없다(포화 표본 제외 잔차 0.093, 기준 0.15; §11.9). 속도 3층은 검증된 EEF 텔레옵 값에 균일 1.25배로 정렬했다(`a5f9890`).
@@ -109,7 +109,7 @@
 | **actor entrypoint 실기 투입** | **미검증.** 지금까지 팔을 움직인 것은 전부 `run_real_hil.py` 다 |
 | **카메라 경로** | **2026-07-28 복구** — 허브 고장이 아니었다(재연결로 둘 다 정상). `43ba314` 가 시리얼 하드코딩을 실제 버스 해석으로 바꿨고, **시리얼 논쟁은 07-29에 종결됐다: 카메라는 한 쌍이고 기본값이 옳다**(모듈 시리얼 vs ASIC 시리얼의 필드 차이였다). ⚠️ **07-29 11:14에 EPROTO 재발**. **관측 전 경로는 여전히 실기 미검증**; §11.10 |
 | **Kanu 실제 정책 서빙 (learner server)** | **미배포.** 2026-07-29 기준 Kanu에 HIL 프로세스가 **하나도 없다**(port 50053 미바인딩, GPU 유휴). zero-action receive server조차 떠 있지 않다; §11.5, §12.5 |
-| **canonical robot demo** | **영구 artifact/사람 라벨은 아직 없음.** 기존 `vectors.h5`+MP4를 변환하는 CLI가 추가됐고 `take_23` 제외 23개/2,037 transitions strict-load smoke는 통과했다. 성공 outcome 확인 후 artifact를 만들 것. 새 actor 녹화는 여전히 `buffer_period=0` 문제를 가진다; `RECORDED_TAKE_DEMO_CONVERSION_KO.md`, §7 P0-2, §11.7 |
+| **canonical robot demo** | ✅ **사람 승인 영구 artifact 완료.** `take_23` 제외 23개/2,037 transitions, SHA `f9718558…032fa`, laptop3/Kanu strict-load 통과. 새 actor 녹화의 `buffer_period=0` 문제는 별개로 남는다 |
 
 즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, unified schema v2 bounded fake learning/checkpoint/resume serving까지 확인했다. fake-data milestone은 완료다.
 
@@ -119,7 +119,7 @@ robot actor 쪽은 "실행 불가"에서 시작해 2026-07-28에 **팔 실구동
 
 1. **actor entrypoint(`run_remote_rlpd_actor.py`)의 실기 투입** — 지금까지 팔을 움직인 것은 전부 `run_real_hil.py` 라는 다른 코드 경로다. **sidecar 경로도 여기서 처음 실기를 탄다.**
 2. ~~**크롭에 맞춘 classifier 재학습**~~ → **⛔ 취소. 2026-07-29에 sidecar 분리로 해소했고 재학습은 하지 않는다**(§12.1, §12.7). 대신 남은 것은 **`stationary_speed_max` 실측**이다 — `cube_in_cup.py::CLASSIFIER_SIDECAR` 의 `0.05 m/s` 는 코드 주석이 스스로 `PLACEHOLDER` 라고 밝혀 둔 값이고, 녹화 take에서 실제로 재야 한다.
-3. **기존 take의 성공 outcome 확인 후 canonical demo artifact 생성** — 변환기와 strict-load smoke는 완료됨; Kanu 정책 서빙의 선결 조건(§7 P0-2, [RECORDED_TAKE_DEMO_CONVERSION_KO.md](./RECORDED_TAKE_DEMO_CONVERSION_KO.md)). **learner는 online replay ≥ `training_starts`(기본 100) *그리고* offline demo ≥ 1 을 둘 다 만족해야 학습을 시작한다**(`ur_env/learner/batches.py::RLPDBatchSampler.ready`) — demo가 0이면 영원히 시작하지 않는다.
+3. ✅ **canonical demo artifact 생성 완료** — 23개/2,037 transitions 사람 success 승인, laptop3/Kanu strict-load 통과. learner의 남은 시작 조건은 online replay ≥ `training_starts`(기본 100)다.
 4. **Kanu에 진짜 정책 서버 배포**(§11.5). **최초 1회 checkpoint 계보 단절이 예정돼 있다** — reward 계약 변경이 fingerprint에 들어가 옛 checkpoint resume은 fail-closed로 거부된다. 의도된 것이고 새 `--checkpoint-root` 로 한 번 시작하면 끝난다(§12.7).
 5. **팔 가림에 강한 카메라 배치** — sidecar가 못 고치는 유일한 항목이다(`take_21` 계열). §12.8-3.
 
@@ -682,10 +682,10 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
    - 기본 ring camera map `7,864,320,000 B` + offline demo + reserve 할당 후 장시간 RSS/VMS/GPU memory/compile/contention을 계측한다.
    - CPU용 `requirements-learner.lock`을 공유 Kanu env에 그대로 설치하지 않는다.
 
-2. **real serving용 canonical robot demo 라벨/영구 artifact 부재**
+2. ✅ **real serving용 canonical robot demo 라벨/영구 artifact 완료**
    - 사용자가 지정한 현재 fake-data acceptance는 완료됐다.
    - fake는 bounded `--synthetic-e2e`에서만 live learner에 허용되고 production robot-data scope에는 의도적으로 차단된다.
-   - 실제 robot serving 단계에는 canonical EEF/action/grasp-penalty demo가 필요하다. 기존 recorder take용 변환기와 23개/2,037-transition smoke는 완료됐으며, 남은 것은 사람 outcome 확인과 영구 artifact 생성이다.
+   - 사용자가 `take_23` 제외 23개를 success로 승인했고 2,037-transition 영구 artifact를 생성했다. laptop3/Kanu strict-load와 SHA 일치까지 확인했다.
    - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 **`--run-id`를 노출하지 않고**(2026-07-29 재확인: CLI에 없음) `remote_actor.py:243`에서 `uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
    - **생산 경로는 두 개다.** 기존 recorder take는 `scripts/convert_recorded_takes_to_demo.py`로 변환한다(`RECORDED_TAKE_DEMO_CONVERSION_KO.md`). 새 actor 녹화는 `remote_actor.py`의 `_dump_data`(`remote_actor.py:189-198`)가 `--checkpoint-path`를 받아 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고, `load_demo_pickles`가 그 `{"meta":…, "transition":…}` 형식을 바로 받는다.
    - 🪤 **선결 조건: `buffer_period = 0`**(`ur_experiments/cube_in_cup.py:265`). 0이면 `_dump_data` 가 호출되지 않아 `--checkpoint-path` 를 줘도 pickle이 **하나도** 안 쓰인다. 이 값을 뒤집는 CLI 플래그도 없다(§11.7).
@@ -747,7 +747,7 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 
 **C. 합류 후 — canonical robot demo artifact**
 
-7. 우선 기존 2026-07-20 take의 성공 outcome을 사람이 확인하고 `RECORDED_TAKE_DEMO_CONVERSION_KO.md`대로 canonical pickle을 생성한다. 새 데이터를 actor 형식으로 다시 녹화하는 경로를 택할 때만 `buffer_period > 0` 배선을 추가한다(§7 P0-2).
+7. ✅ 기존 2026-07-20 take의 사람 승인 canonical pickle 생성·Kanu 복사·strict-load 완료. 새 데이터를 actor 형식으로 다시 녹화할 때만 `buffer_period > 0` 배선을 추가한다.
 8. Kanu에 `run_rlpd_learner_server.py` 를 port 50053에 올린다. 순서는 fake demo `--dry-run` → production bounded run(§11.5). *(2026-07-29 기준 Kanu에는 내릴 receive server조차 떠 있지 않다.)*
 9. production-scope 5,000-step bounded learner run을 수행하고, 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
 10. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.

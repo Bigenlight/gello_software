@@ -38,11 +38,9 @@ def ready(self) -> bool:
 못 미치면 `sample()`이 `LearnerBatchError`를 던지고, `ur_env/learner/runtime.py`가
 `replay=<n>/<training_starts>`를 같이 찍는다.
 
-> 🔴 **G20("canonical demo 없음")은 아직 닫히지 않았다.** 이 세션에서 코드로 확인한 것은
-> **변환 경로가 존재하고 계약이 문서와 일치한다**는 것까지다. 실제로 없는 것은
-> **사람이 성공으로 확인해 라벨한 영구 artifact**다 — 아래 「현재 실데이터 smoke 결과」의
-> 마지막 문단이 그 상태를 그대로 적고 있다. 변환기가 있다는 것과 demo가 있다는 것은
-> 다른 이야기다.
+> 🟢 **G20("canonical demo 없음")은 2026-07-29 닫혔다.** 사용자가 아래 23개 take를
+> success로 승인했고 영구 artifact를 생성했다. 변환기가 outcome을 추측하지 않는 계약은
+> 그대로이며, 이후 데이터에도 사람 라벨이 필요하다.
 
 > **입력 레이아웃 주의 — 이 CLI 자체는 디렉터리 *이름*을 보지 않는다.**
 > `convert_recorded_take()`가 요구하는 것은 디렉터리 안의 `vectors.h5` · `cam1.mp4` ·
@@ -66,7 +64,7 @@ def ready(self) -> bool:
 ## 2026-07-20 묶음 변환
 
 `take_23_20260720_210316`은 1.6초 동안 주차 상태였으므로 현재 분석에서는 제외한다.
-나머지 take가 전부 성공 episode라는 **사람의 확인을 받은 뒤에만** 다음처럼 실행한다.
+나머지 take는 2026-07-29 사용자가 전부 성공 episode라고 확인했다. 재현 명령은 다음과 같다.
 
 ```bash
 cd /home/laptop3/gello_software
@@ -224,13 +222,15 @@ PY
 - 위 2,037개 중 norm clamp 516개(25.33%), 최대 raw group norm 2.755
 - 전체 23개에서 signal 최대 age 44.6 ms, camera 최대 age 60.3 ms
 
-마지막 묶음은 품질 검사 목적으로 메모리에서 `truncated`로 변환했을 뿐, 성공이라고
-라벨한 영구 artifact는 아직 만들지 않았다.
+사용자 승인 후 `success`로 만든 영구 artifact는 다음과 같다.
 
-> 🔴 **따라서 G20은 열려 있다.** `--demo-path`에 넘길 **사람이 성공으로 확인한 영구
-> pickle이 아직 0개**이고, 위 「learner 시작 게이트」 때문에 그 상태로는 learner가 학습을
-> 시작하지 않는다. 다음 한 걸음은 새 변환기를 만드는 것이 아니라 **2026-07-20 take들의
-> 성공/실패를 사람이 확인해 라벨하는 것**이다.
+- laptop3: `/home/laptop3/hil-serl-artifacts/demos/cube_in_cup_20260720_success_23takes.pkl`
+- Kanu: `/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl`
+- 크기: `203,573,172 B`, transitions: `2,037`
+- SHA256: `f97185582401ce7570d44fddc33d1bd64b215d7e32d6384d5fe13e1b405032fa`
+- laptop3와 Kanu learner strict loader 통과, 양쪽 digest 일치
+
+> 🟢 **따라서 G20은 닫혔다.** production learner의 offline-demo 시작 조건을 만족한다.
 >
 > 🪤 그리고 **norm clamp 25.33%(2,037개 중 516개, 최대 raw group norm 2.755)** 를 그냥
 > 넘기지 마라. 포화는 변환 버그가 아니라 **옛 teleop 주기와 현재 10 Hz RL 스텝의 차이**지만,
