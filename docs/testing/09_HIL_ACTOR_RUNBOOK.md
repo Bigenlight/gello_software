@@ -93,7 +93,7 @@ cd $WT/ros2_ur_ws
 | `EXPECTED_REWARD_AUTHORITY` | `server_classifier` | |
 | `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-all3-ckpt150+sidecar-v1` | 서버 `--reward-model-id`와 같아야 함. **id가 체크포인트 + 입력 계약(sidecar)을 둘 다 담는다** — 어긋나면 핸드셰이크에서 거부된다. *(이전 값 `cube-in-cup-checkpoint-150`은 이제 거부된다)* |
 | `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `0.6` / `0.8` | 프로덕션 예산. 늘리지 말 것 (`05` §5) |
-| `HZ_TIMEOUT_S` | `6` | 토픽당 `ros2 topic hz` 대기 시간 |
+| `HZ_TIMEOUT_S` | `6` | 토픽당 정상 종료형 liveness/rate probe 최대 대기 시간. 5개 fresh·advancing 샘플과 최소 Hz를 검사 |
 | `HIL_PREPOSITION_MARKER` | `$XDG_RUNTIME_DIR/hil-preposition.ready` | `run_hil_preposition.sh`와 actor가 공유하는 0600 proof. 보통 직접 지정하지 않는다 |
 | `HIL_PREPOSITION_MARKER_MAX_AGE_S` | `900` | marker 최대 수명. 1~3600초만 허용 |
 | `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. `--arm`과 같이 쓰면 **즉시 FAIL** |
@@ -510,13 +510,17 @@ cd $WT/ros2_ur_ws
 #    멀면 기존 GO gate를 통과한 뒤에만 JTC 궤적이 움직인다.
 ./run_hil_preposition.sh
 
-# 2) 실제 --arm과 같은 handoff 조건을 읽기 전용으로 검사한다.
+# 2) HIL GUI를 먼저 ENGAGE하고 GELLO를 RESET anchor에 고정한다.
+#    dry-preflight도 연속 ENGAGED heartbeat 3개를 요구한다.
+
+# 3) 실제 --arm과 같은 handoff 조건을 읽기 전용으로 검사한다.
 #    이 명령은 controller를 전환하지도 actor를 띄우지도 않는다.
 EXPECTED_MODEL_ID=<서버가 광고하는 값> \
   ./run_hil_actor.sh --dry-preflight --arm --deadman topic
 
-# 3) B3 승인 조건을 별도로 만족하고 GUI를 ENGAGE한 뒤에만 실제 기동.
+# 4) B3 승인 조건을 별도로 만족한 뒤에만 실제 기동.
 #    marker + live pose를 다시 확인하고 STJC -> FPC strict switch 후 actor를 exec한다.
+#    controller switch 직전 ENGAGED heartbeat를 한 번 더 검사한다.
 EXPECTED_MODEL_ID=<서버가 광고하는 값> \
   ./run_hil_actor.sh --arm --deadman topic
 ```
@@ -536,12 +540,21 @@ RESET 자세에서 벗어났으면 전환 전에 실패한다. 첫 B3는 아래 
     ROS 오버레이가 PYTHONPATH에 살아 있다 (덮어쓰기 아님)
 [5] ur_env / ur_experiments / ur_gello_bringup / serl_launcher 전부 이 트리에서 해석
 [6] TCP 127.0.0.1:50153 — 연결 성공
-[7] /joint_states ≈ 100.4 Hz · /gello/joint_states ≈ 30.0 Hz
+[7] 정상 종료형 production-QoS probe:
+    /joint_states ≈ 100.4 Hz · /gello/joint_states ≈ 30.0 Hz
     cam1 ≈ 30.0 Hz · cam2 ≈ 30.0 Hz · 그리퍼 ≈ 5.0 Hz
 [8] scaled_joint_trajectory_controller=active, forward_position_controller=inactive
 [9] 퍼블리셔 0개 — actor가 유일한 퍼블리셔가 된다
 [10] preposition marker + 현재 RESET 자세 확인 (읽기 전용; switch하지 않음)
+[11] deadman ENGAGED: 3 consecutive heartbeats
 ```
+
+`[7]`은 `ros2 topic hz`를 timeout 뒤 강제 종료하지 않는다. 각 probe는 5개의 fresh하고
+증가하는 샘플을 받은 즉시 `destroy_node()`/`rclpy.shutdown()`으로 reader를 정상 정리한다.
+GUI에 cam1 영상이 보이더라도 `[7]`의 cam1만 실패하면 우회하지 말 것. 기존 GUI reader는
+살아 있으나 **새 actor reader에는 큰 이미지가 전달되지 않는 Fast DDS writer 상태**일 수
+있다. 카메라 터미널에서 `Ctrl-C`로 두 카메라를 정상 종료한 뒤
+`./launch_cameras.sh`를 다시 띄우고 `[7]`을 재검증한다.
 
 ### 4.4 🔎 첫 `--arm`의 정지·ENGAGE 구간에서 classifier sidecar를 확인한다
 
@@ -679,8 +692,9 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 믿지 않고 `/joint_states`를 다시 읽어 관절별 최대 오차 0.10 rad 이하를 재확인한다.
 
 > ⚠️ 사전 배치 도구가 도는 동안에는 그것이 팔의 명령 소유자다. **끝난 뒤 반드시 내리고**
-> `./run_hil_actor.sh --dry-preflight --arm`에서 [8] controller 쌍, [9] 퍼블리셔 0,
-> [10] proof + live pose를 모두 확인한 다음 actor를 띄운다.
+> GUI를 ENGAGE한 뒤 `./run_hil_actor.sh --dry-preflight --arm --deadman topic`에서
+> [8] controller 쌍, [9] 퍼블리셔 0, [10] proof + live pose, [11] 연속 ENGAGED
+> heartbeat를 모두 확인한 다음 actor를 띄운다.
 
 게이트 값을 **키워서 통과시키지 말 것** — 그러면 리셋이 작업 공간을 가로질러 쓸고 간다.
 

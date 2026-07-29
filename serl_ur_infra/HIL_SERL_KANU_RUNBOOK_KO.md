@@ -117,8 +117,9 @@
 
 1. laptop에서 §7의 SSH tunnel을 연다. 표준 구성은 local `50153` → Kanu `50053`이다.
 2. [actor runbook §4.2](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)의 T1~T5를 순서대로 띄운다: UR driver, gripper, cam1/cam2, GELLO publisher, HIL deadman GUI.
-3. actor를 내린 상태에서 RESET 자세 proof를 만든 뒤, 실제 transition을 보내기 전에는
-   `--arm` handoff까지 읽기 전용으로 rehearsal한다.
+3. actor를 내린 상태에서 RESET 자세 proof를 만든 뒤 HIL GUI를 **ENGAGE**하고 GELLO를
+   RESET anchor에 고정한다. 실제 transition을 보내기 전에는 `--arm` handoff까지 읽기
+   전용으로 rehearsal한다.
 
    ```bash
    cd /home/laptop3/gello_software/ros2_ur_ws
@@ -128,7 +129,9 @@
 
    `run_hil_preposition.sh`는 이미 RESET 자세 0.10 rad 안이면 팔을 움직이지 않고 proof만
    만든다. 멀면 기존 `GO` 승인 뒤에만 JTC 궤적이 움직인다. `--dry-preflight --arm`은
-   marker/current pose/controller를 확인할 뿐 controller를 전환하지 않는다.
+   marker/current pose/controller와 연속 ENGAGED heartbeat를 확인할 뿐 controller를
+   전환하지 않는다. cam1/cam2는 강제 종료형 `ros2 topic hz`가 아니라 정상 종료형
+   production-QoS probe로 신규 actor reader가 fresh frame을 실제 수신하는지 검사한다.
 
    `--fake-env` actor는 production **lineage의 acceptance나 학습 데이터 생성에** 사용하지
    않는다. 별도 disposable server에 대한 no-submit 연결 점검에는 사용할 수 있다. arm 없는
@@ -137,9 +140,10 @@
    inference RNG/session으로 시작하려면 learner를 정상 종료하고 새 lineage로 다시 띄운다.
 
 4. preflight가 모두 통과하고 operator가 workspace/action scale/controller 상태를 확인한 뒤,
-   deadman을 먼저 ENGAGE하여 첫 action부터 GELLO intervention이 우선하도록 한다. 실제
+   ENGAGED 상태를 유지하여 첫 action부터 GELLO intervention이 우선하도록 한다. 실제
    untrained policy가 거의 포화된 action을 낼 수 있음이 측정됐으므로 이 순서는 권장이 아니라
-   첫 실기 gate다. 그다음에만 실제 actor를 시작한다.
+   첫 실기 gate다. 실제 controller switch 직전에 launcher가 ENGAGED heartbeat를 다시
+   검사한다. 그다음에만 실제 actor를 시작한다.
 
    ```bash
    cd /home/laptop3/gello_software/ros2_ur_ws

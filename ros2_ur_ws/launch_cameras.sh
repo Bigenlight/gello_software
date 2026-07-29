@@ -96,6 +96,11 @@ mkdir -p "${TMPDIR_RUN}"
 # Color topics realsense2_camera publishes under the chosen namespaces.
 CAM1_TOPIC="/${CAM1_NAME}/${CAM1_NAME}/color/image_raw/compressed"
 CAM2_TOPIC="/${CAM2_NAME}/${CAM2_NAME}/color/image_raw/compressed"
+TOPIC_CHECKER="${SCRIPT_DIR}/_hil_topic_rate_check.py"
+if [ ! -f "${TOPIC_CHECKER}" ]; then
+    echo "FATAL: topic probe helper missing: ${TOPIC_CHECKER}" >&2
+    exit 1
+fi
 
 CAM1_PID=""
 CAM2_PID=""
@@ -188,9 +193,11 @@ echo "started (pid ${CAM2_PID})"
 
 echo "### Waiting for both streams (up to 30s) ..."
 
-# Block until <topic> is flowing at ~25+ Hz, or fail after ~30s. Uses a short
-# per-sample timeout on `ros2 topic hz` (which otherwise runs forever) and polls
-# ~every second within a 30s deadline. Prints the measured rate on success.
+# Block until <topic> is flowing at ~25+ Hz, or fail after ~30s.  The bounded
+# helper receives five fresh, advancing messages using production-compatible
+# QoS and then closes its DDS reader normally.  Do not bring back a timed
+# `ros2 topic hz`: repeated forced termination of large-image readers has left
+# the Fast DDS writer serving an existing viewer but dropping every new reader.
 wait_for_stream() {
     local name="$1" topic="$2" pid="$3" logf="$4"
     local deadline hz
@@ -203,9 +210,11 @@ wait_for_stream() {
             echo "###   See ${logf} for the cause (bad serial? camera unplugged?)." >&2
             return 1
         fi
-        # Sample the publish rate with a short timeout; grep the average rate.
-        hz=$(timeout 3 ros2 topic hz "${topic}" --window 5 2>/dev/null \
-             | grep -oP 'average rate:\s*\K[0-9.]+' | tail -1 || true)
+        # Sample the source-header rate and exit normally after five frames.
+        hz=$(python3 "${TOPIC_CHECKER}" --topic "${topic}" \
+             --type compressed_image --samples 5 --timeout 3 --min-rate 25 \
+             2>/dev/null | sed -n 's/.* rate=\([0-9.][0-9.]*\) Hz.*/\1/p' \
+             | tail -1 || true)
         if [ -n "${hz}" ] && awk -v h="${hz}" 'BEGIN { exit !(h >= 25) }'; then
             echo "###   ${name}: ${hz} Hz  OK"
             return 0

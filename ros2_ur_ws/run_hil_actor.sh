@@ -33,7 +33,7 @@
 #   * 태스크 config의 DRY_RUN=True가 기본이다(cube_in_cup). DRY_RUN 해제는
 #     --arm을 actor에게 넘길 때만 일어난다. 이 래퍼는 관절 command를 발행하거나
 #     reset 이동을 호출하지 않는다. 다만 실제 --arm에서는 검증 뒤 controller만 전환한다.
-#   * [1]~[10] 사전 점검은 전부 읽기 전용이다(ros2 topic hz / topic info /
+#   * [1]~[11] 사전 점검은 전부 읽기 전용이다(topic liveness / topic info /
 #     control list_controllers / TCP connect). 실제 switch는 그 뒤 [ARM] 한 곳뿐이다.
 #
 # ── 중단 방법 ────────────────────────────────────────────────────────────────
@@ -68,8 +68,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HANDOFF_LIB="$SCRIPT_DIR/_hil_controller_handoff.sh"
 POSE_CHECKER="$SCRIPT_DIR/_hil_joint_pose_check.py"
-if [ ! -f "$HANDOFF_LIB" ]; then
-    echo "FATAL: controller handoff library missing: $HANDOFF_LIB" >&2
+DEADMAN_CHECKER="$SCRIPT_DIR/_hil_deadman_check.py"
+TOPIC_CHECKER="$SCRIPT_DIR/_hil_topic_rate_check.py"
+if [ ! -f "$HANDOFF_LIB" ] || [ ! -f "$POSE_CHECKER" ] || \
+   [ ! -f "$DEADMAN_CHECKER" ] || [ ! -f "$TOPIC_CHECKER" ]; then
+    echo "FATAL: HIL handoff/deadman/topic helper missing under $SCRIPT_DIR" >&2
     exit 1
 fi
 # shellcheck disable=SC1090
@@ -461,48 +464,55 @@ fi
 # 7~9. ROS 실데이터 / 컨트롤러 / 이중 퍼블리셔 (읽기 전용)
 # ---------------------------------------------------------------------------
 # fake-env는 ROS를 전혀 쓰지 않으므로 실데이터 점검은 정보성으로만 낸다.
-ros_hz_check() {
-    # $1=topic  $2=사람이 읽을 이름  $3=1이면 치명(FAIL) / 0이면 경고(WARN)
-    local topic="$1" label="$2" fatal="$3"
-    local out rate
+ros_rate_check() {
+    # $1=topic $2=label $3=message type $4=min Hz $5=1이면 FAIL/0이면 WARN
+    local topic="$1" label="$2" message_type="$3" min_rate="$4" fatal="$5"
+    local out rc rate
     set +e
-    out="$(timeout --signal=KILL "$HZ_TIMEOUT_S" ros2 topic hz --window 5 "$topic" 2>&1)"
+    # The helper owns its timeout and performs rclpy destroy_node()/shutdown().
+    # TERM+kill-after is only a backstop for a broken middleware teardown; the
+    # old unconditional SIGKILL left short-lived DDS readers behind and could
+    # aggravate large RealSense writer delivery to later subscribers.
+    out="$(timeout --signal=TERM --kill-after=2 "$((HZ_TIMEOUT_S + 4))" \
+        python3 "$TOPIC_CHECKER" --topic "$topic" --type "$message_type" \
+        --samples 5 --timeout "$HZ_TIMEOUT_S" --min-rate "$min_rate" 2>&1)"
+    rc=$?
     set -e
-    rate="$(printf '%s\n' "$out" | grep -m1 'average rate' | awk '{print $3}')"
-    if [ -n "$rate" ]; then
+    rate="$(printf '%s\n' "$out" | sed -n 's/.* rate=\([0-9.][0-9.]*\) Hz.*/\1/p' | tail -1)"
+    if [ "$rc" -eq 0 ] && [ -n "$rate" ]; then
         p_ok "$label ($topic) ≈ ${rate} Hz"
         return 0
     fi
     if [ "$fatal" -eq 1 ]; then
-        p_fail "$label ($topic) 에서 ${HZ_TIMEOUT_S}s 동안 메시지가 없다" \
-               "해당 노드를 먼저 띄운다 (드라이버 / gello_publisher / launch_cameras.sh)"
+        p_fail "$label ($topic) 수신 검증 실패 — ${out:-no diagnostic} (rc=$rc)" \
+               "해당 publisher와 신규 subscriber 전달 경로를 확인한다"
     else
-        p_warn "$label ($topic) 에서 ${HZ_TIMEOUT_S}s 동안 메시지가 없다" \
+        p_warn "$label ($topic) 수신 검증 실패 — ${out:-no diagnostic} (rc=$rc)" \
                "fake-env에서는 쓰이지 않으므로 진행 가능"
     fi
     return 1
 }
 
 _say ""
-_say "[7] ROS 실데이터 (읽기 전용 ros2 topic hz, 각 ${HZ_TIMEOUT_S}s)"
+_say "[7] ROS 실데이터 (읽기 전용 정상 종료형 probe, 각 최대 ${HZ_TIMEOUT_S}s)"
 if [ "$OVERLAY_OK" -ne 1 ]; then
     p_skip "오버레이를 소스하지 못해 건너뜀"
 elif [ "$SKIP_ROS_CHECKS" = "1" ]; then
     p_skip "SKIP_ROS_CHECKS=1"
 elif [ "$FAKE_ENV" -eq 1 ]; then
     p_info "fake-env 모드 — 센서 스트림은 사용되지 않는다 (경고로만 표시)"
-    ros_hz_check "$JOINT_STATES_TOPIC" "로봇 관절"   0 || true
-    ros_hz_check "$GELLO_TOPIC"        "GELLO 리더" 0 || true
-    ros_hz_check "$CAM1_TOPIC"         "cam1 장면"  0 || true
-    ros_hz_check "$CAM2_TOPIC"         "cam2 손목"  0 || true
+    ros_rate_check "$JOINT_STATES_TOPIC" "로봇 관절"  joint_state      50 0 || true
+    ros_rate_check "$GELLO_TOPIC"        "GELLO 리더" joint_state      15 0 || true
+    ros_rate_check "$CAM1_TOPIC"         "cam1 장면"  compressed_image 15 0 || true
+    ros_rate_check "$CAM2_TOPIC"         "cam2 손목"  compressed_image 15 0 || true
 else
-    ros_hz_check "$JOINT_STATES_TOPIC" "로봇 관절"   1 || true
-    ros_hz_check "$GELLO_TOPIC"        "GELLO 리더" 1 || true
-    ros_hz_check "$CAM1_TOPIC"         "cam1 장면"  1 || true
-    ros_hz_check "$CAM2_TOPIC"         "cam2 손목"  1 || true
+    ros_rate_check "$JOINT_STATES_TOPIC" "로봇 관절"  joint_state      50 1 || true
+    ros_rate_check "$GELLO_TOPIC"        "GELLO 리더" joint_state      15 1 || true
+    ros_rate_check "$CAM1_TOPIC"         "cam1 장면"  compressed_image 15 1 || true
+    ros_rate_check "$CAM2_TOPIC"         "cam2 손목"  compressed_image 15 1 || true
     # 그리퍼 위치는 19-D state의 마지막 채널이다. 없으면 관측이 불완전하지만
     # DRY_RUN 배선 확인은 가능하므로 경고로만 낸다.
-    ros_hz_check "$GRIPPER_STATE_TOPIC" "그리퍼 상태" 0 || true
+    ros_rate_check "$GRIPPER_STATE_TOPIC" "그리퍼 상태" float32 2 0 || true
 fi
 
 _say ""
@@ -612,6 +622,21 @@ else
     p_info "preflight가 전부 통과한 뒤 marker + live pose를 재검증하고 strict switch 예정"
 fi
 
+_say ""
+_say "[11] deadman ENGAGED heartbeat gate"
+if [ "$ARM_REQUESTED" -ne 1 ]; then
+    p_info "--arm 없음 — ENGAGED gate 불필요"
+elif [ "$FAKE_ENV" -eq 1 ]; then
+    p_skip "fake-env에서는 deadman gate 없음"
+elif [ "$OVERLAY_OK" -ne 1 ]; then
+    p_skip "ROS overlay 점검 실패"
+elif python3 "$DEADMAN_CHECKER" --topic /hil/deadman --samples 3 --timeout 2.0; then
+    p_ok "연속 ENGAGED heartbeat 확인"
+else
+    p_fail "deadman이 fresh ENGAGED 상태가 아니다" \
+           "HIL GUI에서 ENGAGE한 뒤 GELLO를 RESET anchor에 고정하고 다시 실행"
+fi
+
 # ---------------------------------------------------------------------------
 # 결과 요약
 # ---------------------------------------------------------------------------
@@ -646,6 +671,11 @@ fi
 if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 0 ]; then
     _say ""
     _say "[ARM] controller handoff (여기서만 상태 변경 가능)"
+    if ! python3 "$DEADMAN_CHECKER" \
+            --topic /hil/deadman --samples 3 --timeout 2.0; then
+        _say " ✗ deadman ENGAGED 재검증 실패 — controller를 전환하지 않는다."
+        exit 1
+    fi
     if ! hil_arm_controller_handoff \
             "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER" "$COMMAND_TOPIC" \
             "$PREPOSITION_MARKER" "$POSE_CHECKER" "$RESET_JOINTS_CSV" \

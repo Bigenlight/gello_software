@@ -213,7 +213,9 @@ def test_shell_entrypoint_keeps_probe_before_mutating_handoff():
     text = _ACTOR.read_text()
     dry_exit = text.index('if [ "$DRY_PREFLIGHT" -eq 1 ]; then', text.index("# 결과 요약"))
     handoff = text.index("if ! hil_arm_controller_handoff", dry_exit)
+    final_deadman = text.rindex('python3 "$DEADMAN_CHECKER"', dry_exit, handoff)
     assert dry_exit < handoff
+    assert dry_exit < final_deadman < handoff
     assert 'if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 0 ]; then' in text
     assert "SKIP_ROS_CHECKS=1은 금지" in text
 
