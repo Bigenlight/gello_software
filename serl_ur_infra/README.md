@@ -7,10 +7,23 @@
 > 순서로 읽어라. 이 README는 **env 설계 규약**과 **이 디렉터리 문서 색인**이지 현재 상태 문서가 아니다.
 
 > ⚠️ **정책 경로는 여전히 `config.DRY_RUN=True`(명령 미발행)가 기본이다.**
-> (2026-07-29 정정: 예전 머리말의 "UNTESTED SKELETON / 실기 사용 금지"는 낡았다. 사람 개입 경로는
-> 2026-07-28에 실기에서 팔을 구동해 검증했다 — `tests/run_real_hil.py`, `docs/testing/04_HIL_INTERVENTION.md` §4.5.
-> 다만 **정책이 팔을 움직인 적은 없고**, actor entrypoint `scripts/run_remote_rlpd_actor.py`도
-> 실기에서 돈 적이 없다.)
+> (2026-07-29 정정: 예전 머리말의 "⚠️ UNTESTED SKELETON / 실기 사용 금지"는 **절반만 낡았다.**
+> **여전히 맞는 쪽 — RL 정책 경로는 실기 미검증이다.** 정책이 팔을 움직인 적이 없고,
+> actor entrypoint `scripts/run_remote_rlpd_actor.py`도 실기에서 돈 적이 없다.
+> **낡은 쪽 — zero-policy + 사람 개입 경로는 실기에서 돌았다.** 2026-07-28에 실기 팔을 구동해
+> 검증했다 — `tests/run_real_hil.py`, `docs/testing/04_HIL_INTERVENTION.md` §4.5.
+> 두 경로는 **서로 다른 코드**다. "실기 검증"을 인용할 때 어느 쪽인지 반드시 밝힐 것.)
+
+> 🆕 **(2026-07-29) reward classifier는 이제 정책과 다른 이미지를 본다 — G15 해소.**
+> 분류기는 무크롭 프레임으로 학습됐는데 actor가 **정책의 크롭된** 관측을 먹이고 있었다
+> (recall@0.85 100% → 33.3%). **재학습이 아니라 분리로 고쳤다**: actor가 관측에
+> **무크롭 128×128 JPEG sidecar**를 ~2 Hz로, **팔이 정지해 있을 때만** 덧붙이고
+> 서버는 그것만 분류한다. 정책의 `IMAGE_CROP`은 **불변**이고, **관측 schema hash도 불변**이다
+> (`3459098d…` — hash는 `CANONICAL_OBSERVATION_SPEC` 문서에서 나오지 wire payload에서 나오지 않는다).
+> 계약은 `ur_env/classifier_sidecar.py`, 전모는
+> [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) §12.1.
+> ⚠️ **실기 미검증 — 자동 테스트까지다.** 그리고 **팔 가림 병리(`take_21`)는 안 고쳐졌다**;
+> 정지 게이트가 완화할 뿐 진짜 해법은 카메라 배치다.
 
 최종 운영 checkout은 `/home/laptop3/gello_software`, branch는 `feat/gello-ur7e-humble-22.04` 하나다.
 2026-07-29 머지 `3f199d4`로 로봇/하드웨어 작업이 이 브랜치에 들어왔다 — **워크트리 분리 시절 서술은
@@ -33,7 +46,7 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
 | [REWARD_CLASSIFIER_LIVE_KO.md](REWARD_CLASSIFIER_LIVE_KO.md) | 라이브 reward classifier 뷰어 런북 (랩톱 CPU, 터미널 4개). **2026-07-29 실기 검증됨.** 인터프리터 함정 · 조용한 실패 · 트러블슈팅 |
 | [REWARD_TO_RL_INTEGRATION_KO.md](REWARD_TO_RL_INTEGRATION_KO.md) | **분류기를 개입·학습에 연결하는 사람이 읽을 것.** reward/termination 계약(서버 권위, `next_observations` 기준) · 개입의 **버퍼 이중 기록** · RLPD 50:50 배치 · 연결 순서 6단계 · 감시 지표. 코드에서 직접 추적해 작성 |
-| [RECORDED_TAKE_DEMO_CONVERSION_KO.md](RECORDED_TAKE_DEMO_CONVERSION_KO.md) | `gello_recorder`의 `vectors.h5`+MP4 take를 strict canonical offline demo pickle로 바꾸는 CLI·동기화·action 복원·라벨 계약 |
+| [RECORDED_TAKE_DEMO_CONVERSION_KO.md](RECORDED_TAKE_DEMO_CONVERSION_KO.md) | `gello_recorder`의 `take_*/{vectors.h5,cam1.mp4,cam2.mp4}` 를 strict canonical offline demo pickle로 바꾸는 CLI·동기화·action 복원·라벨 계약 (`40b99f8`). **learner 시작 게이트의 절반이 여기 달려 있다** — online replay ≥ `training_starts`(기본 100) **그리고** offline demo ≥ 1 이어야 학습이 시작된다(`ur_env/learner/batches.py::RLPDBatchSampler.ready`). ⚠️ **headless recorder의 `session_<stamp>/` 는 입력이 아니다** — GUI recorder의 `take_*/` 레이아웃이 필요하다 |
 
 ### 🗄️ 기록물 — 사료로만. 여기 적힌 명령을 실행하지 말 것
 
@@ -57,6 +70,19 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | `ur_env/envs/ros_backend.py` | Flask 로봇 서버 (HTTP) | rclpy 백그라운드 노드 — 토픽 I/O |
 | `ur_env/envs/policy_delta_controller.py` | (Franka 임피던스 컨트롤러가 하던 일) | 정책 델타 → 거버너 → IK → 게이트 → 조인트 명령 |
 | `ur_env/envs/wrappers.py` | `SpacemouseIntervention` | `GelloIntervention` — 데드맨 + 앵커 클러치 개입 |
+| `ur_env/classifier_sidecar.py` 🆕 | (upstream `classifier_keys` 별도 카메라 등록에 대응) | **reward classifier 전용 무크롭 이미지 계약.** `build_sidecar`(랩톱: full-res BGR → 128×128 → JPEG) · `decode_classifier_frames`(서버: 라이브 뷰어와 같은 레시피) · `validate_sidecar`(구조 검증, numpy만) · `SidecarScheduler`(~2 Hz + 정지 게이트 + 성공 근처 에스컬레이션) · `directory_sha256`(orbax **디렉터리** 체크포인트 핑거프린트, G19) |
+
+**sidecar가 관측 계약을 깨지 않는 이유** (헷갈리기 쉬운 지점이라 여기 적는다):
+
+- 전송이 **generic named-tensor map**(`proto/actor_transport.proto`)이라 **proto 변경이 없다.**
+- **관측 schema hash가 불변**이다 — `CANONICAL_OBSERVATION_SPEC` **문서**에서 파생되지 wire
+  payload에서 파생되지 않는다. 게다가 `ur_env/actor_network.py::ActorSessionService.step` 이
+  canonical 검증 **이전에** 예약 키를 벗겨내므로, 아래 어느 것도 완화할 필요가 없었다:
+  `validate_canonical_observation` 의 exact-key 검사, `ur_env/learner/policy.py`, `ReplayIngress`.
+- 옛 서버는 남는 텐서를 그냥 무시하므로 **구/신 peer가 공존**한다. 다만 서빙
+  `reward_model_id`(`cube-in-cup-all3-ckpt150+sidecar-v1`)가 **입력 계약까지 이름에 담고 있어서**,
+  실제로는 짝이 안 맞는 조합이 **핸드셰이크에서 거부**된다 — 서로 다른 픽셀로 reward를
+  계산한 채 세션이 끝까지 가는 것보다 낫다.
 
 ## 설계 요점
 
@@ -64,6 +90,8 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 - **정책 경로**: 델타를 `T_cmd`에 적분 → 거버너 rate cap → seed 기반 IK → 조인트 스텝 게이트 → 의심스러우면 HOLD. (`eef_delta.py` 후반부의 단순화판; 추후 본체 재사용으로 교체 예정)
 - **개입 경로**: 데드맨(스페이스바 홀드, 추후 풋스위치)을 누르는 순간 (GELLO, 로봇 명령 자세) 앵커 래치 → 앵커 델타를 per-step env 액션으로 재표현(클립이 자연스러운 추격 속도 제한이 됨) → `info["intervene_action"]` 보고.
 - **카메라**: franka_env처럼 pyrealsense2로 장치를 직접 열지 않고, `launch_cameras.sh`가 띄우는 realsense2_camera 드라이버의 `/camX/.../compressed` 토픽을 구독 (RealSense는 이중 오픈 불가 + 기존 viewer/recorder 생태계와 공존). JPEG 디코드→크롭→128×128 리사이즈→RGB는 FrankaEnv와 동일. `DISPLAY_IMAGE=True`면 정책 시점 이미지를 OpenCV 창으로 실시간 표시 (ImageDisplayer 포팅).
+  - **(2026-07-29) 디코드된 full-res BGR은 크롭 직전에 보관된다** (`ur7e_env.py` 의 `self._last_camera_frames[key] = bgr`, ≈`:781` — 바로 다음 줄이 크롭이다). `last_camera_frames()` 로 꺼내며 **참조지 복사가 아니다 — read-only로 다룰 것.** reward classifier sidecar의 원본이고, 이 덕분에 추가 디코드 비용이 0이다. fake env는 항상 비어 있다.
+  - 🪤 **RealSense 시리얼: 카메라는 한 쌍뿐이고 필드가 두 개다.** `serial_no:=` 가 매칭하는 **모듈 시리얼**은 `147122072740`(cam1, plain D435) / `243222072700`(cam2, D435IF)이고, 커널 USB 디스크립터(`journalctl`, `/sys/.../serial`)가 노출하는 **ASIC 시리얼**은 `151623020789` / `322743060038` 이다. **저널 grep으로 "어느 카메라가 붙어 있나"를 판정하지 마라** — 두 세션이 그렇게 해서 각각 정반대의 틀린 결론에 도달했다. 정본은 [`../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md).
 - **fake_env 모드**: ROS/카메라 없이 space 정의와 zero 관측만 제공 — learner 노드용.
 
 ## 좌표계 규약 (중요 — 한 번 틀렸던 것)
@@ -94,7 +122,14 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | keepout 존 | ✅ | ❌ | |
 | anti-windup lag 클램프 | ✅ | ❌ (리더 폭주용이라 정책 경로엔 덜 급함) | |
 | 해석적 line search | ✅ | ❌ | |
-| 워크스페이스 박스 (`ABS_POSE_LIMIT`) | (keepout으로 대체) | 🟠 구현됨(`clip_safety_box`), 단 실기 미발동 | `run_real_hil.py`는 `DefaultUR7eEnvConfig`(=0)를 쓰므로 박스가 꺼진다. 측정 박스는 `cube_in_cup.py`에만 있다 |
+| 워크스페이스 박스 (`ABS_POSE_LIMIT`) | (keepout으로 대체) | 🟠 **구현·배선 완료**(`clip_safety_box`), **단 기본 config에서는 비활성** | 구현 `ur7e_env.py::_build_safety_box`(≈`:224`), 클립 `::_clip_xyz_euler`(≈`:309`)·`::clip_safety_box`(≈`:345`). *(줄 번호는 동시 편집으로 밀린다 — 심볼 이름으로 찾을 것.)* `DefaultUR7eEnvConfig`의 `ABS_POSE_LIMIT_LOW/HIGH`가 **영벡터**라 `_safety_box_active=False` 로 떨어진다 — **의도된 refuse-don't-clamp**(0 부피 박스로 클램프하면 TCP를 base 원점으로 몰아 팔을 자기 베이스에 박는다). `run_real_hil.py`가 그 config를 쓰므로 실기에서 박스가 발동한 적이 없다. 측정 박스는 `cube_in_cup.py`에만 있다 |
+
+> 🪤 **이 줄에 대한 낡은 포인터 주의.** `../docs/testing/08_OPEN_GAPS.md`(G1 및 부록)는
+> 이 항목을 **`serl_ur_infra/README.md:59` 의 "❌ config만 존재, 미작동"** 으로 인용한다.
+> 그 서술은 이미 고쳐졌고 줄 번호도 옮겨졌다(현재 이 표). `❌ 미작동` 이라고 적힌
+> README 줄을 찾으려 하지 마라 — 없다. 다만 **"반쯤 맞다"는 지적 자체는 유효하다**:
+> 코드는 있는데 기본 config에서 실제로 꺼져 있다는 것이 혼란의 근원이었고, 위 칸이
+> 그 둘을 분리해 적은 것이다.
 
 **교체 계획**: `eef_delta`의 step()은 "리더→T_des 앵커 매핑(전반부)" +
 "거버너→IK→게이트(후반부)"로 나뉜다. 후반부를 `step_task_target(T_des)` 같은
@@ -123,6 +158,23 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 - [ ] **Kanu production robot/continuous acceptance**
       — 남은 범위는 real canonical demo, 기본 50-step publish/5,000-step checkpoint, 장시간 memory/contention, robot E2E다.
       정확한 명령과 feature RAM gate는 `HIL_SERL_KANU_RUNBOOK_KO.md`를 따른다.
+- [x] **reward classifier 입력 정합 (G15)** — 2026-07-29 해결. **재학습이 아니라 sidecar 분리다.**
+      `IMAGE_CROP`은 불변, 관측 schema hash도 불변(`3459098d…`), proto 무변경.
+- [x] **orbax 디렉터리 checkpoint pin (G19)** — 2026-07-29 해결. `checkpoint_sha256()`이
+      재귀 `directory_sha256()`에 위임하고, 기본 SHA 2개가 `512b6575…`(`checkpoint_150`, 14파일)로 교체됐다.
+      단일 파일 digest는 예전과 동일해 기존 pin이 살아 있다.
+- [ ] 🚧 **`CLASSIFIER_SIDECAR["stationary_speed_max"]` 실측** — 현재 `0.05 m/s`는
+      **코드가 스스로 `PLACEHOLDER`라고 표시한 값**이다(`ur_experiments/cube_in_cup.py`).
+      의도는 "팔이 가라앉았다"이고, 옳은 값은 릴리스 후 TCP가 실제로 머무는 속도다 —
+      녹화 take에서 잰다. 낮으면 게이트가 안 열리고 높으면 모션 블러를 분류한다.
+- [ ] **sidecar 경로 실기 첫 투입** — 위 두 개는 코드·자동 테스트 수준까지만 검증됐다.
+- [ ] 🔴 **팔 가림(occlusion)에 강한 카메라 배치** — sidecar가 **못 고치는** 항목이다.
+      `take_21`은 @0.85 recall 0.0%, @0.05로 내려도 57.9%이고 팔이 cam1을 쓸 때 확률이 `0.005↔1.0`으로
+      진동한다(출처: `REWARD_CLASSIFIER_THRESHOLD_KO.md`). 원인은 시야/가림이지 전처리도 라벨도 아니다.
+- [ ] **최초 1회 checkpoint 계보 단절 처리** — reward 계약(`input_contract`,
+      `success_confirmations`, classifier SHA, `reward_model_id`)이 learner fingerprint에 들어가
+      옛 checkpoint resume이 fail-closed로 거부된다. **의도된 1회성**이며 새 `--checkpoint-root`로
+      한 번 시작하면 끝난다(옛 계보는 recall 0% 체크포인트가 매긴 reward로 학습됐다).
 
 ## RViz fake RL 테스트 (로봇 노트북, 실기 리스크 0)
 

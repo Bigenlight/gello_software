@@ -9,17 +9,30 @@
 
 ---
 
-## 🔴 먼저 — 지금 연결하면 reward가 틀린다
+## ✅ 두 선행 블로커는 **해결됐다** (2026-07-29)
 
-두 개가 먼저 고쳐져야 한다. 둘 다 [`HANDOFF_NEXT_SESSION_KO.md`](HANDOFF_NEXT_SESSION_KO.md) §7 A·B다.
+> ### 🔧 이전 판 머리말 정정 (보존)
+> 이 문서는 원래 *"🔴 먼저 — 지금 연결하면 reward가 틀린다"*로 시작했고 두 블로커를 세웠다:
+> **A. 크롭 불일치**(분류기는 무크롭 학습인데 액터가 `IMAGE_CROP`을 먹인다 → recall@0.85 100% → 33%),
+> **B. `checkpoint_sha256()`가 orbax 디렉터리를 못 읽고 기본 SHA가 recall 0% 은퇴 모델을 가리킨다.**
+>
+> **둘 다 한 변경에서 처리됐다.**
+>
+> | # | 어떻게 해결됐나 |
+> | --- | --- |
+> | **A** | **재학습이 아니라 분리.** 액터가 분류기에게 **무크롭 전용 이미지(sidecar)**를 따로 보낸다. 정책 크롭은 그대로 |
+> | **B** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임. 두 기본 SHA도 `512b6575…`로 교체 |
+>
+> 그리고 *"뷰어와 gRPC 경로는 다른 그림을 본다"*도 **더 이상 맞지 않는다** —
+> 이제 **같은 픽셀·같은 레시피·같은 체크포인트**다.
 
-| # | 문제 | 연결했을 때 벌어지는 일 |
-| --- | --- | --- |
-| **A** | **크롭 불일치** — 분류기는 무크롭으로 학습됐는데 액터 경로는 `IMAGE_CROP`을 적용한다 | 분포 밖 입력. recall@0.85가 **100% → 33%**. 성공을 거의 못 잡는다 |
-| **B** | `checkpoint_sha256()`가 `os.path.isfile()`을 요구해 **orbax 디렉터리 체크포인트를 못 읽는다**. `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`은 아직 recall 0%짜리 은퇴 모델을 가리킨다 | 1만 고치고 2를 빼먹으면 **서버가 조용히 뜨고 reward가 영구 0**이 된다 |
+**대신 연결하는 사람이 반드시 알아야 할 것이 바뀌었다:**
 
-**라이브 뷰어가 잘 나오는 것은 이 둘과 무관하다.** 뷰어와 gRPC 경로는 다른 그림을 본다
-(`HANDOFF_NEXT_SESSION_KO.md` §6). 뷰어 화면을 근거로 "연결만 하면 된다"고 판단하지 마라.
+| | |
+| --- | --- |
+| 🔴 **모든 transition이 분류되지 않는다** | 분류는 **약 2 Hz, 팔이 멈춰 있을 때만** 일어난다. 10 Hz 루프에서 **대다수 transition은 분류되지 않고 reward 0으로 남는다.** 이것은 결함이 아니라 설계다 → §3 |
+| 🔴 **실기 검증이 0이다** | 코드·단위테스트까지다. sidecar 경로는 실기에서 한 번도 안 돌았다 |
+| 🔴 **팔 가림은 안 고쳐졌다** | `take_21` @0.85 recall 0%. 원인은 전처리가 아니라 **시야**다. 정지 게이트는 완화일 뿐 |
 
 ---
 
@@ -105,17 +118,58 @@ reward 1이 붙고 에피소드가 끝난다.
 
 `ur_env/rlpd_receive_server.py:556-620`, `RewardTransitionFinalizer`.
 
-### 3.1 분류 대상은 `next_observations`다
+### 3.1 분류 대상은 **O(t+1)에 붙은 sidecar 프레임**이다 — `next_observations`가 아니다
+
+> **🔧 정정 (2026-07-29).** 이전 판은 이렇게 적었다:
+> *"분류 대상은 `next_observations`다 — `result = self.classifier.classify(transition["next_observations"])`.
+> 그래서 크롭 불일치가 정확히 여기서 문다."*
+> **그 줄은 이제 없다.** 분류기는 정책 관측을 **보지 않는다.**
 
 ```python
-result = self.classifier.classify(transition["next_observations"])
+# classifier_sidecar가 None이면 분류 자체가 일어나지 않는다
+finalize_transition(data, classifier_sidecar)
 ```
 
-**액션 이전이 아니라 이후 관측을 본다.** "이 액션을 한 결과 성공 상태가 되었는가"를 묻는다.
-`next_observations`가 없으면 `ActorProtocolError`로 거부한다.
+- **여전히 O(t+1) 기준이다** — "이 액션을 한 결과 성공 상태가 되었는가"를 묻는다.
+  다만 그 판단에 쓰는 그림이 **크롭된 정책 관측이 아니라 무크롭 sidecar**다.
+- 서버는 `validate_classifier_frames()`로 **정책 관측이 실수로 들어오는 것을 막는다.**
+  기하(shape/dtype)는 canonical spec에서 읽지만 **내용은 다른 그림**이다.
+- `next_observations` 자체는 **여전히 필수**다(`ActorSessionService`가 붙이고 `ReplayIngress`가 쓴다).
+  없으면 파이프라인이 이미 상류에서 깨진 것이다.
 
-→ **그래서 크롭 불일치가 정확히 여기서 문다.** 액터가 `ur7e_env.get_im()`으로 만든
-크롭된 관측이 그대로 분류기에 들어간다.
+### 3.1a 🔴 **대다수 transition은 분류되지 않는다** — 그리고 그것이 설계다
+
+액터는 sidecar를 **약 2 Hz로, 팔이 정지했을 때만** 붙인다. 10 Hz 루프이므로
+**도착하는 transition의 대다수가 `classifier_sidecar=None`이고 분류되지 않는다.**
+
+**성긴 것이 의도인 이유** (서버 docstring이 셋을 든다):
+
+1. 큐브를 놓은 뒤 **장면이 가라앉게 둔다** — 던지는 도중의 모션 블러 프레임을 채점하지 않는다.
+2. **성공 판정의 깜빡임을 없앤다** — 초당 몇 번만 다시 계산되는 판정은 10 Hz로 진동할 수 없다.
+3. 대역폭이 덜 드는 것은 **부수 효과이지 이유가 아니다.**
+
+**분류되지 않은 transition — 필드별로 정확히:**
+
+| 필드 | 값 | 왜 |
+| --- | --- | --- |
+| `rewards` | **0.0으로 강제** | "reward 권위는 서버"의 보수적 확장. 분류가 없으면 성공 증거도 없다. 로컬 제안은 분류된 스텝과 **똑같이** 버려진다 |
+| `masks` | **로컬 제안 유지** | `ReplayIngress._convert`의 mask/done 정합성(`masks==0.0 iff dones`)을 특수 케이스 없이 만족시킨다 |
+| `dones` / `truncated` | **로컬 제안 통과** | 새 동작이 아니다 — 분류기가 negative인 transition에서 이미 그렇게 하고 있었다 |
+| `classifier_evaluated` | `0` | |
+| `classifier_probability` / `classifier_threshold` | `0.0` / `0.0` | 미평가일 때 **0이어야 한다**고 `_convert`와 `grpc_actor_transport`가 요구한다. "진짜지만 안 쓴 확률"을 넣으면 **거부된다** |
+| `classifier_success` | `0` | |
+| `reward_model_id` | `""` | 마찬가지로 미평가일 때 **빈 문자열이어야 한다** |
+
+**학습에 주는 순효과:** 분류되지 않은 transition은 **평범한 reward 0, non-terminal 샘플**이다.
+못 하는 것은 딱 하나 — **positive reward로 에피소드를 끝내는 것.** 아무도 분류하지 않은 스텝에서
+바로 그 권한을 뺏는 것이 의도다.
+
+> **🪤 그래서 "reward가 계속 0"이 정상일 수 있다.** 예전 같으면 그것이 곧 고장 신호였다.
+> 지금은 **분류가 몇 번 일어났는지**를 같이 봐야 한다. 서버가
+> `UNCLASSIFIED_WARN_STREAK = 100`(10 Hz에서 **10초**) 연속 미분류마다 stderr로
+> `[reward-classifier] WARNING:`을 찍는다 — `logging`이 아니라 `print(file=sys.stderr)`인 이유는
+> `ur_env` 어디에서도 logging을 설정하지 않아 **경고 자체가 조용해질 위험**을 피하려는 것이다.
+> 액터 쪽 짝은 `ActorRunSummary.sidecar_attached_steps`다. **0이면 reward는 영원히 안 나온다.**
 
 ### 3.2 reward는 무조건 덮어써진다
 

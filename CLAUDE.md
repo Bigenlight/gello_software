@@ -15,6 +15,7 @@ laptop3                                        kanu (GPU 서버)
 
 laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 kanu에서** 돌리고 gRPC로 실시간
 통신한다. reward 권위는 서버에 있다. 10 Hz 루프라 스텝 예산이 100 ms인데 현재 RTT p99가 97.1 ms다.
+분류기는 정책 관측이 아니라 **자기 전용 무크롭 이미지(sidecar)를 약 2 Hz로** 따로 받는다.
 
 **branch `feat/gello-ur7e-humble-22.04`** (origin/HEAD). 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
 작업을 이 브랜치로 가져왔다. **워크트리 분리는 끝났다** — 로봇 코드와 learner 코드가 **다른
@@ -25,10 +26,20 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 
 **되는 것** — 하드웨어 경로 · 텔레옵 · 사람 개입 · gRPC 왕복 · **라이브 reward classifier 뷰어**.
 전부 실기에서 확인했다.
-**안 되는 것** — **RL 루프의 reward.** 관측은 `IMAGE_CROP`으로 잘려 나가는데(`ur_experiments/cube_in_cup.py`)
-분류기는 무크롭으로 학습됐다. recall@0.85가 100% → 33%로 떨어진다. **뷰어는 믿어도 되고,
-RL reward는 믿으면 안 된다.** 그리고 actor entrypoint(`scripts/run_remote_rlpd_actor.py`)는
-실기에서 한 번도 돌지 않았다.
+
+**🆕 크롭 불일치(G15)는 코드에서 해결됐다 — 재학습이 아니라 분리(decoupling)로.** 액터가 분류기에게
+**무크롭 원본 JPEG를 sidecar로 따로** 보낸다(`ur_env/classifier_sidecar.py`). 정책은 측정된
+`IMAGE_CROP`을 그대로 유지한다. 같은 커밋에서 checkpoint 디렉터리 해시(G19)도 고쳤다.
+**단 실기에서는 아직 한 번도 안 돌렸다** — 코드·단위테스트까지다.
+
+> **이전 판 문구(보존):** *"안 되는 것 — RL 루프의 reward. 뷰어는 믿어도 되고 RL reward는
+> 믿으면 안 된다."* 이 경고는 sidecar 이전 기준이다. 이제 뷰어와 RL 경로는 **같은 그림**을 본다
+> (같은 무크롭 JPEG, 같은 `decode_classifier_image()` 레시피).
+
+**안 되는 것** — actor entrypoint(`scripts/run_remote_rlpd_actor.py`)는 실기에서 한 번도 돌지 않았다.
+그리고 sidecar가 **고치지 못하는 것이 하나 남아 있다**: 팔이 cam1 시야를 쓸고 지나갈 때의
+**가림(occlusion)**. `take_21`은 @0.85 recall 0%, @0.05에서도 57.9%다. 원인은 전처리도 라벨도 아닌
+**시야**다. 정지 게이트가 완화할 뿐이고, 진짜 해결은 **팔이 가로지르지 않는 카메라 배치**다.
 
 ## 읽는 순서 — 이 셋만 읽고 멈춰라
 
@@ -37,7 +48,8 @@ RL reward는 믿으면 안 된다.** 그리고 actor entrypoint(`scripts/run_rem
    **진입점.** 현재 상태 · 리그 실측값 · 다음 할 일 · 함정. **이 문서 하나만 읽고 바로 이어서
    작업할 수 있게** 쓰여 있다. (30분)
 3. [`docs/testing/08_OPEN_GAPS.md`](docs/testing/08_OPEN_GAPS.md) — 지금 무엇이 깨져 있는지.
-   **reward를 믿으면 안 되는 이유(G15 크롭 불일치)와 워크스페이스 박스가 꺼져 있던 이유(G1)가 여기 있다.**
+   **G15(크롭 불일치)가 어떻게 sidecar로 닫혔고 무엇이 안 닫혔는지(가림), 워크스페이스 박스가
+   꺼져 있던 이유(G1)가 여기 있다.**
 
 그다음은 **하려는 일 하나만** 아래에서 골라 읽는다. 나머지는 필요할 때 펼친다 —
 순서대로 다 읽지 마라.
@@ -61,6 +73,7 @@ RL reward는 믿으면 안 된다.** 그리고 actor entrypoint(`scripts/run_rem
 | 셋업 · 빌드 · 인터프리터 함정 · 비상 정지 | [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) |
 | HIL actor 기동 (preflight, Stage A fake-env / Stage B 실센서) | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) |
 | kanu에서 learner 띄우기 | [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) |
+| 녹화 take를 learner용 offline demo로 변환 | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) (`40b99f8`) — **`--outcome success\|truncated`는 사람이 명시한다.** 변환기는 성공을 추측하지 않는다. learner는 offline demo가 0이면 학습을 시작하지 않는다 |
 | 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
 | mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
@@ -73,8 +86,9 @@ RL reward는 믿으면 안 된다.** 그리고 actor entrypoint(`scripts/run_rem
 | 작업 | 시작점 |
 | --- | --- |
 | **분류기를 개입·학습에 연결** | [`serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md`](serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md) — reward/termination 계약, 개입 이중 라우팅, RLPD 50:50, 연결 순서. **코드에서 직접 추적해 쓴 문서다.** 아래 두 블로커가 선행 조건 |
-| **크롭 불일치 해소** (최상위 블로커) | `08_OPEN_GAPS.md` G15 → `REWARD_CLASSIFIER_THRESHOLD_KO.md` → `ur_experiments/cube_in_cup.py`. **`IMAGE_CROP`을 지우는 건 해결이 아니다** |
-| **checkpoint 로딩** (2번째 블로커) | `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`이 `os.path.isfile()`을 요구해 orbax **디렉터리** 체크포인트를 못 읽는다. `scripts/run_rlpd_learner_server.py:72`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`은 아직 recall 0%짜리 은퇴 체크포인트를 가리킨다 |
+| ~~크롭 불일치 해소~~ → **sidecar 실기 검증** | `08_OPEN_GAPS.md` G15 → `ur_env/classifier_sidecar.py` (모듈 docstring이 설계 근거 전부). 코드는 들어갔고 **실기 검증이 남았다**. **`IMAGE_CROP`을 지우는 건 여전히 해결이 아니다** |
+| ~~checkpoint 로딩~~ → **해결됨(G19)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임해 orbax **디렉터리**를 해시한다. 두 `DEFAULT_*_SHA256` 상수도 은퇴 체크포인트(`e329986b…`)에서 교체됐다 |
+| **canonical demo artifact 만들기** (learner 시작 조건) | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) + `08_OPEN_GAPS.md` G20. 변환 경로는 `40b99f8`에서 생겼고 23 take/2,037 transition까지 검증됐다. **남은 건 사람이 성공으로 라벨한 영구 artifact 하나다** |
 | actor entrypoint 실기 첫 투입 | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) §7 (팔을 움직인 건 전부 `tests/run_real_hil.py`였다 — 다른 코드 경로다) |
 | 개입 루프·좌표계·메타데이터 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) |
 | 장애 주입 매트릭스 (거의 미검증) | [`docs/testing/07_FAILURE_INJECTION.md`](docs/testing/07_FAILURE_INJECTION.md) |
@@ -115,7 +129,9 @@ serl_ur_infra/
   ur_env/envs/wrappers.py          GelloIntervention, 데드맨, 그리퍼 페널티
   ur_env/envs/frame_wrappers.py    RelativeFrame, Quat2EulerWrapper
   ur_env/envs/ros_backend.py       rclpy 백엔드, 250 Hz 업샘플러
-  ur_env/remote_actor.py           actor 루프, 전이 생성·전송
+  ur_env/remote_actor.py           actor 루프, 전이 생성·전송, sidecar 부착 계측
+  ur_env/classifier_sidecar.py     분류기 sidecar 계약 — build/validate/decode, 정지·2 Hz 게이트,
+                                   directory_sha256. **설계 근거가 모듈 docstring에 전부 있다**
   ur_env/rlpd_receive_server.py    서버 ingress + RewardClassifierRuntime + checkpoint_sha256
   ur_env/learner/                  RLPD learner, checkpoint, fingerprint
   ur_experiments/cube_in_cup.py    태스크 config (측정값 전부 여기, IMAGE_CROP 포함)
@@ -135,7 +151,10 @@ ros2_ur_ws/
 - **gRPC 코드는 `/home/laptop3/venvs/gello-hil-actor/bin/python`으로만.** 시스템 `python3`의
   grpcio 1.30.2가 손상돼 오류 없이 100% CPU로 무한 정지한다.
 - **`IMAGE_CROP`을 "분류기가 안 맞으니" 지우지 말 것.** 데이터셋 측정값이고 정책이 1차 소비자다.
-  해결은 classifier 재학습이다(handoff §4).
-- **테스트는 passed 수를 볼 것.** PYTHONPATH에서 `serl_launcher`가 빠지면 조용히 333 → 299가 되고
-  skip 사유가 거짓말을 한다.
+  해결은 **분류기에게 무크롭 sidecar를 따로 주는 것**이다(`ur_env/classifier_sidecar.py`).
+  *(이전 판은 "해결은 classifier 재학습이다"라고 적었다 — 재학습은 채택되지 않았다. 분리를
+  택한 덕분에 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 측정값이 전부 살아남았다.)*
+- **테스트는 passed 수를 볼 것.** PYTHONPATH에서 `serl_launcher`가 빠지면 조용히 떨어지고
+  skip 사유가 거짓말을 한다. 기준선은 **429 passed / 11 skipped**(classifier sidecar 반영 후 실측).
+  *(HEAD `40b99f8`에서는 337이었고, 옛 문서의 333은 그보다도 이전 값이다.)*
 - **메인 브랜치는 여러 사람이 공유한다.** 머지·리베이스 전에 상대 checkout이 깨끗한지 확인할 것.

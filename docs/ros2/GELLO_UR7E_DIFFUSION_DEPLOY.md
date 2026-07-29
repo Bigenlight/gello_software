@@ -91,21 +91,59 @@ observation 방향 (팔 → 정책, 매 EXECUTE 틱):
 
 ## 2. 하드웨어 / 환경
 
-> ### 🔧 카메라 시리얼 정정 (2026-07-28)
+> ### 🔧 카메라 시리얼 정정 (2026-07-29) — **직전 "물리 교체" 정정은 틀렸다**
 >
-> 카메라 **개체가 물리적으로 교체됐다.** 이전 판의 `147122072740` / `243222072700`은
-> 이 PC가 커널 로그상 한 번도 열거한 적 없는 하드웨어다(2026-07-05까지 소급 확인).
-> 이 문서의 시리얼은 실제 연결된 개체(`151623020789` / `322743060038`)로 갱신했다.
-> **없는 시리얼로 바인딩하면 조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다.
-> 모델 클래스(D435 / D435if)와 cam1·cam2 배정은 그대로지만, **어느 개체가 손목에 달렸는지는
-> 미확정**이다. 팔을 흔들어 cam2 화면에서 손가락이 고정되는지 확인할 것.
-> 아래 "검증 완료" 류의 과거 기록은 **옛 개체로 수행된 것**이라 그대로 두었다.
+> **이 리그의 RealSense는 한 쌍뿐이고, 한 번도 교체된 적이 없다.**
+> 이 자리에 있던 2026-07-28 판은 "카메라 **개체가 물리적으로 교체됐다**. 이전 판의
+> `147122072740` / `243222072700`은 이 PC가 커널 로그상 한 번도 열거한 적 없는 하드웨어다"라고
+> 주장하며 문서 전체의 시리얼을 `151623020789` / `322743060038`으로 바꿨다.
+> **그 주장은 사실이 아니다.** 리포가 "두 쌍"이라 부르던 것은 **같은 카메라 두 대의 서로 다른
+> 시리얼 *필드*** 다. 2026-07-29에 **같은 물리 USB 포트**에서 두 값을 동시에 측정했다:
+>
+> | 포트 | `camera_info.serial_number` | `camera_info.asic_serial_number` | 장치 |
+> |---|---|---|---|
+> | `4-4.1` | **`147122072740`** | `151623020789` | plain D435 → cam1 **SCENE** (삼각대, 3인칭) |
+> | `4-4.3` | **`243222072700`** | `322743060038` | D435IF → cam2 **WRIST** (그리퍼 장착) |
+>
+> `serial_no:=`는 **`serial_number`에만** 매칭된다. 직접 확인한 결과:
+>
+> ```
+> rs.config().enable_device('151623020789')  ->  NO MATCH   # ASIC 시리얼
+> rs.config().enable_device('147122072740')  ->  MATCHED    # 장치 시리얼
+> ```
+>
+> 즉 07-28 판이 문서에 심어 놓은 ASIC 시리얼은 `realsense2_camera`가 **영원히 해석하지 못한다.**
+> 이 문서의 시리얼은 전부 **장치 시리얼**(`147122072740` / `243222072700`)로 되돌렸다.
+>
+> **덫 1 — 저널 grep.** 커널 USB 디스크립터(`journalctl`, `/sys/bus/usb/devices/*/serial`)는
+> **ASIC 시리얼**을 노출한다. 그래서 저널을 grep하면 `151623020789`/`322743060038`은 수백 건
+> 나오고 `147122072740`/`243222072700`은 **0건**이라, 정확히 "이 호스트는 그 카메라를 본 적이
+> 없다"처럼 읽힌다. 커밋 `607e541`이 그렇게 결론짓고 기본값을 ASIC 시리얼로 바꿨다.
+> **저널 grep으로 카메라 정체를 다시 유도하지 마라** — 이 방법으로 **서로 반대 방향의** 틀린
+> 결론에 도달한 세션이 이미 둘이다. 정체의 권위는 `rs-enumerate-devices` / `pyrealsense2`가
+> 보고하는 `serial_number`이고, 코드에서는
+> [`ros2_ur_ws/_resolve_camera_serials.sh`](../../ros2_ur_ws/_resolve_camera_serials.sh)다.
+>
+> **덫 2 — 조용한 실패.** 해석되지 않는 시리얼로 바인딩해도 **시끄럽게 실패하지 않는다.**
+> 노드는 정상 기동하고 `ros2 topic info`는 publisher 1을 보고하는데, **프레임이 하나도
+> 안 나온다.** 스택 어디에도 "카메라가 안 꽂혔다"와 "설정이 틀렸다"를 구분해 주는 신호가 없다.
+> 그래서 시리얼 하드코딩보다
+> [`ros2_ur_ws/launch_cameras.sh`](../../ros2_ur_ws/launch_cameras.sh)를 권한다 — 이쪽은
+> `_resolve_camera_serials.sh`를 source해 **실제 USB 버스에 대고 시리얼을 해석**한다
+> (커밋 `43ba314`, `fb48100`).
+>
+> cam1/cam2 ↔ 모델 클래스 ↔ 마운트 배정도 확정이다: plain D435 = cam1 = SCENE(삼각대),
+> D435IF = cam2 = WRIST(그리퍼 장착). **손목 배정은 녹화 영상으로 증명됐다** — cam2 화면에서
+> 그리퍼 손가락은 픽셀이 고정된 채 배경만 흐른다.
+> 07-28 판이 "아래 과거 검증 기록은 옛 개체로 수행된 것"이라 적은 주석들도 함께 철회한다.
 
 - **팔**: UR7e, `ros-humble-ur`. **그리퍼**: Robotiq 2F-85 (Modbus RTU, 드라이버가 소유한 socat 브리지 `/tmp/ttyUR` 공유).
 - **카메라**: RealSense 2대, **시리얼로 바인딩** (혼동 시 정책이 조용히 열화됨 — §9 참고):
-  - cam1 = Intel RealSense **D435**, 시리얼 `151623020789`
-  - cam2 = Intel RealSense **D435if**, 시리얼 `322743060038`
+  - cam1 = Intel RealSense **D435**, 시리얼 `147122072740` (SCENE, 삼각대)
+  - cam2 = Intel RealSense **D435if**, 시리얼 `243222072700` (WRIST, 그리퍼 장착)
   - 공통 컬러 프로파일 `1280x720x30` (해상도/FPS는 두 카메라 동일해야 함)
+  - 위 값은 **장치 시리얼**이다. `journalctl`에 보이는 `151623020789` / `322743060038`은
+    **ASIC 시리얼**이고 `serial_no:=`로는 절대 해석되지 않는다(위 정정 박스).
 
   > **⚠️ 물리적 카메라 배치 = 학습 리그와 반드시 일치.** 한 대는 씬/3인칭 시점을, 다른 한 대는 작업공간 근접(close-up)을 본다. **두 물리 시점과 cam1/cam2 시리얼 할당이 학습 당시 리그와 동일**해야 하며, 어긋나면 정책이 **에러 없이 조용히 열화**된다(정책은 cam1=씬, cam2=근접 같은 고정 배치를 가정하고 학습됨 — `cam1/cam2` 순서는 학습에 고정됨). 실기 첫 구동 전에 **라이브 뷰(`rqt_image_view` 등)를 학습 셋업 사진과 대조**해 확인할 것.
 
@@ -182,19 +220,31 @@ DIFFUSION_CHECKPOINT="$CKPT" ./scripts/run_diffusion_server.sh
    >
    > **첫 실행 캐시 노트.** ResNet18 백본은 ImageNet 사전학습 가중치를 쓴다. 오프라인/방화벽 뒤 로봇 PC에서 첫 실행 시 torchvision이 이 가중치를 받으려다 멈출 수 있다 — `run_ur7e_diffusion_real.sh`를 띄우는 셸에서 `export TORCH_HOME=/path/to/torch_cache` (및 캐시가 채워졌으면 `export HF_HUB_OFFLINE=1`)을 미리 설정할 것.
 
-3. **RealSense 카메라 2대를 정확한 시리얼→네임스페이스 매핑으로 기동** (ACT와 동일):
+3. **RealSense 카메라 2대를 정확한 시리얼→네임스페이스 매핑으로 기동** (ACT와 동일).
+   **권장은 시리얼을 직접 적지 않는 것** — [`ros2_ur_ws/launch_cameras.sh`](../../ros2_ur_ws/launch_cameras.sh)가
+   `_resolve_camera_serials.sh`로 실제 USB 버스에 대고 시리얼을 해석하고, 두 스트림이 ~30 Hz로
+   흐를 때까지 기다린 뒤 cam1/cam2 뷰어를 띄운다:
 
    ```bash
-   # cam1 (D435, 151623020789) → 네임스페이스 cam1
+   cd ~/gello_software/ros2_ur_ws
+   ./launch_cameras.sh              # 카메라 2대 + 뷰어 (Ctrl-C 한 번으로 정리)
+   # VIEW=false ./launch_cameras.sh # 뷰어 없이 카메라만
+   ```
+
+   손으로 띄우는 fallback (값은 반드시 **장치 시리얼**, ASIC 시리얼이 아니다 — §2 정정 박스):
+
+   ```bash
+   # cam1 (D435, 147122072740 — SCENE) → 네임스페이스 cam1
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam1 camera_namespace:=cam1 \
-       serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
-   # cam2 (D435if, 322743060038) → 네임스페이스 cam2
+       serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
+   # cam2 (D435if, 243222072700 — WRIST) → 네임스페이스 cam2
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam2 camera_namespace:=cam2 \
-       serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
+       serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
 
-   # 압축 이미지 토픽이 ~30Hz로 나오는지 확인:
+   # 압축 이미지 토픽이 ~30Hz로 나오는지 확인 (수동 경로에서는 필수 —
+   # `ros2 topic info`의 publisher 수는 시리얼이 안 맞아도 1로 나온다):
    ros2 topic hz /cam1/cam1/color/image_raw/compressed
    ros2 topic hz /cam2/cam2/color/image_raw/compressed
    ```
@@ -356,7 +406,8 @@ DIFFUSION_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_diffusion_real.sh
 - **포트 5592 충돌 / 서버가 안 뜸.** diffusion 서버는 5592, ACT 서버는 5591을 쓴다. 두 서버가 동시에 떠 있어도 포트가 달라 충돌하지 않지만, 이전 diffusion 서버가 안 죽고 남아 있으면 5592가 이미 점유되어 새 서버가 bind에 실패한다 — `ss -ltnp | grep 5592`로 확인하고 잔여 프로세스를 정리하라. 리더는 `diffusion_deploy.yaml`의 `act_port=5592`로 서버를 찾으므로, 포트를 바꾸면 yaml과 서버 양쪽을 맞춰야 한다.
 - **refill이 느려 FAULT-loop / 팔이 자꾸 멈춤.** DDIM refill이 `act_timeout_s`(0.6s)를 넘기고 있다는 뜻(또는 refill 블록이 obs를 얼려 `obs_timeout_s`(0.7s)를 넘긴 경우 — 둘 중 먼저 걸리는 쪽이 FAULT). **선호되는 해결책은 워치독을 넓히는 게 아니라**(§6) `DIFFUSION_NUM_INFERENCE_STEPS`를 낮추는 것이다(예: 5). 먼저 `benchmark_diffusion_latency.py`로 p99를 측정해 실제 예산 초과인지 확인할 것. GPU가 아니라 CPU로 돌고 있으면 근본 원인이 그것이다(아래).
 - **서버가 종료 코드 3 / "CUDA unavailable"로 죽음.** `diffusion_server`의 `resolve_device()`는 `--device cuda`인데 CUDA가 없으면 **자동 CPU 폴백을 하지 않고 코드 3으로 거부**한다(CPU DDIM-10이 0.6s 타임아웃을 넘겨 FAULT-loop를 유발하므로 의도적). 해결: (a) CUDA/드라이버를 고치거나(RT 커널 vs NVIDIA 드라이버 충돌 등은 ACT 문서 §4.5-1 참고), (b) 정말 CPU로 돌려야 한다면 `DIFFUSION_DEVICE=cpu`를 명시하고 **동시에** `diffusion_deploy.yaml`의 세 워치독을 **모두** 크게 올릴 것 — `act_timeout_s`뿐 아니라 **`obs_timeout_s`도 반드시 함께** 올려 `act_timeout_s < obs_timeout_s < staleness_timeout_s` 순서를 유지해야 한다. `obs_timeout_s`를 그대로 두면 느린 CPU refill이 obs를 오래 얼려 **가짜 obs-stale FAULT**를 낸다. (단 이는 어디까지나 CPU 임시방편일 뿐이며, 정상 배포의 올바른 노브는 워치독 확대가 아니라 `DIFFUSION_NUM_INFERENCE_STEPS` 축소다.)
-- **cam1/cam2 시리얼이 뒤바뀜.** 반드시 **시리얼로 바인딩**할 것(`serial_no`). 잘못 바인딩되면 정책은 크래시하지 않고 **조용히 열화**된다. all-digit 시리얼은 따옴표로 감쌀 것: `serial_no:="'151623020789'"` (정수 강제변환 버그 — ACT 문서 §9 / `GELLO_UR7E_RECORDING.md` troubleshooting 7 참고).
+- **cam1/cam2 시리얼이 뒤바뀜.** 반드시 **시리얼로 바인딩**할 것(`serial_no`). 잘못 바인딩되면 정책은 크래시하지 않고 **조용히 열화**된다. all-digit 시리얼은 따옴표로 감쌀 것: `serial_no:="'147122072740'"` (정수 강제변환 버그 — ACT 문서 §9 / `GELLO_UR7E_RECORDING.md` troubleshooting 7 참고).
+- **카메라가 조용히 안 뜬다 (노드는 살아 있는데 프레임이 0).** 십중팔구 **해석되지 않는 시리얼**을 바인딩한 것이다. `journalctl` / `/sys/bus/usb/devices/*/serial`이 보여주는 값은 **ASIC 시리얼**(`151623020789` / `322743060038`)이고, `serial_no:=`는 **장치 시리얼**(`147122072740` / `243222072700`)에만 매칭된다. 이 실패는 에러를 내지 않으며 `ros2 topic info`도 publisher 1을 보고한다 — `ros2 topic hz`로만 구분된다. **저널 grep으로 카메라 정체를 재유도하지 말 것**(그 방법으로 반대 방향의 틀린 결론에 도달한 세션이 둘 있다). 실제 값은 `rs-enumerate-devices`로 보거나, 그냥 [`launch_cameras.sh`](../../ros2_ur_ws/launch_cameras.sh)에 맡길 것.
 - **`diffusers`가 없다 / import 에러.** ACT lock에는 `diffusers`가 빠져 있다. diffusion 서버는 `diffusers==0.35.2`가 필요하므로 반드시 `requirements-diffusion.lock`으로 설치했는지 확인(§4-2). ACT venv를 재사용했다면 `act_venv/bin/pip install diffusers==0.35.2`.
 - **첫 실행 시 torch 캐시 관련 멈춤/실패.** §4의 `TORCH_HOME`/`HF_HUB_OFFLINE=1` 참고 — ResNet18 백본 가중치를 오프라인 환경에서 받으려다 멈추는 경우가 흔하다.
 - **가짜(spurious) FAULT가 시작 직후에 뜬다.** 서버 워밍업이 실패/스킵됐을 가능성(로그의 `warmup done` 확인), 또는 첫 refill이 예산을 넘김(→ step 줄이기). diffusion은 첫 EXECUTE에서 곧바로 refill을 한 번 하므로 워밍업이 특히 중요하다.

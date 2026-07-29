@@ -62,6 +62,67 @@ PYTHONPATH=serl_ur_infra python3 -c \
   "from ur_env.observation_schema import CANONICAL_OBSERVATION_SCHEMA_HASH as h; print(h)"
 ```
 
+## Classifier sidecar (non-canonical)
+
+Since 2026-07-29 an observation may carry one extra **nested** key, `classifier`
+(`ur_env.classifier_sidecar.CLASSIFIER_SIDECAR_KEY`), holding the reward
+classifier's own view of the scene:
+
+```text
+classifier/cam1_jpeg   uint8  (N,)    one complete JPEG file
+classifier/cam2_jpeg   uint8  (M,)    one complete JPEG file
+```
+
+**The schema hash does not change, and no proto change was needed.** Three
+independent reasons, each worth stating because each has been misread before:
+
+1. `Tensor{path,dtype,shape,data}` + `Observation{repeated Tensor tensors}` is a
+   *generic named-tensor map*. A new key is data, not schema.
+2. The handshake hash derives from `CANONICAL_OBSERVATION_SPEC` — from the
+   schema **document**, never from the wire payload.
+3. The server splits the sidecar off **before** canonical validation
+   (`actor_network._split_classifier_sidecar`). It has to:
+   `validate_canonical_observation()` rejects unknown keys outright.
+
+So every existing pin of `3459098d…0352903` stays valid, and an old server
+simply ignores the extra tensors.
+
+**What the bytes are.** The uncropped full field of view, resized on the laptop
+to 128x128 with the same deterministic `cv2.resize` the server would have run,
+then JPEG-encoded at quality 95 — **13.32 KiB per pair, measured** over 100
+frames per camera including protobuf framing. The policy's `IMAGE_CROP` is
+deliberately *absent*: this checkpoint was trained on uncropped frames, and
+feeding it the cropped policy observation cost recall@0.85 100% -> 33.3%
+(`docs/testing/08_OPEN_GAPS.md` G15).
+
+Forwarding the camera's original 720p JPEG was the first design and was
+**rejected on measurement**: at the driver's `jpeg_quality=95` a live pair is
+400 KiB, which exceeds a 13 Mbit/s link outright and spikes the step by +252 ms
+against a 100 ms budget.
+
+**Cadence, and why most transitions carry no sidecar.** The actor attaches one
+roughly every 5 steps (~2 Hz at HZ=10) and **only while the arm is stationary**
+(TCP linear speed <= 0.05 m/s); a step about to terminate always attaches. If the
+last classifier probability was >= 0.05 the scheduler escalates to every step —
+that bound is deliberately *below* the 0.2 reward threshold so the step that
+actually crosses it is never missed.
+
+`BeginEpisode` **must not** carry a sidecar and the server rejects one as a
+protocol error: `O0` is no transition's `next_observations`, so a verdict on it
+could not be attached to any reward.
+
+Transitions that arrive without a sidecar are **left unclassified**: `rewards`
+forced to `0.0`, `classifier_evaluated = 0`, and `classifier_probability` /
+`classifier_threshold` / `reward_model_id` required to be `0.0` / `0.0` / `""`.
+They are ordinary zero-reward, non-terminal samples. The one authority withheld
+from them is ending an episode with a positive reward.
+
+**`reward_model_id` now encodes the input contract**, not just the checkpoint:
+`cube-in-cup-all3-ckpt150+sidecar-v1`. A pre-sidecar actor talking to a
+post-sidecar server (or the reverse) would compute reward from different pixels
+than its peer believes, so the pair is rejected at the handshake rather than
+running a whole session on wrong rewards.
+
 ## Direction and one-observation-per-step flow
 
 At reset:
@@ -82,8 +143,17 @@ For a locally terminal or truncated step, Local sends the same `Step` with
 `request_action=false`. A server classifier may also finalize a provisional
 non-terminal transition as terminal; in that case the server suppresses the
 requested next action. Local uses the returned outcome and never resets before
-the ACK is validated. Images are raw lossless numpy bytes with their nested key
-path, dtype, and shape. `O(t)` is therefore not resent inside `D(t)`.
+the ACK is validated. **Policy** images are raw lossless numpy bytes with their
+nested key path, dtype, and shape. `O(t)` is therefore not resent inside `D(t)`.
+
+> **Qualification (2026-07-29).** "Raw lossless numpy bytes" describes the
+> canonical policy observation and **still does**. It does *not* describe the
+> reward-classifier sidecar added on 2026-07-29, which travels in the same
+> tensor map but carries **JPEG-encoded** bytes (quality 95) rather than raw
+> pixels. See [Classifier sidecar](#classifier-sidecar-non-canonical) below.
+> The two are deliberately different: the policy observation must round-trip
+> bit-for-bit, while the classifier's copy is sized to survive a link whose
+> throughput varies ~6x between sessions.
 
 ## Data envelope
 

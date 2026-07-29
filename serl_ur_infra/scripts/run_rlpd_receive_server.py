@@ -16,11 +16,13 @@ sys.path.insert(
 )
 
 from ur_env.actor_network import ActorSessionService  # noqa: E402
+from ur_env.classifier_sidecar import CLASSIFIER_INPUT_ID  # noqa: E402
 from ur_env.grpc_actor_transport import create_grpc_server  # noqa: E402
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
 )
 from ur_env.rlpd_receive_server import (  # noqa: E402
+    DEFAULT_CLASSIFIER_CONFIRMATIONS,
     DEFAULT_INTERVENTION_CAPACITY,
     DEFAULT_REPLAY_CAPACITY,
     DEFAULT_REWARD_THRESHOLD,
@@ -31,9 +33,41 @@ from ur_env.rlpd_receive_server import (  # noqa: E402
 )
 
 
+# Directory sha256 (see ur_env.classifier_sidecar.directory_sha256) of the
+# canonical cube-in-cup orbax checkpoint:
+#
+#   classifier_ckpt/cube_in_cup_all3/checkpoint_150
+#
+# Recompute after ANY change to that tree with:
+#
+#   /home/laptop3/venvs/gello-hil-actor/bin/python -c "
+#   import sys; sys.path.insert(0, '<repo>/serl_ur_infra')
+#   from ur_env.classifier_sidecar import directory_sha256
+#   print(directory_sha256('<repo>/classifier_ckpt/cube_in_cup_all3/checkpoint_150'))"
+#
+# WHY THIS CONSTANT IS SAFETY-CRITICAL, NOT COSMETIC.  It previously held
+# e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997, the digest
+# of a RETIRED checkpoint which scores 0% recall on the current data domain.
+# Once directory hashing works, a server started against that retired artifact
+# comes up perfectly healthy and then reports success==False forever: reward is
+# permanently 0, RLPD trains happily, and nothing in any log says anything is
+# wrong.  That is the single hardest failure in this rig to notice, which is
+# exactly why the pin is a hard-coded default instead of an operator argument.
+# Changing this value also changes the learner fingerprint -- see the epoch note
+# in scripts/run_rlpd_learner_server.py.
 DEFAULT_CHECKPOINT_SHA256 = (
-    "e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997"
+    "512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
 )
+
+# Advertised over GetServerInfo and pinned by the actor
+# (ros2_ur_ws/run_hil_actor.sh::EXPECTED_REWARD_MODEL_ID).  The id deliberately
+# names BOTH the checkpoint and the input contract: an actor that predates the
+# classifier sidecar and a server that expects it disagree about which pixels
+# the reward was computed from, and that disagreement must be rejected at the
+# handshake rather than silently producing wrong rewards for a whole session.
+# Bump the suffix whenever CLASSIFIER_INPUT_ID changes, and update
+# run_hil_actor.sh in the same commit.
+DEFAULT_REWARD_MODEL_ID = "cube-in-cup-all3-ckpt150+sidecar-v1"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -44,8 +78,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--expected-checkpoint-sha256", default=DEFAULT_CHECKPOINT_SHA256
     )
-    parser.add_argument("--reward-model-id")
+    parser.add_argument("--reward-model-id", default=DEFAULT_REWARD_MODEL_ID)
     parser.add_argument("--threshold", type=float, default=DEFAULT_REWARD_THRESHOLD)
+    # WHY THE DEFAULT IS 1 (i.e. smoothing OFF).  Operator decision: the
+    # cube-in-cup checkpoint behaves well at DEFAULT_REWARD_THRESHOLD=0.2, and
+    # an always-on smoothed decision would make the server disagree with the
+    # live classifier viewer (REWARD_CLASSIFIER_LIVE_KO.md) for anyone holding
+    # the two side by side -- the viewer reports per-frame probability with no
+    # temporal filter.  Debugging "why does the server say failure when the
+    # viewer says 0.9" costs more than the occasional single-frame false
+    # positive this would suppress.  Raise it only after deciding you would
+    # rather have latency than twitch.
+    parser.add_argument(
+        "--success-confirmations",
+        type=int,
+        # Single source of truth with the finalizer's own default, so the CLI
+        # and a directly constructed RewardTransitionFinalizer cannot drift.
+        default=DEFAULT_CLASSIFIER_CONFIRMATIONS,
+        help=(
+            "consecutive over-threshold classifications required before the "
+            "server calls an episode successful; 1 (default) means no "
+            "smoothing at all"
+        ),
+    )
     parser.add_argument("--replay-capacity", type=int, default=DEFAULT_REPLAY_CAPACITY)
     parser.add_argument(
         "--intervention-capacity",
@@ -154,6 +209,8 @@ def main() -> int:
         raise ValueError("server limits must be positive")
     if args.sample_probe_after < 0 or args.sample_probe_batch_size <= 0:
         raise ValueError("sample probe settings are invalid")
+    if args.success_confirmations < 1:
+        raise ValueError("success_confirmations must be at least 1")
 
     classifier = RewardClassifierRuntime(
         checkpoint_path=args.checkpoint,
@@ -224,7 +281,12 @@ def main() -> int:
         reward_authority="server_classifier",
         reward_model_id=classifier.reward_model_id,
         observation_schema_hash=CANONICAL_OBSERVATION_SCHEMA_HASH,
-        finalize_transition=RewardTransitionFinalizer(classifier),
+        # The flag is spelled --success-confirmations (it is about calling a
+        # SUCCESS, not about confirmations in general); the finalizer's own
+        # parameter is the shorter `confirmations`.
+        finalize_transition=RewardTransitionFinalizer(
+            classifier, confirmations=args.success_confirmations
+        ),
         accept_data=accept_with_sample_probe,
         buffer_status_provider=ingress.status,
     )
@@ -244,6 +306,11 @@ def main() -> int:
         reward_model_id=classifier.reward_model_id,
         checkpoint_sha256=classifier.checkpoint_sha256,
         threshold=classifier.threshold,
+        # Both belong in the ready line so an operator can read the whole
+        # reward contract -- which weights, which pixels, how much smoothing --
+        # off a single log record when the arm misbehaves.
+        classifier_input_contract=CLASSIFIER_INPUT_ID,
+        success_confirmations=args.success_confirmations,
         classifier_warmup_ms=round(classifier.warmup_ms, 3),
         jax_backend=jax_backend,
         jax_device_count=jax_device_count,

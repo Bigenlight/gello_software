@@ -57,11 +57,13 @@ from ur_env.learner import (  # noqa: E402
     system_available_memory_bytes,
     validate_learner_dependencies,
 )
+from ur_env.classifier_sidecar import CLASSIFIER_INPUT_ID  # noqa: E402
 from ur_env.learner.demo import SYNTHETIC_ACCEPTANCE_ONLY_KEY  # noqa: E402
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
 )
 from ur_env.rlpd_receive_server import (  # noqa: E402
+    DEFAULT_CLASSIFIER_CONFIRMATIONS,
     DEFAULT_INTERVENTION_CAPACITY,
     DEFAULT_REPLAY_CAPACITY,
     DEFAULT_REWARD_THRESHOLD,
@@ -69,9 +71,51 @@ from ur_env.rlpd_receive_server import (  # noqa: E402
 )
 
 
+# Directory sha256 (ur_env.classifier_sidecar.directory_sha256) of the canonical
+# cube-in-cup orbax checkpoint tree:
+#
+#   classifier_ckpt/cube_in_cup_all3/checkpoint_150
+#
+# Recompute after ANY change to that tree with:
+#
+#   /home/laptop3/venvs/gello-hil-actor/bin/python -c "
+#   import sys; sys.path.insert(0, '<repo>/serl_ur_infra')
+#   from ur_env.classifier_sidecar import directory_sha256
+#   print(directory_sha256('<repo>/classifier_ckpt/cube_in_cup_all3/checkpoint_150'))"
+#
+# WHY THE OLD VALUE HAD TO GO.  This used to be
+# e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997, the digest
+# of a RETIRED checkpoint scoring 0% recall on the current data domain.  Before
+# directory hashing existed the mismatch was masked (the old file-only
+# checkpoint_sha256() could not read an orbax *directory* at all, so it raised).
+# With directory hashing in place, leaving the stale pin here would let the
+# learner start cleanly against the retired weights and then emit reward==0 for
+# every transition, forever, with no error anywhere -- RLPD would keep training
+# and learn nothing.  Silent-permanent-zero is the worst failure mode this
+# system has, so the pin is a code default, not an operator flag.
 DEFAULT_CLASSIFIER_CHECKPOINT_SHA256 = (
-    "e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997"
+    "512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
 )
+
+# Advertised over GetServerInfo; the actor pins it via
+# ros2_ur_ws/run_hil_actor.sh::EXPECTED_REWARD_MODEL_ID.  The id names the
+# checkpoint AND the input contract on purpose: a pre-sidecar actor talking to a
+# post-sidecar server (or the reverse) computes reward from different pixels
+# than the other side believes, so the pair must be rejected at the handshake
+# instead of running a whole session on wrong rewards.  Keep this string, the
+# wrapper's default, and CLASSIFIER_INPUT_ID moving together.
+DEFAULT_REWARD_MODEL_ID = "cube-in-cup-all3-ckpt150+sidecar-v1"
+
+# ONE-TIME, INTENTIONAL LEARNER-FINGERPRINT BREAK
+# -----------------------------------------------
+# The classifier SHA, the reward_model_id and the new run_contract fields below
+# all feed LearnerFingerprint, so every checkpoint written before this change
+# will be refused fail-closed on resume.  That is correct: the old lineage was
+# trained against the retired 0%-recall checkpoint, so its critic learned from
+# rewards that were structurally zero.  There is nothing of value to resume.
+# Start a fresh --checkpoint-root once; after that the fingerprint is stable
+# again.  ur_env/learner/composition.py::prepare_learner_state explains this in
+# the refusal message so it does not read like a bug.
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -88,9 +132,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--expected-classifier-sha256",
         default=DEFAULT_CLASSIFIER_CHECKPOINT_SHA256,
     )
-    parser.add_argument("--reward-model-id")
+    parser.add_argument("--reward-model-id", default=DEFAULT_REWARD_MODEL_ID)
     parser.add_argument(
         "--reward-threshold", type=float, default=DEFAULT_REWARD_THRESHOLD
+    )
+    # WHY THE DEFAULT IS 1 (smoothing OFF).  Operator decision, not an accident:
+    # the current checkpoint behaves well at DEFAULT_REWARD_THRESHOLD=0.2, and a
+    # server that silently smoothed its decision would disagree with the live
+    # classifier viewer (REWARD_CLASSIFIER_LIVE_KO.md), which reports raw
+    # per-frame probability.  Anyone comparing the two would be debugging the
+    # filter instead of the robot.  This value feeds the learner fingerprint, so
+    # changing it also breaks resume -- deliberately.
+    parser.add_argument(
+        "--success-confirmations",
+        type=int,
+        # Single source of truth with the finalizer's own default so the CLI
+        # and RewardTransitionFinalizer cannot drift apart.
+        default=DEFAULT_CLASSIFIER_CONFIRMATIONS,
+        help=(
+            "consecutive over-threshold classifications required before an "
+            "episode is called successful; 1 (default) means no smoothing"
+        ),
     )
     parser.add_argument(
         "--demo-path",
@@ -257,6 +319,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
+    if args.success_confirmations < 1:
+        raise ValueError("success_confirmations must be at least 1")
     if args.target_learner_step is not None and args.target_learner_step < 0:
         raise ValueError("target_learner_step must be non-negative")
     if args.synthetic_e2e:
@@ -549,6 +613,19 @@ def _run_locked(
             "sha256": classifier.checkpoint_sha256,
             "threshold": classifier.threshold,
             "reward_model_id": classifier.reward_model_id,
+            # WHICH PIXELS the classifier scored, independent of which weights
+            # scored them.  Without this a replay buffer filled from cropped
+            # policy observations and one filled from uncropped sidecar frames
+            # produce the same fingerprint, and a run could be resumed across
+            # the change with two incompatible reward distributions mixed in
+            # one critic.  The recorded value is the identity of the transport
+            # contract, not a flag: it stays CLASSIFIER_INPUT_ID as long as the
+            # server decodes full-frame JPEG passthrough.
+            "input_contract": CLASSIFIER_INPUT_ID,
+            # Part of the reward definition: at n>1 the same probabilities
+            # produce a different terminal step, so it must not be silently
+            # changeable mid-lineage.
+            "success_confirmations": int(args.success_confirmations),
         },
         "offline_demo_sha256": demo_sha256,
         "offline_demo_transition_count": demo_count,
@@ -688,6 +765,7 @@ def _run_locked(
         service = build_actor_service(
             assembly=assembly,
             classifier=classifier,
+            success_confirmations=args.success_confirmations,
             allowed_actor_ids=(
                 (args.synthetic_actor_id,) if args.synthetic_e2e else None
             ),
@@ -773,6 +851,12 @@ def _run_locked(
             policy_version=assembly.policy_runtime.policy_version,
             learner_step=assembly.learner.learner_step,
             reward_model_id=classifier.reward_model_id,
+            # The full reward contract on one line: which weights, which pixels,
+            # how much smoothing.  Cross-check against the actor's
+            # EXPECTED_REWARD_MODEL_ID before trusting a session's rewards.
+            classifier_sha256=classifier.checkpoint_sha256,
+            classifier_input_contract=CLASSIFIER_INPUT_ID,
+            success_confirmations=args.success_confirmations,
             policy_model_id=assembly.policy_runtime.model_id,
             replay_capacity=raw_ingress.replay_capacity,
             intervention_capacity=raw_ingress.intervention_capacity,

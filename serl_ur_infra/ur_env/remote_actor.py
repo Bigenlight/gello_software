@@ -20,6 +20,7 @@ from ur_env.actor_network import (
     validate_counter,
     validate_timestamp_ns,
 )
+from ur_env.classifier_sidecar import CLASSIFIER_SIDECAR_KEY, build_sidecar
 
 
 class EnvTimestampAdapter:
@@ -184,6 +185,76 @@ class ActorRunSummary:
     # mock policy must stay identifiable AFTER the fact: the stored actions are
     # indistinguishable from real policy output once the process exits.
     policy_actions_synthetic: bool = False
+    # Classifier-sidecar accounting.  Attachment makes one Step RPC carry two
+    # extra encoded frames, and the control loop only has a 100 ms budget, so
+    # the cost has to be measurable in the field rather than estimated: the two
+    # round-trip series are kept apart on purpose.
+    sidecar_attached_steps: int = 0
+    sidecar_build_failures: int = 0
+    sidecar_round_trip_ms_mean: float = 0.0
+    sidecar_round_trip_ms_max: float = 0.0
+    plain_round_trip_ms_mean: float = 0.0
+    plain_round_trip_ms_max: float = 0.0
+
+
+class _RoundTripStats:
+    """Streaming count/mean/max of Step RPC latency.
+
+    Deliberately O(1) in memory: ``config.max_steps`` defaults to 1e6, and
+    keeping every sample just to compute a percentile would cost more RAM than
+    the actor's whole working set.  Mean and max are enough to answer the
+    question this exists for -- "does attaching the sidecar blow the 100 ms
+    step budget?".
+    """
+
+    __slots__ = ("count", "total_ms", "max_ms")
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.total_ms = 0.0
+        self.max_ms = 0.0
+
+    def add(self, elapsed_ms: float) -> None:
+        self.count += 1
+        self.total_ms += elapsed_ms
+        if elapsed_ms > self.max_ms:
+            self.max_ms = elapsed_ms
+
+    @property
+    def mean_ms(self) -> float:
+        return self.total_ms / self.count if self.count else 0.0
+
+
+def resolve_camera_frame_source(
+    env: Any,
+) -> Optional[Callable[[], Mapping[str, np.ndarray]]]:
+    """Find ``last_camera_frames`` on the environment, or return ``None``.
+
+    Walks ``unwrapped`` first and then the ``.env`` chain because the actor is
+    handed a stack of wrappers (EnvTimestampAdapter -> RecordEpisodeStatistics
+    -> GripperPenalty -> Chunking -> SERLObs -> ...), and gymnasium 1.x no
+    longer forwards arbitrary attributes through ``Wrapper.__getattr__``.
+
+    Returning ``None`` rather than raising is intentional: a fake env and the
+    test stubs have no camera, and the sidecar is an optional enrichment of the
+    observation, never a precondition for driving the robot.
+    """
+
+    accessor = getattr(getattr(env, "unwrapped", None), "last_camera_frames", None)
+    if callable(accessor):
+        return accessor
+    # Fall back to walking the chain by hand: EnvTimestampAdapter is not a
+    # gymnasium Wrapper, so ``unwrapped`` is not guaranteed to be defined all
+    # the way down in every composition.
+    current = env
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        accessor = getattr(current, "last_camera_frames", None)
+        if callable(accessor):
+            return accessor
+        current = getattr(current, "env", None)
+    return None
 
 
 def _dump_data(
@@ -217,6 +288,7 @@ def run_remote_actor(
     run_id: Optional[str] = None,
     session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
     policy_action_transform: Optional[Callable[[Any], Any]] = None,
+    sidecar_scheduler: Optional[Any] = None,
 ) -> ActorRunSummary:
     """Run synchronous remote inference and lossless transition delivery.
 
@@ -226,6 +298,13 @@ def run_remote_actor(
     invariant that makes stored transitions trainable.  Its only intended use
     is bring-up against a zero-action server, where the robot would otherwise
     never move and the policy->robot->intervention path could not be exercised.
+
+    ``sidecar_scheduler`` is a ``classifier_sidecar.SidecarScheduler`` (or any
+    object with the same three methods).  When it says yes, the outgoing
+    next-observation carries an extra ``classifier`` entry built from the
+    cameras' UNCROPPED frames, so the reward classifier scores the distribution
+    it was trained on instead of the policy's measured crop.  ``None`` disables
+    attachment entirely and the loop behaves exactly as before.
     """
     max_steps = validate_counter(config.max_steps, name="max_steps")
     if max_steps <= 0:
@@ -247,19 +326,42 @@ def run_remote_actor(
     if action_shape != (7,):
         raise ValueError(f"protocol v2 requires action shape (7,), got {action_shape}")
 
+    frame_source: Optional[Callable[[], Mapping[str, np.ndarray]]] = None
+    if sidecar_scheduler is not None:
+        frame_source = resolve_camera_frame_source(env)
+        if frame_source is None:
+            # Loud, once, at start-up rather than a silent no-op for the whole
+            # run: an operator who asked for classifier rewards must not
+            # discover at analysis time that none were ever produced.
+            print(
+                "[remote-actor] classifier sidecar requested, but this "
+                "environment exposes no last_camera_frames() -- no sidecar "
+                "will be attached and the server cannot score reward.",
+                flush=True,
+            )
+
     replay_data: list[dict[str, Any]] = []
     intervention_data: list[dict[str, Any]] = []
     total_intervention_steps = 0
     episodes_started = 0
     episode_id = 0
     step_id = 0
+    sidecar_attached_steps = 0
+    sidecar_build_failures = 0
+    sidecar_latency = _RoundTripStats()
+    plain_latency = _RoundTripStats()
 
     observation, reset_info = env.reset()
+    if sidecar_scheduler is not None:
+        sidecar_scheduler.reset()
     source_timestamp_ns = validate_timestamp_ns(reset_info.get("timestamp_ns"))
     session_id = session_id_factory()
     if not session_id:
         raise ValueError("session_id_factory returned an empty ID")
     observation_id = f"{session_id}:0"
+    # NOTE: BeginEpisode never carries a sidecar.  O0 is the observation the
+    # first action is computed from; it is no transition's next_observations,
+    # so a classifier verdict on it could not be attached to any reward.
     action_result = network.begin_episode(
         observation,
         run_id=run_id,
@@ -309,13 +411,65 @@ def run_remote_actor(
             action_shape=action_shape,
         )
         provisional_terminal = bool(done) or bool(truncated)
+
+        # ---- classifier sidecar ---------------------------------------- #
+        # The classifier deliberately does NOT run on every step.  Sparse
+        # evaluation is the intended behaviour, not a bandwidth compromise:
+        # scoring at ~2 Hz instead of 10 Hz stops the success verdict from
+        # flickering frame to frame, and it gives the scene a moment to settle
+        # after the cube is released before we ask "did that succeed?".  The
+        # scheduler additionally gates on the arm being stationary, so the
+        # frame we ship is not a motion-blurred one.
+        attached = False
+        outgoing_observation = next_observation
+        if frame_source is not None and sidecar_scheduler.should_attach(
+            next_observation.get("state"), provisional_terminal
+        ):
+            try:
+                # build_sidecar takes the UNCROPPED full-resolution BGR frames
+                # and does the 128x128 resize + re-encode itself.  The resize
+                # has to happen here on the laptop: the camera's own JPEG is
+                # ~200 KiB per frame at the nodes' quality=95, and 400 KiB per
+                # attachment does not fit a 13 Mbit/s link inside a 100 ms step.
+                sidecar = build_sidecar(frame_source())
+            except Exception as exc:  # noqa: BLE001 - any build failure is equivalent
+                # Fail SOFT.  A malformed or missing frame costs this step its
+                # reward (the server reports classifier_evaluated=False), which
+                # is strictly better than aborting an episode mid-motion with
+                # the arm under power.
+                sidecar_build_failures += 1
+                if sidecar_build_failures == 1 or sidecar_build_failures % 50 == 0:
+                    print(
+                        "[remote-actor] classifier sidecar not built "
+                        f"({sidecar_build_failures}x): "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+            else:
+                # Shallow copy, and ONLY for the wire.  ``next_observation``
+                # itself must stay canonical: it is deep-copied into the local
+                # backup pickle below, and ur_env/learner/demo.py validates
+                # those observations strictly -- an extra key makes the whole
+                # dump unloadable as demo data.  It is also the next step's
+                # ``observations``, so a mutation here would leak forward.
+                outgoing_observation = dict(next_observation)
+                outgoing_observation[CLASSIFIER_SIDECAR_KEY] = sidecar
+                attached = True
+
+        rpc_started = time.perf_counter()
         result = network.step(
-            next_observation,
+            outgoing_observation,
             next_observation_id=next_observation_id,
             next_timestamp_ns=next_timestamp_ns,
             data=data,
             request_action=not provisional_terminal,
         )
+        rpc_ms = (time.perf_counter() - rpc_started) * 1000.0
+        if attached:
+            sidecar_attached_steps += 1
+            sidecar_latency.add(rpc_ms)
+        else:
+            plain_latency.add(rpc_ms)
         # Reaching here proves the server ACKed this transition. In particular,
         # terminal reset can never happen after an unacknowledged Step.
         outcome = result.outcome
@@ -323,6 +477,14 @@ def run_remote_actor(
             raise ActorProtocolError(
                 "transition outcome ID does not match the accepted data"
             )
+        if sidecar_scheduler is not None:
+            # Fed on EVERY step, not only attached ones.  The outcome carries
+            # ``classifier_evaluated``, so the scheduler can tell an unattached
+            # step from an attached one that the server declined to score --
+            # information it needs to decide whether to escalate.  Withholding
+            # the unattached outcomes would hide the run's actual duty cycle
+            # from it.
+            sidecar_scheduler.note_outcome(outcome)
         transition = data["transition"]
         transition["rewards"] = float(outcome.reward)
         transition["masks"] = float(outcome.mask)
@@ -371,6 +533,12 @@ def run_remote_actor(
             episode_id += 1
             step_id = 0
             observation, reset_info = env.reset()
+            if sidecar_scheduler is not None:
+                # Per-episode reset: the interval counter and any escalation
+                # state are about "how long since this episode last checked",
+                # and carrying them across a reset would put the first query of
+                # the new episode at an arbitrary offset.
+                sidecar_scheduler.reset()
             source_timestamp_ns = validate_timestamp_ns(
                 reset_info.get("timestamp_ns")
             )
@@ -411,4 +579,10 @@ def run_remote_actor(
         episodes_started=episodes_started,
         intervention_steps=total_intervention_steps,
         policy_actions_synthetic=policy_action_transform is not None,
+        sidecar_attached_steps=sidecar_attached_steps,
+        sidecar_build_failures=sidecar_build_failures,
+        sidecar_round_trip_ms_mean=sidecar_latency.mean_ms,
+        sidecar_round_trip_ms_max=sidecar_latency.max_ms,
+        plain_round_trip_ms_mean=plain_latency.mean_ms,
+        plain_round_trip_ms_max=plain_latency.max_ms,
     )

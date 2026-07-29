@@ -33,6 +33,7 @@ from ur_env.grpc_actor_transport import (  # noqa: E402
 )
 from ur_env.learner import (  # noqa: E402
     CheckpointCorruptError,
+    CheckpointFingerprintError,
     CheckpointManager,
     FROZEN_TRUNK_FEATURE_SHAPE,
     FaultGatedReplayIngress,
@@ -349,6 +350,109 @@ def test_worker_fault_keeps_last_known_good_policy_callable(tmp_path):
     )
     assert version == 1
     assert np.isfinite(action).all()
+
+
+def test_resume_refusal_explains_the_intended_one_time_fingerprint_break(
+    tmp_path,
+):
+    """Retiring the 0%-recall classifier breaks resume once, on purpose.
+
+    The classifier SHA, the reward_model_id and the run_contract's
+    reward_classifier block all feed the fingerprint, so pre-change checkpoints
+    are refused.  The refusal must read as a decision, not as a defect, or the
+    next operator will "fix" it by weakening the check.
+    """
+
+    manager = CheckpointManager(tmp_path / "reward-epoch")
+    checkpoint = manager.save(
+        agent=_agent(step=8, value=0.4),
+        learner_step=4,
+        gradient_step=8,
+        policy_version=2,
+        inference_rng=jax.random.PRNGKey(77),
+        fingerprint=_FINGERPRINT,
+    )
+    rotated = LearnerFingerprint(
+        document={"test": "post-classifier-retirement"},
+        sha256="1" * 64,
+    )
+
+    with pytest.raises(CheckpointFingerprintError) as excinfo:
+        prepare_learner_state(
+            agent_template=_agent(),
+            checkpoint_manager=manager,
+            fingerprint=rotated,
+            resume_path=checkpoint,
+        )
+
+    message = str(excinfo.value)
+    assert "mismatch" in message
+    assert "expected and intended" in message
+    assert "0% recall" in message
+    # The remedy has to be in the message; without it the reflex is to disable
+    # the fingerprint check.
+    assert "--checkpoint-root" in message
+    assert str(checkpoint) in message
+
+
+def test_build_actor_service_forwards_success_confirmations(
+    tmp_path, monkeypatch
+):
+    """The reward smoothing setting must reach the finalizer, not be dropped.
+
+    ``RewardTransitionFinalizer`` is stubbed rather than inspected so this pins
+    *our* wiring (entrypoint flag -> finalizer constructor) without depending on
+    the finalizer's private attribute names.
+    """
+
+    import ur_env.rlpd_receive_server as receive_server
+
+    captured = {}
+
+    class _Finalizer:
+        # Mirrors the real signature: the finalizer's keyword is
+        # `confirmations`, the operator-facing flag is --success-confirmations.
+        def __init__(self, classifier, *, confirmations=1):
+            captured["classifier"] = classifier
+            captured["success_confirmations"] = confirmations
+
+        def __call__(self, data):  # pragma: no cover - never invoked here
+            raise AssertionError("stub finalizer must not be called")
+
+    monkeypatch.setattr(
+        receive_server, "RewardTransitionFinalizer", _Finalizer
+    )
+
+    assembly = _compose_fresh(tmp_path / "confirmations")
+    classifier = ScriptedRewardClassifierRuntime([0.1])
+
+    build_actor_service(assembly=assembly, classifier=classifier)
+    # 1 == no smoothing.  Deliberate operator default: it keeps the server's
+    # verdict identical to the live classifier viewer's per-frame probability.
+    assert captured["success_confirmations"] == 1
+    assert captured["classifier"] is classifier
+
+    build_actor_service(
+        assembly=assembly, classifier=classifier, success_confirmations=3
+    )
+    assert captured["success_confirmations"] == 3
+
+
+def test_build_actor_service_rejects_invalid_success_confirmations(tmp_path):
+    assembly = _compose_fresh(tmp_path / "bad-confirmations")
+    classifier = ScriptedRewardClassifierRuntime([0.1])
+
+    # ``True`` is int-like in Python and would silently mean "1"; reject it so
+    # a boolean flag can never be mistaken for a confirmation count.
+    for value in (0, -1, 1.5, True, "2", None):
+        with pytest.raises(
+            LearnerCompositionError, match="success_confirmations"
+        ):
+            build_actor_service(
+                assembly=assembly,
+                classifier=classifier,
+                success_confirmations=value,
+            )
 
 
 def test_production_service_shares_policy_and_strict_ingress_over_grpc(

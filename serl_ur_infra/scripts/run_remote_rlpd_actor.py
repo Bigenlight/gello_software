@@ -21,6 +21,7 @@ sys.path.insert(
 )
 
 from ur_env.actor_network import create_actor_network  # noqa: E402
+from ur_env.classifier_sidecar import SidecarScheduler  # noqa: E402
 from ur_env.envs.wrappers import (  # noqa: E402
     wrap_gripper_penalty_from_task_config,
 )
@@ -67,6 +68,52 @@ def _parse_args() -> argparse.Namespace:
             "Actually publish to the robot (clears the task config's DRY_RUN). "
             "Default is off, in which case neither the arm nor the gripper "
             "moves. WARNING: the UR7e moves physically."
+        ),
+    )
+    # --- reward classifier sidecar ------------------------------------------
+    # Defaults come from the task config's CLASSIFIER_SIDECAR block; these
+    # flags exist so an operator can retune the cadence on the rig without
+    # editing (and accidentally committing) the task config.
+    parser.add_argument(
+        "--no-classifier-sidecar",
+        action="store_true",
+        help=(
+            "Do not attach uncropped camera frames for the reward classifier. "
+            "The server then has nothing to score, so every transition comes "
+            "back with classifier_evaluated=false and reward 0. Use only to "
+            "isolate the sidecar's latency cost or to reproduce pre-sidecar "
+            "behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--classifier-sidecar-interval",
+        type=int,
+        help=(
+            "Attach a classifier frame at most once every N env steps "
+            "(default: the task config). At HZ=10, 5 means ~2 Hz. Sparse on "
+            "purpose: it damps flicker in the success verdict and lets the "
+            "scene settle after a release before it is scored. 1 scores every "
+            "step and costs the most latency."
+        ),
+    )
+    parser.add_argument(
+        "--classifier-stationary-speed-max",
+        type=float,
+        help=(
+            "Only attach when TCP speed is below this (m/s). Keeps blurred "
+            "mid-motion frames out of the classifier. Default: the task "
+            "config value, which is a PLACEHOLDER until measured on the rig."
+        ),
+    )
+    parser.add_argument(
+        "--classifier-escalate-probability",
+        type=float,
+        help=(
+            "NOT a random chance: the classifier probability at or above which "
+            "the scheduler abandons the interval and scores EVERY step, so the "
+            "step that actually crosses the reward threshold is not missed by "
+            "up to interval-1 steps. Belongs below DEFAULT_REWARD_THRESHOLD "
+            "(0.2). Default: the task config."
         ),
     )
     parser.add_argument(
@@ -116,6 +163,73 @@ def _network_config(config: Any, args: argparse.Namespace) -> dict[str, Any]:
         "observation_schema_hash", CANONICAL_OBSERVATION_SCHEMA_HASH
     )
     return result
+
+
+def _sidecar_settings(config: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve ``SidecarScheduler`` kwargs: task config, then CLI overrides.
+
+    Same precedence rule as ``_network_config``: the task config is the record
+    of what was measured on this rig, and a flag is a deliberate, per-run
+    departure from it.
+    """
+
+    configured = getattr(config, "CLASSIFIER_SIDECAR", {})
+    if configured is None:
+        configured = {}
+    if not isinstance(configured, Mapping):
+        raise TypeError("experiment CLASSIFIER_SIDECAR must be a mapping")
+    result = dict(configured)
+    overrides = {
+        "interval_steps": args.classifier_sidecar_interval,
+        "stationary_speed_max": args.classifier_stationary_speed_max,
+        "escalate_probability": args.classifier_escalate_probability,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            result[key] = value
+    # --no-classifier-sidecar is a kill switch, not an override: it wins over
+    # anything the task config says.
+    if args.no_classifier_sidecar:
+        result["enabled"] = False
+    result.setdefault("enabled", True)
+    unknown = set(result) - {
+        "enabled",
+        "interval_steps",
+        "stationary_speed_max",
+        "escalate_probability",
+    }
+    if unknown:
+        # Typos here are silent otherwise: an unrecognised key would be dropped
+        # and the run would use a default cadence nobody chose.
+        raise SystemExit(
+            "unknown CLASSIFIER_SIDECAR settings: " + ", ".join(sorted(unknown))
+        )
+    return result
+
+
+def _build_sidecar_scheduler(settings: Mapping[str, Any]) -> Any:
+    """Construct the scheduler, or ``None`` when the sidecar is disabled."""
+
+    if not settings.get("enabled", True):
+        print(
+            "[remote-actor] classifier sidecar DISABLED: the server receives "
+            "no uncropped frame and cannot score reward for this run.",
+            flush=True,
+        )
+        return None
+
+    kwargs = {key: value for key, value in settings.items() if key != "enabled"}
+    scheduler = SidecarScheduler(enabled=True, **kwargs)
+    print(
+        "[remote-actor] classifier sidecar: every "
+        f"{settings.get('interval_steps')} steps when TCP speed < "
+        f"{settings.get('stationary_speed_max')} m/s "
+        f"(every step once p >= {settings.get('escalate_probability')}). "
+        "Reward is scored on those steps only -- this is intended, not a "
+        "shortcut.",
+        flush=True,
+    )
+    return scheduler
 
 
 def _mock_policy_transform(sigma: float):
@@ -331,6 +445,9 @@ def main() -> int:
             policy_action_transform=_mock_policy_transform(
                 args.mock_policy_noise
             ),
+            sidecar_scheduler=_build_sidecar_scheduler(
+                _sidecar_settings(config, args)
+            ),
         )
         print(
             f"[remote-actor] run={summary.run_id} steps={summary.env_steps} "
@@ -338,6 +455,24 @@ def main() -> int:
             f"intervention_steps={summary.intervention_steps}",
             flush=True,
         )
+        # Attached vs unattached round trips are reported apart so the sidecar's
+        # share of the 100 ms step budget is a measurement, not a guess.
+        print(
+            "[remote-actor] step RTT: "
+            f"sidecar n={summary.sidecar_attached_steps} "
+            f"mean={summary.sidecar_round_trip_ms_mean:.1f}ms "
+            f"max={summary.sidecar_round_trip_ms_max:.1f}ms | "
+            f"plain mean={summary.plain_round_trip_ms_mean:.1f}ms "
+            f"max={summary.plain_round_trip_ms_max:.1f}ms",
+            flush=True,
+        )
+        if summary.sidecar_build_failures:
+            print(
+                "[remote-actor] !! "
+                f"{summary.sidecar_build_failures} classifier sidecars could "
+                "not be built; those steps carry no classifier reward.",
+                flush=True,
+            )
         if summary.policy_actions_synthetic:
             print(
                 "[remote-actor] !! THIS RUN USED A MOCK POLICY "

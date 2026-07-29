@@ -26,6 +26,11 @@ from ur_env.actor_network import (  # noqa: E402
     StepCommand,
     TransitionOutcome,
 )
+from ur_env.classifier_sidecar import (  # noqa: E402
+    CLASSIFIER_SIDECAR_KEY,
+    SIDECAR_TENSOR_KEYS,
+    build_sidecar,
+)
 from ur_env.grpc_actor_transport import (  # noqa: E402
     GrpcActorNetwork,
     create_grpc_server,
@@ -33,6 +38,10 @@ from ur_env.grpc_actor_transport import (  # noqa: E402
     data_to_proto,
     observation_from_proto,
     observation_to_proto,
+)
+from ur_env.observation_schema import (  # noqa: E402
+    CANONICAL_OBSERVATION_SCHEMA_HASH,
+    validate_canonical_observation,
 )
 from ur_env.proto import actor_transport_pb2 as pb  # noqa: E402
 from ur_env.remote_actor import (  # noqa: E402
@@ -53,6 +62,29 @@ def _observation(value: int) -> dict:
             "side": np.full((2, 3, 3), value + 1, dtype=np.uint8),
         },
     }
+
+
+def _canonical_observation(value: int) -> dict:
+    """Exactly the three keys validate_canonical_observation permits."""
+    return {
+        "state": np.full((1, 19), value / 100.0, dtype=np.float32),
+        "cam1": np.full((1, 128, 128, 3), value, dtype=np.uint8),
+        "cam2": np.full((1, 128, 128, 3), 255 - value, dtype=np.uint8),
+    }
+
+
+def _sidecar(seed: int = 0) -> dict:
+    # Full-resolution-shaped, uncropped BGR frames: build_sidecar owns the
+    # downscale to the classifier's 128x128, nothing here does.
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[:, :, seed % 3] = (seed * 11) % 256
+    return build_sidecar({"cam1": frame, "cam2": frame})
+
+
+def _observation_with_sidecar(value: int) -> dict:
+    observation = _canonical_observation(value)
+    observation[CLASSIFIER_SIDECAR_KEY] = _sidecar(value)
+    return observation
 
 
 def _assert_observation_equal(actual, expected):
@@ -215,8 +247,8 @@ def test_server_finalizer_success_suppresses_requested_action_and_dedupes():
     finalize_calls = []
     sink_calls = []
 
-    def finalize(data):
-        finalize_calls.append(data["meta"]["transition_id"])
+    def finalize(data, classifier_sidecar):
+        finalize_calls.append((data["meta"]["transition_id"], classifier_sidecar))
         transition = data["transition"]
         transition.update(
             rewards=1.0,
@@ -279,9 +311,296 @@ def test_server_finalizer_success_suppresses_requested_action_and_dedupes():
     assert result.action is None
     assert duplicate.ack.deduplicated
     assert len(finalize_calls) == 1
+    assert finalize_calls[0][1] is None  # no sidecar was attached to this step
     assert len(sink_calls) == 1
     assert sink_calls[0][0]["transition"]["rewards"] == 1.0
     assert service.inference_count == 1
+
+
+def test_step_strips_the_classifier_sidecar_before_anything_else_sees_it():
+    """The reserved key never reaches the policy, replay, or canonical checks."""
+    seen_by_policy = []
+    seen_by_finalizer = []
+    accepted = []
+
+    def sample(observation, deterministic):
+        seen_by_policy.append(observation)
+        return np.zeros(7, np.float32), 0
+
+    def finalize(data, classifier_sidecar):
+        seen_by_finalizer.append(classifier_sidecar)
+        transition = data["transition"]
+        return data, TransitionOutcome(
+            transition_id=data["meta"]["transition_id"],
+            reward=float(transition["rewards"]),
+            mask=float(transition["masks"]),
+            done=bool(transition["dones"]),
+            truncated=bool(transition["truncated"]),
+            success=False,
+            classifier_evaluated=False,
+        )
+
+    service = ActorSessionService(
+        sample,
+        observation_schema_hash=CANONICAL_OBSERVATION_SCHEMA_HASH,
+        finalize_transition=finalize,
+        accept_data=lambda data, intervened: accepted.append(data),
+    )
+    action = service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            0,
+            1,
+            10_000,
+            ObservationPacket("o0", 1_000, _canonical_observation(0)),
+        )
+    )
+    result = service.step(
+        StepCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            2,
+            20_000,
+            _data(action.action),
+            ObservationPacket("o1", 2_000, _observation_with_sidecar(1)),
+            True,
+        )
+    )
+
+    assert result.ack.accepted
+    # The finalizer got the validated JPEG tensors, and only the finalizer.
+    assert len(seen_by_finalizer) == 1
+    assert set(seen_by_finalizer[0]) == set(SIDECAR_TENSOR_KEYS)
+    assert seen_by_finalizer[0]["cam1_jpeg"].dtype == np.uint8
+    # The policy and replay both see the untouched canonical three-key tree,
+    # which is what lets validate_canonical_observation stay exact-key strict.
+    for observation in seen_by_policy:
+        assert CLASSIFIER_SIDECAR_KEY not in observation
+        validate_canonical_observation(observation)
+    stored = accepted[0]["transition"]["next_observations"]
+    assert CLASSIFIER_SIDECAR_KEY not in stored
+    validate_canonical_observation(stored)
+    # And the sidecar changes nothing about the schema both peers handshake on.
+    assert (
+        service.get_server_info().observation_schema_hash
+        == CANONICAL_OBSERVATION_SCHEMA_HASH
+    )
+
+
+def test_begin_episode_rejects_a_classifier_sidecar():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0)
+    )
+    command = BeginEpisodeCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        0,
+        1,
+        10_000,
+        ObservationPacket("o0", 1_000, _observation_with_sidecar(0)),
+    )
+
+    with pytest.raises(ActorProtocolError, match="reserved 'classifier'"):
+        service.begin_episode(command)
+    assert service.inference_count == 0
+
+
+def test_malformed_sidecar_is_a_protocol_error_not_an_internal_fault():
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0)
+    )
+    action = service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            0,
+            1,
+            10_000,
+            ObservationPacket("o0", 1_000, _canonical_observation(0)),
+        )
+    )
+    broken = _canonical_observation(1)
+    broken[CLASSIFIER_SIDECAR_KEY] = {"cam1_jpeg": np.zeros(4, dtype=np.uint8)}
+    command = StepCommand(
+        PROTOCOL_VERSION,
+        "actor",
+        "run",
+        "session",
+        2,
+        20_000,
+        _data(action.action),
+        ObservationPacket("o1", 2_000, broken),
+        True,
+    )
+
+    with pytest.raises(ActorProtocolError, match="invalid 'classifier' sidecar"):
+        service.step(command)
+    # A rejected request must not latch the service into a fault state.
+    assert service.health()[1] is True
+
+
+def test_legacy_single_argument_finalizer_fails_closed_on_a_sidecar():
+    """Receive-only harnesses keep working, but may not drop a classification."""
+
+    def legacy_finalize(data):
+        transition = data["transition"]
+        return data, TransitionOutcome(
+            transition_id=data["meta"]["transition_id"],
+            reward=float(transition["rewards"]),
+            mask=float(transition["masks"]),
+            done=bool(transition["dones"]),
+            truncated=bool(transition["truncated"]),
+            success=False,
+            classifier_evaluated=False,
+        )
+
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        finalize_transition=legacy_finalize,
+    )
+    action = service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            0,
+            1,
+            10_000,
+            ObservationPacket("o0", 1_000, _canonical_observation(0)),
+        )
+    )
+
+    # Without a sidecar the legacy callback is still honoured...
+    plain = service.step(
+        StepCommand(
+            PROTOCOL_VERSION,
+            "actor",
+            "run",
+            "session",
+            2,
+            20_000,
+            _data(action.action),
+            ObservationPacket("o1", 2_000, _canonical_observation(1)),
+            True,
+        )
+    )
+    assert plain.ack.accepted
+
+    # ...but a sidecar it cannot consume stops the transition instead of being
+    # silently discarded.
+    with pytest.raises(ActorNetworkError, match="predates the classifier"):
+        service.step(
+            StepCommand(
+                PROTOCOL_VERSION,
+                "actor",
+                "run",
+                "session",
+                3,
+                30_000,
+                _data(
+                    plain.action.action,
+                    env_step=1,
+                    step_id=1,
+                    source_timestamp_ns=2_000,
+                    next_observation_id="o2",
+                ),
+                ObservationPacket("o2", 3_000, _observation_with_sidecar(2)),
+                True,
+            )
+        )
+
+
+def test_sidecar_crosses_the_existing_named_tensor_map_unchanged():
+    """No proto change: the sidecar is just two more paths in the tensor map."""
+    expected = _observation_with_sidecar(7)
+    packet = ObservationPacket("o-side", 123_456_789, expected)
+
+    message = observation_to_proto(packet)
+    decoded = observation_from_proto(message)
+
+    paths = {"/".join(tensor.path) for tensor in message.tensors}
+    assert paths == {
+        "state",
+        "cam1",
+        "cam2",
+        f"{CLASSIFIER_SIDECAR_KEY}/cam1_jpeg",
+        f"{CLASSIFIER_SIDECAR_KEY}/cam2_jpeg",
+    }
+    _assert_observation_equal(decoded.observation, expected)
+    # Byte-for-byte identical JPEGs: the actor re-encodes nothing, so the server
+    # decodes exactly what the live viewer decoded on real hardware.
+    np.testing.assert_array_equal(
+        decoded.observation[CLASSIFIER_SIDECAR_KEY]["cam1_jpeg"],
+        expected[CLASSIFIER_SIDECAR_KEY]["cam1_jpeg"],
+    )
+
+
+def test_grpc_round_trip_delivers_the_sidecar_to_the_finalizer_only():
+    received = []
+
+    def finalize(data, classifier_sidecar):
+        received.append(classifier_sidecar)
+        transition = data["transition"]
+        return data, TransitionOutcome(
+            transition_id=data["meta"]["transition_id"],
+            reward=float(transition["rewards"]),
+            mask=float(transition["masks"]),
+            done=bool(transition["dones"]),
+            truncated=bool(transition["truncated"]),
+            success=False,
+            classifier_evaluated=False,
+        )
+
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        finalize_transition=finalize,
+    )
+    server, port = create_grpc_server(service)
+    server.start()
+    client = GrpcActorNetwork(
+        f"127.0.0.1:{port}", actor_id="actor", timeout_s=5.0
+    )
+    try:
+        action = client.begin_episode(
+            _canonical_observation(0),
+            run_id="run",
+            session_id="session",
+            episode_id=0,
+            observation_id="o0",
+            timestamp_ns=1_000,
+        )
+        sent = _observation_with_sidecar(1)
+        result = client.step(
+            sent,
+            next_observation_id="o1",
+            next_timestamp_ns=2_000,
+            data=_data(action.action),
+            request_action=True,
+        )
+
+        assert result.ack.accepted
+        assert result.outcome.classifier_evaluated is False
+        assert len(received) == 1
+        np.testing.assert_array_equal(
+            received[0]["cam2_jpeg"],
+            sent[CLASSIFIER_SIDECAR_KEY]["cam2_jpeg"],
+        )
+        assert CLASSIFIER_SIDECAR_KEY not in (
+            service.replay_items[0]["transition"]["next_observations"]
+        )
+    finally:
+        client.close()
+        server.stop(grace=0).wait()
 
 
 def test_transition_pipeline_failure_has_no_ack_and_marks_service_not_ready():

@@ -175,8 +175,14 @@ def _launch_realsense(camera_name, serial, color_profile):
     *embedded* single quotes in the value itself. ``ros2 launch`` type-infers
     bare ``key:=value`` CLI args from their content, so an all-digit serial gets
     coerced to an integer and the node (which declares serial_no as a string)
-    dies instantly. Wrapping the value as ``serial_no:='151623020789'`` -- quote
+    dies instantly. Wrapping the value as ``serial_no:='147122072740'`` -- quote
     characters included in the argv string, NOT shell quoting -- forces a string.
+
+    The example above deliberately uses a *device* serial (the
+    ``DEFAULT_CAM1_SERIAL`` above), not an ASIC serial. ``serial_no`` is matched
+    against ``camera_info.serial_number``; the ASIC serial is what the kernel USB
+    descriptor exposes, so it is what ``journalctl`` shows and it will never
+    resolve here. See the port/field table near ``DEFAULT_CAM1_SERIAL``.
     """
     argv = [
         "ros2", "launch", "realsense2_camera", "rs_launch.py",

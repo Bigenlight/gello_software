@@ -168,16 +168,56 @@ handshake timeline, safety model, troubleshooting) see
 
 ### Topics
 
-> ### 🔧 Camera serial correction (2026-07-28)
+> ### 🔧 Camera serial correction (2026-07-29) — **the previous "swap" correction was wrong**
 >
-> The camera **units were physically swapped.** The previously documented pair
-> (`147122072740` / `243222072700`) belongs to hardware this machine has never
-> enumerated (kernel logs checked back to 2026-07-05). Serials in this document
-> are now the connected pair (`151623020789` / `322743060038`).
-> **Binding an absent serial does not fail loudly** — the camera simply never
-> comes up. Model classes and the cam1/cam2 assignment are unchanged, but
-> **which unit is on the wrist is unverified** — jog the arm and check that the
-> gripper fingers stay fixed in cam2.
+> **There is ONE pair of RealSense cameras on this rig and it has never been
+> swapped.** The 2026-07-28 note that stood here claimed the camera "**units were
+> physically swapped**" and that `147122072740` / `243222072700` "belongs to
+> hardware this machine has never enumerated", and rewrote every serial in this
+> document to `151623020789` / `322743060038`. **That claim is false.** What the
+> repo calls "two pairs" is the *same two cameras under two different serial
+> **fields***. Measured 2026-07-29 on the same physical USB ports:
+>
+> | port | `camera_info.serial_number` | `camera_info.asic_serial_number` | device |
+> |---|---|---|---|
+> | `4-4.1` | **`147122072740`** | `151623020789` | plain D435 → cam1 **SCENE** (tripod, 3rd person) |
+> | `4-4.3` | **`243222072700`** | `322743060038` | D435IF → cam2 **WRIST** (gripper-mounted) |
+>
+> `serial_no:=` is matched against **`serial_number`**, verified directly:
+>
+> ```
+> rs.config().enable_device('151623020789')  ->  NO MATCH   # ASIC serial
+> rs.config().enable_device('147122072740')  ->  MATCHED    # device serial
+> ```
+>
+> So the ASIC serials the 07-28 edit planted in this document can **never** be
+> resolved by `realsense2_camera`. Every serial here is back to the **device
+> serial** (`147122072740` / `243222072700`), which is also what the code
+> defaults to (`_resolve_camera_serials.sh` callers `launch_cameras.sh` /
+> `run_recorder.sh`, and `gello_recorder_gui.py`'s `DEFAULT_CAM*_SERIAL`).
+>
+> **Trap 1 — the journal grep.** The kernel USB descriptor (`journalctl`,
+> `/sys/bus/usb/devices/*/serial`) exposes the **ASIC** serial. Grepping the
+> journal therefore finds hundreds of hits for `151623020789`/`322743060038` and
+> *zero* for `147122072740`/`243222072700` — which reads exactly like "this host
+> has never seen those cameras". Commit `607e541` drew that conclusion and set
+> the defaults to the ASIC serials. **Do not re-derive camera identity from a
+> journal grep**: two independent sessions reached *opposite* wrong conclusions
+> that way. The authority is the `serial_number` reported by
+> `rs-enumerate-devices` / `pyrealsense2`, and in code
+> [`ros2_ur_ws/_resolve_camera_serials.sh`](../../_resolve_camera_serials.sh).
+>
+> **Trap 2 — and this is why it matters.** Binding a serial that does not
+> resolve does **not** fail loudly. The node starts, `ros2 topic info` reports a
+> publisher, and it publishes nothing. Nothing in the stack distinguishes an
+> unplugged camera from a misconfigured one — only `ros2 topic hz` does. Prefer
+> [`ros2_ur_ws/launch_cameras.sh`](../../launch_cameras.sh) (commits `43ba314`,
+> `fb48100`), which resolves serials against the live USB bus and blocks until
+> both streams actually flow, over hardcoding serials at all.
+>
+> Mount assignment is settled too: plain D435 = cam1 = SCENE (tripod), D435IF =
+> cam2 = WRIST (gripper-mounted). **The wrist assignment was proven from recorded
+> video** — cam2's gripper fingers hold fixed pixels while the background flows.
 
 | Topic | Type | Dir | Notes |
 | --- | --- | --- | --- |
@@ -185,8 +225,8 @@ handshake timeline, safety model, troubleshooting) see
 | `/robotiq_gripper/command_percent` | `std_msgs/Float32` | pub (policy_leader_node) | 0=open..1=closed, identity mapping (no threshold/binarize). Published directly — `gello_gripper_bridge` is **not** launched, to avoid dual writers |
 | `/joint_states` | `sensor_msgs/JointState` | sub (policy_leader_node) | Live UR7e joint feedback; reordered by name to UR order for both the observation and the max-deviation clamp |
 | `/robotiq_gripper/position_percent` | `std_msgs/Float32` | sub (policy_leader_node) | Live gripper position (0=open..1=closed); `observation.state[6]` |
-| `/cam1/cam1/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam1 (D435, serial `151623020789`); raw JPEG passed through to the ACT server unmodified |
-| `/cam2/cam2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam2 (D435iF, serial `322743060038`); raw JPEG passed through |
+| `/cam1/cam1/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam1 = SCENE, tripod (D435, device serial `147122072740`); raw JPEG passed through to the ACT server unmodified |
+| `/cam2/cam2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam2 = WRIST, gripper-mounted (D435iF, device serial `243222072700`); raw JPEG passed through |
 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray` | sub (policy_leader_node) | Read-only — used **only** to detect the bridge has started streaming, for the optional `auto_start_on_stream` |
 
 ## Build
@@ -242,22 +282,39 @@ CKPT=$(ros2_ur_ws/src/gello_policy/scripts/download_checkpoint.sh | tail -1)
 
 ## Run
 
-**First, bring up both RealSense cameras by serial** (in a separate terminal). The
-policy cannot run without them: EXECUTE needs a fresh `cam1`/`cam2` frame every tick,
-and both `~/start_execution` and the in-EXECUTE obs-freshness watchdog will refuse /
-FAULT if a camera is absent or stale (see Safety). Bind by **serial** (quoted, so the
-all-digit value is not coerced to an int):
+**First, bring up both RealSense cameras** (in a separate terminal). The policy
+cannot run without them: EXECUTE needs a fresh `cam1`/`cam2` frame every tick, and
+both `~/start_execution` and the in-EXECUTE obs-freshness watchdog will refuse /
+FAULT if a camera is absent or stale (see Safety).
+
+**Preferred — do not hardcode serials.**
+[`ros2_ur_ws/launch_cameras.sh`](../../launch_cameras.sh) sources
+`_resolve_camera_serials.sh` to resolve serials against the **live USB bus**, waits
+until both color streams actually flow at ~30 Hz, and opens the cam1/cam2 viewer so
+the SCENE/WRIST mapping can be eyeballed:
 
 ```bash
-# cam1 = D435, serial 151623020789 ; cam2 = D435iF, serial 322743060038
+cd gello_software/ros2_ur_ws
+./launch_cameras.sh              # both cameras + viewer, single Ctrl-C cleanup
+# VIEW=false ./launch_cameras.sh # cameras only, no viewer window
+```
+
+**Manual fallback.** Bind by **device serial** (quoted, so the all-digit value is not
+coerced to an int). Use the `serial_number`, *not* the ASIC serial that `journalctl`
+shows — see the camera serial correction under Topics:
+
+```bash
+# cam1 = D435, device serial 147122072740 (SCENE) ; cam2 = D435iF, 243222072700 (WRIST)
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam1 camera_namespace:=cam1 \
-    serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam2 camera_namespace:=cam2 \
-    serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
 
-# Confirm both compressed topics are publishing at ~30 Hz BEFORE starting the deploy:
+# Confirm both compressed topics are publishing at ~30 Hz BEFORE starting the deploy.
+# This check is mandatory on the manual path: a serial that does not resolve still
+# yields a live node and `ros2 topic info` still reports a publisher — only `hz` tells.
 ros2 topic hz /cam1/cam1/color/image_raw/compressed
 ros2 topic hz /cam2/cam2/color/image_raw/compressed
 ```

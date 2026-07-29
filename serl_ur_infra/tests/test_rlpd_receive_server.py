@@ -19,7 +19,12 @@ _REPO_ROOT = os.path.abspath(os.path.join(_INFRA_ROOT, ".."))
 sys.path.insert(0, _INFRA_ROOT)
 
 from ur_env.actor_network import ActorProtocolError  # noqa: E402
+from ur_env.classifier_sidecar import (  # noqa: E402
+    build_sidecar,
+    decode_classifier_frames,
+)
 from ur_env.rlpd_receive_server import (  # noqa: E402
+    UNCLASSIFIED_WARN_STREAK,
     FakeActionRuntime,
     ReplayIngress,
     RewardClassifierError,
@@ -28,6 +33,7 @@ from ur_env.rlpd_receive_server import (  # noqa: E402
     ScriptedRewardClassifierRuntime,
     checkpoint_sha256,
     sigmoid_probability,
+    validate_classifier_frames,
 )
 
 
@@ -37,6 +43,38 @@ def _observation(value: int) -> dict[str, np.ndarray]:
         "cam1": np.full((1, 128, 128, 3), value, dtype=np.uint8),
         "cam2": np.full((1, 128, 128, 3), 255 - value, dtype=np.uint8),
     }
+
+
+def _bgr(seed: int) -> np.ndarray:
+    """A decoded, uncropped camera frame at a NON-classifier resolution.
+
+    Deliberately not 128x128, so anything that forgets the classifier-side
+    resize shows up as a shape error rather than as a silent pass.
+    """
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[:, :, seed % 3] = (seed * 7) % 256
+    return frame
+
+
+def _jpeg(seed: int) -> bytes:
+    import cv2
+
+    ok, encoded = cv2.imencode(".jpg", _bgr(seed))
+    assert ok
+    return encoded.tobytes()
+
+
+def _sidecar(seed: int = 0) -> dict[str, np.ndarray]:
+    """The payload ActorSessionService hands the finalizer for a classified step."""
+    return build_sidecar({"cam1": _bgr(seed), "cam2": _bgr(seed + 1)})
+
+
+class _WarningSink:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def __call__(self, message: str) -> None:
+        self.messages.append(message)
 
 
 def _data(
@@ -89,10 +127,12 @@ def _data(
 
 
 def _finalized_data(**kwargs: Any) -> dict[str, Any]:
+    probability = kwargs.pop("probability", 0.1)
+    classified = kwargs.pop("classified", True)
     finalizer = RewardTransitionFinalizer(
-        ScriptedRewardClassifierRuntime([kwargs.pop("probability", 0.1)])
+        ScriptedRewardClassifierRuntime([probability]), warn=_WarningSink()
     )
-    data, _ = finalizer(_data(**kwargs))
+    data, _ = finalizer(_data(**kwargs), _sidecar() if classified else None)
     return data
 
 
@@ -196,7 +236,8 @@ def test_reward_classifier_validates_checksum_exact_inputs_and_warms_up(tmp_path
         classifier_loader=loader,
         reward_model_id="cube-in-cup-test",
     )
-    result = runtime.classify(_observation(23))
+    frames = decode_classifier_frames(_sidecar(5))
+    result = runtime.classify(frames)
 
     assert runtime.ready
     assert runtime.evaluation_count == 1
@@ -204,10 +245,51 @@ def test_reward_classifier_validates_checksum_exact_inputs_and_warms_up(tmp_path
     assert len(calls) == 2  # one JIT/warmup-equivalent call plus inference
     assert calls[1]["state"].shape == (1, 1)
     assert np.count_nonzero(calls[1]["state"]) == 0
-    np.testing.assert_array_equal(calls[1]["cam1"], _observation(23)["cam1"])
+    np.testing.assert_array_equal(calls[1]["cam1"], frames["cam1"])
     assert result.probability == pytest.approx(sigmoid_probability(2.0))
     assert result.success is True
     assert result.reward_model_id == "cube-in-cup-test"
+
+
+def test_classifier_input_is_the_sidecar_never_the_policy_observation():
+    """The cropped policy observation must not be classifiable by accident."""
+    classifier = ScriptedRewardClassifierRuntime([0.9])
+
+    with pytest.raises(ActorProtocolError, match="extra=\\['state'\\]"):
+        classifier.classify(_observation(23))
+    assert classifier.evaluation_count == 0
+    # The decoded sidecar is the only accepted shape, and it matches the
+    # canonical camera geometry without ever going through IMAGE_CROP.
+    frames = validate_classifier_frames(decode_classifier_frames(_sidecar(3)))
+    assert set(frames) == {"cam1", "cam2"}
+    assert frames["cam1"].shape == (1, 128, 128, 3)
+    assert frames["cam1"].dtype == np.uint8
+
+
+def test_checkpoint_sha256_pins_orbax_directories_deterministically(tmp_path):
+    """G19: the canonical checkpoint is an orbax OCDBT directory, not a file."""
+    checkpoint = tmp_path / "checkpoint_150"
+    (checkpoint / "ocdbt.process_0").mkdir(parents=True)
+    (checkpoint / "_METADATA").write_bytes(b"metadata")
+    (checkpoint / "ocdbt.process_0" / "d").write_bytes(b"shard-payload")
+    (checkpoint / "manifest.ocdbt").write_bytes(b"manifest")
+
+    first = checkpoint_sha256(str(checkpoint))
+    second = checkpoint_sha256(str(checkpoint))
+
+    assert first == second
+    assert len(first) == 64
+    # A single-file checkpoint still hashes to the plain content digest, so
+    # every SHA already pinned in a runbook or CLI default stays valid.
+    single = tmp_path / "checkpoint_file"
+    single.write_bytes(b"test-flax-checkpoint")
+    assert checkpoint_sha256(str(single)) == hashlib.sha256(
+        b"test-flax-checkpoint"
+    ).hexdigest()
+    (checkpoint / "ocdbt.process_0" / "d").write_bytes(b"shard-payloae")
+    assert checkpoint_sha256(str(checkpoint)) != first
+    with pytest.raises(FileNotFoundError):
+        checkpoint_sha256(str(tmp_path / "absent"))
 
 
 def test_reward_classifier_rejects_wrong_checkpoint_hash(tmp_path):
@@ -255,10 +337,11 @@ def test_reward_finalizer_server_authority(
     finalizer = RewardTransitionFinalizer(
         ScriptedRewardClassifierRuntime(
             [probability], threshold=0.85, reward_model_id="cube-in-cup-v1"
-        )
+        ),
+        warn=_WarningSink(),
     )
     data, outcome = finalizer(
-        _data(done=local_done, truncated=local_truncated)
+        _data(done=local_done, truncated=local_truncated), _sidecar()
     )
 
     transition = data["transition"]
@@ -283,7 +366,7 @@ def test_reward_finalizer_uses_strict_threshold():
         ScriptedRewardClassifierRuntime([0.85], threshold=0.85)
     )
 
-    data, outcome = finalizer(_data())
+    data, outcome = finalizer(_data(), _sidecar())
 
     assert outcome.success is False
     assert data["transition"]["dones"] is False
@@ -294,7 +377,7 @@ def test_reward_finalizer_rejects_provisional_positive_reward_when_negative():
         ScriptedRewardClassifierRuntime([0.1], threshold=0.85)
     )
 
-    data, outcome = finalizer(_data(reward=1.0))
+    data, outcome = finalizer(_data(reward=1.0), _sidecar())
 
     assert data["transition"]["rewards"] == 0.0
     assert outcome.reward == 0.0
@@ -307,7 +390,229 @@ def test_reward_finalizer_classifier_failure_produces_no_data():
     )
 
     with pytest.raises(RewardClassifierError, match="GPU fault"):
-        finalizer(_data())
+        finalizer(_data(), _sidecar())
+
+
+def test_reward_finalizer_reports_the_instantaneous_viewer_probability():
+    """confirmations == 1 must report exactly what the live viewer shows."""
+    classifier = ScriptedRewardClassifierRuntime(
+        [0.1234, 0.4321], threshold=0.2, reward_model_id="cube-in-cup-v1"
+    )
+    finalizer = RewardTransitionFinalizer(classifier)
+    assert finalizer.confirmations == 1
+
+    _, negative = finalizer(_data(step=0), _sidecar(1))
+    _, positive = finalizer(_data(step=1), _sidecar(2))
+
+    assert negative.classifier_probability == pytest.approx(0.1234)
+    assert negative.success is False
+    assert positive.classifier_probability == pytest.approx(0.4321)
+    assert positive.success is True
+    for outcome in (negative, positive):
+        # The invariant three independent layers re-derive.
+        assert outcome.success == (
+            outcome.classifier_probability > outcome.classifier_threshold
+        )
+    assert finalizer.classification_count == 2
+    assert finalizer.transition_count == 2
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "expected_reported", "expected_success"),
+    [
+        # Two strong frames are not enough for three confirmations, and the
+        # reported probability is the window floor (the 0.0 pre-fill), so the
+        # success/probability invariant still holds.
+        ([0.9, 0.9], [0.0, 0.0], [False, False]),
+        # Three in a row confirm; the reported value is the weakest of them.
+        ([0.9, 0.7, 0.8], [0.0, 0.0, 0.7], [False, False, True]),
+        # One dip inside the window blocks confirmation, and the dip itself is
+        # what gets reported -- never an average that could read as a success.
+        ([0.9, 0.1, 0.8, 0.9], [0.0, 0.0, 0.1, 0.1], [False, False, False, False]),
+    ],
+)
+def test_reward_finalizer_n_of_n_smoothing_keeps_the_success_invariant(
+    probabilities, expected_reported, expected_success
+):
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime(
+            probabilities, threshold=0.2, reward_model_id="cube-in-cup-v1"
+        ),
+        confirmations=3,
+    )
+
+    for index, (reported, success) in enumerate(
+        zip(expected_reported, expected_success)
+    ):
+        data, outcome = finalizer(_data(step=index), _sidecar(index))
+        assert outcome.classifier_probability == pytest.approx(reported)
+        assert outcome.success is success
+        assert outcome.classifier_evaluated is True
+        assert outcome.success == (
+            outcome.classifier_probability > outcome.classifier_threshold
+        )
+        assert bool(data["transition"]["classifier_success"]) is success
+        if success:
+            assert outcome.reward == 1.0 and outcome.done is True
+        else:
+            assert outcome.reward == 0.0
+
+
+def test_reward_finalizer_confirmation_window_does_not_cross_episodes():
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime(
+            [0.9] * 4, threshold=0.2, reward_model_id="cube-in-cup-v1"
+        ),
+        confirmations=2,
+        warn=_WarningSink(),
+    )
+
+    finalizer(_data(step=0), _sidecar(0))
+    # A local time limit ends the episode; the half-filled window must not be
+    # completed by the first frame of the next one.
+    _, terminal = finalizer(_data(step=1, truncated=True), _sidecar(1))
+    _, first_of_next = finalizer(
+        _data(step=2, session_id="session-1"), _sidecar(2)
+    )
+    _, second_of_next = finalizer(
+        _data(step=3, session_id="session-1"), _sidecar(3)
+    )
+
+    assert terminal.success is True
+    assert first_of_next.success is False
+    assert first_of_next.classifier_probability == 0.0
+    assert second_of_next.success is True
+
+
+@pytest.mark.parametrize(
+    ("local_done", "local_truncated", "local_reward"),
+    [(False, False, 0.0), (False, False, 1.0), (True, False, 0.0), (False, True, 0.0)],
+)
+def test_unclassified_transition_field_table(
+    local_done, local_truncated, local_reward
+):
+    """The exact contract for a step the actor did not ask us to classify."""
+    classifier = ScriptedRewardClassifierRuntime([0.9], threshold=0.2)
+    finalizer = RewardTransitionFinalizer(classifier, warn=_WarningSink())
+
+    data, outcome = finalizer(
+        _data(
+            done=local_done, truncated=local_truncated, reward=local_reward
+        ),
+        None,
+    )
+
+    transition = data["transition"]
+    # rewards: forced to 0, discarding any locally proposed positive reward.
+    assert transition["rewards"] == 0.0
+    assert outcome.reward == 0.0
+    # masks / dones / truncated: the local proposal survives untouched, which
+    # is what keeps ReplayIngress._convert's mask-vs-done check satisfied.
+    assert transition["dones"] is local_done
+    assert transition["truncated"] is local_truncated
+    assert transition["masks"] == (0.0 if local_done else 1.0)
+    # classifier_*: all zero / empty, which _convert REQUIRES when unevaluated.
+    assert int(transition["classifier_evaluated"]) == 0
+    assert float(transition["classifier_probability"]) == 0.0
+    assert float(transition["classifier_threshold"]) == 0.0
+    assert int(transition["classifier_success"]) == 0
+    assert transition["reward_model_id"] == ""
+    assert outcome.classifier_evaluated is False
+    assert outcome.success is False
+    assert outcome.classifier_probability == 0.0
+    assert outcome.classifier_threshold == 0.0
+    assert outcome.reward_model_id == ""
+    # Nothing was consumed from the classifier: no sidecar, no inference.
+    assert classifier.evaluation_count == 0
+    assert finalizer.classification_count == 0
+
+
+def test_unclassified_transitions_route_into_replay_unchanged():
+    """_convert must already accept classifier_evaluated=0; no relaxation added."""
+    factory = _StoreFactory()
+    ingress = ReplayIngress(
+        replay_capacity=4, intervention_capacity=4, store_factory=factory
+    )
+
+    ingress(_finalized_data(step=0, classified=False), False)
+    ingress(_finalized_data(step=1, classified=True), False)
+
+    stored = ingress.replay_store.items
+    assert [int(item["classifier_evaluated"]) for item in stored] == [0, 1]
+    assert float(stored[0]["classifier_probability"]) == 0.0
+    assert float(stored[0]["classifier_threshold"]) == 0.0
+    assert int(stored[0]["classifier_success"]) == 0
+    assert float(stored[0]["rewards"]) == 0.0
+    assert ingress.status().replay_size == 2
+    assert [record.reward_model_id for record in ingress.replay_sidecar()] == [
+        "",
+        "scripted-reward-v0",
+    ]
+
+
+def test_unevaluated_transition_may_not_smuggle_classifier_values():
+    """The existing guard, re-pinned: it is what makes a 0-reward honest."""
+    ingress = ReplayIngress(
+        replay_capacity=4, intervention_capacity=4, store_factory=_StoreFactory()
+    )
+    smuggled = _finalized_data(step=0, classified=False)
+    smuggled["transition"]["classifier_probability"] = 0.9
+
+    with pytest.raises(ActorProtocolError, match="unevaluated transition"):
+        ingress(smuggled, False)
+
+
+def test_zero_classification_session_warns_loudly_at_the_episode_boundary():
+    sink = _WarningSink()
+    # 0.1 stays under the 0.2 threshold, so the classified step below is an
+    # ordinary non-terminal one and the episode ends where the test says it does.
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([0.1]), warn=sink
+    )
+
+    finalizer(_data(step=0), None)
+    assert sink.messages == []
+    finalizer(_data(step=1, done=True), None)
+
+    assert len(sink.messages) == 1
+    assert "session-0" in sink.messages[0]
+    assert "classified NONE" in sink.messages[0]
+
+    # A session that DID classify stays quiet.
+    sink.messages.clear()
+    finalizer(_data(step=2, session_id="session-1"), _sidecar())
+    finalizer(_data(step=3, session_id="session-1", done=True), None)
+    assert sink.messages == []
+
+
+def test_long_unclassified_streak_warns_even_inside_one_episode():
+    sink = _WarningSink()
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([0.9]), warn=sink
+    )
+
+    for step in range(UNCLASSIFIED_WARN_STREAK - 1):
+        finalizer(_data(step=step), None)
+    assert sink.messages == []
+    finalizer(_data(step=UNCLASSIFIED_WARN_STREAK - 1), None)
+
+    assert len(sink.messages) == 1
+    assert "no classifier sidecar" in sink.messages[0]
+    # One classification resets the streak counter.
+    finalizer(_data(step=UNCLASSIFIED_WARN_STREAK), _sidecar())
+    finalizer(_data(step=UNCLASSIFIED_WARN_STREAK + 1), None)
+    assert len(sink.messages) == 1
+
+
+def test_corrupt_sidecar_bytes_fail_the_transition_instead_of_going_silent():
+    finalizer = RewardTransitionFinalizer(ScriptedRewardClassifierRuntime([0.9]))
+    corrupt = {
+        "cam1_jpeg": np.frombuffer(b"not-a-jpeg", dtype=np.uint8),
+        "cam2_jpeg": np.frombuffer(_jpeg(0), dtype=np.uint8),
+    }
+
+    with pytest.raises(RewardClassifierError, match="decode failed"):
+        finalizer(_data(), corrupt)
 
 
 def test_replay_ingress_routes_all_and_interventions_with_gap_boundaries():

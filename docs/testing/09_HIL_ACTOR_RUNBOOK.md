@@ -8,12 +8,20 @@
 > 2. **actor entrypoint에 CLI 플래그 3개가 생겼다** (§1.2에 정리):
 >    `--arm`, `--deadman {topic,spacebar}`(기본 `topic`), `--mock-policy-noise SIGMA`.
 >    §4의 "DRY_RUN 해제는 이 문서의 범위가 아니다"는 **더 이상 맞지 않는다.**
+>    (2026-07-29에 분류기 sidecar 플래그 4개가 더 붙었다 — §1.2.1.)
 > 3. **`clip_safety_box`는 구현돼 있다.** §4.1의 "아직 구현되어 있지 않다"는 낡았다 —
 >    그 자리에 지금의 사실을 다시 적어 뒀다.
-> 4. **🔴 머지가 분류기 크롭 불일치를 이 브랜치로 들여왔다** (`08` G15).
->    `EXP_NAME=cube_in_cup`(= 래퍼 기본값)으로 띄우면 분류기 입력이 분포 밖이다.
->    `DRY_RUN`은 팔만 막고 **보상/종단은 막지 않는다.** Stage B 전에 처리한다.
-> 5. **Kanu에 지금 아무것도 안 떠 있다** (port 50053 미바인딩, GPU 유휴).
+> 4. **🟢 분류기 크롭 불일치(`08` G15)는 2026-07-29에 닫혔다 — 코드에서만.**
+>    ~~머지가 크롭 불일치를 들여왔고 Stage B 전에 처리해야 한다~~는 더 이상 맞지 않는다.
+>    actor가 분류기에게 **자기 몫의 무크롭 128×128 JPEG(sidecar)**를 약 2 Hz로 따로 붙여
+>    보내고, 정책은 실측 `IMAGE_CROP`을 그대로 쓴다 (`05` §3.2).
+>    **그러나 이 경로는 실기에서 한 번도 안 돌았다.** 그리고 `DRY_RUN`이 팔만 막고
+>    **보상/종단은 막지 않는다**는 사실은 그대로다 — Stage B에서 replay에 들어가는 reward는
+>    여전히 검증되지 않은 값이다. §4.4의 확인을 먼저 한다.
+> 5. **actor에 sidecar 플래그 4개, 서버에 `--reward-model-id` 기본값이 생겼다.**
+>    `EXPECTED_REWARD_MODEL_ID`가 **`cube-in-cup-all3-ckpt150+sidecar-v1`**로 바뀌었고,
+>    옛 값 `cube-in-cup-checkpoint-150`은 **핸드셰이크에서 거부된다** (§1.1, §2.2).
+> 6. **Kanu에 지금 아무것도 안 떠 있다** (port 50053 미바인딩, GPU 유휴).
 >    §2는 "이미 떠 있는 서버에 붙는" 절차가 아니라 **새로 띄우는** 절차다.
 >
 > 현재 상태는 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](../../serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 볼 것.
@@ -82,7 +90,7 @@ cd $WT/ros2_ur_ws
 | `OBS_SCHEMA_HASH` | `3459098d…0352903` | 양쪽이 같아야 한다 (§2.1) |
 | `EXPECTED_MODEL_ID` | `hil-serl-hybrid-sac-resnet10-trunk-cache-v1` | **서버 종류에 따라 반드시 바꾼다** (§2.3) |
 | `EXPECTED_REWARD_AUTHORITY` | `server_classifier` | |
-| `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-checkpoint-150` | 서버 `--reward-model-id`와 같아야 함. **07-24 체크포인트 이름이다** — 새 체크포인트로 바꾸면 여기도 바꾼다 (`08` G19) |
+| `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-all3-ckpt150+sidecar-v1` | 서버 `--reward-model-id`와 같아야 함. **id가 체크포인트 + 입력 계약(sidecar)을 둘 다 담는다** — 어긋나면 핸드셰이크에서 거부된다. *(이전 값 `cube-in-cup-checkpoint-150`은 이제 거부된다)* |
 | `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `0.6` / `0.8` | 프로덕션 예산. 늘리지 말 것 (`05` §5) |
 | `HZ_TIMEOUT_S` | `6` | 토픽당 `ros2 topic hz` 대기 시간 |
 | `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. **실기에서는 쓰지 말 것** |
@@ -98,7 +106,38 @@ cd $WT/ros2_ur_ws
 | `--deadman {topic,spacebar}` | **`topic`** | 개입 데드맨 소스 (`:51-62`, 전달 `:220`). `spacebar`는 **전역 pynput + 워치독 없음**이라 실기 금지 |
 | `--mock-policy-noise SIGMA` | `0.0` (비활성) | 서버 액션을 σ의 zero-mean 가우시안으로 **대체**한다 (`:72-84`). zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증하는 용도. 교란된 액션이 **실행되는 값이자 저장되는 값**이라 버퍼는 자기일관적이다 |
 | `--fake-env` | off | ROS 백엔드도 `GelloIntervention`도 붙이지 않는다 (Stage A) |
-| `--checkpoint-path` | 없음 | ⚠️ **지금은 아무 효과가 없다.** 이건 transition pickle을 주기적으로 **쓰는** 경로인데, `cube_in_cup`의 `buffer_period = 0`이라 덤프 자체가 게이트에서 걸린다 (`cube_in_cup.py:265`, `rlpd_actor.py:258-270`) → `08` G20 |
+| `--checkpoint-path` | 없음 | ⚠️ **실질적으로 아무 pickle도 안 나온다.** 다만 이유는 아래 각주대로 이전 판의 설명과 다르다 → `08` G20 |
+
+> ### 🔧 정정 (2026-07-29, 코드 확인) — `--checkpoint-path`가 안 되는 **진짜 이유**
+> 이전 판은 *"`cube_in_cup`의 `buffer_period = 0`이라 덤프 자체가 게이트에서 걸린다"*고 적었다.
+> **절반만 맞다.** `buffer_period`가 막는 것은 **주기적 중간 덤프**뿐이고
+> (`remote_actor.py:519`), **루프가 끝난 뒤의 최종 덤프는 게이트가 없다**
+> (`remote_actor.py:568`, `if checkpoint_path and replay_data:`).
+>
+> 진짜 이유는 **그 최종 덤프에 도달할 수 없다는 것**이다:
+> `cube_in_cup`의 `max_steps = 1_000_000`(`cube_in_cup.py:269`)이라 10 Hz에서 **약 27.8시간**이고,
+> actor CLI에는 이 값을 줄일 플래그가 **없다.** 그리고 `Ctrl-C`는 루프 **안에서** 예외를
+> 던지므로 최종 덤프를 **건너뛴다**(`try/finally`가 아니다).
+> 즉 `--checkpoint-path`는 배선돼 있지만 실기에서 파일을 남기지 못한다.
+> **§4.4의 서버 확률 판독구가 없는 것도 같은 이유다.**
+
+#### 1.2.1 분류기 sidecar 플래그 (2026-07-29 신규)
+
+기본값은 전부 태스크 config의 `CubeInCupConfig.CLASSIFIER_SIDECAR`에서 온다.
+플래그는 **리그에서 값을 다시 잡아 보되 config를 실수로 커밋하지 않게** 하려고 있다
+(`run_remote_rlpd_actor.py::_sidecar_settings`).
+
+| 플래그 | 기본 | 무엇을 하나 |
+|---|---|---|
+| `--no-classifier-sidecar` | off | **킬 스위치**(config보다 우선). 서버가 채점할 것이 없으므로 **모든 transition이 `classifier_evaluated=false` / reward 0**으로 돌아온다. sidecar의 지연 비용만 분리하거나 sidecar 이전 동작을 재현할 때만 쓴다 |
+| `--classifier-sidecar-interval N` | **5** (10 Hz → 약 2 Hz) | N 스텝마다 최대 1회 부착. **성긴 것이 의도다** — 판정 깜빡임을 줄이고 큐브를 놓은 뒤 장면이 가라앉을 시간을 준다. `1`은 매 스텝 채점 = 지연 비용 최대 |
+| `--classifier-stationary-speed-max M/S` | **0.05** ⚠️ | TCP 속도가 이 값 미만일 때만 부착 (움직이는 중의 블러 프레임 차단). **config 주석이 이 값을 PLACEHOLDER로 명시한다** — 녹화 take에서 "팔이 가라앉은 뒤 실제로 머무는 속도"를 재서 정해야 한다 |
+| `--classifier-escalate-probability P` | **0.05** | **확률적 추첨이 아니다.** 분류기 확률이 P 이상이면 interval을 버리고 **매 스텝** 채점한다. 임계(0.2)를 실제로 넘는 스텝을 최대 interval−1 스텝 놓치지 않으려는 것이라 **`DEFAULT_REWARD_THRESHOLD`보다 낮게** 둔다 |
+
+> 종료 시 actor가 **부착/미부착 왕복을 따로** 찍는다
+> (`sidecar_round_trip_ms_mean/max` vs `plain_round_trip_ms_mean/max`).
+> sidecar가 100 ms 예산에서 얼마를 먹는지는 **추정하지 말고 이 줄을 읽는다.**
+> `sidecar_build_failures`가 0이 아니면 그 스텝들은 reward가 없다.
 
 > ### 🛑 `--mock-policy-noise`로 만든 데이터를 demo로 쓰지 말 것
 > 전이마다 `meta.policy_actions_synthetic = true`가 박히고, actor가 종료 시
@@ -146,7 +185,7 @@ cd $WT/ros2_ur_ws
 | GPU | `CUDA_VISIBLE_DEVICES=7` | **7번 고정이 아니다.** `nvidia-smi`로 비어 있는 카드를 매번 다시 고른다 (2026-07-28 기준 5/6/7 전부 유휴) |
 | 서버 포트 | `50053` (loopback bind) | 그대로 (코드 기본값) |
 | 로컬 터널 입구 | `50153` → 원격 `50053` | 그대로 (`run_hil_actor.sh:72`의 `SERVER_PORT` 기본값도 50153) |
-| 분류기 checkpoint SHA-256 | `e329986b…d7a997` | 🔴 **그 체크포인트는 폐기 대상이다** — 새 도메인 recall 0.0 %. 그런데 코드 기본값이 아직 그것을 pin하고 있다 (`run_rlpd_receive_server.py:34`) → `08` G19 |
+| 분류기 checkpoint SHA-256 | **`512b6575…62846d`** | ✅ `cube_in_cup_all3/checkpoint_150`의 **디렉터리** digest. *(그날 기록된 `e329986b…d7a997`는 recall 0%짜리 폐기 체크포인트였다. 코드 기본값도 07-29에 교체됐다 → `08` G19)* |
 | observation schema hash | `3459098d…0352903` | 📌 2026-07-29 랩톱에서 동일. **그래도 양쪽에서 출력해 대조한다** (`05` §4.2) |
 
 > 로컬 포트가 50053이 아니라 **50153**인 이유: 그날 로컬 50053이 다른 프로세스에
@@ -182,7 +221,7 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --port 50053 \
   --checkpoint <체크포인트 경로> \
   --expected-checkpoint-sha256 <그 체크포인트의 sha256> \
-  --reward-model-id <이 서버가 광고할 id> \
+  --reward-model-id cube-in-cup-all3-ckpt150+sidecar-v1 \
   --require-jax-backend gpu
 ```
 
@@ -197,15 +236,23 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
 > (`run_rlpd_learner_server.py:548-550`), 불일치는 **fail-closed로 거부**된다.
 > 그때는 learner 쪽에 `--reward-threshold <그 값>`을 준다.
 >
-> ⚠️ 그리고 threshold를 정한 근거 수치는 **전부 크롭 없는 입력에서 측정된 것**이다.
-> 크롭이 활성인 지금 경로에서는 재측정이 필요하다 (`08` G15).
+> ⚠️ ~~그리고 threshold를 정한 근거 수치는 **전부 크롭 없는 입력에서 측정된 것**이다.
+> 크롭이 활성인 지금 경로에서는 재측정이 필요하다.~~
+> **🔧 정정 (2026-07-29): 재측정이 필요 없다.** 분류기는 sidecar 덕분에 **계속 무크롭을 먹는다**.
+> 그래서 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 수치가 이 경로에 **그대로 적용된다** (`08` G15).
 
-> ### 🔧 `--checkpoint` / `--expected-checkpoint-sha256`을 반드시 명시할 것
-> `--expected-checkpoint-sha256`을 생략하면 코드 기본값이 쓰이는데, 그것은
-> **폐기 대상인 07-24 체크포인트**(`e329986b…`)를 pin한다
-> (`scripts/run_rlpd_receive_server.py:34-36`). 새 도메인 recall 0.0 %다.
-> 후속 07-27 체크포인트는 **orbax 디렉터리**라 `checkpoint_sha256()`의 `os.path.isfile`
-> 요구를 통과하지 못한다 — 그게 기본값이 아직 옛것인 이유다 → `08` G19.
+> ### 🔧 `--reward-model-id`는 이제 기본값이 있다
+> `cube-in-cup-all3-ckpt150+sidecar-v1`. **이 id는 체크포인트와 입력 계약을 둘 다 이름에 담는다.**
+> sidecar 이전 actor ↔ 이후 server(또는 반대)는 **서로 다른 픽셀에서 reward를 계산**하므로,
+> 그 조합을 **핸드셰이크에서 거부**한다 — 한 세션을 통째로 잘못된 reward로 돌리는 것보다 낫다.
+> actor 쪽 짝은 `run_hil_actor.sh`의 `EXPECTED_REWARD_MODEL_ID`이고 같은 값이다.
+
+> ### 🔧 `--checkpoint` / `--expected-checkpoint-sha256` — 기본값이 이제 정본이다
+> **🔧 정정 (2026-07-29):** 이전 판은 *"생략하면 폐기 대상인 07-24 체크포인트(`e329986b…`)를
+> pin한다 / 07-27 체크포인트는 orbax 디렉터리라 `os.path.isfile` 요구를 통과하지 못한다"*고 적었다.
+> **둘 다 해소됐다** — `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임하고,
+> 두 기본 SHA는 `512b6575…`로 교체됐다 (`08` G19).
+> 그래도 **어느 체크포인트가 로드됐는지 기동 로그에서 확인하는 습관은 유지할 것** — 이 실패는 조용하다.
 >
 > `--replay-capacity` / `--intervention-capacity`도 뺐다. 코드 기본값이 정확히
 > 50000 / 10000이다 (`rlpd_receive_server.py:49-50`).
@@ -344,10 +391,16 @@ state_shape         : [8, 1, 19]
   (`ur7e_env.py:188`, `:334`, `:356`). 실측 박스는 `ur_experiments/cube_in_cup.py:162-167`.
   **그러나 실기에서 클립이 발동한 적은 한 번도 없다** — 그래서 Stage B는 여전히
   **DRY_RUN에서만** 한다. → `08_OPEN_GAPS.md` G1
-* 🔴 **분류기 크롭 불일치가 이 브랜치에서 활성이다** (`08` G15).
-  `EXP_NAME=cube_in_cup`이면 `IMAGE_CROP`이 적용되는데 pin된 분류기는 크롭 없이 학습됐다.
-  **`DRY_RUN`은 팔만 막고 보상/종단은 막지 않는다** — 잘못된 reward가 그대로 replay에
-  들어간다. Stage B로 데이터를 모으려면 이걸 먼저 처리한다.
+* 🟢 **분류기 크롭 불일치는 코드에서 닫혔다** (2026-07-29, `08` G15).
+  ~~`EXP_NAME=cube_in_cup`이면 `IMAGE_CROP`이 적용되는데 pin된 분류기는 크롭 없이 학습됐다~~ —
+  이제 분류기는 이 크롭을 **아예 보지 않는다.** actor가 무크롭 sidecar를 따로 붙인다 (`05` §3.2).
+  그러나 **`DRY_RUN`이 팔만 막고 보상/종단은 막지 않는다는 사실은 그대로다.**
+  그리고 이 경로는 **실기에서 한 번도 안 돌았다.** Stage B로 데이터를 모으기 전에
+  **§4.4를 먼저 한다** — 그게 크롭 불일치가 실제로 고쳐졌다는 가장 값싼 증거다.
+* 🔴 **아직 안 고쳐진 것: 팔 가림(occlusion).** sidecar는 전처리 불일치를 고쳤지
+  **시야 문제를 고치지 못했다.** 팔이 cam1 시야를 쓸고 지나가는 동안 확률이
+  0.005 → 1.0으로 진동한다(`take_21`은 @0.85에서 recall 0.0 %). 정지 게이트가 **완화**할 뿐이다.
+  → `08` G15 §잔여.
 * `cube_in_cup` 태스크 config의 `DRY_RUN`은 **기본 `True`**
   (`ur_experiments/cube_in_cup.py:227`). 래퍼는 그 값을 건드리지 않는다.
   🔧 다만 **actor의 `--arm`이 그 값을 끈다** (`run_remote_rlpd_actor.py:288`) —
@@ -467,6 +520,68 @@ EXPECTED_MODEL_ID=<서버가 광고하는 값> ./run_hil_actor.sh
 [9] 퍼블리셔 0개 — actor가 유일한 퍼블리셔가 된다
 ```
 
+### 4.4 🔎 크롭 불일치가 **실제로** 고쳐졌는지 확인 — 팔을 움직이기 전에 한다
+
+**이것이 G15 수정의 가장 값싼 증거다.** 로봇을 전혀 움직이지 않고, 정지된 장면 하나면 된다.
+**§4.5 / B3(`--arm`)보다 반드시 먼저 한다** — 여기서 어긋나면 그 뒤 모든 reward가 쓰레기다.
+
+**원리.** 라이브 뷰어와 서버는 **같은 전처리 함수**를 돈다 —
+뷰어는 `gello_recorder.reward_classifier_runtime.decode_classifier_image()`,
+서버는 `ur_env.classifier_sidecar.decode_classifier_frames()`이고
+둘 다 *imdecode → **무크롭** → `resize(128,128)` → RGB → batch axis*다.
+그리고 **평활이 꺼져 있으므로**(`--success-confirmations 1`, 서버 기본값)
+서버의 `classifier_probability`는 **시간 필터가 전혀 없는 순간 sigmoid**다 —
+뷰어가 화면에 찍는 것과 **같은 종류의 수치**다. 그래서 이 비교가 근사가 아니라
+**등가성 점검**이 된다.
+
+> ⚠️ 남는 차이는 **딱 하나, 128×128에서의 JPEG 1세대**다. sidecar는 랩톱에서 resize 후
+> 재인코딩되므로 뷰어와 **비트 단위로 같지는 않다.** 실측 기대치:
+> 순수 JPEG 왕복 대조군은 `|Δp| ≤ 0.010`, 판정 경계 근처(합성 프레임)는 `0.022–0.090`으로
+> **주변 센서 노이즈와 같은 수준**이다 (`05` §5.4).
+> **판정은 "소수점까지 같은가"가 아니라 "자릿수가 같은가"다.**
+> 뷰어가 0.9인데 서버가 0.02 같은 차이가 나면 **전처리가 아직 갈라져 있다는 뜻**이다.
+
+**절차 (터널 · 카메라만 필요. 팔은 파킹 상태로 둔다):**
+
+1. 카메라 2대를 띄운다(§4.2 T3). **장면을 고정한다** — 손을 넣지 않는다.
+   팔은 **정지**해 있어야 한다. sidecar의 정지 게이트가 안 열리면 서버가 채점할 것이 없다.
+2. 라이브 뷰어를 띄우고 `p(success)`가 안정될 때까지 둔다.
+   절차 정본은 [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](../../serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md)다
+   (랩톱 CPU는 `run_classifier_viewer.sh`, kanu GPU + 터널은 `run_remote_classifier_viewer.sh`).
+   두 카메라의 값을 적어 둔다.
+3. **DRY_RUN 상태로** actor를 띄운다. 부착을 매 스텝으로 올려 표본을 빨리 모은다:
+
+   ```bash
+   cd $WT/ros2_ur_ws
+   EXPECTED_MODEL_ID=<서버가 광고하는 값> \
+     ./run_hil_actor.sh --classifier-sidecar-interval 1
+   ```
+
+4. 서버가 광고한 계약을 기동 로그에서 확인한다 — `rlpd_receive_server_ready` 한 줄에
+   전부 들어 있다: `reward_model_id`, `checkpoint_sha256`, `threshold`,
+   **`classifier_input_contract`**, **`success_confirmations`**.
+   `success_confirmations`가 1이 아니면 **이 비교는 성립하지 않는다**(평활이 켜진 것).
+5. actor를 내리고 종료 줄의 `sidecar n=`이 0이 아닌지 본다 — 0이면 sidecar가 한 번도
+   안 붙은 것이고, 원인은 보통 **정지 게이트**(`--classifier-stationary-speed-max`)다.
+
+> ### 🪤 그런데 **서버의 확률을 스텝마다 찍어 주는 곳이 지금 없다** (2026-07-29 코드 확인)
+> 정직하게 적는다. `classifier_probability`는
+> (a) `TransitionOutcome`으로 actor에 돌아가 transition dict에 들어가고
+> (`ur_env/remote_actor.py:494-504`), (b) 서버 replay buffer에 저장된다.
+> **그러나 어느 쪽도 로그로 나오지 않는다.**
+> 서버가 스스로 말하는 경우는 두 가지뿐이다: **연속 100건이 미분류**일 때, 그리고
+> **한 세션이 단 한 건도 분류되지 않은 채 끝났을 때**
+> (`rlpd_receive_server.py::RewardTransitionFinalizer`의 경고).
+> `--checkpoint-path`의 로컬 pickle도 이 용도로는 못 쓴다 — 아래 §1.2 각주를 볼 것.
+>
+> **그래서 4번까지는 오늘 그대로 실행되지만, "서버 숫자 대 뷰어 숫자" 대조는 판독구가
+> 하나 생겨야 완결된다.** 그 전까지의 대체 판정은 **같은 라이브 프레임 한 쌍에** 두 레시피를
+> 직접 걸어 확률을 비교하는 것이다 —
+> `decode_classifier_image()`(뷰어 경로) vs `build_sidecar()` → `decode_classifier_frames()`
+> (서버가 실제로 도는 경로). 서버는 후자를 **그대로** 부르므로, 이 둘이 맞으면
+> 전처리는 맞은 것이다. 오프라인 등가성은 `tests/test_classifier_sidecar.py`가
+> 이미 강제한다(resize-only 경로는 **비트 단위**, 인코드 왕복은 **측정된 오차 범위**).
+
 ---
 
 ## 5. 실패 대응표
@@ -562,7 +677,8 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A5 | 인자 통과 | **PASS** | `--fake-env --save-video --actor-id …`가 최종 argv 끝에 그대로 붙음 |
 | B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
-| B3 | actor `--arm` (실제 팔 구동) | **금지** | 🔧 이유가 바뀌었다: `clip_safety_box`는 **구현됐다**. 지금 막는 것은 (a) `08` G15 크롭 불일치가 이 브랜치에서 활성, (b) 초기 정책 액션 크기 미확인, (c) B2 미검증. `08_OPEN_GAPS.md`의 게이트 선언 참조 |
+| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **미검증(TODO)** | 코드·단위테스트까지다. sidecar는 **실기에서 한 번도 안 붙어 봤다.** B3보다 먼저 한다 |
+| B3 | actor `--arm` (실제 팔 구동) | **금지** | 🔧 이유가 또 바뀌었다: `clip_safety_box`는 **구현됐고**, ~~(a) G15 크롭 불일치~~는 **코드에서 닫혔다**(sidecar, `08` G15). 지금 막는 것은 (a′) **그 sidecar 경로가 실기 미검증**(B2c), (b) 초기 정책 액션 크기 미확인, (c) B2 미검증, (d) 팔 가림은 **여전히 안 고쳐졌다**. `08_OPEN_GAPS.md`의 게이트 선언 참조 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
 
 ---
@@ -572,6 +688,7 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 * `04_HIL_INTERVENTION.md` — 데드맨 / 앵커 / 좌표계 / 두 퍼블리셔 충돌
 * `05_COMMS_GRPC.md` — gRPC 계약과 19-D state 레이아웃
 * `06_SENSORS.md` — RealSense 2대
-* `08_OPEN_GAPS.md` — `clip_safety_box` 등 실기 투입 전 미해결 갭
+* `08_OPEN_GAPS.md` — `clip_safety_box` 등 실기 투입 전 미해결 갭 (G15/G19는 닫혔다)
+* `serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md` — 라이브 분류기 뷰어 정본. **§4.4가 이걸 쓴다**
 * `serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md` — Kanu learner 서버 전체 런북
 * `serl_ur_infra/RL_RECEIVE_SERVER.md` / `HIL_RLPD_RECEIVE_SERVER_KO.md` — receive server 마일스톤

@@ -114,6 +114,17 @@ class UR7eEnv(gym.Env):
         self.save_video = save_video
         self.recording_frames = []
 
+        # Full-resolution UNCROPPED BGR frames, keyed by camera name, refreshed
+        # by get_im().  These exist so the reward classifier can be shipped the
+        # whole scene while the policy keeps its measured IMAGE_CROP: one image
+        # cannot serve both, and that mismatch cost recall@0.85 100% -> 33.3%.
+        # get_im() decodes this array anyway, so stashing the reference costs
+        # no CPU, no second decode and no copy.
+        # See ur_env/classifier_sidecar.py for the consumer.
+        # Declared before the fake_env early return so the accessor is always
+        # safe to call; a fake env simply never fills it.
+        self._last_camera_frames: Dict[str, np.ndarray] = {}
+
         # workspace safety box (same semantics as FrankaEnv.clip_safety_box)
         self._build_safety_box()
 
@@ -756,6 +767,18 @@ class UR7eEnv(gym.Env):
                     "is launch_cameras.sh running?"
                 )
             bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+            # Keep the decoded frame BEFORE the crop on the next line.  The
+            # policy observation below is cropped on purpose (config.IMAGE_CROP
+            # is measured from the dataset); the reward classifier was trained
+            # on the full frame and gets this uncropped one instead.
+            #
+            # A reference, not a copy, and that is safe: the crop is a numpy
+            # slice (a read-only view over this same buffer), cv2.resize
+            # allocates its own destination, and both `full_res` and the
+            # display path copy before they keep anything.  Nothing below
+            # writes back into `bgr`.  Were that ever to change, copy here and
+            # accept the ~2.7 MB/frame memcpy.
+            self._last_camera_frames[key] = bgr
             cropped = (
                 self.config.IMAGE_CROP[key](bgr)
                 if key in self.config.IMAGE_CROP
@@ -772,6 +795,25 @@ class UR7eEnv(gym.Env):
         if self.config.DISPLAY_IMAGE:
             self.img_queue.put(display_images)
         return images
+
+    def last_camera_frames(self) -> Dict[str, np.ndarray]:
+        """Full-resolution BGR frames behind the most recent :meth:`get_im`.
+
+        UNCROPPED — the whole scene as the camera published it, only JPEG
+        decoding applied.  ``classifier_sidecar.build_sidecar`` resizes these
+        to 128x128 and re-encodes before they go on the wire; forwarding the
+        camera's original JPEG was measured at ~400 KiB per attachment, which
+        does not fit a 13 Mbit/s link inside a 100 ms step.
+
+        Returns a fresh dict so a caller cannot re-key the env's state, but the
+        arrays themselves are shared and are the same buffers ``get_im`` crops
+        from.  **Treat them as read-only** — writing through one would corrupt
+        the policy observation of the step it came from.
+
+        Empty until :meth:`get_im` has run once, and always empty for a fake
+        env, which has no camera at all.
+        """
+        return dict(self._last_camera_frames)
 
     def _save_video_recording(self):
         # TODO: port FrankaEnv.save_video_recording if we want mp4 dumps

@@ -4,6 +4,25 @@ The laptop sends an initial observation with :meth:`begin_episode`.  Every
 later RPC combines the transition just executed with its next observation, so
 large image tensors cross the network once rather than once for inference and
 again for replay insertion.
+
+THE CLASSIFIER SIDECAR
+----------------------
+The reward classifier was trained on UNCROPPED camera frames, while the policy
+observation is cropped (``ur_experiments/cube_in_cup.py::IMAGE_CROP``).  Feeding
+the policy observation to the classifier costs recall@0.85 100% -> 33.3%, so the
+actor additionally ships the classifier its own uncropped JPEG frames.  They
+travel inside the existing named-tensor observation map under one reserved key
+(``ur_env.classifier_sidecar.CLASSIFIER_SIDECAR_KEY``), which needs no proto
+change and does not alter the observation schema hash.
+
+:meth:`ActorSessionService.step` strips that key BEFORE anything else in the
+server sees the observation.  Everything downstream — the exact-key check in
+``ur_env.observation_schema.validate_canonical_observation``, the policy in
+``ur_env.learner.policy``, and replay conversion in
+``ur_env.rlpd_receive_server.ReplayIngress`` — therefore keeps operating on the
+unchanged canonical tree and needs no relaxation.  Relaxing that exact-key check
+instead would have made the schema permissive for every future caller; stripping
+one reserved key in one place does not.
 """
 
 from __future__ import annotations
@@ -12,6 +31,7 @@ from collections import OrderedDict
 import copy
 from dataclasses import dataclass, replace
 import hashlib
+import inspect
 import math
 import threading
 import time
@@ -22,6 +42,22 @@ import numpy as np
 
 PROTOCOL_VERSION = "2"
 SCHEMA_VERSION = 2
+
+# Resolved on first use, never at import time.  ``ur_env.classifier_sidecar``
+# imports ActorProtocolError from this module, so a module-scope import here
+# would be circular; a lazy one also keeps the image codec out of processes
+# that only want the dataclasses in this file.
+_SIDECAR_CONTRACT: Any = None
+
+
+def _sidecar_contract() -> Any:
+    """Return the frozen ``ur_env.classifier_sidecar`` contract module."""
+    global _SIDECAR_CONTRACT
+    if _SIDECAR_CONTRACT is None:
+        from ur_env import classifier_sidecar
+
+        _SIDECAR_CONTRACT = classifier_sidecar
+    return _SIDECAR_CONTRACT
 
 
 class ActorNetworkError(RuntimeError):
@@ -388,10 +424,13 @@ class ActorSessionService:
         cache_size: int = 2048,
         clock: Callable[[], float] = time.perf_counter,
         accept_data: Optional[Callable[[dict[str, Any], bool], None]] = None,
+        # Contract: ``finalize_transition(data, classifier_sidecar)`` where
+        # ``classifier_sidecar`` is the validated sidecar tensor map for this
+        # step's O(t+1) (still JPEG-encoded — the finalizer decodes it), or
+        # ``None`` when the actor did not classify this step.  Legacy
+        # single-argument finalizers are still accepted; see _bind_finalizer.
         finalize_transition: Optional[
-            Callable[
-                [dict[str, Any]], tuple[dict[str, Any], TransitionOutcome]
-            ]
+            Callable[..., tuple[dict[str, Any], TransitionOutcome]]
         ] = None,
         buffer_status_provider: Optional[Callable[[], BufferStatus]] = None,
         in_memory_capacity: int = 256,
@@ -422,7 +461,7 @@ class ActorSessionService:
         self._clock = clock
         self._in_memory_capacity = int(in_memory_capacity)
         self._accept_data = accept_data or self._accept_data_in_memory
-        self._finalize_transition = (
+        self._finalize_transition = self._bind_finalizer(
             finalize_transition or self._finalize_transition_identity
         )
         self._buffer_status_provider = buffer_status_provider
@@ -523,6 +562,11 @@ class ActorSessionService:
                     f"episode_id must be {run.next_episode_id}, got {command.episode_id}"
                 )
 
+            # A sidecar on BeginEpisode is a protocol error, not a no-op: the
+            # sidecar labels the transition that ENDS on this observation, and
+            # BeginEpisode has no transition.  Accepting and dropping it would
+            # silently lose a classification the actor believed it had paid for.
+            self._reject_classifier_sidecar(command.observation, rpc="BeginEpisode")
             observation = self._validated_observation(command.observation)
             try:
                 action, version, inference_ms = self._infer(
@@ -591,7 +635,14 @@ class ActorSessionService:
                     f"got {command.request_id}"
                 )
 
-            next_observation = self._validated_observation(command.next_observation)
+            # Separate the classifier sidecar FIRST.  From here on nothing in
+            # this process — canonical validation, the policy, the finalizer's
+            # protected-field diff, replay conversion — can see the reserved
+            # key, so the canonical observation contract stays exact-key strict.
+            next_packet, classifier_sidecar = self._split_classifier_sidecar(
+                command.next_observation
+            )
+            next_observation = self._validated_observation(next_packet)
             self._validate_data(command, session, next_observation)
             observation_key = (
                 command.actor_id,
@@ -613,7 +664,7 @@ class ActorSessionService:
             )
             try:
                 finalized = self._finalize_transition(
-                    copy.deepcopy(provisional_data)
+                    copy.deepcopy(provisional_data), classifier_sidecar
                 )
                 if not isinstance(finalized, tuple) or len(finalized) != 2:
                     raise ActorProtocolError(
@@ -725,9 +776,104 @@ class ActorSessionService:
         self._ready = False
         self._fault_detail = str(detail) or "actor service fault"
 
+    @staticmethod
+    def _bind_finalizer(
+        finalizer: Callable[..., tuple[dict[str, Any], TransitionOutcome]]
+    ) -> Callable[..., tuple[dict[str, Any], TransitionOutcome]]:
+        """Accept the two-argument contract, bridging legacy one-argument ones.
+
+        The finalizer contract grew a second positional argument (the classifier
+        sidecar) when the actor started shipping uncropped frames.  Receive-only
+        harnesses that predate it still pass ``finalize(data)``; those keep
+        working, but they FAIL CLOSED the first time an actor actually sends a
+        sidecar rather than silently discarding a classification.
+        """
+        try:
+            signature = inspect.signature(finalizer)
+        except (TypeError, ValueError):
+            # Builtins / C callables expose no signature.  Assume the current
+            # contract rather than downgrading them behind the operator's back.
+            return finalizer
+        parameters = list(signature.parameters.values())
+        takes_var_positional = any(
+            parameter.kind is inspect.Parameter.VAR_POSITIONAL
+            for parameter in parameters
+        )
+        positional_count = sum(
+            1
+            for parameter in parameters
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        )
+        if takes_var_positional or positional_count >= 2:
+            return finalizer
+
+        def legacy_finalizer(
+            data: dict[str, Any], classifier_sidecar: Optional[Mapping[str, Any]]
+        ) -> tuple[dict[str, Any], TransitionOutcome]:
+            if classifier_sidecar is not None:
+                raise ActorProtocolError(
+                    "this server's transition finalizer predates the classifier "
+                    "sidecar and cannot classify the actor's uncropped frames"
+                )
+            return finalizer(data)
+
+        return legacy_finalizer
+
+    def _reject_classifier_sidecar(
+        self, packet: ObservationPacket, *, rpc: str
+    ) -> None:
+        observation = packet.observation
+        if not isinstance(observation, Mapping):
+            return  # _validated_observation reports the real shape error
+        key = _sidecar_contract().CLASSIFIER_SIDECAR_KEY
+        if key in observation:
+            raise ActorProtocolError(
+                f"{rpc} observation must not carry the reserved {key!r} "
+                "classifier sidecar; it belongs on the Step that ends there"
+            )
+
+    def _split_classifier_sidecar(
+        self, packet: ObservationPacket
+    ) -> tuple[ObservationPacket, Optional[dict[str, np.ndarray]]]:
+        """Return ``(observation without the sidecar, validated sidecar|None)``.
+
+        Called before ANY other inspection of the observation.  ``validate_``
+        ``sidecar`` owns the tensor contract (key set, dtype, rank); a malformed
+        sidecar is a protocol error, exactly like a malformed observation, and
+        must not be silently downgraded to "no classification this step".
+        """
+        observation = packet.observation
+        if not isinstance(observation, Mapping):
+            return packet, None
+        contract = _sidecar_contract()
+        key = contract.CLASSIFIER_SIDECAR_KEY
+        if key not in observation:
+            return packet, None
+        try:
+            sidecar = contract.validate_sidecar(observation[key])
+        except ValueError as exc:
+            # validate_sidecar speaks ValueError so the actor can call it before
+            # any transport exists.  On this side a bad payload is a wire
+            # contract violation, and only ActorProtocolError makes the gRPC
+            # servicer answer INVALID_ARGUMENT instead of INTERNAL.
+            raise ActorProtocolError(f"invalid {key!r} sidecar: {exc}") from exc
+        cleaned = {
+            name: value for name, value in observation.items() if name != key
+        }
+        return replace(packet, observation=cleaned), sidecar
+
     def _finalize_transition_identity(
-        self, data: dict[str, Any]
+        self,
+        data: dict[str, Any],
+        classifier_sidecar: Optional[Mapping[str, Any]] = None,
     ) -> tuple[dict[str, Any], TransitionOutcome]:
+        # The identity finalizer has no classifier, so it ignores the sidecar
+        # and reports classifier_evaluated=False for every transition.
+        del classifier_sidecar
         transition = data["transition"]
         return data, TransitionOutcome(
             transition_id=str(data["meta"]["transition_id"]),

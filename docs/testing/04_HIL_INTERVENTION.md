@@ -502,6 +502,53 @@ PYTHONPATH="$WT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages
 > ⚠️ 오버레이 `PYTHONPATH` 없이 돌리면 **`1 skipped`로 조용히 넘어간다**
 > (`serl_launcher` 미발견). 통과했다고 착각하기 쉽다 → `00_SETUP_AND_SAFETY.md` §4.2.
 
+### 7.4 reward / 분류 메타데이터 — **개입 스텝은 사실상 채점되지 않는다** (2026-07-29 신규)
+
+위 §7.1–7.3은 **개입** 메타데이터 계약이고 **바뀌지 않았다.**
+바뀐 것은 그 옆에 붙는 **reward 쪽 메타데이터**이고, 그 변화가 개입 루프에 직접 영향을 준다.
+
+분류기는 이제 정책의 크롭된 관측이 아니라 actor가 따로 붙이는 **무크롭 sidecar**를 채점한다
+(설계는 `05_COMMS_GRPC.md` §3.2). sidecar는 **모든 스텝에 붙지 않는다** —
+`ur_env/classifier_sidecar.py::SidecarScheduler`가 두 가지로 게이트한다:
+
+| 게이트 | 규칙 |
+|---|---|
+| **주기** | `interval_steps = 5` → 10 Hz 루프에서 **약 2 Hz** |
+| **정지** | TCP 선속도가 `stationary_speed_max`(기본 `0.05 m/s`, **PLACEHOLDER 값이다**) 이하일 때만 |
+| **에스컬레이션** | 확률이 `escalate_probability`(0.05) 이상이면 주기를 버리고 **매 스텝** |
+| **예외 (게이트 무시)** | 로컬이 잠정 terminal이라고 판단한 스텝은 **정지 게이트를 무시하고 반드시 붙는다** — 성공을 한 스텝 늦게 잡으면 그건 실패로 기록된다 |
+
+> ### 🎯 개입 루프에 대한 함의 — 이게 이 절의 요점이다
+> **사람이 GELLO로 팔을 움직이는 동안에는 정지 게이트가 열리지 않는다.**
+> 즉 **개입 스텝은 거의 전부 미분류(unclassified)로 replay에 들어간다.**
+> 예외는 그 개입이 에피소드를 끝낸 스텝뿐이다(위 표 마지막 줄).
+
+미분류 transition의 필드는 **정확히 이 모양**이어야 하고, 세 곳에서 독립적으로 강제된다
+(`actor_network._validate_finalized_transition`, `grpc_actor_transport.outcome_from_proto`,
+`ReplayIngress._convert`):
+
+| 필드 | 값 | 왜 |
+|---|---|---|
+| `rewards` | **0.0으로 확정** | 서버가 reward 권위다. 분류가 없으면 성공의 증거가 없다 |
+| `masks` / `dones` / `truncated` | **로컬 제안 그대로 통과** | `masks == 0.0 iff dones` 정합성이 특수 처리 없이 유지된다 |
+| `classifier_evaluated` | `0` | |
+| `classifier_probability` / `classifier_threshold` | `0.0` / `0.0` | 미평가일 때 0이 아니면 **거부된다** |
+| `classifier_success` | `0` | |
+| `reward_model_id` | `""` (빈 문자열) | 마찬가지로 미평가일 때 비어 있어야 한다 |
+
+**학습 관점에서 미분류 transition은 평범한 zero-reward · non-terminal 표본이다.**
+못 하는 것은 딱 하나 — **양의 reward로 에피소드를 끝내는 것**이고, 그건 아무도 채점하지 않은
+스텝에서 일부러 뺏은 권한이다.
+
+> 🛑 **"개입했는데 reward가 0이다"를 버그로 읽지 말 것.** 설계다.
+> 성긴 채점은 대역폭 절감이 아니라 **판정 안정성**을 위한 것이다 — 큐브를 놓은 뒤 장면이
+> 가라앉게 두고, 10 Hz로 성공 판정이 깜빡이는 것을 막는다.
+>
+> 반대로 **경고해야 할 신호**는 있다: 서버가 **연속 100건 미분류**이거나
+> **한 세션이 단 한 건도 분류되지 않고** 끝나면 stderr에 경고를 찍는다
+> (`rlpd_receive_server.py::RewardTransitionFinalizer`). 그게 뜨면 정지 게이트가 한 번도
+> 안 열렸다는 뜻이므로 `--classifier-stationary-speed-max`를 의심한다 (`09` §1.2.1).
+
 ---
 
 ## 8. 판정 체크리스트
@@ -523,3 +570,5 @@ mock 루프(§3)에서는 **아무것도 확인되지 않았다** — 두 열을
 | 10 | **그리퍼 개입** (§6.3): 트리거 0.7↑ → `ia6 = -1.0`, 0.3↓ → `+1.0`, 그 사이 래치 유지 | [ ] `--gripper` 필요 | [ ] |
 | 11 | **핵심 회귀:** 트리거 퍼블리셔를 죽이면 `ia6`가 0.0(HOLD)이 되고 **그리퍼가 저절로 열리지 않는다** | [ ] | [ ] |
 | 12 | `cube_in_cup` config(워크스페이스 박스 활성)로 같은 루프 | [ ] → `08` G1 | — |
+| 13 | **개입 스텝이 미분류로 들어온다** (§7.4): `classifier_evaluated=0`, `rewards=0.0`, `masks/dones`는 로컬 제안 그대로 | [ ] ⚠️ **판독구가 없다** — `09` §4.4 참조 | — |
+| 14 | 정지 상태에서 sidecar가 **실제로 붙는다** (actor 종료 줄의 `sidecar n=`이 0이 아니다) | [ ] → `09` §4.4 | — |

@@ -77,7 +77,20 @@ MAX_RESPONSE_AGE_S="${MAX_RESPONSE_AGE_S:-0.8}"
 OBS_SCHEMA_HASH="${OBS_SCHEMA_HASH:-3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903}"
 EXPECTED_MODEL_ID="${EXPECTED_MODEL_ID:-hil-serl-hybrid-sac-resnet10-trunk-cache-v1}"
 EXPECTED_REWARD_AUTHORITY="${EXPECTED_REWARD_AUTHORITY:-server_classifier}"
-EXPECTED_REWARD_MODEL_ID="${EXPECTED_REWARD_MODEL_ID:-cube-in-cup-checkpoint-150}"
+# 서버 `--reward-model-id` 와 **정확히 같은 문자열**이어야 한다. 이 값은 자유
+# 문자열이고 GetServerInfo 에서 동일성만 검사하므로, 체크포인트뿐 아니라 **분류기가
+# 무슨 픽셀을 봤는지**(input contract)까지 이름에 넣는다:
+#
+#   cube-in-cup-all3-ckpt150 : classifier_ckpt/cube_in_cup_all3/checkpoint_150
+#   +sidecar-v1              : ur_env/classifier_sidecar.py CLASSIFIER_INPUT_ID
+#                              = "fullframe-jpeg-passthrough-v1"
+#
+# 이렇게 해야 sidecar 이전 actor ↔ 이후 server (또는 그 반대)가 **핸드셰이크에서
+# 거부**된다. 그러지 않으면 양쪽이 서로 다른 이미지로 계산된 reward 를 아무 경고 없이
+# 한 세션 내내 주고받는다 — 이 리그에서 가장 알아채기 어려운 고장이다.
+# 기본값은 serl_ur_infra/scripts/run_rlpd_{receive,learner}_server.py 의
+# DEFAULT_REWARD_MODEL_ID 와 한 커밋에서 같이 바꾼다.
+EXPECTED_REWARD_MODEL_ID="${EXPECTED_REWARD_MODEL_ID:-cube-in-cup-all3-ckpt150+sidecar-v1}"
 
 # 손상된 시스템 grpcio 버전 (조용한 무한정지의 원인)
 BROKEN_GRPCIO_VERSION="1.30.2"

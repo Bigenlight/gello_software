@@ -21,6 +21,7 @@ import numpy as np
 from ur_env.learner.batches import RLPDBatchSampler, ReplayIngressView
 from ur_env.learner.checkpoint import (
     CheckpointCorruptError,
+    CheckpointFingerprintError,
     CheckpointManager,
     LearnerFingerprint,
     RestoredCheckpoint,
@@ -226,11 +227,37 @@ def prepare_learner_state(
         raise LearnerCompositionError(
             "resume must use the checkpoint inference RNG"
         )
-    restored = checkpoint_manager.load(
-        agent_template=agent_template,
-        fingerprint=fingerprint,
-        path=resolved_resume_path,
-    )
+    try:
+        restored = checkpoint_manager.load(
+            agent_template=agent_template,
+            fingerprint=fingerprint,
+            path=resolved_resume_path,
+        )
+    except CheckpointFingerprintError as exc:
+        # Fingerprint refusal is fail-closed by design, but on 2026-07-29 it is
+        # also EXPECTED EXACTLY ONCE and an operator who hits it deserves to be
+        # told that rather than to go hunting for a bug.  Retiring the
+        # 0%-recall reward classifier changed the pinned checkpoint SHA, the
+        # reward_model_id, and the run_contract's reward_classifier block --
+        # all fingerprint inputs.  Every checkpoint written before that change
+        # was trained on rewards that were structurally zero, so refusing to
+        # resume it is the whole point; there is no lineage worth rescuing.
+        # Start one fresh --checkpoint-root and the fingerprint is stable
+        # again.  A mismatch after that IS a real problem: something changed
+        # the algorithm config, the frozen ResNet asset, or the reward contract
+        # mid-lineage, and continuing would mix incompatible data in one critic.
+        raise CheckpointFingerprintError(
+            f"{exc}: refusing to resume {resolved_resume_path}. If this is the "
+            "first run after the reward-classifier retirement "
+            "(2026-07-29), this refusal is expected and intended: the pinned "
+            "classifier checkpoint SHA, reward_model_id and reward-input "
+            "contract all changed, and the previous lineage was trained "
+            "against a checkpoint scoring 0% recall. Start a fresh, empty "
+            "--checkpoint-root instead of resuming. Otherwise, diff the "
+            "learner config, the frozen ResNet asset and the reward contract "
+            "against the checkpoint's stored fingerprint document before "
+            "changing anything."
+        ) from exc
     _validate_restored_checkpoint(restored, config)
     return PreparedLearnerState(
         agent=restored.agent,
@@ -412,15 +439,34 @@ def build_actor_service(
     *,
     assembly: LearnerAssembly,
     classifier: Any,
+    # Mirrors rlpd_receive_server.DEFAULT_CLASSIFIER_CONFIRMATIONS.  Spelled as
+    # a literal because that module is imported lazily below (it pulls in the
+    # heavy inference stack) and this signature must stay cheap to import.
+    success_confirmations: int = 1,
     allowed_actor_ids: tuple[str, ...] | None = None,
     allowed_run_ids: tuple[str, ...] | None = None,
 ) -> Any:
-    """Bind the shared policy and ingress to the transport-neutral service."""
+    """Bind the shared policy and ingress to the transport-neutral service.
+
+    ``success_confirmations`` is the number of consecutive over-threshold
+    classifications the finalizer requires before it calls an episode
+    successful.  It defaults to 1 -- no smoothing -- so the server's verdict
+    matches the live classifier viewer frame for frame; see the rationale on
+    ``--success-confirmations`` in ``scripts/run_rlpd_learner_server.py``.
+    """
 
     if not bool(getattr(classifier, "ready", False)):
         raise LearnerCompositionError(
             f"reward classifier is not ready: "
             f"{getattr(classifier, 'fault_detail', 'unknown fault')}"
+        )
+    if (
+        isinstance(success_confirmations, bool)
+        or not isinstance(success_confirmations, int)
+        or success_confirmations < 1
+    ):
+        raise LearnerCompositionError(
+            "success_confirmations must be an integer of at least 1"
         )
     from ur_env.actor_network import ActorSessionService
     from ur_env.rlpd_receive_server import RewardTransitionFinalizer
@@ -433,7 +479,13 @@ def build_actor_service(
         reward_authority="server_classifier",
         reward_model_id=classifier.reward_model_id,
         observation_schema_hash=CANONICAL_OBSERVATION_SCHEMA_HASH,
-        finalize_transition=RewardTransitionFinalizer(classifier),
+        # This module's parameter matches the operator-facing flag
+        # (--success-confirmations); the finalizer's own keyword is the shorter
+        # `confirmations`.  Keep the mapping here rather than renaming either
+        # side, so grepping for the flag finds the whole path.
+        finalize_transition=RewardTransitionFinalizer(
+            classifier, confirmations=success_confirmations
+        ),
         accept_data=ingress,
         buffer_status_provider=ingress.status,
         allowed_actor_ids=allowed_actor_ids,

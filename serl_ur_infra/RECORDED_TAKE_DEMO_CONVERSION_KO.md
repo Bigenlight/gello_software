@@ -19,6 +19,50 @@ python3 serl_ur_infra/scripts/convert_recorded_takes_to_demo.py \
 raw 128×128 이미지를 frozen ResNet-10으로 **한 번만** encode하고, 장기 demo/replay
 buffer에는 `(1,4,4,512) float32` feature만 보관한다.
 
+## 왜 이게 차단점인가 — learner 시작 게이트 (G20)
+
+**learner는 두 조건을 *동시에* 만족해야 학습을 시작한다** (`ur_env/learner/batches.py` 의
+`RLPDBatchSampler.ready`, 2026-07-29 코드 확인):
+
+```python
+@property
+def ready(self) -> bool:
+    return (
+        len(self.online_replay) >= self.training_starts   # 기본 100
+        and len(self.offline_demos) > 0                   # ← 이게 0이면 영원히 False
+    )
+```
+
+`training_starts` 기본값은 **100** (`ur_env/learner/config.py` 의 `training_starts: int = 100`).
+즉 **offline demo가 하나도 없으면 online transition을 아무리 쌓아도 학습이 시작되지 않는다.**
+못 미치면 `sample()`이 `LearnerBatchError`를 던지고, `ur_env/learner/runtime.py`가
+`replay=<n>/<training_starts>`를 같이 찍는다.
+
+> 🔴 **G20("canonical demo 없음")은 아직 닫히지 않았다.** 이 세션에서 코드로 확인한 것은
+> **변환 경로가 존재하고 계약이 문서와 일치한다**는 것까지다. 실제로 없는 것은
+> **사람이 성공으로 확인해 라벨한 영구 artifact**다 — 아래 「현재 실데이터 smoke 결과」의
+> 마지막 문단이 그 상태를 그대로 적고 있다. 변환기가 있다는 것과 demo가 있다는 것은
+> 다른 이야기다.
+
+> **입력 레이아웃 주의 — 이 CLI 자체는 디렉터리 *이름*을 보지 않는다.**
+> `convert_recorded_take()`가 요구하는 것은 디렉터리 안의 `vectors.h5` · `cam1.mp4` ·
+> `cam2.mp4`와 h5 안의 7개 그룹(`command`, `ur_joint_states`, `gripper`, `wrench`,
+> `tcp_pose`, `cam1_frames`, `cam2_frames`)뿐이다. GUI recorder의 `take_<NN>_<stamp>/`와
+> headless recorder의 `session_<stamp>/`는 **둘 다 같은 `RecordingSession`이 쓰므로 파일
+> 구성이 같고, 이 변환기는 둘 다 받는다.**
+>
+> **그런데도 `take_*/`로 녹화해야 한다.** kanu의 classifier 라벨링 파이프라인
+> (`cube_classifier_pipeline.py prepare`)이 **`take_*/` 디렉터리만 읽기 때문이다.**
+> headless `run_recorder.sh`가 만드는 `session_<stamp>/`는 그쪽에 **보이지 않고**, 촬영은
+> 정상 종료되므로 **손실이 라벨링 시점에야 드러난다** — 그때는 이미 세션이 끝나 있다.
+> 기존 학습 take는 전부 GUI에서 나왔다. 근거: `32a193b`,
+> [`../ros2_ur_ws/src/gello_recorder/README.md`](../ros2_ur_ws/src/gello_recorder/README.md) `:153-159`.
+
+> **sidecar와 무관하다.** 2026-07-29 reward classifier sidecar 변경은 **gRPC 실시간 경로**의
+> 것이다. 여기서 만드는 offline demo는 `--outcome`으로 **명시 라벨**을 받고 분류기를 전혀
+> 타지 않으므로, 이 문서의 계약은 그 변경에 영향받지 않는다. 아래 observation 절의
+> `IMAGE_CROP` 적용도 **그대로 옳다** — offline demo는 **정책이 보는 이미지**여야 한다.
+
 ## 2026-07-20 묶음 변환
 
 `take_23_20260720_210316`은 1.6초 동안 주차 상태였으므로 현재 분석에서는 제외한다.
@@ -143,6 +187,32 @@ PY
 호환 처리하며 나머지 pickle 오류는 그대로 실패시킨다. pickle은 기존 계약대로
 **신뢰하는 로컬 artifact에만** 사용한다.
 
+🪤 **`/tmp/gello-hil-rl-learner-venv`는 `/tmp`에 있다 — 리부트하면 사라진다.** 없으면
+`HIL_SERL_KANU_RUNBOOK_KO.md` 절차로 다시 만든다. 변환 CLI 자체는 이 venv가 필요 없다
+(`python3`로 충분하다 — 스크립트가 `sys.path`를 스스로 세운다). 이 venv는 **pinned NumPy
+1.26에서의 재로딩 확인**에만 쓴다.
+
+## 코드와 대조한 항목 (2026-07-29)
+
+이 문서의 계약을 코드에서 직접 확인했다. **문서와 코드가 어긋나는 곳은 발견되지 않았다.**
+
+| 이 문서의 서술 | 확인한 코드 |
+| --- | --- |
+| `--outcome` 필수, `success\|truncated` 두 값 | `scripts/convert_recorded_takes_to_demo.py::_parser` (`required=True`, `choices`) |
+| 출력 파일을 덮어쓰지 않음 | 같은 파일 `--output` 도움말(`never overwritten`) + `write_recorded_demo_pickle` |
+| `success` → 마지막만 `reward=1/done=true/mask=0` · `truncated` → 전부 `reward=0/mask=1` + 마지막 `truncated=true` | `ur_env/learner/recorded_demo.py` 의 `truncated = terminal and outcome == "truncated"` 및 `"rewards"/"masks"/"dones"/"truncated"` 조립부 |
+| 그리퍼 hysteresis `≥0.7` 닫기 / `≤0.3` 열기 / 그 사이 유지 | 같은 파일 `if trigger >= 0.7:` / `elif trigger <= 0.3:` |
+| JSON의 `saturated_action_count` · `saturated_action_fraction` · `max_raw_action_group_norm` | 같은 파일 `TakeConversionStats` 필드 + 생성부 |
+| 19-D state 순서 (`gripper` / `force` / `rel pose` / `torque` / `vel`) | `ur_env/observation_schema.py::STATE_FEATURE_INDEX` 를 직접 출력해 대조 — 인덱스 0 / 1:4 / 4:10 / 10:13 / 13:19 일치 |
+| `load_demo_pickle` + `len(demos)` + `demos.sidecars[-1].metadata` | `ur_env/learner/demo.py` 의 `LoadedDemos.__len__` · `DemoSidecar.metadata` · `load_demo_pickle` |
+| 필수 h5 그룹 7종 | `ur_env/learner/recorded_demo.py::convert_recorded_take` 의 `required_groups` |
+| `python3` 로 바로 실행 가능 | `scripts/convert_recorded_takes_to_demo.py` 머리의 `_REPO_ROOT`/`_INFRA_ROOT` `sys.path` 부트스트랩 |
+
+*(줄 번호 대신 심볼로 적었다 — 이 트리는 동시 편집 중이라 줄 번호가 계속 밀린다.)*
+
+**아래 「현재 실데이터 smoke 결과」의 수치는 `40b99f8` 작성자의 실행 기록이며 이 세션에서
+재실행하지 않았다.** 인용할 때 그 조건을 함께 옮길 것.
+
 ## 현재 실데이터 smoke 결과
 
 - `take_23_20260720_210316`을 truncated로 변환: 15 transitions
@@ -156,3 +226,13 @@ PY
 
 마지막 묶음은 품질 검사 목적으로 메모리에서 `truncated`로 변환했을 뿐, 성공이라고
 라벨한 영구 artifact는 아직 만들지 않았다.
+
+> 🔴 **따라서 G20은 열려 있다.** `--demo-path`에 넘길 **사람이 성공으로 확인한 영구
+> pickle이 아직 0개**이고, 위 「learner 시작 게이트」 때문에 그 상태로는 learner가 학습을
+> 시작하지 않는다. 다음 한 걸음은 새 변환기를 만드는 것이 아니라 **2026-07-20 take들의
+> 성공/실패를 사람이 확인해 라벨하는 것**이다.
+>
+> 🪤 그리고 **norm clamp 25.33%(2,037개 중 516개, 최대 raw group norm 2.755)** 를 그냥
+> 넘기지 마라. 포화는 변환 버그가 아니라 **옛 teleop 주기와 현재 10 Hz RL 스텝의 차이**지만,
+> 방향만 보존하고 크기를 깎은 액션이 demo의 1/4이라는 뜻이다. **어느 take를 demo에 넣을지는
+> 별도의 데이터 품질 결정**이고, 라벨링과 같이 해야 한다.

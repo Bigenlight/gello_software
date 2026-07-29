@@ -38,6 +38,14 @@ def _required_args(tmp_path: Path) -> list[str]:
     ]
 
 
+#: Digest of the RETIRED classifier checkpoint (0% recall on the current data
+#: domain).  A learner pinned to it starts cleanly and then emits reward==0 for
+#: every transition forever, so this value must never come back.
+_RETIRED_ZERO_RECALL_SHA256 = (
+    "e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997"
+)
+
+
 def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
     args = _MODULE._parse_args(_required_args(tmp_path))
 
@@ -52,6 +60,50 @@ def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
     assert not hasattr(args, "require_grasp_penalty")
     assert not hasattr(args, "learner_mode")
     _MODULE._validate_args(args)
+
+
+def test_cli_defaults_pin_the_reward_contract_without_smoothing(tmp_path):
+    args = _MODULE._parse_args(_required_args(tmp_path))
+
+    # 1 == no smoothing, so the learner's reward matches the live classifier
+    # viewer frame for frame.  See --success-confirmations in the entrypoint.
+    assert args.success_confirmations == 1
+    assert args.reward_model_id == _MODULE.DEFAULT_REWARD_MODEL_ID
+    assert (
+        args.expected_classifier_sha256
+        == _MODULE.DEFAULT_CLASSIFIER_CHECKPOINT_SHA256
+    )
+    # The 0.2 threshold was chosen on FP/FN cost asymmetry and is out of scope
+    # for the sidecar change; a silent move here would change every reward.
+    assert args.reward_threshold == pytest.approx(0.2)
+    _MODULE._validate_args(args)
+
+
+def test_default_classifier_sha_is_the_live_orbax_tree_not_the_retired_pin():
+    sha = _MODULE.DEFAULT_CLASSIFIER_CHECKPOINT_SHA256
+
+    assert sha != _RETIRED_ZERO_RECALL_SHA256
+    assert len(sha) == 64 and set(sha) <= set("0123456789abcdef")
+    # Directory sha256 of classifier_ckpt/cube_in_cup_all3/checkpoint_150;
+    # recompute with ur_env.classifier_sidecar.directory_sha256 if restaged.
+    assert sha == (
+        "512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
+    )
+    # Both entrypoints must advertise the same artifact, or an actor pinned to
+    # one of them silently accepts rewards produced by the other.
+    assert _MODULE.DEFAULT_REWARD_MODEL_ID == (
+        "cube-in-cup-all3-ckpt150+sidecar-v1"
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_cli_rejects_nonpositive_success_confirmations(tmp_path, value):
+    args = _MODULE._parse_args(
+        [*_required_args(tmp_path), "--success-confirmations", value]
+    )
+
+    with pytest.raises(ValueError, match="success_confirmations"):
+        _MODULE._validate_args(args)
 
 
 def test_cli_rejects_nonloopback_and_backend_fallback(tmp_path):
@@ -195,6 +247,7 @@ def test_cli_main_constructs_feature_ingress_from_restored_agent_contract(
 ):
     captured = {}
     classifier_kwargs = {}
+    fingerprint_kwargs = {}
     (tmp_path / "demo.pkl").write_bytes(b"synthetic-demo")
 
     class StopAfterIngress(RuntimeError):
@@ -239,10 +292,14 @@ def test_cli_main_constructs_feature_ingress_from_restored_agent_contract(
     monkeypatch.setattr(
         _MODULE, "create_frozen_trunk_feature_agent", lambda **kwargs: agent
     )
+    def create_fingerprint(**kwargs):
+        fingerprint_kwargs.update(kwargs)
+        return object()
+
     monkeypatch.setattr(
         _MODULE,
         "LearnerFingerprint",
-        SimpleNamespace(create=lambda **kwargs: object()),
+        SimpleNamespace(create=create_fingerprint),
     )
     monkeypatch.setattr(
         _MODULE,
@@ -308,6 +365,34 @@ def test_cli_main_constructs_feature_ingress_from_restored_agent_contract(
     ).resolve()
     assert classifier_kwargs["resnet_cache_path"] == str(
         tmp_path / "resnet-cache.pkl"
+    )
+    assert classifier_kwargs["expected_sha256"] == (
+        _MODULE.DEFAULT_CLASSIFIER_CHECKPOINT_SHA256
+    )
+    assert classifier_kwargs["reward_model_id"] == (
+        _MODULE.DEFAULT_REWARD_MODEL_ID
+    )
+
+    # The reward contract is fingerprinted exhaustively on purpose: adding a
+    # field here breaks resume, so it has to be a deliberate edit rather than
+    # something that slips in under a subset assertion.  input_contract records
+    # WHICH PIXELS were scored, so a replay buffer filled from cropped policy
+    # observations can never be mixed with one filled from uncropped sidecar
+    # frames inside a single critic.
+    assert fingerprint_kwargs["run_contract"]["reward_classifier"] == {
+        "sha256": "c" * 64,
+        "threshold": 0.85,
+        "reward_model_id": "test-classifier",
+        "input_contract": "fullframe-jpeg-passthrough-v1",
+        "success_confirmations": 1,
+    }
+    # The observation schema hash is NOT allowed to move: the sidecar rides
+    # inside the existing named-tensor map, so the laptop<->Kanu handshake and
+    # every place this hash is pinned stay valid.
+    assert fingerprint_kwargs["run_contract"]["policy_observations"][
+        "schema_hash"
+    ] == (
+        "3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903"
     )
 
 

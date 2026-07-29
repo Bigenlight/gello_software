@@ -6,9 +6,11 @@ callbacks consumed by :class:`ur_env.actor_network.ActorSessionService`:
 * :class:`FakeActionRuntime` is a safe placeholder policy for receive-only
   bring-up;
 * :class:`RewardClassifierRuntime` owns the cube-in-cup Flax checkpoint and
-  classifies the already-received ``O(t+1)`` image tensors;
+  classifies the UNCROPPED sidecar frames the actor attached to ``O(t+1)`` --
+  never the cropped policy observation, see :func:`validate_classifier_frames`;
 * :class:`RewardTransitionFinalizer` makes reward/termination authoritative on
-  the server; and
+  the server, including for the majority of transitions that arrive with no
+  sidecar and are therefore left unclassified and unrewarded; and
 * :class:`ReplayIngress` routes the finalized transition into the actual
   upstream HIL-SERL memory-efficient replay datastores.
 
@@ -146,17 +148,19 @@ def sigmoid_probability(logit: Any) -> float:
 
 
 def checkpoint_sha256(path: str) -> str:
-    """Hash one explicit Flax checkpoint file using bounded memory."""
-    checkpoint = os.path.abspath(os.path.expanduser(path))
-    if not os.path.isfile(checkpoint):
-        raise FileNotFoundError(
-            f"reward classifier checkpoint file not found: {checkpoint}"
-        )
-    digest = hashlib.sha256()
-    with open(checkpoint, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    """Pin one reward-classifier checkpoint, file or orbax directory.
+
+    G19: this used to require ``os.path.isfile()``, which made the canonical
+    checkpoint impossible to pin at all — ``classifier_ckpt/cube_in_cup_all3/``
+    ``checkpoint_150`` is an orbax OCDBT *directory*, so
+    :class:`RewardClassifierRuntime` died with ``FileNotFoundError`` before it
+    ever opened the classifier.  ``directory_sha256`` covers both shapes and
+    keeps the single-file digest byte-identical to the old implementation, so
+    every SHA already written into a runbook or a CLI default stays valid.
+    """
+    from ur_env.classifier_sidecar import directory_sha256
+
+    return directory_sha256(path)
 
 
 def _validated_sha256(value: str) -> str:
@@ -166,17 +170,64 @@ def _validated_sha256(value: str) -> str:
     return expected
 
 
-def _classifier_observation(
-    observation: Mapping[str, Any],
+def validate_classifier_frames(
+    frames: Mapping[str, Any], *, copy: bool = False
 ) -> dict[str, np.ndarray]:
-    canonical = validate_canonical_observation(observation, copy=False)
+    """Validate the decoded sidecar frames the classifier is allowed to see.
+
+    These are NOT the policy observation.  They are produced by
+    ``ur_env.classifier_sidecar.decode_classifier_frames`` from the camera's
+    original JPEG bytes with the same preprocessing the live viewer uses (the
+    viewer was validated on real hardware 2026-07-29), which is exactly what
+    makes the server verdict agree with the viewer.  The policy's ``IMAGE_CROP``
+    is deliberately absent here and must stay absent: the crop is a measured
+    dataset property the policy is the first consumer of, while this checkpoint
+    was trained on uncropped full frames.
+
+    Shapes are read from the canonical spec on purpose — the classifier's image
+    tensors and the policy's have the same geometry even though their CONTENT
+    differs, and a schema change must not leave the two silently out of step.
+    """
+    if not isinstance(frames, Mapping):
+        raise ActorProtocolError("classifier frames must be a mapping")
+    actual = set(frames)
+    expected = set(IMAGE_KEYS)
+    if actual != expected:
+        raise ActorProtocolError(
+            "classifier frames keys mismatch: "
+            f"missing={sorted(expected - actual)}, "
+            f"extra={sorted(actual - expected)}"
+        )
+    result: dict[str, np.ndarray] = {}
+    for key in IMAGE_KEYS:
+        expected_dtype, expected_shape = CANONICAL_OBSERVATION_SPEC[key]
+        array = np.asarray(frames[key])
+        if array.dtype != expected_dtype:
+            raise ActorProtocolError(
+                f"classifier frame {key!r} must have dtype "
+                f"{expected_dtype.name}, got {array.dtype}"
+            )
+        if array.shape != expected_shape:
+            raise ActorProtocolError(
+                f"classifier frame {key!r} must have shape {expected_shape}, "
+                f"got {array.shape}"
+            )
+        contiguous = np.ascontiguousarray(array)
+        result[key] = contiguous.copy() if copy else contiguous
+    return result
+
+
+def _classifier_model_input(
+    frames: Mapping[str, Any],
+) -> dict[str, np.ndarray]:
+    validated = validate_classifier_frames(frames)
     # The classifier checkpoint was trained with use_proprio=False and a
     # one-element dummy state.  Policy/replay state remains the canonical 19-D
     # tensor and is intentionally not fed to this checkpoint.
     return {
         "state": np.zeros((1, 1), dtype=np.float32),
-        "cam1": canonical["cam1"],
-        "cam2": canonical["cam2"],
+        "cam1": validated["cam1"],
+        "cam2": validated["cam2"],
     }
 
 
@@ -262,7 +313,14 @@ class RewardClassifier(Protocol):
     threshold: float
     reward_model_id: str
 
-    def classify(self, observation: Mapping[str, Any]) -> ClassificationResult:
+    def classify(self, frames: Mapping[str, Any]) -> ClassificationResult:
+        """Classify ONE decoded sidecar frame pair; see validate_classifier_frames.
+
+        ``ClassificationResult.probability`` is always the INSTANTANEOUS sigmoid
+        of this frame pair — identical to what the live viewer prints for the
+        same frames.  Any temporal smoothing belongs to the caller
+        (:class:`RewardTransitionFinalizer`), never here.
+        """
         ...
 
 
@@ -353,8 +411,8 @@ class RewardClassifierRuntime:
     def warmup_ms(self) -> float:
         return self._warmup_ms
 
-    def classify(self, observation: Mapping[str, Any]) -> ClassificationResult:
-        classifier_observation = _classifier_observation(observation)
+    def classify(self, frames: Mapping[str, Any]) -> ClassificationResult:
+        classifier_observation = _classifier_model_input(frames)
         with self._lock:
             if not self._ready:
                 raise RewardClassifierError(
@@ -517,8 +575,11 @@ class ScriptedRewardClassifierRuntime:
         with self._lock:
             return self._index
 
-    def classify(self, observation: Mapping[str, Any]) -> ClassificationResult:
-        validate_canonical_observation(observation, copy=False)
+    def classify(self, frames: Mapping[str, Any]) -> ClassificationResult:
+        # Validate the same input contract the real runtime enforces, so a test
+        # that hands the classifier a policy observation by mistake fails here
+        # instead of quietly "passing" against a checkpoint it never saw.
+        validate_classifier_frames(frames)
         with self._lock:
             if not self._ready:
                 raise RewardClassifierError("scripted classifier is not ready")
@@ -553,14 +614,119 @@ class ScriptedRewardClassifierRuntime:
             )
 
 
-class RewardTransitionFinalizer:
-    """Apply one server-authoritative reward-classifier result."""
+#: Number of classifications that must agree before success is declared.
+#: 1 == no smoothing, and that is the operator's decision for the first run.
+DEFAULT_CLASSIFIER_CONFIRMATIONS = 1
 
-    def __init__(self, classifier: RewardClassifier) -> None:
+#: Consecutive unclassified transitions that trigger a loud operator warning.
+#: At the 10 Hz control loop this is ten seconds during which nothing on this
+#: server could ever have produced a reward.
+UNCLASSIFIED_WARN_STREAK = 100
+
+
+def _emit_operator_warning(message: str) -> None:
+    """Write one operator-visible line to stderr.
+
+    Deliberately not the ``logging`` module: nothing else in ``ur_env`` config-
+    ures logging, so a logger call would land in a null handler and the silent-
+    failure mode this warning exists to prevent would itself be silent.
+    """
+    print(f"[reward-classifier] WARNING: {message}", file=sys.stderr, flush=True)
+
+
+class RewardTransitionFinalizer:
+    """Apply one server-authoritative reward result to one transition.
+
+    WHAT IT CLASSIFIES
+    ------------------
+    The uncropped sidecar frames the actor attached to O(t+1), NOT
+    ``transition["next_observations"]``.  The policy observation is cropped by
+    ``IMAGE_CROP`` while this checkpoint was trained on full frames; classifying
+    the policy observation cost recall@0.85 100% -> 33.3%.
+
+    WHY MOST TRANSITIONS ARE UNCLASSIFIED, AND WHY THAT IS A FEATURE
+    ---------------------------------------------------------------
+    The actor ships a sidecar at roughly 2 Hz and only while the arm is
+    stationary, so at a 10 Hz control loop the large majority of transitions
+    arrive with ``classifier_sidecar=None``.  That sparsity is intentional:
+
+    * it lets the scene settle after the cube is released, instead of scoring
+      motion-blurred frames mid-throw;
+    * it removes flicker from the success verdict — a verdict that is only
+      recomputed a few times per second cannot oscillate at 10 Hz; and
+    * it happens to cost far less bandwidth, which is a side effect, not the
+      reason.
+
+    THE UNCLASSIFIED TRANSITION, FIELD BY FIELD
+    -------------------------------------------
+    ``rewards``      forced to 0.0.  This is the conservative extension of
+                     "reward authority lives on the server": with no
+                     classification there is no evidence of success, so there is
+                     no positive reward.  The locally proposed reward is
+                     discarded exactly as it already is on classified steps.
+    ``masks``        the local proposal is preserved, which is what keeps the
+                     mask/done consistency check in ``ReplayIngress._convert``
+                     (masks == 0.0 iff dones) satisfied without special-casing.
+    ``dones`` /      the local proposal passes through untouched.  This is not
+    ``truncated``    new behaviour: it is what already happens on every
+                     classifier-negative transition today.
+    ``classifier_evaluated``  0
+    ``classifier_probability`` / ``classifier_threshold``  0.0 / 0.0 — required
+                     to be zero when unevaluated by ``_convert`` and by
+                     ``grpc_actor_transport``; a "real but unused" probability
+                     here would be rejected.
+    ``classifier_success``    0
+    ``reward_model_id``       "" — likewise required to be empty when
+                     unevaluated (``actor_network._validate_finalized_``
+                     ``transition``, ``grpc_actor_transport.outcome_from_proto``).
+
+    Net effect on learning: an unclassified transition is an ordinary
+    zero-reward, non-terminal sample.  The only thing it cannot do is END an
+    episode with a positive reward, which is precisely the authority we want to
+    withhold from a step nobody classified.
+    """
+
+    def __init__(
+        self,
+        classifier: RewardClassifier,
+        *,
+        confirmations: int = DEFAULT_CLASSIFIER_CONFIRMATIONS,
+        warn: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.classifier = classifier
+        self.confirmations = _positive_int(confirmations, name="confirmations")
+        self._warn = warn or _emit_operator_warning
+        # Pre-filled with 0.0 so the window is ALWAYS full: while it is still
+        # filling, min() == 0.0, which cannot exceed a threshold in [0, 1] and
+        # therefore cannot declare success on fewer than `confirmations`
+        # classifications.  With confirmations == 1 the deque holds exactly the
+        # frame just classified, so the reported probability is the
+        # instantaneous sigmoid, bit for bit what the live viewer shows.
+        self._window: deque[float] = deque(
+            [0.0] * self.confirmations, maxlen=self.confirmations
+        )
+        self._lock = threading.Lock()
+        self._session_id = ""
+        self._session_transitions = 0
+        self._session_classifications = 0
+        self._unclassified_streak = 0
+        self._transition_count = 0
+        self._classification_count = 0
+
+    @property
+    def transition_count(self) -> int:
+        with self._lock:
+            return self._transition_count
+
+    @property
+    def classification_count(self) -> int:
+        with self._lock:
+            return self._classification_count
 
     def __call__(
-        self, data: dict[str, Any]
+        self,
+        data: dict[str, Any],
+        classifier_sidecar: Optional[Mapping[str, Any]] = None,
     ) -> tuple[dict[str, Any], TransitionOutcome]:
         finalized = copy.deepcopy(data)
         if set(finalized) != {"meta", "transition"}:
@@ -575,16 +741,53 @@ class RewardTransitionFinalizer:
             meta.get("transition_id"), name="meta.transition_id"
         )
         if "next_observations" not in transition:
+            # Still required, even though it is no longer what gets classified:
+            # ActorSessionService attaches it and ReplayIngress needs it, so its
+            # absence here means the pipeline is already broken upstream.
             raise ActorProtocolError(
                 "transition.next_observations is required before reward finalization"
             )
 
-        result = self.classifier.classify(transition["next_observations"])
-        # Reward is classifier-authoritative in both directions.  Local may
-        # propose episode terminal/truncation semantics, but it cannot inject
-        # a positive reward when the server classifier is negative.
-        transition["rewards"] = 1.0 if result.success else 0.0
-        if result.success:
+        session_id = meta.get("session_id")
+        session_id = session_id if isinstance(session_id, str) else ""
+        self._begin_transition(session_id)
+
+        if classifier_sidecar is None:
+            probability = 0.0
+            threshold = 0.0
+            success = False
+            evaluated = False
+            reward_model_id = ""
+        else:
+            from ur_env.classifier_sidecar import decode_classifier_frames
+
+            # Decoding here rather than in ActorSessionService keeps the JPEG
+            # codec out of the transport contract and off the path of servers
+            # that do not classify at all.
+            try:
+                frames = decode_classifier_frames(classifier_sidecar)
+            except ValueError as exc:
+                # The structure was already validated on ingress, so reaching
+                # here means genuinely corrupt JPEG bytes.  Fail the transition
+                # rather than silently downgrading it to "unclassified": a
+                # camera producing undecodable frames must stop the run.
+                raise RewardClassifierError(
+                    f"classifier sidecar decode failed: {exc}"
+                ) from exc
+            result = self.classifier.classify(frames)
+            probability, success = self._confirm(result)
+            threshold = float(result.threshold)
+            evaluated = True
+            reward_model_id = _required_text(
+                result.reward_model_id, name="classifier.reward_model_id"
+            )
+
+        # Reward is server-authoritative in both directions.  Local may propose
+        # episode terminal/truncation semantics, but it cannot inject a positive
+        # reward — neither past a negative classifier verdict nor past the
+        # absence of one.
+        transition["rewards"] = 1.0 if success else 0.0
+        if success:
             # Classifier success wins if the local time limit happened on this
             # same observation, matching basic HIL-SERL one-positive behavior.
             transition["masks"] = 0.0
@@ -598,11 +801,15 @@ class RewardTransitionFinalizer:
 
         # These server-only fields are not serialized back as transition input;
         # they are retained by ReplayIngress and mirrored in TransitionOutcome.
-        transition["classifier_evaluated"] = np.uint8(1)
-        transition["classifier_probability"] = float(result.probability)
-        transition["classifier_threshold"] = float(result.threshold)
-        transition["classifier_success"] = np.uint8(result.success)
-        transition["reward_model_id"] = result.reward_model_id
+        transition["classifier_evaluated"] = np.uint8(evaluated)
+        transition["classifier_probability"] = float(probability)
+        transition["classifier_threshold"] = float(threshold)
+        transition["classifier_success"] = np.uint8(success)
+        transition["reward_model_id"] = reward_model_id
+
+        self._end_transition(
+            session_id, evaluated=evaluated, terminal=done or truncated
+        )
 
         return finalized, TransitionOutcome(
             transition_id=transition_id,
@@ -610,12 +817,116 @@ class RewardTransitionFinalizer:
             mask=mask,
             done=done,
             truncated=truncated,
-            success=result.success,
-            classifier_evaluated=True,
-            classifier_probability=result.probability,
-            classifier_threshold=result.threshold,
-            reward_model_id=result.reward_model_id,
+            success=success,
+            classifier_evaluated=evaluated,
+            classifier_probability=probability,
+            classifier_threshold=threshold,
+            reward_model_id=reward_model_id,
         )
+
+    def _confirm(self, result: ClassificationResult) -> tuple[float, bool]:
+        """Fold one instantaneous verdict into the confirmation window.
+
+        Returns ``(reported_probability, success)``.
+
+        THE INVARIANT THAT MUST SURVIVE ANY SMOOTHING SCHEME
+        ----------------------------------------------------
+        ``classifier_success == (classifier_probability > classifier_threshold)``
+        is re-derived and enforced independently in THREE places —
+        ``actor_network._validate_finalized_transition``,
+        ``grpc_actor_transport.outcome_from_proto`` and
+        ``ReplayIngress._convert``.  They exist so the number a human reads in a
+        log can always be checked against the verdict that was actually trained
+        on; a smoothing scheme that reports one number and decides on another
+        would be rejected by all three, and rightly so.
+
+        So smoothing is expressed as a CHOICE OF WHICH REAL PROBABILITY TO
+        REPORT, never as a separate decision rule: the reported value is the
+        weakest classification in the window of the last ``confirmations``
+        samples.  ``min(window) > threshold`` holds exactly when every one of
+        those samples cleared the threshold, i.e. N-of-N consecutive
+        confirmations, and the invariant is true by construction.
+
+        With ``confirmations == 1`` (the default, and what the first real run
+        uses) the window is that single sample: the reported probability IS the
+        instantaneous sigmoid, so the server and the live viewer print the same
+        number for the same frames.  ONLY when ``confirmations > 1`` does
+        ``classifier_probability`` stop being instantaneous — it becomes the
+        window floor.  Note the window is NOT reset by the gaps between sparse
+        classifications, so at ~2 Hz sampling three confirmations span roughly
+        1.5 seconds of real time; it IS reset at every episode boundary.
+        """
+        instantaneous = float(result.probability)
+        threshold = float(result.threshold)
+        with self._lock:
+            self._window.append(instantaneous)
+            reported = min(self._window)
+        if self.confirmations == 1 and reported != instantaneous:
+            raise RewardClassifierError(
+                "unsmoothed confirmation window did not report the "
+                "instantaneous probability"
+            )
+        return reported, reported > threshold
+
+    def _begin_transition(self, session_id: str) -> None:
+        warnings: list[str] = []
+        with self._lock:
+            if session_id != self._session_id:
+                # Covers the session that ended without a terminal transition
+                # (actor crash, operator abort) — it still gets its verdict.
+                warnings.extend(self._flush_session_locked())
+                self._session_id = session_id
+                # A new session is a new episode: confirmations must never
+                # carry a verdict across an episode boundary.
+                self._reset_window_locked()
+            self._transition_count += 1
+            self._session_transitions += 1
+        for message in warnings:
+            self._warn(message)
+
+    def _end_transition(
+        self, session_id: str, *, evaluated: bool, terminal: bool
+    ) -> None:
+        warnings: list[str] = []
+        with self._lock:
+            if evaluated:
+                self._classification_count += 1
+                self._session_classifications += 1
+                self._unclassified_streak = 0
+            else:
+                self._unclassified_streak += 1
+                if self._unclassified_streak % UNCLASSIFIED_WARN_STREAK == 0:
+                    warnings.append(
+                        f"{self._unclassified_streak} consecutive transitions "
+                        "carried no classifier sidecar; no reward can be "
+                        "produced while this continues (is the actor's sidecar "
+                        "scheduler running, and is the arm ever stationary?)"
+                    )
+            if terminal:
+                # Report at the episode boundary rather than only when the next
+                # session shows up, so an operator sees it while the episode is
+                # still on screen.
+                warnings.extend(self._flush_session_locked())
+                self._reset_window_locked()
+        for message in warnings:
+            self._warn(message)
+
+    def _flush_session_locked(self) -> list[str]:
+        """Close the accounting for the current session; caller emits, unlocked."""
+        messages: list[str] = []
+        if self._session_transitions > 0 and self._session_classifications == 0:
+            messages.append(
+                f"session {self._session_id!r} finalized "
+                f"{self._session_transitions} transitions and classified NONE "
+                "of them; every reward in it is 0 by default, not by verdict"
+            )
+        self._session_transitions = 0
+        self._session_classifications = 0
+        return messages
+
+    def _reset_window_locked(self) -> None:
+        self._window.clear()
+        self._window.extend([0.0] * self.confirmations)
 
 
 class _ReplayStore(Protocol):
@@ -1271,6 +1582,14 @@ class ReplayIngress:
         reward_model_id = source.get("reward_model_id", "")
         if not isinstance(reward_model_id, str):
             raise ActorProtocolError("transition.reward_model_id must be a string")
+        # Sparse classification needed NO change here, and that is deliberate.
+        # The strict `success == (probability > threshold)` cross-check already
+        # sits INSIDE the evaluated branch, and the `elif` already rejects any
+        # non-zero classifier field on an unevaluated transition.  So an
+        # unclassified transition is representable without weakening either
+        # guard: it must be exactly (0, 0.0, 0.0, false, "").  Relaxing the
+        # cross-check to admit unevaluated rows would have opened a hole for
+        # evaluated ones too.
         if classifier_evaluated:
             if not 0.0 <= probability <= 1.0 or not 0.0 <= threshold <= 1.0:
                 raise ActorProtocolError(

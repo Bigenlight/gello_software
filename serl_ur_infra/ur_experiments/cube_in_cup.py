@@ -178,36 +178,42 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     # than on a table region, because the fingers stay at fixed pixels while the
     # background moves with the arm.
     #
-    # KNOWN CONFLICT (G15) -- the pinned classifier was trained WITHOUT a crop:
-    #   its training pipeline resized the full 1280x720 frame straight to
-    #   128x128 (kanu hil-serl examples/cube_classifier_pipeline.py, whose
-    #   export passes crop=None), while get_im() crops first.  Measured
-    #   2026-07-28: bit-exact pixel match to the no-crop hypothesis, and
-    #   recall@0.85 falls 100% -> 33.3% when the crop is applied.
-    #   rlpd_receive_server._classifier_observation() performs NO image
-    #   transform -- it forwards this env's cropped canonical observation
-    #   unchanged -- so the mismatch originates here, not on the server.
+    # G15 (crop vs classifier) is RESOLVED -- BY DECOUPLING, NOT BY RECROPPING.
+    #   The history: the pinned classifier was trained WITHOUT a crop (its
+    #   pipeline resized the full 1280x720 frame straight to 128x128, kanu
+    #   hil-serl examples/cube_classifier_pipeline.py exports with crop=None),
+    #   while get_im() crops first.  Feeding it the policy's cropped
+    #   observation dropped recall@0.85 from 100% to 33.3% (measured
+    #   2026-07-28, bit-exact match to the no-crop hypothesis).
     #
-    #   DO NOT "fix" this by removing the crop.  These boxes are measured and
-    #   serve the policy, which is the primary consumer.  The resolution is to
-    #   retrain the classifier against these crops (the run that produced the
-    #   current checkpoint took 46 s, and cube_classifier_pipeline.py already
-    #   accepts --cam1-crop/--cam2-crop):
-    #       cam1 -> --cam1-crop 340,20,990,670      (this file stores y0,y1,x0,x1;
-    #       cam2 -> --cam2-crop 420,0,1140,720       the pipeline takes x0,y0,x1,y1)
+    #   The fix was to stop making one image serve two consumers.  The
+    #   classifier no longer sees this cropped image at all: the actor stashes
+    #   the UNCROPPED full frame get_im() decodes anyway and attaches it as a
+    #   sidecar inside the observation tensor map (ur_env/classifier_sidecar.py,
+    #   gated by CLASSIFIER_SIDECAR below), where it is resized to 128x128 and
+    #   re-encoded before it goes on the wire.  The server decodes it with the
+    #   same function the validated live viewer uses.  So the classifier is
+    #   back in distribution without anyone touching this crop, and retraining
+    #   against these boxes is now an option rather than a prerequisite.
     #
-    #   Until that lands the classifier is out of distribution, and it is
-    #   authoritative for reward AND done.  See docs/testing/08_OPEN_GAPS.md
-    #   G15 and HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md §12.
+    #   (Forwarding the camera's own JPEG untouched was the first design and
+    #   was measured out: the camera nodes run quality=95, so a 720p frame is
+    #   ~200 KiB and a two-camera attachment ~400 KiB -- 6.55 Mbit/s at 2 Hz on
+    #   a 13 Mbit/s link, +252 ms against a 100 ms step budget.)
     #
-    #   Do not confuse this with
+    #   These crop values are CORRECT AND STAY.  They are measured from the
+    #   dataset and the policy is their consumer; deleting them to "help" the
+    #   classifier would degrade the thing this rig exists to train and would
+    #   no longer help anything.
+    #
+    #   Do not confuse any of this with
     #   gello_recorder.reward_classifier_runtime.decode_classifier_image().
     #   That function resizes the FULL frame with no crop -- it is correct for
     #   what it serves, the standalone ZMQ viewer (remote_reward_classifier_
     #   server.py), which subscribes to the raw camera topics and never sees a
-    #   canonical observation.  It has NO call path to the gRPC receive server,
-    #   so "fixing" it does nothing for this defect.  An earlier version of
-    #   this comment named it as the cause; that was wrong and cost a session.
+    #   canonical observation.  It has NO call path to the gRPC receive server.
+    #   An earlier comment here named it as the cause of G15; that was wrong
+    #   and cost a session.
     IMAGE_CROP: Optional[dict] = {
         "cam1": lambda img: img[20:670, 340:990],   # 650x650
         "cam2": lambda img: img[0:720, 420:1140],   # 720x720
@@ -274,6 +280,41 @@ class CubeInCupConfig:
         "timeout_s": 0.6,
         "max_response_age_s": 0.8,
         "retry_count": 1,
+    }
+
+    #: How often the actor ships the reward classifier its own uncropped frame.
+    #:
+    #: Lives here rather than on the env config because nothing robot-side
+    #: consumes it: the actor loop reads it, builds a
+    #: ``ur_env.classifier_sidecar.SidecarScheduler``, and the frames ride
+    #: inside the observation tensor map to the server.  This is what makes
+    #: ``IMAGE_CROP`` above safe to keep -- the policy gets the crop, the
+    #: classifier gets the whole scene.
+    #:
+    #: The classifier is queried SPARSELY on purpose.  At 10 Hz every frame
+    #: would be scored, and a verdict that flips between adjacent frames is
+    #: what makes "success" arrive at a random moment during a release; a ~2 Hz
+    #: query also lets the cube actually land before the scene is judged.  The
+    #: latency saving is a side benefit, not the reason.
+    #:
+    #: --classifier-sidecar-interval / --classifier-stationary-speed-max /
+    #: --classifier-escalate-probability / --no-classifier-sidecar override
+    #: these per run.
+    CLASSIFIER_SIDECAR = {
+        "enabled": True,
+        "interval_steps": 5,          # 10 Hz control loop -> ~2 Hz classifier queries
+        # PLACEHOLDER.  Must be measured from the recorded takes: the intent is
+        # "the arm has settled", and the right threshold is the speed the TCP
+        # actually sits below while the operator waits after a release, not a
+        # round number.  Too low and the gate never opens on a rig with noisy
+        # velocity estimates; too high and the classifier scores motion blur.
+        "stationary_speed_max": 0.05,  # m/s
+        # NOT a random chance -- it is the classifier probability at which the
+        # scheduler abandons the interval above and scores EVERY step.  Set
+        # well below DEFAULT_REWARD_THRESHOLD (0.2) on purpose: once the scene
+        # merely starts to look like success we want the step that actually
+        # crosses the threshold, not one up to interval_steps later.
+        "escalate_probability": 0.05,
     }
 
     def __init__(self) -> None:
