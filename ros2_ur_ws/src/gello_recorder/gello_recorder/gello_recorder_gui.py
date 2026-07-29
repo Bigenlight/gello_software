@@ -54,17 +54,29 @@ from PyQt5.QtWidgets import (
 # names + values). They are a PREFERENCE, not a requirement:
 # _resolve_camera_serials() below checks them against what pyrealsense2
 # actually enumerates on the USB bus and falls back by model class (or raises)
-# if the configured pair isn't plugged in. Two different D435 pairs have been
-# on this rig -- (151623020789, 322743060038) and (151623020789, 322743060038)
-# -- and which one enumerates has flipped more than once. Binding
-# realsense2_camera to an absent serial_no does NOT fail loudly: the node
-# comes up, publishes nothing, and this GUI's camera panes just show "no
-# signal" instead of "wrong serial", which is why this is auto-detected
-# instead of trusted blindly. See ros2_ur_ws/_resolve_camera_serials.sh (the
-# shell equivalent used by launch_cameras.sh / run_recorder.sh) for the full
-# incident history.
-DEFAULT_CAM1_SERIAL = "151623020789"   # plain D435
-DEFAULT_CAM2_SERIAL = "322743060038"   # D435IF
+# if the configured pair isn't plugged in.
+#
+# The two "pairs" named across this repo are the SAME two cameras under two
+# different serial FIELDS -- there was no hardware swap. Measured 2026-07-29,
+# one physical port reporting both values:
+#
+#   port    serial_number     asic_serial_number   device
+#   4-4.1   147122072740      151623020789         D435    -> cam1
+#   4-4.3   243222072700      322743060038         D435IF  -> cam2
+#
+# serial_no:= matches serial_number, not the ASIC serial: enable_device on
+# 151623020789 returns NO MATCH while 147122072740 MATCHES. The kernel USB
+# descriptor exposes the ASIC serial, so grepping journalctl finds only the
+# ASIC values -- a different FIELD, not a different camera.
+#
+# Binding realsense2_camera to a serial that does not resolve does NOT fail
+# loudly: the node comes up, publishes nothing, and this GUI's camera panes
+# show "no signal" instead of "wrong serial", which is why this is
+# auto-detected instead of trusted blindly. See
+# ros2_ur_ws/_resolve_camera_serials.sh (the shell equivalent used by
+# launch_cameras.sh / run_recorder.sh) for the full incident history.
+DEFAULT_CAM1_SERIAL = "147122072740"   # plain D435   (ASIC 151623020789)
+DEFAULT_CAM2_SERIAL = "243222072700"   # D435IF       (ASIC 322743060038)
 DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"

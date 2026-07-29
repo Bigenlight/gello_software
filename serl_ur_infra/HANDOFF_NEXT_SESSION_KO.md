@@ -75,7 +75,7 @@ git log --oneline | grep 3f199d4     # 머지 커밋이 히스토리에 있어�
 | cam2 | **WRIST** — 그리퍼에 강체 장착. D435IF |
 | Kanu | 🔴 **HIL 프로세스가 하나도 안 떠 있다** (port 50053 미바인딩, GPU 유휴) |
 
-### 🔧 카메라 시리얼은 하드코딩하지 않는다 (`43ba314`)
+### 🔧 카메라 시리얼은 하드코딩하지 않는다 (`43ba314`, `fb48100`)
 
 리포 여러 곳에 **D435 시리얼 두 쌍**이 등장하는데, **이 PC에 실제로 붙은 적이 있는 것은 한 쌍뿐이다.**
 
@@ -97,16 +97,23 @@ journalctl -k --boot=all | grep -c '147122072740\|243222072700'   # -> 0
 
 **없는 시리얼로 바인딩해도 오류가 나지 않는다.** `realsense2_camera` 노드는 정상 기동한 뒤
 아무것도 발행하지 않고, 소비자는 "프레임 없음"만 본다 — 스택 어디에도 "빠진 카메라"와
-"잘못 설정된 카메라"를 구별하는 지점이 없다. 그래서 `launch_cameras.sh`는 시리얼을
-**요구사항이 아니라 선호값**으로 다루고, 둘 다 안 붙어 있으면 **모델 클래스로 배정**한다
+"잘못 설정된 카메라"를 구별하는 지점이 없다. 그래서 시리얼을 **요구사항이 아니라 선호값**으로
+다루고, 둘 다 안 붙어 있으면 **모델 클래스로 배정**한다
 (plain D435 → cam1 SCENE, D435IF/i → cam2 WRIST). 같은 클래스 2대면 시리얼 정렬 순서로 떨어뜨리고
-"패널을 눈으로 확인하라"고 경고한다.
+"패널을 눈으로 확인하라"고 경고한다. 2대 미만이면 **카메라 프로세스를 띄우기 전에 하드 에러**로 죽는다.
 
-명시 오버라이드:
+이 정책은 이제 **한 군데에 있고 세 경로가 공유한다**(`fb48100`):
 
-```bash
-CAM1_SERIAL=<serial> CAM2_SERIAL=<serial> ./launch_cameras.sh
-```
+| 구현 | 쓰는 곳 |
+| --- | --- |
+| `ros2_ur_ws/_resolve_camera_serials.sh` (source 전용, `resolve_serials`) | `launch_cameras.sh`, `run_recorder.sh` |
+| `gello_recorder_gui.py::_resolve_camera_serials()` (같은 정책의 파이썬 판) | GUI 레코더 (카메라를 **자기가 직접 띄운다**) |
+
+> **🚫 시리얼을 하드코딩하거나 `CAM1_SERIAL=`/`CAM2_SERIAL=`로 덮어쓰지 말 것.**
+> 기본값은 이미 붙어 있는 쌍이고, 다른 쌍이 꽂히면 자동 해석이 알아서 잡는다.
+> 손으로 넣은 값이 틀리면 **경고 없이 프레임이 안 나온다**(위 문단). 오버라이드는 스크립트가
+> "모델 클래스가 애매하다"거나 "2대 미만"이라고 **먼저 경고했을 때만**, 그 경고문이 알려주는
+> 시리얼을 그대로 넣는 용도다.
 
 > **미확정 — 팔을 한 번 흔들면 끝난다.** cam1/cam2 배정은 **모델 클래스 추론**이고, 그것이 각 개체를
 > 마운트에 묶는 유일한 근거다. **cam2가 손목이므로, 팔을 움직였을 때 그리퍼 손가락은 같은 픽셀에
@@ -121,8 +128,20 @@ CAM1_SERIAL=<serial> CAM2_SERIAL=<serial> ./launch_cameras.sh
 
 ## 3. 무엇이 검증됐고 무엇이 아닌가
 
-### ✅ 실기에서 확인 (2026-07-28)
+### ✅ 실기에서 확인 (2026-07-28 · 07-29)
 
+- **🆕 07-29 — reward classifier가 실기에서 라이브로 돈다.** `3ff5f80`이 ROS2 노드 + PyQt 모니터 GUI를
+  넣었고, **랩톱 CPU에서 약 12 ms/frame**으로 카메라 토픽을 그대로 받아 `p(success)`를 띄운다.
+  **GPU도 kanu도 SSH 터널도 필요 없다.** 절차는 `REWARD_CLASSIFIER_LIVE_KO.md`(§11)에 따로 있다 —
+  여기서는 한 줄만:
+  ```bash
+  cd /home/laptop3/gello_software/ros2_ur_ws
+  VIEW=false ./launch_cameras.sh          # 먼저 카메라 (뷰어 창은 안 띄운다)
+  REWARD_CLASSIFIER_PYTHON=/home/laptop3/venvs/hilserl/bin/python ./run_classifier_viewer.sh
+  ```
+  **⚠️ 이것이 검증한 것은 "이 체크포인트가 이 조명·이 배경·이 카메라에서 동작한다"까지다.**
+  뷰어는 **무크롭** 입력이라 §5.1의 크롭 불일치는 여전히 열려 있고, **RL 루프의 reward는 이걸로
+  검증되지 않았다.**
 - **팔 구동** — `run_real_hil.py --arm --scale 0.25`, 100 스텝 중 개입 64, `held=0`. 의도대로 움직임
 - **frame-map = 단위행렬** — 부호 뒤집힘도 축 교환도 없다(§4.1)
 - **개입 불변식 4종** — anchor-latch 변동 0, gain-latch 변동 0, **action-exec(저장 액션 == 실행 액션) 비율 1.000**, held-rate 0%
@@ -138,7 +157,8 @@ CAM1_SERIAL=<serial> CAM2_SERIAL=<serial> ./launch_cameras.sh
 - `clip_safety_box` (`ur7e_env.py:334`) — 구현·배선은 됐으나 `run_real_hil.py` 경로에서는 **비활성**(§4.3)
 - `go_to_reset` branch-cut 게이트 (`ur7e_env.py:520`, `ur_kin.wrapped_nearest`)
 - 카메라 첫 프레임 대기 (`_await_first_frames`, `ur7e_env.py:475`)
-- 랩톱 로컬 classifier 뷰어 — 의존성(`jax/flax/orbax/rclpy/gello_recorder`) import 가능은 확인, **실행 미검증**
+- **kanu GPU 쪽 ZMQ 뷰어**(`run_remote_classifier_viewer.sh` + kanu의 `run_remote_reward_classifier_server.sh`) —
+  코드는 이제 kanu에도 있지만(§9) **한 번도 안 돌렸다.** 랩톱 CPU 판(위 ✅)으로 충분하다
 
 ### 🔴 아직 안 된 것 — 여기를 솔직하게 읽을 것
 
@@ -149,10 +169,15 @@ CAM1_SERIAL=<serial> CAM2_SERIAL=<serial> ./launch_cameras.sh
   **"팔이 움직였다"를 "액터가 된다"로 읽지 말 것.**
 - **카메라를 켠 상태의 canonical observation 전 경로가 실기에서 안 돌았다.**
 - **Kanu에 실제 정책이 서빙된 적이 없다.** 지금껏 붙었던 것은 zero-action 목 서버뿐이다.
+- **🔴 1순위 — classifier 크롭 불일치.** gRPC/50053 canonical observation은 **크롭돼 있고**
+  분류기는 **무크롭**으로 학습됐다(비트 단위로 증명, §5.1). 실측 대가는 recall@0.85 **100% → 33%**.
+  **즉 라이브 뷰어는 믿을 수 있지만 RL 루프의 reward는 못 믿는다.** 그 둘은 다른 그림을 본다(§6).
+- **🔴 2순위 — receive server가 지금 체크포인트를 아예 못 읽는다.** `checkpoint_sha256()`이 파일만
+  받는데 정본 체크포인트는 orbax **디렉터리**다 → `FileNotFoundError`. 게다가 코드 기본 SHA는
+  **0724 도메인 recall 0.0%**인 폐기 체크포인트를 가리킨다 → 그대로 띄우면 **reward가 영구 0**이다(§5.3).
 - **canonical robot demo가 없다** — learner의 하드 블로커(§9).
-- **classifier 크롭 불일치 미해결**(§5.1).
 
-### 테스트 — 이 명령 그대로 (2026-07-29 canonical checkout에서 재실행함)
+### 테스트 — 이 명령 그대로 (2026-07-29 canonical checkout에서 재실행, `fb48100` 이후 기준)
 
 ```bash
 cd /home/laptop3/gello_software
@@ -311,24 +336,61 @@ export 스크립트가 `preprocess_frame(frame, crop=None)`을 넘겨 **1280×72
 라벨 오염 0% 확인됨.
 
 로드 검증(kanu GPU): `LOAD OK 13.5 s`, 워밍업 후 **1.03 ms/frame**.
+랩톱 CPU에서도 실기로 돈다 — 약 **12 ms/frame**(§3).
+
+#### ⚠️ 분류기는 "해결됨"이 아니다 — 이 다섯 줄을 지우지 말 것
+
+이 문서를 읽고 "분류기는 됐고 다음은 RL"이라고 결론내면 안 된다. 근거는
+`REWARD_CLASSIFIER_THRESHOLD_KO.md`이고, 요약은 이렇다:
+
+1. **pooled recall 86.8% @0.5, FPR 0%(0/470)** — 여기까지가 좋은 소식이다.
+2. **take 단위로 보면 훨씬 나쁘다.** `take_21`은 @0.5에서 **7.9%**로 무너진다(@0.2에서도 21.1%).
+   pooled 평균이 take별 붕괴를 가린다.
+3. **"FPR 0%"의 통계적 강도가 약하다.** 독립 단위는 프레임이 아니라 take이고 held-out take는 **6개**뿐이라,
+   rule-of-three 단측 95% 상한은 **50%**다. 470프레임 기준 0.64%는 프레임 비독립성을 무시한 값이다.
+   게다가 470 중 446(95%)은 큐브가 컵 근처에도 안 간 "쉬운" 프레임이라 **실질 표본은 24프레임**이다.
+4. **배포용 `all3`가 측정된 ckpt 중 가장 나쁘다.** 0720 held-out positive 266프레임에서
+   fold_take_01/02/03이 각각 89.5 / 89.9 / 86.5% @0.5인데 `all3`는 **86.8%**로 **모든 threshold에서 최저**다.
+   즉 **0724 데이터를 더한 것이 0720 도메인을 퇴행시켰다.** 그래도 `all3`를 쓰는 이유는 0724 도메인을
+   유일하게 커버하기 때문이다.
+5. 그러므로 **어떤 비교든 "재학습해서 좋아졌다"를 주장하기 전에 무엇과 비교하는지 명시할 것.**
+
+> **🟡 미기록 수치 하나.** "동일한 데이터로 재학습만 해도 take별 recall이 최대 21%p 움직인다(시드 분산)"는
+> 구두로 돌던 값인데 **리포 어느 문서에도 측정 기록이 없다.** 인용하지 말고, 필요하면
+> `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 재현 절차로 직접 측정할 것.
 
 > **🪤 `checkpoint_150`이라는 이름의 디렉터리가 5개다.** 같은 12분 세션 산출물이고 크기까지 비슷하다:
 > `cube_in_cup_combined`(11:04), `cv/fold_take_01`(11:10), `fold_take_02`(11:11), `fold_take_03`(11:13),
 > **`cube_in_cup_all3`(11:15) ← 이것만 우리 것.**
 
-### 5.3 🪤 코드는 아직 폐기된 Jul-24를 pin 중이다
+### 5.3 🔴 receive server는 지금 정본 체크포인트를 **못 읽는다** (블로커 2순위)
+
+두 결함이 겹쳐 있다. 둘 다 고쳐야 gRPC 경로가 산다.
+
+**(1) 디렉터리를 못 받는다.** `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)이
+`os.path.isfile`을 요구한다(`:151`). 정본 `cube_in_cup_all3/checkpoint_150`은 **orbax OCDBT 디렉터리**라
+로드 시도조차 못 하고 `FileNotFoundError`로 죽는다.
+
+> **🪤 `--expected-classifier-sha256`로 우회되지 않는다.** `RewardClassifierRuntime.__init__`은
+> 기대 SHA를 줬든 말든 `checkpoint_sha256(self.checkpoint_path)`를 **무조건 먼저 호출한다**(`:289`).
+> 옛 판 문서에 "그전까지는 SHA를 명시하면 된다"고 적혀 있었는데 **틀렸다.**
+> **디렉터리 인식(재귀 해시)을 넣는 것 말고 우회로는 없다.**
+
+**(2) 코드 기본 SHA가 폐기된 체크포인트를 가리킨다.**
 
 ```
-scripts/run_rlpd_receive_server.py:34-36   DEFAULT_CHECKPOINT_SHA256          = e329986b…
+scripts/run_rlpd_receive_server.py:34-36   DEFAULT_CHECKPOINT_SHA256            = e329986b…
 scripts/run_rlpd_learner_server.py:72-74   DEFAULT_CLASSIFIER_CHECKPOINT_SHA256 = e329986b…
 ```
 
-**왜 아직 안 바꿨나:** `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)이
-`os.path.isfile`을 요구한다(`:151`). Jul-27은 **orbax 디렉터리**라 그대로 넣으면 즉시 `FileNotFoundError`다.
-**즉 이 함수를 디렉터리(재귀 해시) 지원으로 고치는 것이 Jul-27 전환의 선결 조건이다.**
-그전까지 gRPC 경로를 띄우려면 `--expected-classifier-sha256`를 반드시 명시해야 한다.
+`e329986b…`는 Jul-24 msgpack이고 **0724 도메인 success recall이 0.0%**다
+(성공 1123프레임 중 **0건**, 평균 확률 **0.007**). 즉 **(1)을 고치기만 하고 이 상수를 안 바꾸면
+서버가 조용히 뜨고 reward가 영구 0이 된다** — 학습이 도는데 아무것도 안 배우는, 가장 알아채기 어려운 실패다.
+**(1)과 (2)는 반드시 같은 커밋에서 고칠 것.**
 
-반면 **ZMQ 뷰어 경로는 이미 Jul-27로 넘어가 있다** — SHA pin이 없어서 그냥 됐다.
+**ZMQ 뷰어 경로는 왜 되는가:** SHA pin이 아예 없고 `os.path.exists()`만 본다
+(`reward_classifier_runtime.py:56`) — 그래서 디렉터리 체크포인트가 그냥 로드된다. 즉 **뷰어가 되는 것이
+gRPC 경로도 된다는 증거가 아니다.** 뷰어는 이미 Jul-27로 넘어가 있다.
 `run_classifier_viewer.sh`, `run_reward_classifier_gui.sh`, `run_remote_reward_classifier_server.sh`,
 `reward_classifier_runtime.py:DEFAULT_CHECKPOINT_PATH` 전부 `classifier_ckpt/cube_in_cup_all3`가 기본값이다.
 **두 경로가 서로 다른 체크포인트를 보고 있다는 뜻이다. 뷰어에서 본 확률이 gRPC 경로의 reward가 아니다.**
@@ -427,51 +489,91 @@ cam2  img[0:720, 420:1140]  ->  --cam2-crop 420,0,1140,720
 ZMQ 뷰어에는 두 가지 구성이 있다:
 
 ```bash
-# (A) 랩톱 로컬 실행 — 분류기를 랩톱 CPU에서 돌린다. 터널 불필요.
-#     체크포인트는 이미 스테이징돼 있다(classifier_ckpt/cube_in_cup_all3).
+# (A) 랩톱 로컬 실행 — 분류기를 랩톱 CPU에서 돌린다. 터널 불필요. ✅ 07-29 실기 검증됨
+#     체크포인트는 이미 스테이징돼 있다(classifier_ckpt/cube_in_cup_all3, 43 MB).
 cd /home/laptop3/gello_software/ros2_ur_ws
+VIEW=false ./launch_cameras.sh          # 먼저 카메라 (뷰어 창 없이)
 REWARD_CLASSIFIER_PYTHON=/home/laptop3/venvs/hilserl/bin/python ./run_classifier_viewer.sh
 
-# (B) kanu GPU 실행 — 스크립트가 SSH 터널까지 직접 연다.
+# (B) kanu GPU 실행 — 스크립트가 SSH 터널까지 직접 연다. 🟡 코드는 있으나 미실행
 #     kanu 쪽: serl_ur_infra/run_remote_reward_classifier_server.sh (REWARD_CLASSIFIER_PYTHON 지정 필요)
 cd /home/laptop3/gello_software/ros2_ur_ws
 ./run_remote_classifier_viewer.sh
 ```
 
-두 구성 모두 **cam1/cam2 ROS 토픽이 이미 떠 있어야 한다**(`./launch_cameras.sh`).
+두 구성 모두 **cam1/cam2 ROS 토픽이 이미 떠 있어야 한다**(`VIEW=false ./launch_cameras.sh`).
 threshold 기본값은 양쪽 다 0.2로 `DEFAULT_REWARD_THRESHOLD`와 맞춰져 있다.
+**(A)는 랩톱 CPU에서 약 12 ms/frame으로 돈다 — (B)를 쓸 이유가 딱히 없다.**
 
-> **🪤 (B)는 kanu에 코드를 먼저 올려야 한다.** `run_remote_reward_classifier_server.sh`와
-> `remote_reward_classifier_server.py`는 **`3ff5f80`(07-29)에서 새로 생긴 파일**이고,
-> kanu의 worktree `/tmp/gello-hil-rl-receive-server-v2`는 `5fb716b`(머지 이전)에 고정돼 있어
-> **그 파일들이 없다.** 별도 저장소 `~/workspace/youngwoong/gello_software_remote_classifier`에는
-> 옛 뷰어와 **Jul-24 체크포인트**가 있다 — 그쪽을 쓰면 폐기된 모델을 보게 된다.
-> **랩톱 CPU로 충분하므로 (A)부터 시도할 것.**
+> **🪤 (B)를 쓴다면 kanu에서 경로를 고를 것.** `run_remote_reward_classifier_server.sh`와
+> `remote_reward_classifier_server.py`는 `3ff5f80`(07-29)에서 새로 생긴 파일이다.
+> **새 체크아웃 `/home/junhyeong/gello_software_hil`에는 있다**(확인함). 반면
+> kanu의 옛 워크트리 `/tmp/gello-hil-rl-receive-server-v2`는 `5fb716b`(머지 이전)에 고정돼 있어 **없고**,
+> 별도 저장소 `~/workspace/youngwoong/gello_software_remote_classifier`에는 옛 뷰어와
+> **Jul-24 체크포인트**가 있다 — 그쪽을 쓰면 recall 0%짜리 폐기 모델을 보게 된다(§5.3).
 
 ---
 
 ## 7. 다음에 할 일 — 순서대로
 
-### A. ZMQ 뷰어로 classifier를 실기에서 눈으로 확인 ← **여기서 시작**
+> **✅ 07-28~29 판의 "A. ZMQ 뷰어로 classifier를 실기에서 눈으로 확인"은 끝났다.**
+> 랩톱 CPU에서 라이브로 돌고 절차는 `REWARD_CLASSIFIER_LIVE_KO.md`에 있다(§3, §6-(A)).
+> 그래서 아래 목록은 **그 다음부터** 시작한다.
 
-가장 안전하고(팔이 안 움직인다) 목표에 가장 직접적이다. held-out에서 6개 take 전부 사람이 찍은
-프레임과 사실상 같은 프레임에서 발화했으니, 실기에서도 그래야 정상이다.
+### A. 🔴 classifier 크롭 불일치를 고친다 ← **여기서 시작**
+
+**이것이 최상위 블로커다.** 지금 상태에서 RL 루프를 돌리면 **reward가 틀린다**(§5.1: recall 100% → 33%).
+라이브 뷰어가 잘 보인다고 이 문제가 사라지지 않는다 — 뷰어와 gRPC 경로는 **다른 그림을 본다**(§6).
+
+권장은 §5.5의 **(a) 같은 크롭으로 재학습**이다. `IMAGE_CROP`을 지우는 것이 아니다(그 값은 정책
+관점에서 측정에 근거해 옳다). 절차:
+
+1. kanu에서 `cube_classifier_pipeline.py`에 크롭 인자를 주고 재학습 (**약 46초**)
+   ```
+   --cam1-crop 340,20,990,670      # 리포의 img[20:670, 340:990]
+   --cam2-crop 420,0,1140,720      # 리포의 img[0:720, 420:1140]
+   ```
+   **⚠️ 리포는 `y0,y1,x0,x1`로 쓰고 파이프라인은 `x0,y0,x1,y1`을 받는다 — 순서가 바뀐다.**
+2. `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 threshold 스윕을 **통째로 다시 돌린다.**
+   §5.2의 수치는 전부 무크롭 기준이라 그대로 못 쓴다.
+3. 크롭 값을 체크포인트 옆에 기록하고, 서버가 불일치 시 fail-closed 하게 한다.
+4. **B와 묶어서 한 커밋으로 낸다** — 재학습은 체크포인트 SHA를 바꾸고, SHA와 threshold는 둘 다
+   learner fingerprint에 들어간다. 따로 하면 checkpoint resume이 두 번 깨진다(§5.4-3).
+
+### B. 🔴 receive server가 체크포인트를 읽을 수 있게 만든다 (§5.3)
+
+A의 결과물을 배포하려면 이게 먼저다. **A와 같은 커밋.**
+
+1. `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)에 **디렉터리 재귀 해시**를 넣는다.
+   현재는 `os.path.isfile`을 요구해 orbax 디렉터리에서 `FileNotFoundError`로 죽는다.
+2. `DEFAULT_CHECKPOINT_SHA256`(`scripts/run_rlpd_receive_server.py:34`)과
+   `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`(`scripts/run_rlpd_learner_server.py:72`)을
+   **새 체크포인트 SHA로 갱신한다.** 지금 값 `e329986b…`는 recall 0%짜리 폐기 모델이다.
+3. 1만 고치고 2를 빼먹으면 **서버가 조용히 뜨고 reward가 영구 0**이 된다.
+
+### C. 새 데이터 수집 — **GUI 레코더로**
+
+분류기 recall은 아직 충분하지 않다(§5.2의 다섯 줄). take 수를 늘리는 것이 계획된 다음 단계다.
 
 ```bash
-# T1 — 카메라
-cd /home/laptop3/gello_software/ros2_ur_ws && ./launch_cameras.sh
-#   → cam2 창에서 그리퍼 손가락이 고정되는지 확인 (§2의 미확정 항목이 여기서 닫힌다)
-
-# T2 — 뷰어 (§6 (A))
-cd /home/laptop3/gello_software/ros2_ur_ws
-REWARD_CLASSIFIER_PYTHON=/home/laptop3/venvs/hilserl/bin/python ./run_classifier_viewer.sh
+cd /home/laptop3/gello_software
+set +u; source /opt/ros/humble/setup.bash; source ros2_ur_ws/install/setup.bash; set -u
+ros2 run gello_recorder gello_recorder_gui
 ```
 
-텔레옵으로(또는 손으로) 큐브를 컵에 넣으면서 `p(success)`가 **그 순간에** 오르는지 본다.
-**이 확인은 무크롭 입력 기준이라 §5.1의 크롭 불일치를 검증하지 못한다** — 확인하는 것은
-"이 체크포인트가 이 조명·이 배경·이 카메라에서 동작하는가"다. 그것만으로도 충분히 값지다.
+- **GUI 레코더는 카메라를 자기가 직접 띄운다.** `launch_cameras.sh`를 같이 돌리지 말 것 —
+  같은 USB 장치를 두 프로세스가 잡으려 든다.
+- 출력: `ros2_ur_ws/gello_logs/take_NN_<YYYYmmdd_HHMMSS>/{cam1.mp4,cam2.mp4,vectors.h5}`
+  (`RECORDER_OUTPUT_ROOT`로 바꿀 수 있다).
+- 🪤 **헤드리스 `run_recorder.sh`를 쓰면 안 된다.** 그쪽은 `session_<timestamp>/`를 쓰는데
+  라벨링 파이프라인의 `prepare`가 `raw_root.glob("take_*")`로 **직접 자식만** 훑어서 **한 개도 못 읽는다.**
+  디렉터리 이름만 다르고 내용물(`cam1.mp4`/`cam2.mp4`/`vectors.h5`)은 같다.
+- 📌 준비 자료(파이프라인 CLI 레퍼런스, 촬영 체크리스트, split 계획, `split_takes.py`/`retrain.sh`/`reeval.sh`)가
+  이미 있다:
+  `/tmp/claude-1000/-home-laptop3-gello-software/22de95e4-65f3-449b-b662-5ae4bd21dd7b/scratchpad/intake/`
+  **⚠️ 세션 스크래치 경로다 — 계속 쓸 거면 리포 안으로 옮겨야 살아남는다.**
 
-### B. 액터 entrypoint를 실기에서 **처음** 돌리기
+### D. 액터 entrypoint를 실기에서 **처음** 돌리기
 
 지금까지 실기에서 돈 것은 `run_real_hil.py`뿐이다. **액터는 다른 코드 경로다**(§3).
 Kanu에 지금 아무것도 안 떠 있으므로 **서버를 먼저 띄워야 한다.**

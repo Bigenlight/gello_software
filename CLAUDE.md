@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+문서 색인이다. 상태 보고서가 아니다 — 숫자와 근거는 링크된 문서에 있다.
+
 ## 이 리포에서 진행 중인 작업
 
 **HIL-SERL(사람 개입 온라인 RL)을 실기 UR7e에서 돌린다.**
@@ -14,29 +16,94 @@ laptop3                                        kanu (GPU 서버)
 laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 kanu에서** 돌리고 gRPC로 실시간
 통신한다. reward 권위는 서버에 있다. 10 Hz 루프라 스텝 예산이 100 ms인데 현재 RTT p99가 97.1 ms다.
 
-**branch `feat/gello-ur7e-humble-22.04`** (origin/HEAD). 2026-07-29에 `test/hil-hardware-comms`
-(로봇/하드웨어)를 머지해서 로봇 쪽과 learner/classifier 쪽이 **하나로 합쳐졌다**. 이전 문서들이
-말하던 "워크트리 분리"·"canonical checkout에는 이 코드가 없다"는 **더 이상 사실이 아니다.**
-
-**→ 이어서 작업하려면 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 먼저 읽어라.**
+**branch `feat/gello-ur7e-humble-22.04`** (origin/HEAD). 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
+작업을 이 브랜치로 가져왔다. **워크트리 분리는 끝났다** — 로봇 코드와 learner 코드가 **다른
+checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 개 남아 있다). 작업은
+`/home/laptop3/gello_software` 한 곳에서만 한다.
 
 ## 지금 상태 한 줄
 
-하드웨어 경로와 통신은 뚫렸다(팔 구동·개입·frame-map·gRPC 왕복 실기 검증 완료).
-남은 관문은 **(a) actor entrypoint를 실기에 처음 올리는 것**과
-**(b) reward classifier 전처리를 맞추는 것** 둘이다. 지금은 **reward를 믿으면 안 된다.**
+**되는 것** — 하드웨어 경로 · 텔레옵 · 사람 개입 · gRPC 왕복 · **라이브 reward classifier 뷰어**.
+전부 실기에서 확인했다.
+**안 되는 것** — **RL 루프의 reward.** 관측은 `IMAGE_CROP`으로 잘려 나가는데(`ur_experiments/cube_in_cup.py`)
+분류기는 무크롭으로 학습됐다. recall@0.85가 100% → 33%로 떨어진다. **뷰어는 믿어도 되고,
+RL reward는 믿으면 안 된다.** 그리고 actor entrypoint(`scripts/run_remote_rlpd_actor.py`)는
+실기에서 한 번도 돌지 않았다.
+
+## 읽는 순서 — 이 셋만 읽고 멈춰라
+
+1. **이 파일** — 무엇을 만들고 있고 어디를 봐야 하는지. (2분)
+2. [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md) —
+   **진입점.** 현재 상태 · 리그 실측값 · 다음 할 일 · 함정. **이 문서 하나만 읽고 바로 이어서
+   작업할 수 있게** 쓰여 있다. (30분)
+3. [`docs/testing/08_OPEN_GAPS.md`](docs/testing/08_OPEN_GAPS.md) — 지금 무엇이 깨져 있는지.
+   **reward를 믿으면 안 되는 이유(G15 크롭 불일치)와 워크스페이스 박스가 꺼져 있던 이유(G1)가 여기 있다.**
+
+그다음은 **하려는 일 하나만** 아래에서 골라 읽는다. 나머지는 필요할 때 펼친다 —
+순서대로 다 읽지 마라.
 
 ## 문서 지도
 
-| 문서 | 용도 |
+### A. 상태를 더 깊이 이해하려면
+
+| 문서 | 무엇이 들어 있나 |
 | --- | --- |
-| `serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md` | **시작점** — 통합 현황, 다음 할 일, 함정 |
-| `serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md` | 전체 기록. learner §1–10 / actor·하드웨어 §11 / classifier 조사 §12 |
-| `serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md` | threshold 근거 + leakage 감사 |
-| `serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md` | kanu 실행 절차 |
-| `docs/testing/README.md` | 하드웨어·통신 검증 런북 (00~09) |
-| `docs/testing/08_OPEN_GAPS.md` | 미해결 갭 목록 |
-| `serl_ur_infra/HIL_SERL_STATUS_AND_NEXT.md` | 🗄️ 2026-07-24 기록물 — 현재와 다르다. 역사 참고용 |
+| [`serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 기록. learner 구현 §1–10 / actor·하드웨어 §11 / classifier 조사 §12 |
+| [`serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md) | threshold를 0.85 → 0.2로 내린 근거 + 07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해서 인용할 것 |
+| [`docs/testing/README.md`](docs/testing/README.md) | 하드웨어·통신 검증 런북 인덱스(00~09) + 항목별 PASS/미검증 상태표 |
+| [`serl_ur_infra/README.md`](serl_ur_infra/README.md) | env 설계 규약(좌표계·액션 계약·컨트롤러 격차) + `serl_ur_infra/` 문서 인덱스 |
+| [`serl_ur_infra/REMOTE_ACTOR_GRPC.md`](serl_ur_infra/REMOTE_ACTOR_GRPC.md) | gRPC 전송 계약 v2 — 서버 entrypoint 3종의 차이 (영문) |
+
+### B. 무언가를 실행하려면 (런북)
+
+| 하려는 일 | 문서 |
+| --- | --- |
+| 셋업 · 빌드 · 인터프리터 함정 · 비상 정지 | [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) |
+| HIL actor 기동 (preflight, Stage A fake-env / Stage B 실센서) | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) |
+| kanu에서 learner 띄우기 | [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) |
+| 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
+| mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
+| GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
+| 처음부터 환경 세팅 / 세션 전 프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
+| 그리퍼만 단독으로 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
+| 카메라가 안 뜰 때 | [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md) · [`docs/testing/06_SENSORS.md`](docs/testing/06_SENSORS.md) |
+
+### C. 특정 진행 중 작업을 이어받으려면
+
+| 작업 | 시작점 |
+| --- | --- |
+| **크롭 불일치 해소** (최상위 블로커) | `08_OPEN_GAPS.md` G15 → `REWARD_CLASSIFIER_THRESHOLD_KO.md` → `ur_experiments/cube_in_cup.py`. **`IMAGE_CROP`을 지우는 건 해결이 아니다** |
+| **checkpoint 로딩** (2번째 블로커) | `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`이 `os.path.isfile()`을 요구해 orbax **디렉터리** 체크포인트를 못 읽는다. `scripts/run_rlpd_learner_server.py:72`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`은 아직 recall 0%짜리 은퇴 체크포인트를 가리킨다 |
+| actor entrypoint 실기 첫 투입 | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) §7 (팔을 움직인 건 전부 `tests/run_real_hil.py`였다 — 다른 코드 경로다) |
+| 개입 루프·좌표계·메타데이터 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) |
+| 장애 주입 매트릭스 (거의 미검증) | [`docs/testing/07_FAILURE_INJECTION.md`](docs/testing/07_FAILURE_INJECTION.md) |
+
+### D. 🗄️ 낡음 / 대체됨 — 찾더라도 따르지 말 것
+
+| 문서 | 왜 |
+| --- | --- |
+| [`serl_ur_infra/HIL_SERL_STATUS_AND_NEXT.md`](serl_ur_infra/HIL_SERL_STATUS_AND_NEXT.md) | 2026-07-24 서버 핸드오프 아카이브. agentlace 5588/5589 · `train_rlpd.py` · jax 0.4.35 핀을 권고한다 — **그대로 준비하면 learner가 즉사한다.** 문서 머리에 대조표가 있다 |
+| [`serl_ur_infra/RL_RECEIVE_SERVER.md`](serl_ur_infra/RL_RECEIVE_SERVER.md) · [`HIL_RLPD_RECEIVE_SERVER_KO.md`](serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md) | receive-only 마일스톤 기록. 브랜치·체크포인트가 은퇴했고 **19-D `state` 순서를 v1(틀린 순서)로 적은 곳이 남아 있다** |
+| [`serl_ur_infra/ACTOR_ADAPTER.md`](serl_ur_infra/ACTOR_ADAPTER.md) | agentlace 로컬 어댑터(`scripts/train_rlpd_actor.py`) 기준. **실기 경로가 아니다** — transition 계약 설명만 유효 |
+| [`docs/rl/GELLO_UR7E_HIL_SERL_PLAN.md`](docs/rl/GELLO_UR7E_HIL_SERL_PLAN.md) · [`GELLO_UR7E_SERL_ENV_STATUS.md`](docs/rl/GELLO_UR7E_SERL_ENV_STATUS.md) | 2026-07-24 채택 계획과 첫 커밋 스냅샷. upstream 구조 설명만 참고 가치 |
+| [`docs/ros2/GELLO_UR_ROS2_PLAN.md`](docs/ros2/GELLO_UR_ROS2_PLAN.md) · [`GELLO_UR_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR_ROS2_BRINGUP.md) | UR5e + Jazzy 시절. 이 브랜치는 UR7e + Humble이고 실기 경로가 이미 있다 |
+| [`docs/ros2/GELLO_UR7E_EEF_TELEOP_PLAN.md`](docs/ros2/GELLO_UR7E_EEF_TELEOP_PLAN.md) | EEF 설계·근거 아카이브. 대체된 부분에 `⛔ SUPERSEDED` 표시가 붙어 있고, 조작자 정본은 `GELLO_UR7E_EEF_MODE.md`다 |
+| [`README.md`](README.md) (루트) | 2026-07-20. Panda/UR5e sim 소개 중심이라 HIL-SERL이 없다. 데이터셋·HF 절만 유효 |
+| [`docs/sim/`](docs/sim) · [`docs/ros2/GELLO_FRANKA_RVIZ.md`](docs/ros2/GELLO_FRANKA_RVIZ.md) · [`GELLO_ROS2_CONTROL_REFERENCE.md`](docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md) · [`ros2/`](ros2) · [`docs/reference/`](docs/reference) | Panda/Jazzy 계보이거나 upstream 원본. **이 작업 범위 밖** |
+
+### E. 모방학습(ACT/Diffusion/FM) 시대 문서 — 유효하지만 HIL과 다른 스택
+
+같은 로봇·같은 브리지를 쓰지만 **RL 경로와 코드가 다르다.** 섞지 말 것.
+[`docs/ros2/GELLO_UR7E_ACT_DEPLOY.md`](docs/ros2/GELLO_UR7E_ACT_DEPLOY.md)(유일하게 실기 검증) ·
+[`GELLO_UR7E_DIFFUSION_DEPLOY.md`](docs/ros2/GELLO_UR7E_DIFFUSION_DEPLOY.md) ·
+[`GELLO_UR7E_FM_DEPLOY.md`](docs/ros2/GELLO_UR7E_FM_DEPLOY.md)(뒤 둘은 실기 미검증) ·
+[`ros2_ur_ws/src/gello_policy/README.md`](ros2_ur_ws/src/gello_policy/README.md) ·
+[`ros2_ur_ws/REMOTE_DIFFUSION_RUNBOOK.md`](ros2_ur_ws/REMOTE_DIFFUSION_RUNBOOK.md).
+데이터 기록은 [`ros2_ur_ws/src/gello_recorder/README.md`](ros2_ur_ws/src/gello_recorder/README.md) ·
+[`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md).
+단위 확인은 [`docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md`](docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md).
+종결된 조사 기록: [`ros2_ur_ws/gello_logs/experiments/README.md`](ros2_ur_ws/gello_logs/experiments/README.md)(startup-snap,
+수정 반영 완료) · [`docs/ros2/GELLO_DIFFUSION_ENSEMBLE_OFFLINE.md`](docs/ros2/GELLO_DIFFUSION_ENSEMBLE_OFFLINE.md)(결과 부정적, 기능 default-OFF).
 
 ## 코드 지도
 
@@ -48,7 +115,7 @@ serl_ur_infra/
   ur_env/envs/frame_wrappers.py    RelativeFrame, Quat2EulerWrapper
   ur_env/envs/ros_backend.py       rclpy 백엔드, 250 Hz 업샘플러
   ur_env/remote_actor.py           actor 루프, 전이 생성·전송
-  ur_env/rlpd_receive_server.py    서버 ingress + RewardClassifierRuntime
+  ur_env/rlpd_receive_server.py    서버 ingress + RewardClassifierRuntime + checkpoint_sha256
   ur_env/learner/                  RLPD learner, checkpoint, fingerprint
   ur_experiments/cube_in_cup.py    태스크 config (측정값 전부 여기, IMAGE_CROP 포함)
   scripts/run_remote_rlpd_actor.py actor entrypoint
@@ -56,7 +123,9 @@ serl_ur_infra/
 ros2_ur_ws/
   run_hil_actor.sh                 actor 실행 래퍼 (preflight 9종)
   run_hil_gui.sh                   데드맨/개입 GUI
-  launch_cameras.sh                RealSense 2대
+  launch_cameras.sh                RealSense 2대 (시리얼 자동 해석)
+  run_classifier_viewer.sh         라이브 분류기 뷰어 (랩톱 CPU)
+  run_remote_classifier_viewer.sh  라이브 분류기 뷰어 (kanu GPU + SSH 터널)
 ```
 
 ## 반드시 지킬 것

@@ -22,8 +22,8 @@
 #     VIEW=false ./launch_cameras.sh      # both cameras, NO viewer window
 #
 # ENV (same names/defaults as run_recorder.sh's camera section):
-#     CAM1_SERIAL    RealSense #1 serial (default 151623020789, a plain D435)
-#     CAM2_SERIAL    RealSense #2 serial (default 322743060038, a D435IF)
+#     CAM1_SERIAL    RealSense #1 serial (auto-resolved; default 147122072740, plain D435)
+#     CAM2_SERIAL    RealSense #2 serial (auto-resolved; default 243222072700, D435IF)
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
@@ -37,27 +37,37 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 
 # Serials are a PREFERENCE, not a requirement -- resolve_serials() below falls
-# back to whatever is actually plugged in.  Two different D435 pairs have been
-# named in this repo: (147122072740, 243222072700) and (151623020789,
-# 322743060038), but only the SECOND has ever enumerated here -- checked
-# 2026-07-29 across the full persistent journal, 97 boots back to 2025-07-28:
-# 650 hits for the second pair, 0 for the first, and no USB re-enumeration at
-# all on 07-29.  Binding by an absent serial does NOT fail loudly -- the camera
-# simply never comes up and callers see "no frame" rather than "wrong serial",
-# which is why this is auto-detected instead of hardcoded.
+# back to whatever is actually plugged in.
+#
+# The two "pairs" named across this repo are the SAME two cameras under two
+# different serial FIELDS.  There was no hardware swap.  Measured 2026-07-29,
+# same physical USB port reporting both values:
+#
+#   port    serial_number     asic_serial_number   device
+#   4-4.1   147122072740      151623020789         D435    -> cam1
+#   4-4.3   243222072700      322743060038         D435IF  -> cam2
+#
+# serial_no:= is matched against serial_number, NOT the ASIC serial:
+#   rs.config().enable_device('151623020789')  ->  NO MATCH
+#   rs.config().enable_device('147122072740')  ->  MATCHED
+#
+# The kernel USB descriptor (journalctl, /sys/bus/usb/devices/*/serial) exposes
+# the ASIC serial.  So grepping the journal finds only 151623020789/322743060038
+# and zero hits for 147122072740/243222072700 -- that means the kernel prints a
+# DIFFERENT FIELD, not that those cameras were never present.  607e541 read that
+# grep as a hardware swap and set these defaults to the ASIC serials, which
+# realsense2_camera can never resolve.
+#
+# Binding a serial that does not resolve does NOT fail loudly -- the node starts,
+# ros2 topic info even reports Publisher count 1, and it publishes nothing.  That
+# silence is why this is auto-detected rather than hardcoded.
 #
 # Mount assignment is by model class: plain D435 -> cam1 (SCENE), D435IF/D435i
-# -> cam2 (WRIST, gripper-mounted).  That is the only evidence tying each unit to its
-# mount, so confirm with one arm jog: cam2 is the WRIST camera, so its
-# background must sweep while the gripper fingers stay fixed in frame.
-# Defaults are the pair this machine actually enumerates.  Checked 2026-07-29
-# across the full persistent journal (97 boots, back to 2025-07-28):
-#   journalctl -k --boot=all | grep -c 151623020789\|322743060038   -> 650
-#   journalctl -k --boot=all | grep -c 147122072740\|243222072700   -> 0
-# The older pair has never appeared on this host, so defaulting to it would
-# send every launch down the WARN fallback below even when the rig is fine.
-CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
-CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
+# -> cam2 (WRIST, gripper-mounted).  Model class is the only evidence tying each
+# unit to its mount, so confirm with one arm jog: cam2 is the WRIST camera, so
+# its background must sweep while the gripper fingers stay fixed in frame.
+CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
+CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
 CAM1_NAME="${CAM1_NAME:-cam1}"
 CAM2_NAME="${CAM2_NAME:-cam2}"
 COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"

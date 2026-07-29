@@ -3,12 +3,48 @@
 `third_party/hil-serl`의 `serl_robot_infra`(Franka 전용)에 대응하는 **UR7e + GELLO** robot infra.
 `FrankaEnv`의 관측/액션 계약을 그대로 복제해서 hil-serl의 wrapper 체인·actor 루프가 무수정으로 돌게 한다.
 
-> ⚠️ **UNTESTED SKELETON** — 실기 경로는 `config.DRY_RUN=True`(명령 미발행)가 기본.
-> 검증 전까지 실기 대상 사용 금지.
+> 🚩 **이 리포에 처음 왔다면** 루트 [`CLAUDE.md`](../CLAUDE.md) → [`HANDOFF_NEXT_SESSION_KO.md`](HANDOFF_NEXT_SESSION_KO.md)
+> 순서로 읽어라. 이 README는 **env 설계 규약**과 **이 디렉터리 문서 색인**이지 현재 상태 문서가 아니다.
 
-HIL-SERL actor/server/learner의 통합 상태, checkpoint, branch, Kanu 검증, frozen-trunk feature replay, bounded fake-data learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)를 기준으로 한다. 최종 운영 checkout은 `/home/laptop3/gello_software`, branch는 `feat/gello-ur7e-humble-22.04`다. learner/hardware merge `248255f` 계열과 authoritative schema v2 fake-data E2E 결과가 이 branch에 통합됐다.
+> ⚠️ **정책 경로는 여전히 `config.DRY_RUN=True`(명령 미발행)가 기본이다.**
+> (2026-07-29 정정: 예전 머리말의 "UNTESTED SKELETON / 실기 사용 금지"는 낡았다. 사람 개입 경로는
+> 2026-07-28에 실기에서 팔을 구동해 검증했다 — `tests/run_real_hil.py`, `docs/testing/04_HIL_INTERVENTION.md` §4.5.
+> 다만 **정책이 팔을 움직인 적은 없고**, actor entrypoint `scripts/run_remote_rlpd_actor.py`도
+> 실기에서 돈 적이 없다.)
+
+최종 운영 checkout은 `/home/laptop3/gello_software`, branch는 `feat/gello-ur7e-humble-22.04` 하나다.
+2026-07-29 머지 `3f199d4`로 로봇/하드웨어 작업이 이 브랜치에 들어왔다 — **워크트리 분리 시절 서술은
+전부 낡았다.** 통합 상태·checkpoint·Kanu 검증·frozen-trunk feature replay·bounded fake-data
+learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)를 기준으로 한다.
 
 `scripts/run_fake_e2e_actor.py`는 robot를 제어하는 actor가 아니라 `--synthetic-e2e` Kanu learner에 canonical raw fake observation 100개를 보내 gRPC→classifier→feature replay→CTA→publish→checkpoint→fresh-process resume를 검증하는 acceptance tool이다. server는 exact actor/run ID, exact 100 inserts, bounded timeout을 강제하고 synthetic-only model ID를 advertise한다. cleanup 후 full checkpoint roundtrip/trunk invariant까지 통과해야 pass한다. synthetic checkpoint는 fingerprint/model scope가 다르므로 production robot lineage에 사용할 수 없다.
+
+## 이 디렉터리의 문서 (`serl_ur_infra/*.md`)
+
+### 지금 유효 — 지침으로 읽어도 되는 것
+
+| 문서 | 무엇인가 |
+| --- | --- |
+| [HANDOFF_NEXT_SESSION_KO.md](HANDOFF_NEXT_SESSION_KO.md) | **진입점.** 현재 상태 · 리그 실측값 · 다음 할 일 · 함정. 이 하나로 작업을 시작할 수 있게 쓰여 있다 |
+| [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 상태 기록. learner 구현 §1–10 / actor·하드웨어 §11 / reward classifier 조사 §12. 위 문서보다 깊다 |
+| [HIL_SERL_KANU_RUNBOOK_KO.md](HIL_SERL_KANU_RUNBOOK_KO.md) | Kanu에서 learner를 띄우는 절차 (dry-run → bounded run) |
+| [REWARD_CLASSIFIER_THRESHOLD_KO.md](REWARD_CLASSIFIER_THRESHOLD_KO.md) | reward threshold를 0.85 → 0.2로 내린 근거 + 2026-07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해 인용할 것 |
+| [REMOTE_ACTOR_GRPC.md](REMOTE_ACTOR_GRPC.md) | gRPC 액터 전송 계약 v2 — 같은 전송을 쓰는 **서버 entrypoint 3종의 차이**. 영문, 머지 트리 기준 재검증 |
+| [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
+| `REWARD_CLASSIFIER_LIVE_KO.md` | 라이브 reward classifier 뷰어 런북 — **병행 작성 중이라 아직 파일이 없다.** 그때까지는 `../ros2_ur_ws/run_classifier_viewer.sh`(랩톱 CPU) / `run_remote_classifier_viewer.sh`(kanu GPU) |
+
+### 🗄️ 기록물 — 사료로만. 여기 적힌 명령을 실행하지 말 것
+
+| 문서 | 왜 |
+| --- | --- |
+| [HIL_SERL_STATUS_AND_NEXT.md](HIL_SERL_STATUS_AND_NEXT.md) | 2026-07-24 서버 핸드오프. 전송을 agentlace 5588/5589로, 진입점을 `train_rlpd.py`로, jax를 0.4.35로 적는다 — 셋 다 현행과 다르고 **그대로 준비하면 learner가 즉사한다.** 문서 머리에 대조표가 있다 |
+| [RL_RECEIVE_SERVER.md](RL_RECEIVE_SERVER.md) | receive-only 마일스톤(영문). 인용된 classifier checkpoint는 은퇴했고 **19-D `state` 순서를 v1(틀린 순서)로 적은 곳이 남아 있다** |
+| [HIL_RLPD_RECEIVE_SERVER_KO.md](HIL_RLPD_RECEIVE_SERVER_KO.md) | 은퇴한 `feat/hil-rl-receive-server` 브랜치 시절 작업 정리. 브랜치·워크트리 경로가 낡았다 |
+| [ACTOR_ADAPTER.md](ACTOR_ADAPTER.md) | agentlace 로컬 어댑터 `scripts/train_rlpd_actor.py` 기준(영문). **실기 경로가 아니다** — `create_actor_network()`가 `agentlace`를 `NotImplementedError`로 거부한다. transition 계약 설명만 유효 |
+
+디렉터리 밖 관련 문서: [`../docs/testing/README.md`](../docs/testing/README.md)(하드웨어·통신 검증 런북 00~09) ·
+[`../docs/testing/09_HIL_ACTOR_RUNBOOK.md`](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)(actor 기동) ·
+[`../docs/testing/08_OPEN_GAPS.md`](../docs/testing/08_OPEN_GAPS.md)(미해결 갭).
 
 ## 구조
 
