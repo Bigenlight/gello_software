@@ -50,13 +50,98 @@ from PyQt5.QtWidgets import (
 # Camera subprocess management
 # --------------------------------------------------------------------------- #
 
-# Defaults mirror run_recorder.sh exactly (same env var names + values).
-# See launch_cameras.sh for why these changed on 2026-07-28.
-DEFAULT_CAM1_SERIAL = "151623020789"   # plain D435
-DEFAULT_CAM2_SERIAL = "322743060038"   # D435IF
+# Defaults mirror run_recorder.sh / launch_cameras.sh exactly (same env var
+# names + values). They are a PREFERENCE, not a requirement:
+# _resolve_camera_serials() below checks them against what pyrealsense2
+# actually enumerates on the USB bus and falls back by model class (or raises)
+# if the configured pair isn't plugged in. Two different D435 pairs have been
+# on this rig -- (147122072740, 243222072700) and (151623020789, 322743060038)
+# -- and which one enumerates has flipped more than once. Binding
+# realsense2_camera to an absent serial_no does NOT fail loudly: the node
+# comes up, publishes nothing, and this GUI's camera panes just show "no
+# signal" instead of "wrong serial", which is why this is auto-detected
+# instead of trusted blindly. See ros2_ur_ws/_resolve_camera_serials.sh (the
+# shell equivalent used by launch_cameras.sh / run_recorder.sh) for the full
+# incident history.
+DEFAULT_CAM1_SERIAL = "147122072740"   # plain D435
+DEFAULT_CAM2_SERIAL = "243222072700"   # D435IF
 DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"
+
+
+def _resolve_camera_serials(want1, want2):
+    """Resolve (cam1_serial, cam2_serial) against the live USB bus.
+
+    In-process Python equivalent of resolve_serials() in
+    ``ros2_ur_ws/_resolve_camera_serials.sh`` (the shared helper sourced by
+    ``launch_cameras.sh`` / ``run_recorder.sh``) -- reimplemented directly
+    against pyrealsense2 here rather than shelling out, since this file
+    already depends on pyrealsense2 transitively (via the realsense2_camera
+    node it launches) and there is no ROS graph to shell into yet at this
+    point in startup. Keep the two in sync by hand if the policy changes.
+
+    Enumeration only (``rs.context().query_devices()``) -- this never opens a
+    streaming lock, so it is safe to call before the realsense2_camera nodes
+    (or anything else) hold the cameras.
+
+    Returns:
+        ``(serial1, serial2, warnings)`` where ``warnings`` is a list of
+        human-readable strings. An empty list means the configured pair was
+        found connected and passed through unchanged (nothing to report).
+
+    Raises:
+        ImportError: pyrealsense2 is not importable. Callers should treat
+            this as non-fatal and fall back to the configured serials as-is
+            -- the realsense2_camera node does its own serial lookup anyway.
+        RuntimeError: fewer than 2 RealSense devices are enumerated. Callers
+            should treat this as fatal: there is nothing useful to launch.
+    """
+    import pyrealsense2 as rs  # may raise ImportError -- caller decides
+
+    devs = [
+        (d.get_info(rs.camera_info.name), d.get_info(rs.camera_info.serial_number))
+        for d in rs.context().query_devices()
+    ]
+
+    if len(devs) < 2:
+        lines = ["    connected: {} {}".format(n, s) for n, s in devs]
+        raise RuntimeError(
+            "only {} RealSense device(s) found, need 2\n{}\n"
+            "Override explicitly with CAM1_SERIAL=<serial> CAM2_SERIAL=<serial>"
+            .format(len(devs), "\n".join(lines))
+        )
+
+    present = {s for _, s in devs}
+    if want1 in present and want2 in present:
+        return want1, want2, []
+
+    warnings = [
+        "configured serials ({}, {}) are not both connected".format(want1, want2)
+    ]
+    warnings += ["    connected: {} {}".format(n, s) for n, s in devs]
+
+    # IMU/IF variants report a name containing "D435I..."; the plain unit
+    # reports "D435".
+    imu = [s for n, s in devs if "d435i" in n.lower()]
+    plain = [s for n, s in devs if "d435i" not in n.lower()]
+
+    if len(plain) == 1 and len(imu) == 1:
+        warnings.append(
+            "auto-selected by model class: cam1={} (plain D435), "
+            "cam2={} (D435IF/i)".format(plain[0], imu[0])
+        )
+        return plain[0], imu[0], warnings
+
+    # Ambiguous: same model class on both mounts. Order is arbitrary, so say so.
+    ordered = sorted(s for _, s in devs)[:2]
+    warnings.append(
+        "model classes are ambiguous; falling back to serial sort order: "
+        "cam1={} cam2={}".format(ordered[0], ordered[1])
+    )
+    warnings.append("VERIFY THE PANES BEFORE RECORDING -- cam1/cam2 may be swapped")
+    return ordered[0], ordered[1], warnings
+
 
 # Shared sizing for the big operator-facing buttons (Start/Stop/Pause/Resume) so
 # they're easy to hit one-handed while the other hand holds the GELLO leader.
@@ -187,12 +272,13 @@ _TELEOP_STATE_STALE_S = 2.0
 class MainWindow(QMainWindow):
     """Operator window: dual camera preview + state panel + record controls."""
 
-    def __init__(self, node, cam1_proc, cam2_proc):
+    def __init__(self, node, cam1_proc, cam2_proc, cam_warnings=None):
         super().__init__()
         self._node = node
         self._cam1_proc = cam1_proc
         self._cam2_proc = cam2_proc
         self._cameras_killed = False
+        self._cam_warnings = cam_warnings or []
 
         self._record_start_wall = None  # time.monotonic() at Start, for elapsed
 
@@ -203,6 +289,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("GELLO -> UR7e Recorder")
         self._build_ui()
+        if self._cam_warnings:
+            self._show_camera_warning()
 
         # --- Timers (all fire on the Qt/main thread) ---------------------- #
         self._preview_timer = QTimer(self)
@@ -245,6 +333,26 @@ class MainWindow(QMainWindow):
 
         # --- Bottom: record control bar ----------------------------------- #
         root.addLayout(self._build_control_bar())
+
+    def _show_camera_warning(self):
+        """Make a resolved-but-mismatched camera serial pairing hard to miss.
+
+        Called from __init__ only when ``_resolve_camera_serials()`` (see
+        module-level function above) had to override the configured
+        CAM1_SERIAL/CAM2_SERIAL -- i.e. the connected pair was not what was
+        asked for. The full detail is already on the console (main() prints
+        every entry of ``self._cam_warnings``); this adds a permanent,
+        can't-miss banner in the GUI itself, since an operator running this
+        as a double-clicked GUI app may never see the console.
+        """
+        detail = [w for w in self._cam_warnings if not w.strip().startswith("connected:")]
+        summary = " | ".join(detail) if detail else "camera serials auto-resolved"
+        banner = QLabel("CAMERA SERIALS AUTO-RESOLVED (not the configured pair) -- {}".format(summary))
+        banner.setStyleSheet(
+            "color: white; background-color: #cc3333; font-weight: bold; padding: 3px 8px;"
+        )
+        banner.setWordWrap(True)
+        self.statusBar().addPermanentWidget(banner, stretch=1)
 
     def _make_video_pane(self, name):
         label = QLabel("{}: no signal".format(name))
@@ -635,6 +743,28 @@ def main(args=None):
     cam2_name = os.environ.get("CAM2_NAME", DEFAULT_CAM2_NAME)
     color_profile = os.environ.get("COLOR_PROFILE", DEFAULT_COLOR_PROFILE)
 
+    # --- Resolve serials against what is actually on the USB bus ---------- #
+    # See _resolve_camera_serials() above for the full policy; this mirrors
+    # resolve_serials() in ros2_ur_ws/_resolve_camera_serials.sh. A hard
+    # mismatch (< 2 devices) aborts BEFORE any camera subprocess is spawned --
+    # launching a realsense2_camera node against a serial we already know is
+    # wrong just produces a silently-broken GUI instead of a clear error.
+    cam_warnings = []
+    try:
+        cam1_serial, cam2_serial, cam_warnings = _resolve_camera_serials(
+            cam1_serial, cam2_serial
+        )
+    except ImportError:
+        cam_warnings = [
+            "pyrealsense2 not importable; using configured serials as-is"
+        ]
+    except RuntimeError as exc:
+        print("### ERROR resolving camera serials: {}".format(exc), file=sys.stderr)
+        sys.exit(1)
+
+    for w in cam_warnings:
+        print("### WARN {}".format(w), file=sys.stderr)
+
     # Parse "WxHxFPS" -> fps for the node's camera_fps arg (best-effort).
     camera_fps = 30.0
     try:
@@ -695,7 +825,7 @@ def main(args=None):
 
     # --- 4. Qt event loop on the main thread ------------------------------ #
     app = QApplication(sys.argv if args is None else args)
-    window = MainWindow(node, cam1_proc, cam2_proc)
+    window = MainWindow(node, cam1_proc, cam2_proc, cam_warnings=cam_warnings)
     window.resize(1280, 720)
     window.show()
 

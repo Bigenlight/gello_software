@@ -22,11 +22,17 @@
 #     RATE=200 ./run_recorder.sh        # synchronized-table sample rate (Hz)
 #
 # Camera env vars (only used when CAMS=true or CAMS=1):
-#     CAM1_SERIAL    RealSense #1 serial (default 151623020789, a plain D435)
-#     CAM2_SERIAL    RealSense #2 serial (default 322743060038, a D435IF)
+#     CAM1_SERIAL    RealSense #1 serial (default 147122072740, a plain D435)
+#     CAM2_SERIAL    RealSense #2 serial (default 243222072700, a D435IF)
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
+# The serials above are a PREFERENCE, not a requirement: resolve_serials()
+# (shared with launch_cameras.sh, see _resolve_camera_serials.sh) checks them
+# against what pyrealsense2 actually enumerates on the USB bus and falls back
+# by model class -- or errors loudly -- if the configured pair isn't plugged
+# in. See _resolve_camera_serials.sh for why this matters (binding to an
+# absent serial does not fail loudly; the node just publishes nothing).
 # The cameras are launched via realsense2_camera rs_launch.py. The recorder node
 # subscribes to the color topics realsense2_camera publishes under
 # /<CAM1_NAME>/<CAM1_NAME>/color/image_raw/compressed (and likewise CAM2) and
@@ -60,15 +66,23 @@ fi
 CAM1_PID=""
 CAM2_PID=""
 if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
-    # See launch_cameras.sh for why these changed on 2026-07-28.
-    CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
-    CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
+    # Serials are a PREFERENCE, not a requirement -- see _resolve_camera_serials.sh
+    # (shared with launch_cameras.sh) for why: two different D435 pairs have been
+    # on this rig and which one enumerates has flipped more than once. Binding by
+    # an absent serial does NOT fail loudly -- the node comes up, publishes
+    # nothing, and the recorder just writes an empty cam*.mp4.
+    CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
+    CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
     CAM1_NAME="${CAM1_NAME:-cam1}"
     CAM2_NAME="${CAM2_NAME:-cam2}"
     # Both cameras record at the same resolution/fps so the two MP4s line up
     # visually (D435 defaults to 640x480, D435IF to 1280x720 -- force both to
     # match). Override with COLOR_PROFILE=WxHxFPS if you ever need something else.
     COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
+    # Resolve against what is actually on the USB bus before launching anything
+    # (enumeration takes no streaming lock, so this is safe here).
+    source "$SCRIPT_DIR/_resolve_camera_serials.sh"
+    resolve_serials
     echo "### CAMS=true -> launching RealSense ${CAM1_NAME} (${CAM1_SERIAL}) + ${CAM2_NAME} (${CAM2_SERIAL}) @ ${COLOR_PROFILE}"
     echo "###   camera launch logs -> ${SESSION}/cam1_launch.log , ${SESSION}/cam2_launch.log"
     # NOTE: serial_no MUST be wrapped in embedded single-quotes ('"'"'...'"'"') --
