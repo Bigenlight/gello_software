@@ -442,7 +442,14 @@ def build_actor_service(
 
 
 class LearnerWorker:
-    """Own exactly one background caller of ``HILSERLLearner.train_once``."""
+    """Own one transition-paced caller of ``HILSERLLearner.train_once``.
+
+    ``utd_ratio`` counts outer learner steps per newly accepted online
+    transition; the learner's independent ``cta_ratio`` controls how many
+    optimizer calls each outer step performs.  The transition which reaches
+    ``training_starts`` opens the first UTD budget, so the warm-up prefix never
+    causes a burst of ``training_starts * utd_ratio`` updates.
+    """
 
     _FINAL_STATES = frozenset({"completed", "stopped", "faulted"})
 
@@ -450,10 +457,13 @@ class LearnerWorker:
         self,
         learner: HILSERLLearner,
         *,
+        replay_insert_count: Callable[[], int],
         target_learner_step: int | None = None,
         poll_interval: float = 0.1,
         thread_name: str = "hil-serl-learner",
     ) -> None:
+        if not callable(replay_insert_count):
+            raise TypeError("replay_insert_count must be callable")
         if target_learner_step is not None:
             if (
                 isinstance(target_learner_step, bool)
@@ -467,8 +477,11 @@ class LearnerWorker:
         if not math.isfinite(poll_interval) or poll_interval <= 0.0:
             raise ValueError("poll_interval must be positive and finite")
         self.learner = learner
+        self.replay_insert_count = replay_insert_count
         self.target_learner_step = target_learner_step
         self.poll_interval = float(poll_interval)
+        self._initial_learner_step = learner.learner_step
+        self._last_replay_insert_count: int | None = None
         self._stop_event = threading.Event()
         self._finished_event = threading.Event()
         self._lock = threading.Lock()
@@ -524,6 +537,44 @@ class LearnerWorker:
             self._detail = detail[:2_000]
         self._finished_event.set()
 
+    def _read_replay_insert_count(self) -> int:
+        value = self.replay_insert_count()
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, np.integer)
+        ):
+            raise TypeError("replay_insert_count must return an integer")
+        count = int(value)
+        if count < 0:
+            raise ValueError("replay_insert_count cannot be negative")
+        if (
+            self._last_replay_insert_count is not None
+            and count < self._last_replay_insert_count
+        ):
+            raise ValueError("replay_insert_count cannot decrease")
+        self._last_replay_insert_count = count
+        return count
+
+    def _update_budget(self) -> int:
+        """Return outer learner steps permitted in this worker run.
+
+        Only the transition that reaches ``training_starts`` and transitions
+        accepted after it earn updates.  Checkpoint resume therefore refills
+        the RAM-only replay before receiving a fresh, run-local UTD budget.
+        """
+
+        insert_count = self._read_replay_insert_count()
+        training_starts = self.learner.config.training_starts
+        if insert_count < training_starts:
+            return 0
+        eligible_transitions = insert_count - training_starts + 1
+        return eligible_transitions * self.learner.config.utd_ratio
+
+    def _has_update_budget(self) -> bool:
+        completed = self.learner.learner_step - self._initial_learner_step
+        if completed < 0:
+            raise ValueError("learner_step cannot decrease within a worker run")
+        return completed < self._update_budget()
+
     def _run(self) -> None:
         try:
             while not self._stop_event.is_set():
@@ -540,6 +591,9 @@ class LearnerWorker:
                         self._finish("faulted", existing_fault.detail)
                         return
                     if not self.learner.ready:
+                        self._stop_event.wait(self.poll_interval)
+                        continue
+                    if not self._has_update_budget():
                         self._stop_event.wait(self.poll_interval)
                         continue
                     self.learner.train_once()

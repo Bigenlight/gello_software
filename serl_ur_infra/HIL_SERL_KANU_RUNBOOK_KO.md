@@ -823,6 +823,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --feature-memory-reserve-gib 2 \
   --demo-extraction-batch-size 64 \
   --grasp-penalty "$HIL_GRASP_PENALTY" \
+  --utd-ratio 1 \
   --max-workers 4 \
   --max-message-bytes 16777216 \
   --require-jax-backend gpu \
@@ -830,7 +831,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --poll-interval 0.1
 ```
 
-server는 online replay가 100개에 도달할 때까지 policy version 0으로 inference/ingress를 제공하며 학습을 기다린다. stdout의 `rlpd_learner_server_ready`를 확인한 뒤 laptop tunnel과 actor를 시작한다.
+server는 online replay가 100개에 도달할 때까지 policy version 0으로 inference/ingress를 제공하며 학습을 기다린다. `--utd-ratio 1`은 100번째 transition에서 learner step 1회를 허용하고, 그 뒤 새 online transition마다 learner step 1회만 추가로 허용한다. 각 learner step 내부의 CTA 2:1(critic 두 번, actor 한 번)은 그대로다. 따라서 warm-up 100개가 한꺼번에 100 learner step backlog를 만들지 않으며, fresh `--target-learner-step 5000`에는 총 5,099개의 accepted transition이 필요하다. stdout의 `rlpd_learner_server_ready`를 확인한 뒤 laptop tunnel과 actor를 시작한다.
 
 기본 capacity의 feature camera tensor는 정확히 `7,864,320,000 B = 7.32421875 GiB`다. CLI는 이 ring에 offline demo feature tensor와 `--feature-memory-reserve-gib` 값을 더해 할당 전 `MemAvailable`을 검사한다. Python/JAX/XLA/classifier 오버헤드는 reserve 정책으로 별도 여유를 잡는다. capacity나 reserve를 바꾸면 실험 기록에 남긴다.
 

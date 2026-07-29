@@ -46,6 +46,7 @@ def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
     assert args.require_jax_backend == "cpu"
     assert args.wandb_mode == "offline"
     assert args.grasp_penalty == pytest.approx(-0.02)
+    assert args.utd_ratio == 1
     assert args.feature_memory_reserve_gib == pytest.approx(2.0)
     assert args.demo_extraction_batch_size == 64
     assert args.synthetic_e2e is False
@@ -102,6 +103,7 @@ def test_cli_synthetic_e2e_is_bounded_and_keeps_real_learning_scale(tmp_path):
 
     assert config.batch_size == 256
     assert config.training_starts == 100
+    assert config.utd_ratio == 1
     assert config.cta_ratio == 2
     assert config.publish_period == 1
     assert config.checkpoint_period == 1
@@ -318,6 +320,27 @@ def test_cli_rejects_invalid_grasp_penalty(tmp_path, value):
     )
     with pytest.raises(ValueError, match="grasp_penalty"):
         _MODULE._validate_args(args)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_cli_rejects_nonpositive_utd_ratio(tmp_path, value):
+    args = _MODULE._parse_args(
+        [*_required_args(tmp_path), "--utd-ratio", value]
+    )
+    with pytest.raises(ValueError, match="utd_ratio"):
+        _MODULE._validate_args(args)
+
+
+def test_cli_threads_utd_ratio_into_fingerprinted_config(tmp_path):
+    args = _MODULE._parse_args(
+        [*_required_args(tmp_path), "--utd-ratio", "3"]
+    )
+    _MODULE._validate_args(args)
+
+    config = _MODULE._learner_config(args)
+    assert config.utd_ratio == 3
+    assert config.fingerprint_values()["utd_ratio"] == 3
+    assert config.cta_ratio == 2
 
 
 def test_cli_rejects_offline_demo_with_different_penalty():

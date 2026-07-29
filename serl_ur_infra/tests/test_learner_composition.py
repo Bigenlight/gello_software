@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -84,6 +85,7 @@ class _PoolIngress:
         return SimpleNamespace(
             replay_size=len(self.replay),
             intervention_size=len(self.interventions),
+            replay_insert_count=self.replay.insert_count,
         )
 
     def sample_replay(self, batch_size: int, **kwargs):
@@ -309,6 +311,9 @@ def test_worker_reaches_bounded_target_and_publishes_once(tmp_path):
     assembly = _compose_fresh(tmp_path / "worker-complete")
     worker = LearnerWorker(
         assembly.learner,
+        replay_insert_count=lambda: (
+            assembly.ingress.status().replay_insert_count
+        ),
         target_learner_step=1,
         poll_interval=0.001,
     )
@@ -325,12 +330,15 @@ def test_worker_reaches_bounded_target_and_publishes_once(tmp_path):
 
 
 def test_worker_fault_keeps_last_known_good_policy_callable(tmp_path):
+    ingress = _PoolIngress(replay_count=5)
     assembly = _compose_fresh(
         tmp_path / "worker-fault",
         agent=_agent(fail_at=3),
+        ingress=ingress,
     )
     worker = LearnerWorker(
         assembly.learner,
+        replay_insert_count=lambda: ingress.status().replay_insert_count,
         target_learner_step=2,
         poll_interval=0.001,
     )
@@ -349,6 +357,73 @@ def test_worker_fault_keeps_last_known_good_policy_callable(tmp_path):
     )
     assert version == 1
     assert np.isfinite(action).all()
+
+
+def _wait_for_learner_step(worker, expected: int, timeout: float = 2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if worker.status.learner_step >= expected:
+            return
+        time.sleep(0.001)
+    raise AssertionError(
+        f"learner did not reach step {expected}; status={worker.status}"
+    )
+
+
+def test_worker_default_utd_one_waits_for_each_post_warmup_insert(tmp_path):
+    assembly = _compose_fresh(tmp_path / "worker-utd-one")
+    insert_count = {"value": 3}
+    worker = LearnerWorker(
+        assembly.learner,
+        replay_insert_count=lambda: insert_count["value"],
+        target_learner_step=3,
+        poll_interval=0.001,
+    )
+
+    worker.start()
+    time.sleep(0.02)
+    assert worker.status.learner_step == 0
+
+    insert_count["value"] = 4
+    _wait_for_learner_step(worker, 1)
+    time.sleep(0.02)
+    assert worker.status.learner_step == 1
+
+    insert_count["value"] = 5
+    _wait_for_learner_step(worker, 2)
+    time.sleep(0.02)
+    assert worker.status.learner_step == 2
+
+    insert_count["value"] = 6
+    assert worker.wait(timeout=2.0)
+    assert worker.join(timeout=2.0)
+    assert worker.status.state == "completed"
+    assert worker.status.learner_step == 3
+    assert worker.status.gradient_step == 6
+
+
+def test_worker_utd_two_allows_two_steps_at_warmup_boundary(tmp_path):
+    config = LearnerConfig(
+        batch_size=4,
+        training_starts=4,
+        utd_ratio=2,
+        publish_period=2,
+        checkpoint_period=100,
+    )
+    assembly = _compose_fresh(tmp_path / "worker-utd-two", config=config)
+    worker = LearnerWorker(
+        assembly.learner,
+        replay_insert_count=lambda: 4,
+        target_learner_step=2,
+        poll_interval=0.001,
+    )
+
+    worker.start()
+    assert worker.wait(timeout=2.0)
+    assert worker.join(timeout=2.0)
+    assert worker.status.state == "completed"
+    assert worker.status.learner_step == 2
+    assert worker.status.gradient_step == 4
 
 
 def test_production_service_shares_policy_and_strict_ingress_over_grpc(

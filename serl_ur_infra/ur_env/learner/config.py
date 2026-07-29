@@ -24,6 +24,7 @@ class LearnerConfig:
     seed: int = 42
     batch_size: int = 256
     online_fraction: float = 0.5
+    utd_ratio: int = 1
     cta_ratio: int = 2
     training_starts: int = 100
     publish_period: int = 50
@@ -41,6 +42,7 @@ class LearnerConfig:
             raise ValueError("seed must be an integer")
         for name in (
             "batch_size",
+            "utd_ratio",
             "cta_ratio",
             "training_starts",
             "publish_period",
