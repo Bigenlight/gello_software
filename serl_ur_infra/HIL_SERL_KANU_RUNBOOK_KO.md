@@ -2,13 +2,13 @@
 
 > 상태: **실물 로봇 production learning smoke 진입 가능**. 실제 arm 실행은 아직 operator 검증 항목이다.
 >
-> 기준일: **2026-07-29 18:53 KST**. 현재 실기 준비 **코드 기준선**은 **`18e3696`**이다.
-> 이 커밋은 no-arm 무전송 probe, deadman heartbeat fail-stop, proof 기반 controller
-> handoff, JAX-before-gRPC 초기화, deterministic/stochastic policy 사전 warm-up을 모두 포함한다.
+> 기준일: **2026-07-29 21:05 KST**. 현재 실기 준비 **코드 기준선**은 **`ca19652`**이다.
+> 이 커밋은 no-arm 무전송 probe, deadman/leader-loss HOLD, proof 기반 controller
+> handoff와 종료 후 자동 복귀, 250 Hz 가속도 제한 보간, JAX update 사전 warm-up을 모두 포함한다.
 > 그 이후 문서-only descendant는 허용하되 양쪽 exact HEAD가 같은지는 매번 명령으로 확인한다.
 >
 > 검증 브랜치: `feat/gello-ur7e-humble-22.04`. laptop3 infra 전체
-> **459 passed, 11 skipped**, controller handoff shell mock **14 passed**. Kanu 실제
+> **497 passed, 11 skipped**, controller/종료 경로 focused **137 passed**. Kanu 실제
 > classifier/demo/SAC production 규모 dry-run과 실제 policy gRPC no-submit probe도 통과했다.
 >
 > **Kanu 실행 checkout: `/home/junhyeong/gello_software_hil`** — 2026-07-29 신설된 영속 worktree. §1.1
@@ -20,6 +20,17 @@
 > 실기 classifier 별도 시각 검증 경로: [REWARD_CLASSIFIER_LIVE_KO.md](./REWARD_CLASSIFIER_LIVE_KO.md)
 
 ### 2026-07-29 최종 준비 증거
+
+- `ca19652`에서 실제 model/demo/production capacity로 startup update path를 세 번
+  warm-up했다. cycle은 **46.83 s → 37.22 s → 466 ms**였고, 이 작업은 port bind 전에
+  끝났다. learner/gradient/policy counter는 모두 0이었다. 증거 root:
+  `/home/junhyeong/hil-serl-data/dry-runs/warmup-ca19652-UGVLx8`.
+- 같은 커밋의 실제 model no-submit probe는 inference **18.44 ms**, laptop 왕복
+  **47.75 ms**, Step RPC/robot action/replay insert 모두 0으로 통과했다. probe가 inference
+  RNG를 한 번 소비한 run은 종료·보존했고, 실제 transition용 fresh lineage
+  `/home/junhyeong/hil-serl-data/runs/cube_in_cup_real_20260729_120225`를 새로 띄웠다.
+  기록 시점 PID는 `159159`, GPU 5, port 50053, counter는 모두 0이다. 이 PID가 이후에도
+  살아 있다고 가정하지 말고 `pgrep`/`ss`/JSONL로 확인한다.
 
 - 실제 E2E 실행 시점에 laptop3와 Kanu 영속 checkout의 HEAD는 `18e3696`으로 동기화됐다.
   아래 증거를 기록한 문서 commit 뒤에는 branch tip이 달라질 수 있으므로 현재 HEAD는 직접 읽는다.
@@ -48,21 +59,21 @@
 
 ### A. 코드와 데이터 고정
 
-1. laptop과 Kanu 모두 `18e3696` 이상인 같은 실행 커밋을 사용한다.
+1. laptop과 Kanu 모두 `ca19652` 이상인 같은 실행 커밋을 사용한다.
 
    ```bash
    # laptop3
    cd /home/laptop3/gello_software
    git branch --show-current
    git rev-parse HEAD
-   git merge-base --is-ancestor 18e3696 HEAD
+   git merge-base --is-ancestor ca19652 HEAD
 
    # Kanu
    ssh kanu 'cd /home/junhyeong/gello_software_hil && git branch --show-current && git rev-parse HEAD'
    ```
 
    `git merge-base`가 0이 아니거나 양쪽 실행 HEAD가 다르면 시작하지 않는다. 2026-07-29
-   18:53 KST에는 양쪽과 origin이 `18e3696`으로 동기화돼 있었지만, 다음 세션에서도 위
+   21:05 KST에는 양쪽과 origin이 `ca19652` 이상으로 동기화돼 있었지만, 다음 세션에서도 위
    명령으로 다시 확인한다. 오래된 Kanu checkout으로 대신 실행하지 않는다.
 
 2. Kanu의 `HIL_REAL_DEMO`는 recorder take를 변환한 **실제** artifact여야 한다. 먼저 §1.1/§1.2에 따라 `HIL_KANU_REPO`와 `HIL_KANU_PYTHON`을 export한다. fake acceptance pickle, `synthetic_acceptance_only=true`, real/fake 혼합은 production server가 의도적으로 거부한다.
@@ -107,6 +118,10 @@
    - `--synthetic-e2e`, `--dry-run`, synthetic actor/run ID는 **사용하지 않는다**.
 
 3. stdout의 `rlpd_learner_server_ready`에서 다음을 확인한 뒤에만 laptop으로 넘어간다.
+
+   그 전에 `learner_update_warmup_complete`가 있어야 하고, `warmup_cycle_ms`의 마지막
+   cycle이 steady-state 범위인지 확인한다. warm-up은 disposable agent로 수행되므로 아래
+   production counter는 여전히 모두 0이어야 한다.
 
    - `learner_step=0`, `policy_version=0`인 fresh lineage
    - `jax_backend=gpu`

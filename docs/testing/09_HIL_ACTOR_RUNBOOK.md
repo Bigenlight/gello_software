@@ -78,7 +78,9 @@ cd $WT/ros2_ur_ws
   센서 점검을 WARN으로 강등하는 데 쓰고, actor에게도 넘긴다 (`run_hil_actor.sh:113-114`).
 * 래퍼가 먼저 넣는 기본 인자보다 **뒤에** 붙으므로, 같은 옵션을 다시 주면 사용자 값이 이긴다
   (argparse는 뒤가 이김).
-* `exec`로 프로세스를 대체하므로 **Ctrl-C가 곧바로 actor에게** 간다 (중간 래퍼 없음).
+* no-arm/fake는 `exec`로 바로 actor를 실행한다. 실기 `--arm`은 래퍼가 부모로 남아
+  Ctrl-C를 actor에 정확히 한 번 전달하고, actor publisher 종료를 확인한 뒤
+  `forward_position_controller`에서 `scaled_joint_trajectory_controller`로 자동 복귀한다.
 
 ### 1.1 환경변수 오버라이드
 
@@ -702,10 +704,12 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 
 ## 6. 중단 · 복구
 
-* **actor 중단:** T6에서 `Ctrl-C`. `exec`이므로 신호가 곧바로 actor에게 간다.
+* **actor 중단:** T6에서 `Ctrl-C`. armed 래퍼가 신호를 actor에게 전달하고 실제 child 종료까지 기다린다.
 * **팔이 움직이는 중이라면 먼저 펜던트 E-STOP.**
-* actor가 죽어도 `forward_position_controller`는 **마지막 명령을 유지**한다 → 팔은 그 자리에서
-  홀드하고 튀지 않는다.
+* 정상 종료/예외 뒤에는 actor의 command publisher가 사라진 것을 확인한 다음 STJC로
+  strict 복귀한다. `controller cleanup PASS`를 확인한다. publisher가 남거나 controller 쌍이
+  예상 밖이면 자동 switch를 거부하고 rc 70으로 끝나므로 `ros2 control list_controllers`와
+  `ros2 topic info -v /forward_position_controller/commands`를 직접 확인한다.
 * GELLO 개입 중이면 T5 GUI에서 **DISENGAGE**.
 * 터널이 죽으면 actor는 타임아웃으로 실패한다. §2.4를 다시 띄우고 actor를 재시작한다.
 * Kanu 세션을 끝낼 때는 서버와 터널을 정상 종료해 **쓰던 GPU와 포트 50053을 반납**한다.
@@ -726,11 +730,11 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A3 | `--fake-env`에서 센서 점검이 WARN으로 강등 | **PASS** | 격리 ROS 도메인에서 경고 4건 + 통과 |
 | A4 | PYTHONPATH 이어붙임 | **PASS** | `PYTHONPATH=/pre/existing`를 미리 잡고 실행해도 `ur_gello_bringup`이 오버레이에서 해석됨 |
 | A5 | 인자 통과 | **PASS** | `--fake-env --save-video --actor-id …`가 최종 argv 끝에 그대로 붙음 |
-| A6 | `--arm` controller handoff | **오프라인 PASS / 실기 미검증** | marker 부재·stale·pose 변경·기존 publisher·예상 밖 controller 조합·FPC-active 임의 자세를 거부하고 정상 strict switch·postcondition·live-pose idempotent 경로를 shell mock 14개 테스트로 확인. 실물 controller_manager에서는 아직 실행하지 않음 |
+| A6 | `--arm` controller handoff | **실기 PASS / 자동 복귀 재실기 대기** | 2026-07-29 실물에서 RESET proof 뒤 STJC→FPC strict switch와 postcondition이 통과했다. `ca19652`의 publisher-first teardown·FPC→STJC 자동 복귀는 focused control 137 tests를 통과했고 다음 실기 종료에서 최종 확인한다 |
 | B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
 | B2c | **분류기 sidecar 실기 왕복** (§4.4) | **첫 B3와 결합 / 미검증** | no-arm은 transition을 보내지 않으므로 GUI ENGAGE + 정지 GELLO 상태의 첫 `--arm`에서 확인한다. live 확률 판독구는 아직 없다 |
-| B3 | actor `--arm` (실제 팔 구동) | **OPERATOR GATE / 실기 미검증** | 실제 policy gRPC no-submit은 통과했고 초기 action `max_abs=0.99894`를 확인했다. preposition proof·live pose·strict FPC handoff·publisher 0·deadman fail-stop이 모두 구현됐다. 첫 실행은 GUI를 미리 ENGAGE하고 GELLO를 정지 anchor에 둔 §4.4 smoke로만 시작한다. 팔 가림/force·collision 회피 부재는 남는다 |
+| B3 | actor `--arm` (실제 팔 구동) | **부분 PASS / `ca19652` 재실기 대기** | 이전 코드로 실물 handoff·policy/GELLO 구동까지 진입했으나 transition 100의 lazy JAX compile 때문에 RPC timeout이 났다. `ca19652`는 port bind 전 3-cycle warm-up과 250 Hz 가속도 제한 보간을 넣었고 Kanu 실측 steady cycle 466 ms/no-submit RTT 47.75 ms를 통과했다. 첫 재시험은 GUI를 미리 ENGAGE하고 GELLO를 정지 anchor에 둔 §4.4 smoke로만 시작한다 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
 
 ---
