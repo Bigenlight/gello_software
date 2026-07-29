@@ -5,8 +5,16 @@
 
 정본: `docs/ros2/GELLO_UR7E_EEF_MODE.md`. 여기서는 테스트 관점의 요약 + 이 브랜치의 실행 명령만 담는다.
 
+> ### 2026-07-27 실기 세션의 영향: **없음 (의도적으로)**
+> 오늘 진전된 것은 RL/HIL 쪽(`04`~`09`)이고 EEF 텔레옵 경로는 건드리지 않았다.
+> 이 문서의 판정은 그대로 유효하다.
+>
+> 다만 **RL 경로와 혼동하지 말 것**: EEF 텔레옵의 `keepout`/`sigma_min` 감속/branch-lock IK는
+> `PolicyDeltaController`(RL)에는 **없다** (`08_OPEN_GAPS.md` G2). 새로 생긴
+> `clip_safety_box`는 **RL 경로 전용**이고 EEF 텔레옵에는 적용되지 않는다.
+
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 cd $WT/ros2_ur_ws
 ```
 

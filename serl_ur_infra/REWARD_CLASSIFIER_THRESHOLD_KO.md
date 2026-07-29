@@ -370,7 +370,7 @@ take_01/02는 96%대인데 take_03만 44%다. 조사 결과:
 (c) 광범위 스윙 궤적 데이터를 프레임 단위로 재검수해 학습에 포함.
 **[07-29] (a)와 (b)는 이제 "완화책"이 아니라 [배포 전 필수](#후속-권고)다.**
 
-### 전처리 — 지금은 일치한다. 크롭을 넣는 순간 무효가 된다
+### 전처리 — 07-29까지는 일치했다. 머지로 크롭이 들어와 지금은 불일치다
 
 > **07-28 원문 (과장):** "`ur_env/envs/ur7e_env.py`의 canonical observation은 `IMAGE_CROP`을 적용한다.
 > **위 수치는 전부 크롭 없는 이미지에서 측정한 것이므로, 크롭된 입력을 주는 순간 이 표는 무효다.**"
@@ -378,7 +378,7 @@ take_01/02는 96%대인데 take_03만 44%다. 조사 결과:
 **[07-29 교정] 지금은 불일치가 없다.** 확인한 사실:
 
 - `ur_env/envs/config.py:26` — `IMAGE_CROP: Dict[str, Callable] = {}` (기본값이 빈 dict).
-- `serl_ur_infra`에는 **cube_in_cup용 UR config가 아직 없다** — 즉 크롭을 채우는 subclass가 없다.
+- ~~`serl_ur_infra`에는 cube_in_cup용 UR config가 아직 없다~~ — **머지로 추가됐다**(`ur_experiments/cube_in_cup.py`). 아래 07-29 판정의 전제가 무너진 지점이다.
 - `ur_env/envs/ur7e_env.py:471-478` — 키가 없으면 원본 `bgr`을 그대로 128×128로 resize한다.
 
 ```python
@@ -390,16 +390,32 @@ cropped = (
 resized = cv2.resize(cropped, ...)
 ```
 
-따라서 현재 파이프라인은 측정 시 쓴 `preprocess_frame(frame, None)`과 **동일**하고, 위 표들은 유효하다.
+따라서 07-29 시점의 파이프라인은 측정 시 쓴 `preprocess_frame(frame, None)`과 **동일**했고, 위 표들은
+그 시점 기준으로 유효했다.
 
-**경고의 방향은 그대로 유지한다: 크롭을 넣지 마라.** cube_in_cup용 UR config를 만들면서
-`IMAGE_CROP`에 항목을 추가하는 순간, 이 문서의 모든 확률·threshold 수치가 무효가 된다
-(classifier는 크롭 없이 학습됐다 — `analysis/infer_new_takes.py` 헤더: "matches training and
-deployment exactly: ... frames are resized to 128x128"). 크롭이 필요하면 **classifier를 같은 크롭으로
-재학습하고 이 문서의 스윕을 전부 다시 돌려라.**
-
-> 왜 문구를 고쳤나: 지금 사실이 아닌 경고를 남겨 두면 진짜로 크롭이 들어갔을 때 아무도 반응하지 않는다.
-> 경고는 실제로 깨졌을 때만 울려야 한다.
+> ### 🔴 [07-29 갱신] **그 전제는 이 머지로 깨졌다.**
+>
+> 위 07-29 교정은 "`serl_ur_infra`에 cube_in_cup용 UR config가 없다"를 근거로 삼았는데,
+> `test/hil-hardware-comms` 머지가 **정확히 그 config를 추가했다** —
+> `serl_ur_infra/ur_experiments/cube_in_cup.py`의 `IMAGE_CROP`이 cam1 `img[20:670,340:990]`,
+> cam2 `img[0:720,420:1140]`로 채워져 있다. 즉 **지금은 불일치가 실재하며, 이 문서의 확률·threshold
+> 표는 크롭이 활성인 경로에 대해서는 무효다.** 측정 자체는 그대로 유효하다 — 단 **"크롭 없는 입력"**
+> 이라는 조건이 붙는다.
+>
+> **해결 방향은 "크롭을 빼라"가 아니다.** 크롭 값은 데이터셋에서 측정해 나온 값이고(테이블 z 바닥,
+> 손목 파지축 x=781) 1차 소비자는 RL 정책이다. **classifier를 같은 크롭으로 재학습하고 이 문서의
+> 스윕을 다시 돌리는 것**이 정본 경로다. 현 체크포인트를 만든 학습이 150 epoch에 46초였고,
+> `cube_classifier_pipeline.py`에 `--cam1-crop`/`--cam2-crop`이 이미 배선돼 있다:
+>
+> ```
+> cam1  img[20:670, 340:990]  ->  --cam1-crop 340,20,990,670
+> cam2  img[0:720, 420:1140]  ->  --cam2-crop 420,0,1140,720
+> ```
+> (이 리포는 `y0,y1,x0,x1`로 저장하고 파이프라인은 `x0,y0,x1,y1`을 받는다 — 순서가 바뀐다.)
+>
+> 근거와 실측(픽셀 MAE 0.00 vs 21–35, recall@0.85 100% → 33.3%)은
+> [`HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md`](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) §12와
+> [`../docs/testing/08_OPEN_GAPS.md`](../docs/testing/08_OPEN_GAPS.md) G15.
 
 **[07-29 추가] `state` 더미도 무해함이 확인됐다.** 측정 스크립트가 넘기는 `state=np.zeros((1,1))`은
 결과에 영향이 없다 — `create_classifier()`가 `use_proprio=False`라 `observations["state"]`를 읽지 않는다.

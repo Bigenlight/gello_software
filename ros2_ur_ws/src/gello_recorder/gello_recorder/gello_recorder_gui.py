@@ -51,8 +51,9 @@ from PyQt5.QtWidgets import (
 # --------------------------------------------------------------------------- #
 
 # Defaults mirror run_recorder.sh exactly (same env var names + values).
-DEFAULT_CAM1_SERIAL = "147122072740"   # plain D435
-DEFAULT_CAM2_SERIAL = "243222072700"   # D435IF
+# See launch_cameras.sh for why these changed on 2026-07-28.
+DEFAULT_CAM1_SERIAL = "151623020789"   # plain D435
+DEFAULT_CAM2_SERIAL = "322743060038"   # D435IF
 DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"

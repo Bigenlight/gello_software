@@ -72,6 +72,7 @@ def build_data(
     timestamp_ns: int,
     policy_version: int,
     policy_action: Any,
+    policy_actions_synthetic: bool = False,
     episode_id: int,
     step_id: int,
     observation_id: str,
@@ -164,6 +165,10 @@ def build_data(
             ),
             "policy_action": requested_action,
             "intervened": intervened,
+            # Stamped per transition, not just in the run summary: once these
+            # pickles leave the process there is nothing else to distinguish a
+            # mock-noise action from a real policy action.
+            "policy_actions_synthetic": bool(policy_actions_synthetic),
         },
         "transition": transition,
     }
@@ -175,6 +180,10 @@ class ActorRunSummary:
     env_steps: int
     episodes_started: int
     intervention_steps: int
+    # True when policy actions were rewritten before execution. A run with a
+    # mock policy must stay identifiable AFTER the fact: the stored actions are
+    # indistinguishable from real policy output once the process exits.
+    policy_actions_synthetic: bool = False
 
 
 def _dump_data(
@@ -207,8 +216,17 @@ def run_remote_actor(
     checkpoint_path: Optional[str] = None,
     run_id: Optional[str] = None,
     session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+    policy_action_transform: Optional[Callable[[Any], Any]] = None,
 ) -> ActorRunSummary:
-    """Run synchronous remote inference and lossless transition delivery."""
+    """Run synchronous remote inference and lossless transition delivery.
+
+    ``policy_action_transform`` rewrites the server's action before it is used.
+    It is applied at the single point where the action enters the loop, so the
+    executed action and the stored action stay the same object -- the buffer
+    invariant that makes stored transitions trainable.  Its only intended use
+    is bring-up against a zero-action server, where the robot would otherwise
+    never move and the policy->robot->intervention path could not be exercised.
+    """
     max_steps = validate_counter(config.max_steps, name="max_steps")
     if max_steps <= 0:
         raise ValueError("config.max_steps must be positive")
@@ -258,6 +276,14 @@ def run_remote_actor(
             action_shape=action_shape,
             name="network policy action",
         )
+        if policy_action_transform is not None:
+            # Re-validate: the transform is caller-supplied, and an out-of-range
+            # or wrong-dtype action must fail here rather than reach the robot.
+            policy_action = validate_action(
+                policy_action_transform(policy_action),
+                action_shape=action_shape,
+                name="transformed policy action",
+            )
         next_observation, reward, done, truncated, info = env.step(policy_action)
         next_timestamp_ns = validate_timestamp_ns(info.get("timestamp_ns"))
         next_observation_id = f"{session_id}:{step_id + 1}"
@@ -271,6 +297,7 @@ def run_remote_actor(
             timestamp_ns=source_timestamp_ns,
             policy_version=action_result.policy_version,
             policy_action=policy_action,
+            policy_actions_synthetic=policy_action_transform is not None,
             episode_id=episode_id,
             step_id=step_id,
             observation_id=observation_id,
@@ -383,4 +410,5 @@ def run_remote_actor(
         env_steps=max_steps,
         episodes_started=episodes_started,
         intervention_steps=total_intervention_steps,
+        policy_actions_synthetic=policy_action_transform is not None,
     )

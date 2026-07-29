@@ -94,10 +94,20 @@ observation 방향 (팔 → 정책, 매 EXECUTE 틱):
 
 ## 2. 하드웨어 / 환경
 
+> ### 🔧 카메라 시리얼 정정 (2026-07-28)
+>
+> 카메라 **개체가 물리적으로 교체됐다.** 이전 판의 `147122072740` / `243222072700`은
+> 이 PC가 커널 로그상 한 번도 열거한 적 없는 하드웨어다(2026-07-05까지 소급 확인).
+> 이 문서의 시리얼은 실제 연결된 개체(`151623020789` / `322743060038`)로 갱신했다.
+> **없는 시리얼로 바인딩하면 조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다.
+> 모델 클래스(D435 / D435if)와 cam1·cam2 배정은 그대로지만, **어느 개체가 손목에 달렸는지는
+> 미확정**이다. 팔을 흔들어 cam2 화면에서 손가락이 고정되는지 확인할 것.
+> 아래 "검증 완료" 류의 과거 기록은 **옛 개체로 수행된 것**이라 그대로 두었다.
+
 - **팔**: UR7e, `ros-humble-ur`. **그리퍼**: Robotiq 2F-85 (Modbus RTU, 드라이버가 소유한 socat 브리지 `/tmp/ttyUR` 공유).
 - **카메라**: RealSense 2대, **시리얼로 바인딩** (혼동 시 정책이 조용히 열화됨 — §9 참고):
-  - cam1 = Intel RealSense **D435**, 시리얼 `147122072740`
-  - cam2 = Intel RealSense **D435if**, 시리얼 `243222072700`
+  - cam1 = Intel RealSense **D435**, 시리얼 `151623020789`
+  - cam2 = Intel RealSense **D435if**, 시리얼 `322743060038`
   - 공통 컬러 프로파일 `1280x720x30` (해상도/FPS는 두 카메라 동일해야 함)
 
   > **⚠️ 물리적 카메라 배치 = 학습 리그와 반드시 일치.** 한 대는 씬/3인칭 시점을, 다른 한 대는 작업공간 근접(close-up)을 본다. **두 물리 시점과 cam1/cam2 시리얼 할당이 학습 당시 리그와 동일**해야 하며, 어긋나면 정책이 **에러 없이 조용히 열화**된다(정책은 `cam1`=씬, `cam2`=근접 같은 고정 배치를 가정하고 학습됨 — `cam1/cam2` 순서는 학습에 고정됨). 실기 첫 구동 전에 **라이브 뷰(`rqt_image_view` 등)를 학습 셋업 사진과 대조**해 확인할 것. (FM 서버는 네이티브 해상도 프레임을 받아 정책이 224로 내부 리사이즈하므로, 두 카메라의 시점·순서가 유일한 육안 검증 포인트다.)
@@ -181,14 +191,14 @@ act_venv/bin/hf download Bigenlight/flow_matching_banana_in_pot_joint \
 3. **RealSense 카메라 2대를 정확한 시리얼→네임스페이스 매핑으로 기동** (ACT/diffusion과 동일):
 
    ```bash
-   # cam1 (D435, 147122072740) → 네임스페이스 cam1
+   # cam1 (D435, 151623020789) → 네임스페이스 cam1
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam1 camera_namespace:=cam1 \
-       serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
-   # cam2 (D435if, 243222072700) → 네임스페이스 cam2
+       serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
+   # cam2 (D435if, 322743060038) → 네임스페이스 cam2
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam2 camera_namespace:=cam2 \
-       serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+       serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
 
    # 압축 이미지 토픽이 ~30Hz로 나오는지 확인:
    ros2 topic hz /cam1/cam1/color/image_raw/compressed
@@ -331,7 +341,7 @@ FM_CHECKPOINT=/path/to/pretrained_model ./run_ur7e_fm_real.sh
 - **refill이 느려 FAULT-loop / 팔이 자꾸 멈춤.** Euler refill이 `act_timeout_s`(0.6s)를 넘기고 있다는 뜻(또는 refill 블록이 obs를 얼려 `obs_timeout_s`(0.7s)를 넘긴 경우 — 둘 중 먼저 걸리는 쪽이 FAULT). **선호되는 해결책은 워치독을 넓히는 게 아니라**(§6) `FM_NUM_INTEGRATION_STEPS`를 낮추는 것이다(예: 5). 먼저 서버 `net refill` 로그로 실제 예산 초과인지 확인할 것. GPU가 아니라 CPU로 돌고 있으면 근본 원인이 그것이다(아래).
 - **서버가 종료 코드 3 / "CUDA unavailable"로 죽음.** `resolve_device()`는 `--device cuda`인데 CUDA가 없으면 **자동 CPU 폴백을 하지 않고 코드 3으로 거부**한다(CPU Euler 적분이 0.6s 타임아웃을 넘겨 FAULT-loop를 유발하므로 의도적). 해결: (a) CUDA/드라이버를 고치거나, (b) 정말 CPU로 돌려야 한다면 `--device cpu`(또는 `FM_DEVICE=cpu`)를 명시하고 **동시에** `fm_deploy.yaml`의 세 워치독을 **모두** 크게 올릴 것 — `act_timeout_s`뿐 아니라 **`obs_timeout_s`도 반드시 함께** 올려 `act_timeout_s < obs_timeout_s < staleness_timeout_s` 순서를 유지해야 한다(그러지 않으면 느린 CPU refill이 obs를 오래 얼려 **가짜 obs-stale FAULT**를 낸다). 이는 어디까지나 CPU 임시방편이며, 정상 배포의 올바른 노브는 `FM_NUM_INTEGRATION_STEPS` 축소다.
 - **resize / policy-type mismatch (조용한 열화 또는 로드 실패).** FM 경로는 **네이티브 해상도**를 서버에 넘기고 정책이 224로 내부 리사이즈한다 — diffusion처럼 360×640으로 pre-resize하면 **double-resize**로 조용히 열화된다. `image_preprocess_fm`(FM용)과 `image_preprocess`(diffusion용)를 헷갈리지 말 것. 또한 체크포인트가 `multi_task_dit`/`flow_matching`이 아니면 `get_policy_class(cfg.type)`가 다른 클래스를 로드하거나, `--num-integration-steps`가 `hasattr` 가드에 걸려 **경고만 남기고 무시**된다(로그 `WARNING: --num-integration-steps=... ignored`) — 로드 로그의 `policy class:`·`objective=`·`num_integration_steps=`·`image_resize_shape=` 줄로 올바른 체크포인트인지 확인하라.
-- **cam1/cam2 시리얼이 뒤바뀜.** 반드시 **시리얼로 바인딩**할 것(`serial_no`). 잘못 바인딩되면 정책은 크래시하지 않고 **조용히 열화**된다. all-digit 시리얼은 따옴표로 감쌀 것: `serial_no:="'147122072740'"`.
+- **cam1/cam2 시리얼이 뒤바뀜.** 반드시 **시리얼로 바인딩**할 것(`serial_no`). 잘못 바인딩되면 정책은 크래시하지 않고 **조용히 열화**된다. all-digit 시리얼은 따옴표로 감쌀 것: `serial_no:="'151623020789'"`.
 - **가짜(spurious) FAULT가 시작 직후에 뜬다.** 서버 워밍업이 실패/스킵됐을 가능성(로그의 `warmup done` 확인), 또는 첫 refill이 예산을 넘김(→ Euler 스텝 줄이기). FM은 첫 EXECUTE에서 곧바로 refill을 한 번 하므로 워밍업(+CLIP lazy-init)이 특히 중요하다.
 - **`~/start_execution`이 계속 거부됨.** 라이브 자세가 `start_pose`에서 0.1rad 넘게 떨어졌거나("live pose not within 0.1 rad" 로그), fresh 관측 셋(두 카메라 + 그리퍼 위치)이 완전하지 않다는 뜻. handshake 수렴 로그와 카메라·그리퍼 토픽 발행을 확인하라.
 - **`--checkpoint` 누락.** `FM_CHECKPOINT`(또는 `--checkpoint`)가 없으면 서버는 종료 코드 2로 즉시 죽는다; 런처는 그 전에 `ERROR: FM_CHECKPOINT is required`로 거부한다.

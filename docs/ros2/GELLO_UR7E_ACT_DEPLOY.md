@@ -85,10 +85,20 @@ observation 방향 (팔 → 정책, 매 EXECUTE 틱):
 
 ## 2. 하드웨어 / 환경
 
+> ### 🔧 카메라 시리얼 정정 (2026-07-28)
+>
+> 카메라 **개체가 물리적으로 교체됐다.** 이전 판의 `147122072740` / `243222072700`은
+> 이 PC가 커널 로그상 한 번도 열거한 적 없는 하드웨어다(2026-07-05까지 소급 확인).
+> 이 문서의 시리얼은 실제 연결된 개체(`151623020789` / `322743060038`)로 갱신했다.
+> **없는 시리얼로 바인딩하면 조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다.
+> 모델 클래스(D435 / D435if)와 cam1·cam2 배정은 그대로지만, **어느 개체가 손목에 달렸는지는
+> 미확정**이다. 팔을 흔들어 cam2 화면에서 손가락이 고정되는지 확인할 것.
+> 아래 "검증 완료" 류의 과거 기록은 **옛 개체로 수행된 것**이라 그대로 두었다.
+
 - **팔**: UR7e, `ros-humble-ur`. **그리퍼**: Robotiq 2F-85 (Modbus RTU, 드라이버가 소유한 socat 브리지 `/tmp/ttyUR` 공유).
 - **카메라**: RealSense 2대, **시리얼로 바인딩** (혼동 시 정책이 조용히 열화됨 — §9 참고):
-  - cam1 = Intel RealSense **D435**, 시리얼 `147122072740`
-  - cam2 = Intel RealSense **D435if**, 시리얼 `243222072700`
+  - cam1 = Intel RealSense **D435**, 시리얼 `151623020789`
+  - cam2 = Intel RealSense **D435if**, 시리얼 `322743060038`
   - 공통 컬러 프로파일 `1280x720x30` (해상도/FPS는 두 카메라 동일해야 함)
 
   > **⚠️ 물리적 카메라 배치 = 학습 리그와 반드시 일치.** 하드웨어 스펙상 한 대는 **삼각대(tripod)에 올려 씬/3인칭 시점**을, 다른 한 대는 **작업공간을 근접(close-up)**으로 본다. **두 물리 시점과 cam1/cam2 시리얼 할당이 학습 당시 리그와 동일**해야 하며, 어긋나면 정책이 **에러 없이 조용히 열화**된다(정책은 cam1=씬, cam2=근접 같은 고정 배치를 가정하고 학습됨). 실기 첫 구동 전에 **라이브 뷰(`rqt_image_view` 등)를 학습 셋업 사진과 대조**해 어느 카메라가 어느 시점인지, 시리얼 할당이 맞는지 확인한 뒤에야 정책을 신뢰할 것. (§9의 cam1/cam2 swap 경고와 함께 읽을 것.)
@@ -174,14 +184,14 @@ ACT_CHECKPOINT="$CKPT" ./scripts/run_act_server.sh
 3. **RealSense 카메라 2대를 정확한 시리얼→네임스페이스 매핑으로 기동.** 별도 launch 파일이 없으므로 `ros2_ur_ws/run_recorder.sh`(레코더)가 카메라를 띄우는 방식(시리얼별 `realsense2_camera` 노드, `serial_no:='<serial>'`처럼 **작은따옴표로 감싼** all-digit 문자열, 공통 `color_profile:='1280x720x30'`)을 그대로 재사용한다:
 
    ```bash
-   # cam1 (D435, 147122072740) → 네임스페이스 cam1
+   # cam1 (D435, 151623020789) → 네임스페이스 cam1
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam1 camera_namespace:=cam1 \
-       serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
-   # cam2 (D435if, 243222072700) → 네임스페이스 cam2
+       serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
+   # cam2 (D435if, 322743060038) → 네임스페이스 cam2
    ros2 launch realsense2_camera rs_launch.py \
        camera_name:=cam2 camera_namespace:=cam2 \
-       serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+       serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
    ```
 
    기동 후 압축 이미지 토픽이 실제로 나오는지 확인:
@@ -322,10 +332,10 @@ source /opt/ros/humble/setup.bash
 cd ~/gello_software/ros2_ur_ws
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam1 camera_namespace:=cam1 \
-    serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam2 camera_namespace:=cam2 \
-    serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
 ```
 
 확인: `ros2 topic hz /cam1/cam1/color/image_raw/compressed` / `/cam2/...`로 ~30Hz 나오는지.
@@ -453,6 +463,9 @@ cd ~/gello_software/ros2_ur_ws
 - **Humble colcon build** — `colcon build --packages-select gello_policy ur_gello_bringup`가 실제 로봇 PC의 Humble에서 성공(이전엔 가정이었으나 이제 실제로 수행됨).
 - **실제 handshake** — 실제 UR7e에서 **첫 시도에** 깔끔하게 수렴: 0.388 rad gap을 0.78s 트래젝토리로 chase → max gap 0.0001 rad(`chase_tol` 0.06 rad을 크게 하회)로 수렴 → 0.41s 유지(`chase_dwell_s` 0.4s 요건 충족) → 컨트롤러가 `forward_position_controller`로 깔끔히 전환 → 브리지 resume. dead-band livelock 없음, 튜닝 불필요 — **디폴트 그대로 통과**. ([`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md) §2의 tolerance 체인이 ACT 경로에서도 실기에서 성립함을 확인.)
 - **실제 카메라 시리얼 매핑** — cam1(D435, `147122072740`)·cam2(D435if, `243222072700`) 모두 `rs-enumerate-devices`로 정상 열거, arm 직전 `ros2 topic hz`로 압축 토픽이 ~29.7–29.9Hz 라이브 스트리밍 확인 — 문서의 예상 물리 배치와 일치.
+  > ⚠️ 이 시리얼은 **당시 장착돼 있던 개체**다. 2026-07-28에 카메라가 물리적으로 교체돼
+  > 현재는 `151623020789` / `322743060038`이다(§2 정정 박스). 이 줄은 그때의 검증 기록이라
+  > 일부러 그대로 두었다 — 오늘 이 값으로 실행하면 카메라가 조용히 안 뜬다.
 - **실제 그리퍼** — 공유 Modbus socat 브리지로 연결 후 fault 없이 자동 캘리브레이션 성공(`gACT:1, gFLT:0`). ~1.7s 활성화 창 동안 일시적 "dropped streaming setpoint" 경고 1회가 떴으나 스스로 해소된 benign 현상(실제 문제 아님).
 - **ACT 서버 / GPU 추론** — py3.12·`--device cuda`로 체크포인트 로드 후 `127.0.0.1:5591` listen 확인, GPU 추론 경로 라이브(RTX 3060 Mobile, CUDA 13.2, 드라이버 595.71.05).
 - **엔드투엔드 자율 시도** — 오퍼레이터가 `~/start_execution`을 호출, 로봇이 학습된 "put right banana in pot" 태스크를 실제로 자율 시도. **전체 시스템(안전 게이팅 → 실제 handshake → 실제 카메라 매핑 → ZMQ 라운드트립 → 실제 GPU 추론 → 실제 그리퍼 제어)이 물리 하드웨어에서 엔드투엔드로 올바르게 동작한 첫 확인 사례**다.
@@ -469,7 +482,7 @@ cd ~/gello_software/ros2_ur_ws
 ## 9. 트러블슈팅
 
 - **cam1/cam2 시리얼이 뒤바뀜.** 반드시 **시리얼로 바인딩**할 것(`serial_no`) — 이름/포트 순서에 의존하면 두 RealSense를 구분할 수 없다. 잘못 바인딩되면 정책은 크래시하지 않고 **조용히 열화**된다(어느 카메라가 어느 관측 슬롯인지 학습 시와 달라지므로).
-- **all-digit 시리얼의 정수 강제변환 버그.** `ros2 launch`의 CLI 인자 파서는 전부 숫자인 문자열(예: `147122072740`)을 정수로 오추론해 `serial_no`(string 파라미터)에 넣으려다 노드가 즉시 죽는다. 값을 **따옴표로 감쌀 것**: `serial_no:="'147122072740'"` (자세한 배경은 [`GELLO_UR7E_RECORDING.md`](./GELLO_UR7E_RECORDING.md)의 troubleshooting 항목 7 참고).
+- **all-digit 시리얼의 정수 강제변환 버그.** `ros2 launch`의 CLI 인자 파서는 전부 숫자인 문자열(예: `151623020789`)을 정수로 오추론해 `serial_no`(string 파라미터)에 넣으려다 노드가 즉시 죽는다. 값을 **따옴표로 감쌀 것**: `serial_no:="'151623020789'"` (자세한 배경은 [`GELLO_UR7E_RECORDING.md`](./GELLO_UR7E_RECORDING.md)의 troubleshooting 항목 7 참고).
 - **그리퍼 크러시(과도한 힘으로 닫힘).** `policy_leader_node`는 `action[6]`(0=open..1=closed)을 **그대로(identity)** `/robotiq_gripper/command_percent`에 발행한다 — threshold나 binarize를 절대 넣지 말 것(데이터셋의 grip_cmd가 연속값이므로). `ur_gello_bringup`의 `gello_gripper_bridge_node`에는 방향을 뒤집는 `invert` 파라미터(반드시 `false`로 유지해야 하는, crush hazard가 있는 옵션)가 있지만, **ACT 배포 경로는 이 노드를 아예 launch하지 않는다** — `policy_leader_node`가 `/robotiq_gripper/command_percent`의 유일한 publisher이고 그 사이에 invert 로직이 전혀 없다. 만약 launch 파일을 손대다 `gello_gripper_bridge`를 다시 끼워 넣으면 이중 writer + 잠재적 invert 위험이 함께 재발하므로, 트러블슈팅 시 **`gello_gripper_bridge`가 여전히 빠져 있는지**부터 확인할 것.
 - **첫 실행 시 torch 캐시 관련 멈춤/실패.** §4의 `TORCH_HOME`/`HF_HUB_OFFLINE=1` 참고 — ResNet18 백본 가중치를 오프라인 환경에서 인터넷으로 받으려다 멈추는 경우가 흔하다.
 - **가짜(spurious) FAULT가 시작 직후에 뜬다.** 서버의 워밍업이 실패했거나 건너뛰어졌을 가능성. 서버 로그에 `warmup done`이 찍혔는지 확인.

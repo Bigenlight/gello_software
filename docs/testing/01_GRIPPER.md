@@ -5,7 +5,7 @@
 정본 문서: `docs/ros2/GELLO_UR7E_GRIPPER.md`. 이 문서는 HIL 관점의 검증 절차/판정 기준만 다룬다.
 
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 ```
 
 ---
@@ -176,7 +176,16 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 
 ## 7. 남은 것 (이 문서 범위에서 미검증)
 
+> 🔧 **2026-07-27 재확인:** §3의 실측치(열림 0.0118 / 빈손닫힘 0.8980 = 229/255 /
+> 피드백 5.000 Hz)는 이번 실기 세션에서도 그대로 재현됐다. **§6의 완료 판정은 유효하다.**
+> 아래 미검증 항목은 여전히 미검증이다 — §6과 섞지 말 것.
+
 - [ ] **RL 경로**(`/robotiq_gripper/command_percent`)로 그리퍼가 실제로 움직이는지 —
-      env에서 액션 `[0,0,0,0,0,0,-1]` / `[0,...,+1]`을 쏴서 확인. `07_FAILURE_INJECTION.md` E-부록.
+      env에서 액션 `[0,0,0,0,0,0,-1]` / `[0,...,+1]`을 쏴서 확인. `07_FAILURE_INJECTION.md` E12.
+- [ ] **개입 경로**(리더 트리거 → `intervene_action[6]` → 그리퍼). 배선 코드는 커밋됐지만
+      (`08_OPEN_GAPS.md` G3) 하드웨어 미확인. 판정은 `04_HIL_INTERVENTION.md` §6.3.
+- [ ] `run_hil_actor.sh`의 preflight [7b]가 `/robotiq_gripper/position_percent`를 확인하지만
+      **WARN이지 FAIL이 아니다** — 그리퍼 없이도 actor가 뜬다. 19-D state의 그리퍼 채널이
+      조용히 0.0("열림")으로 채워진다는 뜻이다 (`08_OPEN_GAPS.md` G8).
 - [ ] `GRIPPER_SLEEP=0.6 s` 디바운스가 10 Hz 정책 루프에서 실제로 어떻게 보이는지 (6 스텝에 1번만 반영).
 - [ ] 물체를 쥔 상태에서 `gOBJ`(stalled) 판정과 `GripperPenaltyWrapper` 보상 연동.

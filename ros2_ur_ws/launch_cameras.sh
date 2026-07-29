@@ -22,8 +22,8 @@
 #     VIEW=false ./launch_cameras.sh      # both cameras, NO viewer window
 #
 # ENV (same names/defaults as run_recorder.sh's camera section):
-#     CAM1_SERIAL    RealSense #1 serial (default 147122072740, a plain D435)
-#     CAM2_SERIAL    RealSense #2 serial (default 243222072700, a D435IF)
+#     CAM1_SERIAL    RealSense #1 serial (default 151623020789, a plain D435)
+#     CAM2_SERIAL    RealSense #2 serial (default 322743060038, a D435IF)
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
@@ -36,8 +36,16 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 
-CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
-CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
+# Serials updated 2026-07-28: the previously configured pair (147122072740 /
+# 243222072700) belongs to cameras that are not connected and that this machine
+# has never enumerated -- kernel logs back to 2026-07-05 only ever show the two
+# below.  Binding by a serial that is absent does not degrade gracefully; the
+# camera simply never comes up.  Model classes are unchanged (plain D435 -> cam1,
+# D435IF -> cam2), which is the only evidence tying each unit to its mount, so
+# confirm with one arm jog: cam2 is the WRIST camera, so its background must
+# sweep while the gripper fingers stay fixed in frame.
+CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
+CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
 CAM1_NAME="${CAM1_NAME:-cam1}"
 CAM2_NAME="${CAM2_NAME:-cam2}"
 COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"

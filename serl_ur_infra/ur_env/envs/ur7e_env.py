@@ -115,16 +115,7 @@ class UR7eEnv(gym.Env):
         self.recording_frames = []
 
         # workspace safety box (same semantics as FrankaEnv.clip_safety_box)
-        self.xyz_bounding_box = gym.spaces.Box(
-            np.asarray(self.config.ABS_POSE_LIMIT_LOW[:3], dtype=np.float64),
-            np.asarray(self.config.ABS_POSE_LIMIT_HIGH[:3], dtype=np.float64),
-            dtype=np.float64,
-        )
-        self.rpy_bounding_box = gym.spaces.Box(
-            np.asarray(self.config.ABS_POSE_LIMIT_LOW[3:], dtype=np.float64),
-            np.asarray(self.config.ABS_POSE_LIMIT_HIGH[3:], dtype=np.float64),
-            dtype=np.float64,
-        )
+        self._build_safety_box()
 
         # ---- spaces: byte-for-byte the FrankaEnv contract ---- #
         self.action_space = gym.spaces.Box(
@@ -192,7 +183,10 @@ class UR7eEnv(gym.Env):
                 upsampler_cfg=self.config.UPSAMPLER,
                 dry_run=self.config.DRY_RUN,
             )
-        self.controller = PolicyDeltaController(self.config.GOVERNOR, self.hz)
+        self._await_robot_state()
+        self.controller = PolicyDeltaController(
+            self.config.GOVERNOR, self.hz, clip_pose=self._clip_command_pose
+        )
         self.last_gripper_act = time.time()
 
         if self.config.DISPLAY_IMAGE:
@@ -214,6 +208,173 @@ class UR7eEnv(gym.Env):
             print(f"[UR7eEnv] keyboard listener unavailable ({e}) — no ESC stop")
 
     # ------------------------------------------------------------------ #
+    # workspace safety box                                                #
+    # ------------------------------------------------------------------ #
+    def _build_safety_box(self) -> None:
+        """Validate ABS_POSE_LIMIT_* and arm (or refuse to arm) the clip.
+
+        Sets ``self.xyz_bounding_box`` / ``self.rpy_bounding_box`` (the two
+        gym Boxes FrankaEnv.clip_safety_box reads) and
+        ``self._safety_box_active``.
+
+        REFUSE-DON'T-CLAMP.  ``DefaultUR7eEnvConfig`` ships zeros for both
+        limits — "not measured yet", not "the workspace is a point at the base
+        origin".  Clamping to a zero-volume box would command the TCP to
+        (0,0,0) with rx=ry=rz=0, i.e. drive the arm straight down through its
+        own base: a far worse outcome than no box at all.  The same is true of
+        an inverted box (``np.clip`` with low>high silently returns ``high``,
+        so every pose is teleported to one corner).  In both cases we disable
+        the clip and say so loudly.  A task config that actually intends a box
+        is expected to validate its own numbers and fail at construction —
+        ``ur_experiments/cube_in_cup.py`` does exactly that; this is the
+        second line of defence for configs that don't.
+        """
+        low_cfg = getattr(self.config, "ABS_POSE_LIMIT_LOW", None)
+        high_cfg = getattr(self.config, "ABS_POSE_LIMIT_HIGH", None)
+
+        self.xyz_bounding_box = None
+        self.rpy_bounding_box = None
+        self._safety_box_active = False
+
+        if low_cfg is None or high_cfg is None:
+            print(
+                "[UR7eEnv] WARNING: ABS_POSE_LIMIT_LOW/HIGH is None — workspace "
+                "safety box DISABLED (commands are not clipped)."
+            )
+            return
+
+        low = np.asarray(low_cfg, dtype=np.float64).reshape(-1)
+        high = np.asarray(high_cfg, dtype=np.float64).reshape(-1)
+        if low.shape != (6,) or high.shape != (6,):
+            print(
+                f"[UR7eEnv] WARNING: ABS_POSE_LIMIT_* must be 6-vectors, got "
+                f"{low.shape}/{high.shape} — workspace safety box DISABLED."
+            )
+            return
+        if not np.all(np.isfinite(low)) or not np.all(np.isfinite(high)):
+            print(
+                "[UR7eEnv] WARNING: ABS_POSE_LIMIT_* contains non-finite values "
+                "— workspace safety box DISABLED."
+            )
+            return
+        if not np.all(high > low):
+            print(
+                "[UR7eEnv] WARNING: ABS_POSE_LIMIT_HIGH must exceed "
+                f"ABS_POSE_LIMIT_LOW on every axis (low={low}, high={high}) — "
+                "this is a zero-volume or inverted workspace, NOT a workspace. "
+                "Safety box DISABLED rather than clamping the arm to a point; "
+                "measure the box (see ur_experiments/cube_in_cup.py)."
+            )
+            return
+        # Index 3 is |rx|, not rx (see clip_safety_box) — a negative bound there
+        # means the config author wrote a signed range and the magnitude clip
+        # would do something they did not intend.
+        if low[3] < 0.0 or high[3] <= 0.0:
+            print(
+                "[UR7eEnv] WARNING: ABS_POSE_LIMIT_*[3] is the bound on |rx| "
+                f"(magnitude, always >= 0), got low={low[3]} high={high[3]} — "
+                "workspace safety box DISABLED."
+            )
+            return
+
+        self.xyz_bounding_box = gym.spaces.Box(low[:3], high[:3], dtype=np.float64)
+        self.rpy_bounding_box = gym.spaces.Box(low[3:], high[3:], dtype=np.float64)
+        self._safety_box_active = True
+
+        # FRAME COUPLING.  The box is enforced on the pose PolicyDeltaController
+        # integrates, which is fk(q) — the FLANGE.  With a non-zero TCP offset
+        # the observation is the tool tip while the box is the flange, and the
+        # two differ by the whole tool length with no error anywhere (this is
+        # the 17.4 cm trap documented in ur_experiments/cube_in_cup.py).
+        tool = np.asarray(self.config.TCP_OFFSET_XYZ_RPY, dtype=float)
+        if np.any(tool != 0.0):
+            print(
+                "[UR7eEnv] WARNING: TCP_OFFSET_XYZ_RPY is non-zero but the "
+                "workspace box is enforced on the FLANGE pose the controller "
+                "integrates. Either measure the box in the flange frame or "
+                "make PolicyDeltaController integrate at fk(q) @ T_tool."
+            )
+
+    def _clip_xyz_euler(self, xyz: np.ndarray, euler: np.ndarray):
+        """The actual clip, in the representation the box is defined in.
+
+        Ported verbatim from franka_env.envs.franka_env.FrankaEnv.
+        clip_safety_box (upstream lines 185-207); both public entry points
+        below go through here so they cannot drift apart.
+
+        The rx special case is the whole reason this is not one np.clip: our
+        tool points straight DOWN, so rx sits near +-pi and
+        ``Rotation.as_euler("xyz")`` reports it on whichever branch is closer.
+        12% of the cube_in_cup samples land on the negative branch. A naive
+        ``np.clip(rx, 2.60, pi)`` maps rx=-3.14 to +2.60 — a 5.7 rad wrist
+        flip, commanded as a "safety" measure. Upstream therefore clips the
+        MAGNITUDE and restores the sign, which is continuous across the
+        +-pi seam. Index 3 of ABS_POSE_LIMIT_* is consequently a bound on
+        |rx|, not on rx.
+
+        Upstream edge case kept as-is: ``np.sign(0.0) == 0`` leaves rx at 0.
+        That pose is 180 deg from the operating branch and unreachable by the
+        0.05 rad/step increments this controller emits; the alternative
+        (forcing a sign) would command exactly the wrist flip the branch
+        handling exists to prevent.
+        """
+        xyz_c = np.clip(xyz, self.xyz_bounding_box.low, self.xyz_bounding_box.high)
+        euler_c = np.asarray(euler, dtype=float).copy()
+        sign = np.sign(euler_c[0])
+        euler_c[0] = sign * np.clip(
+            np.abs(euler_c[0]),
+            self.rpy_bounding_box.low[0],
+            self.rpy_bounding_box.high[0],
+        )
+        euler_c[1:] = np.clip(
+            euler_c[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:]
+        )
+        return xyz_c, euler_c
+
+    def clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
+        """Clip a COMMANDED tcp_pose (7,) xyz+quat into the workspace box.
+
+        Same signature and semantics as FrankaEnv.clip_safety_box, with one
+        deliberate difference: we return a copy instead of mutating the
+        caller's array. Upstream can mutate safely because it only ever passes
+        its own scratch ``self.nextpos``; our callers pass observations too.
+
+        WHEN it is applied matches upstream exactly: on the pose being
+        COMMANDED, not on the observation. Clipping the observation would lie
+        to the policy about where the arm is; clipping the command is what
+        keeps the arm inside the box. A no-op when the box is disabled.
+        """
+        pose = np.asarray(pose, dtype=float).copy()
+        if not self._safety_box_active:
+            return pose
+        euler = Rotation.from_quat(pose[3:]).as_euler("xyz")
+        xyz_c, euler_c = self._clip_xyz_euler(pose[:3], euler)
+        pose[:3] = xyz_c
+        pose[3:] = Rotation.from_euler("xyz", euler_c).as_quat()
+        return pose
+
+    def _clip_command_pose(self, T: np.ndarray):
+        """4x4 adapter handed to PolicyDeltaController as ``clip_pose``.
+
+        Returns ``(T_clipped, clipped)``. When nothing is out of bounds the
+        ORIGINAL matrix is returned untouched — a matrix->euler->matrix
+        round-trip would inject ~1e-16 of drift into every single command and
+        make ``clipped`` impossible to detect exactly.
+        """
+        if not self._safety_box_active:
+            return T, False
+        euler = Rotation.from_matrix(T[:3, :3]).as_euler("xyz")
+        xyz_c, euler_c = self._clip_xyz_euler(T[:3, 3], euler)
+        # np.clip returns the input value bit-for-bit when it is in range, and
+        # sign*abs is exact, so equality here is exactly "nothing was clipped".
+        if np.array_equal(xyz_c, T[:3, 3]) and np.array_equal(euler_c, euler):
+            return T, False
+        T_c = np.eye(4)
+        T_c[:3, :3] = Rotation.from_euler("xyz", euler_c).as_matrix()
+        T_c[:3, 3] = xyz_c
+        return T_c, True
+
+    # ------------------------------------------------------------------ #
     # step / reset                                                        #
     # ------------------------------------------------------------------ #
     def _action_to_xi(self, action: np.ndarray) -> np.ndarray:
@@ -227,14 +388,19 @@ class UR7eEnv(gym.Env):
         )
 
     def _apply_action(self, action: np.ndarray) -> dict:
-        """Action post-processing + dispatch: scale -> governor/IK gates ->
+        """Action post-processing + dispatch: scale -> governor/box/IK gates ->
         publish arm and gripper commands. Returns the controller info dict
-        (held / reject_reason)."""
+        (held / reject_reason / clipped).
+
+        The workspace box is enforced INSIDE the controller, not here: it is
+        applied to the commanded pose BEFORE IK, so a clamped target re-solves
+        instead of being held, and the clamped pose becomes the controller's
+        integrator state (see PolicyDeltaController.step for the anti-windup
+        argument). ``self._clip_command_pose`` is the hook — this env still
+        owns the box, the controller just asks it per tick.
+        """
         xi = self._action_to_xi(action)
         q_cmd, ctrl_info = self.controller.step(xi)
-        # workspace box: clamp is applied on the *commanded* TCP pose.
-        # TODO(together): fold clip_safety_box into the controller gates so
-        # a clamped target re-solves IK instead of holding.
         self.backend.send_joint_command(q_cmd)
         self._send_gripper_command(action[6] * self.action_scale[2])
         return ctrl_info
@@ -259,12 +425,82 @@ class UR7eEnv(gym.Env):
             or bool(reward)
             or self.terminate
         )
-        # held/reject_reason surfaced for operator display and logging; extra
-        # info keys are ignored by the hil-serl actor loop (it only pops
+        # held/reject_reason/clipped surfaced for operator display and logging;
+        # extra info keys are ignored by the hil-serl actor loop (it only pops
         # intervene_action/left/right and reads succeed).
-        info = {"succeed": bool(reward)}
+        #
+        # "clipped" is not decoration: a policy fighting the workspace wall
+        # looks exactly like a policy that has stopped learning — the action is
+        # large, the arm does not move, and nothing in the reward explains it.
+        # Silent clamping is the single hardest failure to diagnose after the
+        # fact, so every clamped tick is reported. Present (False) even in fake
+        # mode so log schemas do not depend on the run mode.
+        info = {"succeed": bool(reward), "held": False, "clipped": False}
         info.update(ctrl_info)
         return ob, int(reward), done, False, info
+
+    def _await_robot_state(self) -> None:
+        """Block until the robot state stream is live, or fail with a diagnosis.
+
+        DDS discovery plus the first /joint_states message takes on the order of
+        a second, and reset() is the very first thing every caller does.  Without
+        this wait the env raises "no /joint_states -- cannot reset" on a rig that
+        is in fact perfectly healthy, which reads as a wiring fault and sends
+        people looking at QoS.  Waiting here rather than in each entry point
+        keeps the contract with the caller simple: once the constructor returns,
+        the env is usable.
+        """
+
+        deadline = time.time() + float(self.config.ROBOT_STATE_WAIT_S)
+        while time.time() < deadline:
+            q, _, _ = self.backend.get_joint_state()
+            if q is not None:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                f"no /joint_states within {self.config.ROBOT_STATE_WAIT_S}s of "
+                f"subscribing to '{self.config.ROS.get('joint_states_topic', '/joint_states')}'. "
+                "Is the UR driver running (ros2 topic hz /joint_states), and does "
+                "this process share its ROS_DOMAIN_ID?"
+            )
+        # Its OWN budget, not whatever the joint-state wait left over. DDS
+        # discovery can eat most of ROBOT_STATE_WAIT_S, which would leave the
+        # cameras near-zero seconds and time them out on a healthy rig -- the
+        # exact failure this wait exists to prevent.
+        self._await_first_frames(
+            time.time() + float(self.config.ROBOT_STATE_WAIT_S)
+        )
+
+    def _await_first_frames(self, deadline: float) -> None:
+        """Block until every configured camera has delivered a frame.
+
+        Same argument as the joint-state wait above, and the same failure it
+        prevents: get_im() rejects any frame older than IMAGE_STALE_S (0.5 s),
+        but a RealSense needs seconds to produce its first one.  Without this,
+        reset() -- the first thing every caller does -- throws on a healthy rig
+        that has simply not finished starting its cameras.
+
+        The hasattr guard is load-bearing, not defensive: fake/stub backends in
+        the test suite implement get_joint_state() without get_image().
+        """
+
+        cameras = getattr(self.config, "CAMERAS", None)
+        if not cameras or not hasattr(self.backend, "get_image"):
+            return
+        pending = list(cameras)
+        while time.time() < deadline:
+            pending = [
+                key for key in pending if self.backend.get_image(key)[0] is None
+            ]
+            if not pending:
+                return
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"no frame from camera(s) {pending} within "
+            f"{self.config.ROBOT_STATE_WAIT_S}s. Is launch_cameras.sh running, "
+            "and do the configured serials match the connected cameras?"
+        )
 
     def reset(self, **kwargs):
         if self.save_video:
@@ -293,6 +529,10 @@ class UR7eEnv(gym.Env):
         pose the operator pre-positions with the proven move-to-start tooling
         first.
 
+        The target is first mapped onto the arm's CURRENT turn (branch cut)
+        so no joint is ever sent the long way round — see the block comment
+        below; this is a cable-winding hazard, not a cosmetic detail.
+
         TODO(together): RANDOM_RESET (task-space offset around the init pose),
         UR fault recovery before moving.
         """
@@ -301,6 +541,49 @@ class UR7eEnv(gym.Env):
         q, _, _ = self.backend.get_joint_state()
         if q is None:
             raise RuntimeError("no /joint_states — cannot reset")
+
+        # ---- BRANCH CUT: map the target onto the arm's current turn ---- #
+        # Do NOT "simplify" this back to a raw abs(q - target). A joint angle
+        # sent to forward_position_controller is a LITERAL NUMBER, not an angle:
+        # the controller interpolates linearly in raw joint space with no 2*pi
+        # awareness (ur_gello_bringup/angle_utils.py opens with this exact
+        # warning). So target and q can be ~2*pi apart as numbers while being
+        # the same physical pose.
+        #
+        # This task lives right on that seam. cube_in_cup's RESET_JOINTS has
+        # wrist_3 at -3.1331 and shoulder_pan ~0.003 rad past +pi; a measured
+        # parked pose on this rig had wrist_3 at +3.1795 — physically 0.029 rad
+        # from the target, numerically 6.3126 apart. Two consequences, both real:
+        #
+        #   1. Commanding the raw -3.1331 sends wrist_3 the LONG way: a full
+        #      6.31 rad revolution instead of 0.03 rad, ~10 s of blind slew,
+        #      and the Robotiq 2F-85 tool-comm cable wound once around the
+        #      wrist (hazard H3 in this repo's docs). DRY_RUN is the only
+        #      reason the measured case did not do this.
+        #   2. The guard below reported "6.31 rad" for a move whose true worst
+        #      joint is 3.53 — which reads as a wiring fault and sends the
+        #      operator looking in the wrong place.
+        #
+        # ur_kin.wrapped_nearest picks, per joint, the 2*pi-equivalent of the
+        # target nearest the CURRENT q. It deliberately leaves the elbow
+        # (index 2) alone: the elbow's range is +-pi, so its "shorter" wrapped
+        # target would sit outside the feasible set. The elbow therefore keeps
+        # its literal travel, which is its real travel — that is why the
+        # branch-safe distance here is 3.53 and not the 2.75 a naive circular
+        # distance reports.
+        #
+        # Everything downstream (distance guard, command, arrival test, error
+        # messages) uses THIS target, never self.config.RESET_JOINTS: arrival is
+        # convergence to what we actually commanded.
+        target = self._kin.wrapped_nearest(target, q)
+        if not self._kin.within_joint_limits(target, margin=0.0):
+            raise RuntimeError(
+                f"branch-mapped reset target {np.round(target, 4)} leaves the "
+                f"joint limits (current q={np.round(q, 4)}) — the arm is on a "
+                "turn from which RESET_JOINTS is not reachable without "
+                "unwinding; pre-position with move-to-start first"
+            )
+
         gap = float(np.max(np.abs(q - target)))
         if gap > self.config.RESET_MAX_DIST_RAD:
             raise RuntimeError(
@@ -313,6 +596,11 @@ class UR7eEnv(gym.Env):
         if self.backend.dry_run:
             return  # nothing will move; don't wait for arrival
 
+        # The raw abs() below is correct BECAUSE `target` is the branch-mapped
+        # one: the driver reports joint positions continuously within each
+        # joint's +-2pi range and never re-wraps mid-move, so q converges to the
+        # literal number we sent. Re-wrapping here would be worse than useless —
+        # it would score a full-turn error as arrival.
         deadline = time.time() + self.config.RESET_TIMEOUT_S
         while time.time() < deadline:
             q, _, age = self.backend.get_joint_state()

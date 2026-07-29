@@ -61,7 +61,16 @@ class DefaultUR7eEnvConfig:
     # (obs, action, next_obs) transition — policy AND GELLO intervention —
     # systematically overstates the motion. The governor is a safety net, not
     # a working limit; UR7eEnv.__init__ warns if this invariant is violated.
-    ACTION_SCALE: np.ndarray = np.array([0.01, 0.05, 1.0])
+    #
+    # Working speed is pinned to the PROVEN EEF teleop stack, not chosen freely.
+    # The three layers below are a uniform 1.25x of the original values, which
+    # lands UPSAMPLER.max_step_rad exactly on the teleop value (see below) —
+    # that per-joint slew cap is what actually protects the hardware, and it is
+    # the limit that binds during fast motion in teleop too
+    # (ur7e_gello_eef.yaml:234-238). Keep the three layers in this ratio: raise
+    # one alone and the next silently truncates it, which re-breaks the
+    # invariant above.
+    ACTION_SCALE: np.ndarray = np.array([0.0125, 0.0625, 1.0])
 
     # ---- workspace safety box (TCP, UR base frame) ---- #
     ABS_POSE_LIMIT_LOW: np.ndarray = np.zeros((6,))
@@ -69,12 +78,15 @@ class DefaultUR7eEnvConfig:
 
     # ---- governor / IK safety (feeds PolicyDeltaController; the analog of ---- #
     # ---- Franka's COMPLIANCE_PARAM — software-synthesized softness).      ---- #
-    # Caps sit ~20% above ACTION_SCALE * HZ (0.1 m/s, 0.5 rad/s) — pure safety
-    # net; never the binding limit in normal operation (see INVARIANT above).
+    # Caps sit ~20% above ACTION_SCALE * HZ (0.125 m/s, 0.625 rad/s) — pure
+    # safety net; never the binding limit in normal operation (see INVARIANT).
+    # Still at or below the proven teleop caps (v_max 0.16, w_max 1.0 in
+    # ur7e_gello_eef.yaml:238,241), so this stack is not faster than what has
+    # already run on this arm.
     GOVERNOR: Dict[str, float] = {
-        "v_max": 0.12,        # m/s   task-space translational rate cap
-        "w_max": 0.60,        # rad/s task-space rotational rate cap
-        "dq_step_max": 0.05,  # rad   per-tick joint step acceptance gate
+        "v_max": 0.15,          # m/s   task-space translational rate cap
+        "w_max": 0.75,          # rad/s task-space rotational rate cap
+        "dq_step_max": 0.0625,  # rad   per-tick joint step acceptance gate
     }
 
     # ---- 250 Hz command upsampler ---- #
@@ -85,9 +97,15 @@ class DefaultUR7eEnvConfig:
     # would blur action->effect credit assignment.
     UPSAMPLER: Dict[str, float] = {
         "hz": 250.0,
-        # per-tick joint step: 0.002 rad @ 250 Hz = 0.5 rad/s, the same rate
-        # ceiling as GOVERNOR.dq_step_max (0.05 rad @ 10 Hz).
-        "max_step_rad": 0.002,
+        # per-tick joint step: 0.0025 rad @ 250 Hz = 0.625 rad/s, the same rate
+        # ceiling as GOVERNOR.dq_step_max (0.0625 rad @ 10 Hz).
+        #
+        # 0.0025 is EXACTLY the proven teleop value (ur7e_gello.yaml:64, same
+        # 250 Hz upsampler). Do NOT raise it past ~0.003 while at 250 Hz: the
+        # driver runs a 500 Hz cycle, so the per-driver-cycle step is half this,
+        # and ur7e_gello.yaml:56-63 pins ~0.00314 rad as the ceiling there.
+        # Going faster means raising hz first, not this.
+        "max_step_rad": 0.0025,
     }
 
     # ---- ROS 2 wiring (defaults match ur_gello_bringup / gello_recorder) ---- #
@@ -118,6 +136,10 @@ class DefaultUR7eEnvConfig:
     TCP_OFFSET_XYZ_RPY: list = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     # robot /joint_states older than this -> unsafe to act on
+    # How long __init__ waits for the first /joint_states before giving up.
+    # DDS discovery plus the first message costs about a second; callers
+    # reset() immediately, so without this the env fails on a healthy rig.
+    ROBOT_STATE_WAIT_S: float = 15.0
     JOINT_STATE_STALE_S: float = 0.2
 
     # ---- gripper ---- #

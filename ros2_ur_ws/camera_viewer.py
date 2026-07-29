@@ -7,15 +7,24 @@ ROS2 Humble sourced:
     python3 camera_viewer.py \
         --cam1-topic /cam1/cam1/color/image_raw/compressed \
         --cam2-topic /cam2/cam2/color/image_raw/compressed \
-        --cam1-label "cam1 - SCENE - 147122072740" \
-        --cam2-label "cam2 - CLOSE-UP - 243222072700"
+        --cam1-label "cam1 - SCENE - 151623020789" \
+        --cam2-label "cam2 - WRIST - 322743060038"
 
 Purpose: BEFORE trusting an autonomous real-robot policy deploy, a human needs to
-eyeball both camera feeds at once and confirm which physical camera is which
-(which one is the wide "scene" view, which is the "close-up") -- if they're
-swapped, the policy sees the wrong thing. This shows cam1 on the LEFT and cam2 on
-the RIGHT in a single window, each labelled, with a live FPS readout and an
-obvious "STALLED" indicator if a feed drops.
+eyeball both camera feeds at once and confirm which physical camera is which --
+if they're swapped, the policy sees the wrong thing. This shows cam1 on the LEFT
+and cam2 on the RIGHT in a single window, each labelled, with a live FPS readout
+and an obvious "STALLED" indicator if a feed drops.
+
+Which is which: **cam2 is the WRIST camera**, rigidly mounted on the gripper, so
+its whole background sweeps when the arm moves while the fingers hold the same
+pixels. cam1 is the fixed third-person tripod view. Earlier docs called cam2 a
+"close-up"/"workspace" camera; that was wrong and was corrected 2026-07-28 from
+pixel measurements on the recorded dataset. Jogging the arm is the one-command
+way to confirm.
+
+Serials were updated 2026-07-28: the pair this file used to name
+(147122072740 / 243222072700) is hardware this machine has never enumerated.
 
 Decoding matches the rest of this codebase (see gello_recorder/video_writer.py):
 the CompressedImage ``.data`` bytes are a complete JPEG file, decoded straight

@@ -3,8 +3,14 @@
 **상태: 전 항목 미검증.** 아래는 실행 절차와 **코드 근거가 있는 기대 동작**이다.
 실행하기 전에 기대 동작을 먼저 읽고, 다르게 나오면 그것이 발견이다.
 
+> ### 2026-07-27 실기 세션 반영
+> - **E5(카메라)의 전제가 바뀌었다:** cam2는 손목 카메라다. 유발 방법과 안전 절차가 다르다.
+> - **E13(인터프리터 hang)이 새로 추가됐다.** 이건 가설이 아니라 오늘 실제로 4번 물린 것이다.
+> - **E14(리셋 branch-cut)가 새로 추가됐다.** 실기에서 반드시 `DRY_RUN`으로 먼저 본다.
+> - E4의 포트가 **로컬 50153 / 원격 50053**으로 바뀌었다 (`05_COMMS_GRPC.md` §6).
+
 ```bash
-export WT=/home/laptop3/gello_software
+export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 ```
 
 ---
@@ -92,7 +98,7 @@ export WT=/home/laptop3/gello_software
 | **유발** | (a) SSH 터널 프로세스 kill, (b) `sudo tc qdisc add dev lo root netem delay 800ms` 로 지연 주입 |
 | **기대 (a)** | `UNAVAILABLE` = transient → **똑같은 직렬화 요청을 정확히 1회 재시도** (`grpc_actor_transport.py:733-746`) → 실패 시 transition은 **pending**으로 남고 **reset/새 액션이 차단**되며 **Local fails stopped**. **폴백/랜덤 액션은 절대 실행되지 않는다** (`REMOTE_ACTOR_GRPC.md` "Failure rules") |
 | **기대 (b)** | 800 ms 지연 > `timeout_s` 0.6 s + `max_response_age_s` 0.8 s → (a)와 같은 경로 |
-| **확인** | 러너 로그에 재시도 1회 후 fail-stop, `ss -ltnp \| grep 50053` |
+| **확인** | 러너 로그에 재시도 1회 후 fail-stop, `ss -ltnp \| grep 50153` (**로컬 터널 포트는 50153**, 원격이 50053) |
 | **PASS** | ① 재시도가 **정확히 1회** ② 서버에 중복 삽입이 없다(응답 캐싱) ③ 팔이 정지 ④ 임의 액션이 실행되지 않았다 |
 | **복구** | `sudo tc qdisc del dev lo root` / 터널 재수립. 에피소드는 버린다 |
 | **주의** | 스모크 기본 타임아웃(2.0/3.0 s)으로 테스트하면 800 ms 지연을 **통과해버린다.** 반드시 프로덕션 값(0.6/0.8)으로 → `05_COMMS_GRPC.md` §5 |
@@ -101,14 +107,24 @@ export WT=/home/laptop3/gello_software
 
 ## E5 — 카메라
 
+> 🔧 **cam2는 손목 카메라다** (`06_SENSORS.md` §1.1). USB를 뽑으려면 **팔에 붙어 있는**
+> 케이블을 만지게 된다 — 팔이 명령을 받고 있지 않은 상태에서만 할 것.
+> 렌즈 가림 테스트(c)도 손목에 손을 넣는 동작이다.
+
 | | |
 |---|---|
-| **유발** | (a) cam2 USB 뽑기, (b) `pkill -f "realsense2_camera_node.*cam2"`, (c) 렌즈를 가려 프레임 내용만 죽이기 |
-| **기대 (a)(b)** | 0.5 s 후 `RuntimeError: camera 'cam2' has no fresh frame (age=...s)` → 러너 크래시 (`ur7e_env.py:463-469`) |
+| **유발** | (a) cam2 USB 뽑기(**손목에 손이 들어간다 — 팔 정지 확인 후**), (b) `pkill -f "realsense2_camera_node.*cam2"`, (c) 렌즈를 가려 프레임 내용만 죽이기 |
+| **기대 (a)(b)** | 0.5 s 후 `RuntimeError: camera 'cam2' has no fresh frame (age=...s)` → 러너 크래시 (`ur7e_env.py:705-717`) |
 | **기대 (c)** | **아무 일도 안 일어난다.** 신선도만 보고 내용은 안 본다. 검은 화면이 그대로 관측/버퍼에 들어간다 |
-| **확인** | `ros2 topic hz /cam2/cam2/color/image_raw/compressed` |
+| **⚠️ TRANSIENT_LOCAL 함정** | 퍼블리셔가 TRANSIENT_LOCAL이라 **카메라가 이미 죽은 뒤에 붙은 구독자도 캐시된 마지막 프레임을 한 장 받는다.** `ros2 topic echo --once`가 성공하는 것을 "살아 있음"의 근거로 쓰지 말 것 → `06_SENSORS.md` §3.0 |
+| **확인** | `ros2 topic hz /cam2/cam2/color/image_raw/compressed` (**`echo`가 아니라 `hz`**) |
 | **PASS** | (a)(b)에서 0.5 s 안에 명확한 에러로 정지. (c)는 **탐지 불가임을 확인**하고 기록 |
 | **복구** | USB 재연결 후 `./launch_cameras.sh` 재기동. DFU(`8086:0adb`)면 물리적 재연결 → `06_SENSORS.md` §2.2 |
+
+> ### E5 손목 카메라 특유의 추가 관측 (기록만, 판정 아님)
+> 팔을 크게 움직이면 cam2 화면 전체가 흐른다. **모션 블러/노출 변화가 정책 입력에 실제로
+> 들어간다.** 고정 카메라 전제로 설계한 크롭·전처리는 여기서 통하지 않는다.
+> `IMAGE_CROP["cam2"]`가 테이블이 아니라 **측정된 grasp 축(x=781)** 기준인 이유다.
 
 ---
 
@@ -217,6 +233,45 @@ export WT=/home/laptop3/gello_software
 
 ---
 
+## E13 (신규) — 🛑 "아무 일도 안 일어난다": 잘못된 인터프리터
+
+장애를 **주입할 필요가 없다.** 오늘 4번 저절로 일어났다. 이건 시나리오가 아니라
+**증상 인식 훈련**이다.
+
+| | |
+|---|---|
+| **증상** | 프로세스가 기동 로그를 몇 줄 찍고 **아무 출력 없이 멈춘다.** 에러도, 타임아웃도, 스택트레이스도 없다. Ctrl-C는 먹힌다 |
+| **진짜 원인** | 시스템 `python3`(grpcio 1.30.2)로 gRPC 채널을 만들었다 → `08_OPEN_GAPS.md` G14 |
+| **오진하기 쉬운 것** | "네트워크가 느리다", "서버가 안 뜬다", "터널이 안 붙었다", "GPU가 잡혔다" — 전부 아니다 |
+| **1분 진단** | ① `ps -L -o pid,tid,pcpu,stat,wchan -p <pid>` → 단일 스레드 **100% CPU / `R` / `wchan` 비어 있음**<br>② `ls -l /proc/<pid>/exe` → `/usr/bin/python3`이면 확정 |
+| **즉시 조치** | 죽이고 `/home/laptop3/venvs/gello-hil-actor/bin/python`으로 다시 띄운다. 실기면 `run_hil_actor.sh`를 쓴다 (preflight [2][3]이 이걸 막는다) |
+| **오프라인 재현** | `00_SETUP_AND_SAFETY.md` §3.4의 `/tmp/g.py` 스니펫 |
+| **PASS** | 위 진단 두 줄로 **60초 안에** 원인을 특정할 수 있다 |
+
+> **왜 매트릭스에 넣는가:** 이 장애의 특징은 **어떤 안전망도 반응하지 않는다**는 것이다.
+> 워치독도, 타임아웃도, staleness도 안 걸린다. 팔은 마지막 명령 자세를 홀드하지만
+> (프로세스가 살아 있으므로 업샘플러가 계속 발행할 수 있다 → **E3b와 같은 상황**),
+> 아무도 그것을 지시하고 있지 않다. **E3b의 "가장 위험한 변종"이 실제로 일어나는 경로가 이것이다.**
+
+---
+
+## E14 (신규) — 리셋이 먼 길로 가는지 (branch-cut)
+
+| | |
+|---|---|
+| **유발** | 팔을 `RESET_JOINTS`에서 **wrist_3가 반대 분기**인 자세로 옮긴 뒤 `reset()`을 부른다. 실측 사례: 실제 `wrist_3 = +3.1795`, 목표 `-3.1331` (물리적으로 0.029 rad) |
+| **기대 (수정 후)** | `go_to_reset()`이 `wrapped_nearest`로 목표를 현재 회전수로 옮긴다 → 명령되는 `wrist_3`는 **+3.1501 부근**. 거리 가드가 보는 값도 6.31이 아니라 branch-safe 값 |
+| **🛑 수정 전이었다면** | 6.31 rad를 계산 → 가드가 배선 고장처럼 보이는 에러를 내거나, 통과 시 **손목이 한 바퀴 돌며 2F-85 케이블을 감음**(H3) |
+| **확인 (DRY_RUN에서 전부 가능)** | 러너 로그/CSV의 **명령된 관절 목표값**. `wrist_3` 명령값이 현재 값 근처인가? |
+| **PASS** | ① 명령 `wrist_3`가 현재 값에서 0.1 rad 이내 ② 거리 가드가 통과 ③ `DRY_RUN=False`로 갔을 때 손목이 한 방향으로 짧게만 움직인다 |
+| **⚠️ 순서** | **반드시 `DRY_RUN=True`로 먼저** 로그를 본다. 이 항목은 눈으로 확인하기 전에 arm하면 안 된다 |
+| **회귀** | `tests/test_reset_branch_cut.py` (10 passed) |
+
+같이 볼 것: `RESET_MAX_DIST_RAD`가 `0.5` → **`0.9`**로 올라갔다. `0.5`는 23테이크 중
+16개의 **정상 종료 자세**를 거부했다. 리셋이 자주 예외로 죽으면 이 값을 의심한다.
+
+---
+
 ## 결과 기록표
 
 | ID | 일시 | 유발 방법 | 관측된 동작 | 기대 일치? | 복구 시간 | 비고 |
@@ -242,3 +297,5 @@ export WT=/home/laptop3/gello_software
 | E11b | | | | | | |
 | E11c | | | | | | |
 | E12 | | | | | | |
+| E13 | 2026-07-27 | (주입 불필요 — 실제 발생 4회) | 무출력·CPU 100% 정지 | 예 (사후 특정) | — | 원인 = 시스템 grpcio 1.30.2. venv로 전환해 해결 |
+| E14 | | | | | | |

@@ -168,14 +168,25 @@ handshake timeline, safety model, troubleshooting) see
 
 ### Topics
 
+> ### 🔧 Camera serial correction (2026-07-28)
+>
+> The camera **units were physically swapped.** The previously documented pair
+> (`147122072740` / `243222072700`) belongs to hardware this machine has never
+> enumerated (kernel logs checked back to 2026-07-05). Serials in this document
+> are now the connected pair (`151623020789` / `322743060038`).
+> **Binding an absent serial does not fail loudly** — the camera simply never
+> comes up. Model classes and the cam1/cam2 assignment are unchanged, but
+> **which unit is on the wrist is unverified** — jog the arm and check that the
+> gripper fingers stay fixed in cam2.
+
 | Topic | Type | Dir | Notes |
 | --- | --- | --- | --- |
 | `/gello/joint_states` | `sensor_msgs/JointState` | pub (policy_leader_node) | Synthetic leader output: 6 arm joints, UR order, radians, position-only (velocity/effort empty) |
 | `/robotiq_gripper/command_percent` | `std_msgs/Float32` | pub (policy_leader_node) | 0=open..1=closed, identity mapping (no threshold/binarize). Published directly — `gello_gripper_bridge` is **not** launched, to avoid dual writers |
 | `/joint_states` | `sensor_msgs/JointState` | sub (policy_leader_node) | Live UR7e joint feedback; reordered by name to UR order for both the observation and the max-deviation clamp |
 | `/robotiq_gripper/position_percent` | `std_msgs/Float32` | sub (policy_leader_node) | Live gripper position (0=open..1=closed); `observation.state[6]` |
-| `/cam1/cam1/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam1 (D435, serial `147122072740`); raw JPEG passed through to the ACT server unmodified |
-| `/cam2/cam2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam2 (D435iF, serial `243222072700`); raw JPEG passed through |
+| `/cam1/cam1/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam1 (D435, serial `151623020789`); raw JPEG passed through to the ACT server unmodified |
+| `/cam2/cam2/color/image_raw/compressed` | `sensor_msgs/CompressedImage` | sub (policy_leader_node) | RealSense cam2 (D435iF, serial `322743060038`); raw JPEG passed through |
 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray` | sub (policy_leader_node) | Read-only — used **only** to detect the bridge has started streaming, for the optional `auto_start_on_stream` |
 
 ## Build
@@ -238,13 +249,13 @@ FAULT if a camera is absent or stale (see Safety). Bind by **serial** (quoted, s
 all-digit value is not coerced to an int):
 
 ```bash
-# cam1 = D435, serial 147122072740 ; cam2 = D435iF, serial 243222072700
+# cam1 = D435, serial 151623020789 ; cam2 = D435iF, serial 322743060038
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam1 camera_namespace:=cam1 \
-    serial_no:="'147122072740'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'151623020789'" rgb_camera.color_profile:="'1280x720x30'" &
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:=cam2 camera_namespace:=cam2 \
-    serial_no:="'243222072700'" rgb_camera.color_profile:="'1280x720x30'" &
+    serial_no:="'322743060038'" rgb_camera.color_profile:="'1280x720x30'" &
 
 # Confirm both compressed topics are publishing at ~30 Hz BEFORE starting the deploy:
 ros2 topic hz /cam1/cam1/color/image_raw/compressed

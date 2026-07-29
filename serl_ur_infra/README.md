@@ -74,7 +74,8 @@ HIL-SERL actor/server/learner의 통합 상태, checkpoint, branch, Kanu 검증,
 - [ ] `policy_delta_controller` → `eef_delta` 후반부 재사용 리팩토링 (위 표 참고) — **DRY_RUN 해제 전 필수**
 - [ ] 워크스페이스 박스 클램프를 컨트롤러 게이트에 통합
 - [ ] HOLD/reject_reason을 step info로 노출 + staleness safe-stop 정책 통일 + UR fault recovery
-- [ ] v_max(0.1m/s) vs ACTION_SCALE 최대(0.2m/s) 정합 — 지금은 거버너가 풀액션을 절반으로 자름
+- [x] v_max vs ACTION_SCALE 정합 — 2026-07-28 해결. 3층을 균일 1.25배로 맞춰 헤드룸 1.20x 유지
+      (`ACTION_SCALE` 0.0125/0.0625, `GOVERNOR` 0.15/0.75/0.0625, `UPSAMPLER` 0.0025)
 - [ ] 데드맨 하드웨어 (풋스위치, 현재 스페이스바) + 성공/실패 라벨링 키
 - [ ] `GelloIntervention._leader_T`에 TCP_OFFSET 배선 (config는 있음, 현재 플랜지 기준)
 - [ ] 로봇 노트북에서 mock 하드웨어 검증 (QoS `VERIFY(hw)` 주석 참고, 그리퍼 방향 육안 확인)
