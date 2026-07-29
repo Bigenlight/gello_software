@@ -2,7 +2,9 @@
 
 > 상태: production-shaped CLI의 dry-run/초기 bounded-run 절차
 >
-> 기준일: 2026-07-27 KST
+> 기준일: **2026-07-29 KST** (하드웨어 브랜치 통합 머지 `3f199d4` + threshold 커밋 `1b02857` 이후 재검증)
+>
+> 검증 브랜치: `feat/gello-ur7e-humble-22.04`
 >
 > 구현 상태와 차단점: [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)
 >
@@ -11,7 +13,12 @@
 ## 먼저 읽을 요약
 
 - ⚠️ **이 문서의 모든 예시가 쓰던 classifier `e329986b...`는 폐기됐다.** 0724 도메인 success recall이 `0.0%`다. 실기에 물리면 reward가 영원히 0이다. 새 정본 경로와 orbax 디렉터리 제약은 1.3절에 있다. `--expected-classifier-sha256`/`--expected-checkpoint-sha256`는 **절대 생략하지 마라** — 코드 기본값이 아직 폐기된 SHA다.
-- ⚠️ reward threshold는 `53d5cf6`에서 0.85 → 0.5로 바뀌었고 **fingerprint에 포함된다.** 0.85로 학습한 checkpoint는 지금 명령으로 resume되지 않는다(의도된 거부).
+- ⚠️ **reward threshold 숫자를 이 문서에서 베끼지 마라.** 이틀 사이에 0.85 → 0.5(`53d5cf6`) → **0.2**(`1b02857`)로 두 번 움직였다. 권위 있는 값은 코드 상수 하나뿐이다:
+  `serl_ur_infra/ur_env/rlpd_receive_server.py`의 `DEFAULT_REWARD_THRESHOLD`.
+  근거와 조건은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
+  아래 명령들은 값을 적어 넣지 않고 2.2절에서 코드로부터 읽어온 `$HIL_REWARD_THRESHOLD`를 쓴다.
+  threshold는 **fingerprint에 포함된다**(`run_rlpd_learner_server.py`의 `run_contract["reward_classifier"]["threshold"]`).
+  다른 threshold로 만든 checkpoint는 resume이 fail-closed로 거부된다 — 의도된 동작이다.
 - Kanu learner server는 `127.0.0.1:50053`에만 bind하고 laptop은 SSH local forwarding으로 접속한다.
 - Kanu에서는 JAX/JAXLIB 0.5.3 CUDA 환경을 사용하고 CLI에 `--require-jax-backend gpu`를 반드시 준다.
 - fake canonical demo는 construction `--dry-run` 또는 bounded `--synthetic-e2e` acceptance에만 허용된다. production robot-data serving은 계속 자동 거부한다.
@@ -24,32 +31,59 @@
 - trainable `SpatialLearnedEmbeddings/Dropout/Dense256/LayerNorm/tanh`는 sample time에 적용된다. frozen trunk의 online/target exact invariant와 target repin을 유지한다.
 - 기본 50k/10k ring camera tensor는 `7,864,320,000 B = 7.32421875 GiB`다. `--feature-memory-reserve-gib`를 포함한 startup RAM preflight가 fail-closed한다.
 - Kanu GPU actual classifier/agent production dry-run과 feature CTA smoke는 통과했다. unified schema v2에서 laptop→SSH tunnel→Kanu exact 100 transition, 실제 CTA step 1, publish/checkpoint full-load roundtrip, fresh-process resume와 version 1 inference까지 통과했다. production robot E2E와 continuous learner는 아직 미검증이다.
+- ⚠️ **2026-07-29 기준 Kanu에는 HIL 프로세스가 하나도 떠 있지 않다.** port 50053 미바인딩, GPU 유휴. 이 문서에 "server가 떠 있다"고 읽히는 문장이 있으면 그건 과거 run의 기록이지 현재 상태가 아니다. 매번 1.0절의 확인 명령으로 직접 본다.
+- ⚠️ **`/home/laptop3/gello_software`는 Kanu에 존재하지 않는다.** 그 경로는 laptop3 전용이다. Kanu 쪽 실제 경로는 1.1절 표에 있다.
 
 ---
 
 ## 1. 사전 조건
 
-이 PC의 실제 SSH alias는 `kanu`다. 2026-07-27 read-only preflight에서 접속, host RAM, GPU, 기존 `il` Python 환경을 확인했다. 이후 기존 dirty detached repository를 건드리지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 일회성 tree를 구성해 GPU dry-run/CTA smoke를 수행했다.
+이 PC의 실제 SSH alias는 `kanu`다. 조직 VPN, SSH config 또는 실제 hostname은 사용자가 관리하는 값이므로 문서에서 추측해 바꾸지 않는다.
 
 ```bash
 ssh -G kanu | sed -n '1,40p'
 ssh -T kanu true
 ```
 
-확인 당시 Kanu는 RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장을 제공했고 `/home/junhyeong/miniconda3/envs/il/bin/python`에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개를 확인했다. 이 값은 실행 직전에 다시 확인한다.
+두 번째 command가 성공하기 전에는 아래 Kanu command를 실행 가능하다고 간주하지 않는다.
 
-두 번째 command가 성공하기 전에는 아래 Kanu command를 실행 가능하다고 간주하지 않는다. 조직 VPN, SSH config 또는 실제 hostname은 사용자가 관리하는 값이므로 문서에서 추측해 바꾸지 않는다.
+### 1.0 지금 Kanu에서 뭐가 돌고 있는지부터 본다
 
-### 1.1 repository와 commit
-
-Kanu에는 검증할 production learner commit이 checkout돼 있어야 한다. 아래 경로는 현재 historical Kanu workspace layout을 따른 예시다. 실제 clone 위치가 다르면 `HIL_KANU_REPO`만 바꾼다.
+이 절의 수치는 **관측값이 아니라 관측 방법**이다. 아래를 실행해서 나온 값이 사실이고, 문서에 적힌 과거 값은 기록일 뿐이다.
 
 ```bash
-export HIL_KANU_REPO=/home/junhyeong/workspace/youngwoong/gello_software
+ssh kanu 'ss -ltnp 2>/dev/null | grep -E ":(50053|5594)\b" || echo "50053/5594 unbound"'
+ssh kanu 'pgrep -af "run_rlpd_(learner|receive)_server|remote_reward_classifier_server" || echo "no HIL process"'
+ssh kanu nvidia-smi
+ssh kanu 'df -h ~/workspace'
+```
 
-cd "$HIL_KANU_REPO"
+> 📌 **스냅샷 (2026-07-29, 재실행 필요):** 위 네 명령 모두에서 HIL 관련 활동이 없었다 — port 50053 미바인딩, HIL 프로세스 0개, GPU 유휴, 디스크 95% 사용(여유 약 90 GB). PID·GPU 번호·포트 점유는 이 문서에 고정값으로 적지 않는다.
+>
+> 📌 **스냅샷 (2026-07-27, 재실행 필요):** RAM 251 GiB(available 152 GiB), RTX A4000 16 GB 8장, `/home/junhyeong/miniconda3/envs/il/bin/python`에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개. 그날의 GPU dry-run/CTA smoke는 기존 dirty detached repository를 건드리지 않으려고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 만든 일회성 tree에서 수행했다. **그 tree는 `/tmp`이므로 지금 남아 있다고 가정하지 않는다.**
+
+### 1.1 Kanu 경로 — 확인된 것과 확인되지 않은 것
+
+이 표는 2026-07-29 공유 팩트 시트 기준이다. `~`는 `/home/junhyeong`이다.
+
+| 경로 | 정체 | 상태 |
+| --- | --- | --- |
+| `~/workspace/youngwoong/hil-serl` | classifier 학습처. YWhero/hil-serl fork, branch `agent/cube-in-cup-classifier` @ `d753571` | 확인됨 |
+| `~/workspace/youngwoong/dataset/cube_in_cup_all3/` | 학습 데이터 + **Jul-27 정본 checkpoint** | 확인됨 |
+| `~/workspace/youngwoong/gello_software_remote_classifier` | ZMQ 뷰어 checkout + **Jul-24 폐기 checkpoint** | 확인됨 |
+| `/tmp/gello-hil-rl-receive-server-v2` | receive-server milestone용 Kanu 전용 worktree | 확인됨 (`/tmp`, 휘발 가능) |
+| `/home/junhyeong/miniconda3/envs/il/bin/python` | 공유 conda base Python | 확인됨 |
+| `/home/laptop3/gello_software` | — | **Kanu에 없음.** laptop3 전용 경로다 |
+| `$HIL_KANU_REPO` (아래) | production learner를 돌릴 `gello_software` checkout | **미확인 — 직접 확인하거나 새로 clone해야 한다** |
+
+learner를 돌리려면 통합 브랜치가 checkout된 `gello_software`가 Kanu에 있어야 하는데, 위 표의 확인된 경로 중에는 그런 checkout이 없다. 즉 **`HIL_KANU_REPO`는 예시가 아니라 사용자가 만들어야 하는 값이다.** 아무 값이나 넣고 진행하지 말고 존재를 먼저 확인한다.
+
+```bash
+export HIL_KANU_REPO=/absolute/path/to/gello_software/on/kanu
+
+cd "$HIL_KANU_REPO" || { echo "이 경로부터 만들어야 한다"; exit 1; }
 git status --short --branch
-git rev-parse HEAD
+git rev-parse HEAD          # 통합 브랜치 feat/gello-ur7e-humble-22.04 의 commit 이어야 한다
 git submodule status third_party/hil-serl
 ```
 
@@ -60,26 +94,44 @@ cd "$HIL_KANU_REPO"
 git submodule update --init --recursive third_party/hil-serl
 ```
 
+> 🪤 test suite는 **녹색인지가 아니라 passed 개수**로 판단한다. laptop3 canonical checkout에서 완전한 기준선은 **333 passed / 11 skipped**다(2026-07-29 실행 확인). `PYTHONPATH`에서 `third_party/hil-serl/serl_launcher`를 빼면 조용히 299로 줄고, submodule을 초기화하지 않은 새 worktree에서는 296 / 17이 된다. 두 경우 모두 실패는 하나도 안 나오므로 "green"만 보면 못 잡는다. skip 사유 문자열("submodule is not checked out")도 그대로 믿지 않는다.
+>
+> laptop3 기준선 재현 명령(테스트는 laptop3에서 돌린다. Kanu에서 돌리는 절차가 아니다):
+>
+> ```bash
+> set +u; source /opt/ros/humble/setup.bash; source ros2_ur_ws/install/setup.bash; set -u
+> OVERLAY=$(python3 -c "import ur_gello_bringup,os;print(os.path.dirname(os.path.dirname(ur_gello_bringup.__file__)))")
+> env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
+>   PYTHONPATH="$PWD/serl_ur_infra:$PWD/third_party/hil-serl/serl_launcher:$OVERLAY" \
+>   /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest -q -p no:cacheprovider serl_ur_infra/tests
+> ```
+>
+> 시스템 `python3 -m pytest`로 돌리지 않는다. 시스템 python3의 grpcio는 1.30.2라 이 suite에서 오류 없이 100% CPU로 멈춘다.
+
 ### 1.2 Python/JAX GPU 환경
 
-아래는 현재 검증 target이다. `runtime fail-closed` 항목은 production CLI가 시작 시 버전을 직접 비교한다. 나머지는 CPU lock/known-good environment에 고정된 값이며 아직 같은 runtime validator가 강제하지 않으므로 Kanu environment 준비 단계에서 수동 확인한다.
+아래는 현재 검증 target이다. `runtime fail-closed` 항목은 production CLI가 시작 시 버전을 직접 비교한다(`ur_env/learner/agent.py`의 `validate_learner_dependencies()`). 나머지는 `requirements-learner.lock`에만 있는 값이며 **어떤 runtime validator도 강제하지 않는다** — 어긋나도 프로세스는 그대로 뜬다. 그래서 Kanu environment 준비 단계에서 반드시 눈으로 확인한다.
 
-| package | version | 현재 enforcement |
-| --- | --- | --- |
-| JAX / JAXLIB | 0.5.3 / 0.5.3 | runtime fail-closed |
-| Flax | 0.10.5 | runtime fail-closed |
-| Distrax | 0.1.5 | runtime fail-closed |
-| TensorFlow Probability | 0.25.0 | runtime fail-closed |
-| W&B | 0.26.0 | W&B enabled일 때 runtime fail-closed |
-| NumPy | 1.26.4 | lock/known environment, 수동 확인 |
-| Optax | 0.2.4 | lock/known environment, 수동 확인 |
-| protobuf | 7.34.1, pure-Python compatibility mode | lock + implementation compatibility 검사; version 비교는 미구현 |
-| grpcio | 1.74.0 | lock/known environment, 수동 확인 |
-| Orbax | 0.11.5 | lock/known environment, 수동 확인 |
+| package | lock/expected | 현재 enforcement | 2026-07-29 Kanu `il` 실측 |
+| --- | --- | --- | --- |
+| JAX / JAXLIB | 0.5.3 / 0.5.3 | runtime fail-closed | 0.5.3 (07-27 확인) |
+| Flax | 0.10.5 | runtime fail-closed | 0.10.5 (07-27 확인) |
+| Distrax | 0.1.5 | runtime fail-closed | — |
+| TensorFlow Probability | 0.25.0 | runtime fail-closed | — |
+| W&B | 0.26.0 | W&B enabled일 때 runtime fail-closed | — |
+| NumPy | 1.26.4 | **없음** (lock 전용) | 🔴 **2.2.5 — 드리프트** |
+| Orbax | 0.11.5 | **없음** (lock 전용) | 🔴 **0.11.12 — 드리프트** |
+| grpcio | 1.74.0 | **없음** (lock 전용) | 🔴 **1.80.0 — 드리프트** |
+| Optax | 0.2.4 | **없음** (lock 전용) | — |
+| protobuf | 7.34.1, pure-Python compatibility mode | lock + implementation compatibility 검사; version 비교는 미구현 | — |
+
+> 🪤 **드리프트는 자동으로 안 걸린다.** runtime fail-closed 대상은 jax / jaxlib / flax / distrax / tensorflow_probability (+ W&B enabled 시 wandb) **뿐**이다. 위 표에서 🔴 표시된 numpy·orbax·grpcio는 lock에서 벗어나 있는데도 CLI가 아무 말 없이 시작한다. orbax 드리프트는 특히 1.3절의 checkpoint 포맷 문제와 같은 축에 있으므로, run 전에 실제 값을 기록해 둔다.
+>
+> 위 실측 열은 **팩트 시트에서 가져온 값**이고 laptop3에서 코드로 재확인할 수 없다(이 PC에는 JAX/Flax가 없다). 아래 1.2절 preflight 블록을 실제로 돌려 나온 값이 권위 있다.
 
 `requirements-learner.lock`은 CPU-local 검증 환경용으로 `jaxlib==0.5.3`을 포함한다. 공유 Kanu conda environment에 그대로 설치하거나 upgrade하지 않는다. 별도의 CUDA-capable environment를 준비하고 그 interpreter 경로를 명시한다.
 
-이전 receive-only overlay(`/tmp/gello-hil-rl-receive-overlay-v2`)는 protobuf 3.20.3과 당시 Kanu base JAX를 전제로 하므로 production learner 환경으로 재사용하지 않는다.
+이전 receive-only overlay(`/tmp/gello-hil-rl-receive-overlay-v2`)는 protobuf 3.20.3과 당시 Kanu base JAX를 전제로 하므로 production learner 환경으로 **재사용하지 않는다.** protobuf 3.20.3 핀이 `wandb` import를 깨뜨린다.
 
 ```bash
 export HIL_KANU_PYTHON=/absolute/path/to/jax-0.5.3-cuda-env/bin/python

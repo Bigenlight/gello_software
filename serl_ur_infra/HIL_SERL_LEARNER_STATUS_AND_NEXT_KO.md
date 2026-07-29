@@ -2,49 +2,73 @@
 
 > 🚩 **이어서 작업하러 왔다면 [HANDOFF_NEXT_SESSION_KO.md](./HANDOFF_NEXT_SESSION_KO.md)를 먼저 읽어라.** 이 문서는 전체 상태 기록이고, 그쪽이 "지금 무엇을 하면 되는가"다.
 >
-> 기준일: **2026-07-28** KST (이전판 2026-07-27)
+> 기준일: **2026-07-29** KST (이전판 2026-07-28, 그 이전 2026-07-27)
 >
-> 문서상 최종 운영 checkout: `/home/laptop3/gello_software`
+> 최종 운영 checkout: `/home/laptop3/gello_software` · branch `feat/gello-ur7e-humble-22.04` (= `origin/HEAD`)
 >
-> 문서상 최종 운영 branch: `feat/gello-ur7e-humble-22.04`
+> **actor/하드웨어 branch는 머지됐다.** `test/hil-hardware-comms` 는 2026-07-29 merge `3f199d4`(부모 `3ff5f80` + `1a4f93d`)로 canonical branch에 들어왔다. 그 위에 `1b02857`(reward threshold 0.5 → 0.2)과 `43ba314`(RealSense 시리얼을 실제 USB 버스에서 해석)가 올라와 있다. **이 문서의 기준 HEAD는 `43ba314`다.**
 >
-> learner/hardware 통합 merge: `248255f` (schema v2 검증 및 canonical branch 통합 완료)
+> 이전 learner/hardware 통합 merge: `248255f` (2026-07-27, schema v2). `5fb716b..3f199d4` 는 23 commit, `5fb716b..43ba314` 누적 diff는 70 files / +9,903 −395.
 >
-> **robot actor 작업 branch: `test/hil-hardware-comms` @ `c069e79`** — worktree `/home/laptop3/gello_worktrees/hil-hardware-comms`, `5fb716b` 대비 12 commit. actor/하드웨어는 §11, **reward classifier 조사는 §12**
+> worktree `/home/laptop3/gello_worktrees/hil-hardware-comms` 는 아직 디스크에 있고 `test/hil-hardware-comms` @ `1a4f93d` 를 가리키지만 **더 이상 작업 위치가 아니다.** 새 작업은 canonical checkout에서 한다.
+>
+> actor/하드웨어는 §11, **reward classifier 조사는 §12**
 >
 > Kanu 실행 절차: [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)
 >
 > reward threshold 근거와 classifier 실측: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)
 >
 > 하드웨어/통신 테스트 절차: [../docs/testing/README.md](../docs/testing/README.md)
+>
+> ### 📖 이 문서를 읽는 법
+>
+> 이 문서는 **누적 기록**이다. 지운 서술이 거의 없고, 대신 뒤집힌 서술에는 무엇이 그것을 대체했는지를 붙였다.
+>
+> - 절 제목이나 문단 머리에 **날짜가 붙어 있으면 그 날짜의 관측**이다. 현재 상태가 아니다.
+> - `⛔ 폐기` / `⚠️ 대체됨` 표시가 붙은 블록은 **왜 틀렸는지를 남기려고 보존한 것**이다. 인용하지 마라.
+> - **숫자를 인용할 때는 옆에 붙은 조건(split·전처리·날짜·하드웨어)을 함께 옮겨라.** 조건 없는 숫자 하나가 이미 한 번 잘못된 결론을 만들었다(§12.3).
 
 ## 한눈에 보기
 
+> **(2026-07-29) 이 절은 §11/§12와 정합을 맞춘 판이다.** 각 항목 끝의 `§` 가 근거 절이다.
+
+- **actor 브랜치 머지가 끝났다** (`3f199d4`). 이 문서에서 "머지하면 …가 된다"로 쓰여 있던 예측은 전부 **일어난 일**로 바뀌었다. 특히 §12의 크롭 불일치는 이제 **canonical branch에 실재하는 결함**이다(더 이상 "머지하면 유입된다"가 아니다). §12.1
 - receive server, 실제 hybrid SAC learner, versioned policy, strict replay ingress, gripper penalty, checkpoint/resume, JSONL/W&B를 **하나의 production CLI**로 조립하는 구현은 learner/hardware 통합 merge `248255f` 계열에 모였다. schema v2 검증과 최종 운영 위치 `/home/laptop3/gello_software`의 `feat/gello-ur7e-humble-22.04` 통합을 완료했다.
 - robot actor의 실제 실행 action을 기준으로 `grasp_penalty`를 생성하는 wrapper도 두 actor entrypoint에 배선됐다. learner ingress는 penalty 누락을 허용하지 않는다.
 - 실제 `SACAgentHybridSingleArm`을 사용해 CTA update → publish → checkpoint → fresh agent restore → production composition 재조립 → action/RNG/counter 확인 → 추가 update/checkpoint까지 검증했다.
-- 실제 reward classifier checkpoint(`e329986b...`)는 로컬에서 **SHA 검증, load, warm-up까지만** 성공했다. 이것은 artifact I/O 검증이지 분류 성능 검증이 아니며, **분류 성능은 당시 검증하지 않았다.** 이후 2026-07-28 Kanu 실측에서 이 checkpoint의 0724 도메인 success recall이 `0.0%`(성공 1,123 프레임 중 0건, mean 확률 `0.007`)로 확인돼 **폐기 대상**이 됐다. 그대로 실기에 물리면 로봇이 성공해도 reward가 영원히 0이고 학습이 시작되지 않는다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md), 새 정본 경로는 [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.3에 있다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했고, 이 수정 자체는 계속 유효하다.
+- 실제 reward classifier checkpoint(`e329986b...`, Jul-24 단일 파일 flax msgpack 87 MB)는 로컬에서 **SHA 검증, load, warm-up까지만** 성공했다. 이것은 artifact I/O 검증이지 분류 성능 검증이 아니며, **분류 성능은 당시 검증하지 않았다.** 이후 **2026-07-28 Kanu GPU 실측(0724 도메인 success 프레임 1,123장, 크롭 없는 입력, threshold 0.85)** 에서 이 checkpoint의 success recall이 `0.0%`(1,123장 중 0건, mean 확률 `0.007`)로 확인돼 **폐기 대상**이 됐다. ※ 같은 checkpoint가 **0720 test split**(무크롭)에서는 recall `93.4%` @0.85 / FPR `0.0%` 다(§12.3) — 도메인이 다르면 숫자가 이렇게 갈린다. **"recall 0%"를 조건 없이 인용하지 마라.** 그대로 실기에 물리면 로봇이 성공해도 reward가 영원히 0이고 학습이 시작되지 않는다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md), 새 정본 경로는 [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.3에 있다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했고, 이 수정 자체는 계속 유효하다.
 - fake canonical demo generator가 추가됐다. 이 raw artifact는 construction `--dry-run` 또는 명시적으로 bounded된 `--synthetic-e2e` acceptance에만 허용된다. 일반 robot-data learner serving은 계속 거부한다.
-- unified schema v2 기본 suite는 `253 passed, 4 skipped, 6 warnings`, UR/GELLO suite는 `436 passed`다. 실제 frozen-trunk agent `2 passed`, checkpoint/resume `1 passed`, local fake E2E `1 passed`도 다시 통과했다.
+- **테스트 (2026-07-29 `43ba314` 에서 재실행):** `serl_ur_infra/tests` = **`333 passed, 11 skipped`**, UR/GELLO `ur_gello_bringup` = **`436 passed`**. 명령은 §9. 🪤 `third_party/hil-serl/serl_launcher` 를 `PYTHONPATH` 에서 빼면 **조용히 299**로 떨어지고 skip 사유가 "submodule is not checked out"이라고 거짓말한다 — **녹색이 아니라 passed 수를 볼 것.**
+  - *(2026-07-27 `248255f` 시점의 역사값: `253 passed, 4 skipped, 6 warnings` / `436 passed`. 실제 frozen-trunk agent `2 passed`, checkpoint/resume `1 passed`, local fake E2E `1 passed`. §5.1)*
 - 사용자가 현재 milestone 완료 조건으로 지정한 **fake data laptop→SSH tunnel→Kanu learning E2E**는 schema v2에서 exact 100 ingress→actual classifier→feature replay→CTA update→publish→checkpoint full-load roundtrip까지 통과했다. 새 Kanu process가 checkpoint를 `1/2/1`로 restore하고 policy version 1의 finite 7D action을 serving하는 것도 확인했다. 사용자 요청에 따라 v2 resume process의 불필요한 두 번째 SAC update는 생략했다.
 - 아직 실제 robot/task/camera E2E, production 50-step publish/5,000-step checkpoint bounded run, 장시간 GPU contention/latency, 운영 heartbeat는 검증되지 않았다. 따라서 현재 fake-data milestone은 완료됐지만 “실기 운용 승인 완료” 상태는 아니다.
 - external policy/classifier는 canonical raw `uint8 (1,128,128,3)` image를 계속 받지만, replay/demo에는 frozen ResNet-10의 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` map의 current/next만 저장한다. GAP은 적용하지 않고 augmentation은 `none`이다.
 - `SpatialLearnedEmbeddings(8) -> Dropout(0.1) -> Dense(256) -> LayerNorm -> tanh`는 동결하지 않았다. learner가 feature batch를 꺼낼 때 현재 weight로 적용하므로 critic/grasp critic CTA update가 유지된다.
 - checkpoint만 영속화되고 replay/intervention buffer는 RAM-only다. checkpoint는 덮어쓰기·삭제·자동 pruning을 하지 않는다.
 - **(2026-07-27 추가)** robot actor 쪽은 `5fb716b` 시점에 **실행 자체가 불가능**했다. 4개 층이 동시에 막고 있었고(§11.1) 전부 해소했다. 이제 actor가 기동해서 Kanu까지 왕복하고, workspace box와 reset branch-cut 두 안전 게이트가 실제로 동작한다.
-- **(2026-07-27 추가)** 실기 검증 완료: 2F-85 gripper 개폐 방향, GELLO leader 7 모터, laptop→Kanu 100-step gRPC 왕복(`replay_insert_count:100`, schema hash 일치), 왕복 지연 p50 58.6 / p95 75.8 / p99 97.1 ms. 미검증: 팔 실제 구동, 카메라(현재 하드웨어 고장), 개입 루프 실기.
-- **(2026-07-27 추가)** Kanu에는 **inference server가 없다**. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 하며, 그 유일한 하드 블로커는 여전히 §7 P0-2의 canonical robot demo 부재다. Kanu 환경 자체는 추가 설치 없이 준비돼 있다(§11.5).
-- **(2026-07-28 정정)** 위 항목의 "PID 1096786, port 50053, GPU 7에 12.3 GiB"는 **더 이상 사실이 아니다.** Kanu에 HIL 프로세스가 하나도 없고 port 50053은 미바인딩, GPU 5/6/7 전부 유휴다. 또한 **`/home/laptop3/gello_software`는 kanu에 존재하지 않는다** — 실제 경로는 §12.5 표를 볼 것.
+- **(2026-07-27 실기 측정)** 검증 완료: 2F-85 gripper 개폐 방향, GELLO leader 7 모터, laptop→Kanu 100-step gRPC 왕복(`replay_insert_count:100`, schema hash 일치). 왕복 지연은 **WiFi·fake-env actor·zero-action receive server 조건**에서 RTT p50 58.6 / p95 75.8 / **p99 97.1 ms**, step당 96.1 KiB → 7.9 Mbit/s(§11.4).
+  - ⚠️ 같은 항목의 "미검증: 팔 실제 구동, 카메라(하드웨어 고장), 개입 루프 실기"는 **2026-07-28에 셋 다 뒤집혔다** — 팔은 움직였고(§11.9) 카메라는 허브 고장이 아니었다(§11.10).
+- **(2026-07-27 추가 · 2026-07-28 이후 부분 정정)** Kanu에는 **실제 정책 inference server가 없다**. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 하며, 그 유일한 하드 블로커는 여전히 §7 P0-2의 canonical robot demo 부재다. Kanu 환경 자체는 추가 설치 없이 준비돼 있었다(§11.5, 2026-07-27 점검).
+  - ⛔ **폐기:** 이 항목의 07-27 판본에 있던 "`run_rlpd_receive_server.py` PID 1096786이 port 50053에 떠 있고 GPU 7에 12.3 GiB를 잡고 있다"는 **2026-07-28 이후로는 사실이 아니다.** Kanu에 HIL 프로세스가 하나도 없고 port 50053은 미바인딩, GPU 유휴다(§11.5, §12.5). 즉 지금은 **zero-action 서버조차 떠 있지 않다.**
+  - ⛔ **폐기:** `/home/laptop3/gello_software` 는 **kanu에 존재하지 않는다.** kanu의 실제 경로는 §12.5 표.
 - **(2026-07-28 추가)** 실기에서 **팔이 처음으로 움직였고**(`--arm --scale 0.25`, 개입 64 스텝, `held=0`), **frame-map 측정을 마쳤다** — 좌표계 매핑은 **단위행렬**이고 부호 뒤집힘도 축 교환도 없다(§11.9). 속도 3층은 검증된 EEF 텔레옵 값에 정렬했다(균일 1.25배).
 - **(2026-07-28 추가)** actor entrypoint의 4개 결함을 고쳐 실기 투입 가능 상태가 됐다: `--deadman {topic,spacebar}` 배선(이전에는 전역 스페이스바/ESC로 조용히 fallback), `--arm`(`DRY_RUN` CLI 해제), `--mock-policy-noise`(zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증), 카메라 첫 프레임 대기. `--arm` 시 이중 퍼블리셔 거부 게이트도 추가했다. suite `333 passed, 11 skipped`.
-- **(2026-07-28 🔴 핵심)** **reward classifier가 학습 때와 다른 이미지를 받고 있다.** 학습은 크롭 없이 full-frame을 128×128로 찌그러뜨렸는데, 우리 actor는 `IMAGE_CROP`을 적용한 뒤 리사이즈한다. 픽셀 대조(MAE 0.00 vs 21–35)와 실제 체크포인트 실행(recall **100% → 33.3%**)으로 증명했다. **단 현재 프로덕션은 안 망가져 있다** — 크롭을 켜는 task config가 kanu 체크아웃 브랜치에 없다. **actor 브랜치를 머지하는 순간 유입된다.** 전체 내용은 §12.
-- **(2026-07-28 측정 · 07-29 단서 추가)** Jul-27 `cube_in_cup_all3` 체크포인트를 held-out에서 측정했다: `dataset_manifest.json`의 **test split**(n=166), threshold 0.5, **크롭 없는 입력** 기준 recall 100.0% / FPR 0.0% / acc 100.0% (§12.3). **이 수치를 단독으로 인용하지 말 것.** (a) 조건이 붙는다 — 크롭이 활성인 경로에는 적용되지 않는다(§12.1). (b) 같은 체크포인트를 leave-one-take-out CV로 재면 @0.5에서 **86.8%**다 ([REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 참조) — 분할이 달라서 둘 다 맞지만, 그 문서의 leakage 감사는 0724 held-out이 사실상 학습 데이터였다고 지적한다. **더 보수적인 쪽을 기준으로 삼아라.**
+- **(2026-07-28 발견 · 2026-07-29 머지로 현실화 🔴 핵심)** **reward classifier가 학습 때와 다른 이미지를 받는다.** 학습은 크롭 없이 full-frame 1280×720을 128×128로 찌그러뜨렸는데, actor는 `IMAGE_CROP`을 적용한 뒤 리사이즈한다. 픽셀 대조(**MAE 0.00**(무크롭 가설, 비트 일치) **vs 21–35**(크롭))와 실제 체크포인트 실행(**성공 프레임 36장에서 recall@0.85 100.0% → 33.3%**)으로 증명했다.
+  - 07-28 판본은 "현재 프로덕션은 안 망가져 있다 — 크롭을 켜는 task config가 kanu 체크아웃 브랜치에 없다. **actor 브랜치를 머지하는 순간 유입된다**"였다. **그 머지가 `3f199d4` 로 일어났다.** `serl_ur_infra/ur_experiments/cube_in_cup.py` 는 이제 canonical checkout에 존재하고 `IMAGE_CROP` 이 채워져 있다. **따라서 이것은 예측이 아니라 현재 canonical branch의 실재 결함이다.** 전체 내용은 §12.
+  - 해결 방향은 **크롭 제거가 아니라 classifier 재학습**이다(§12.7). 크롭 값은 데이터셋 실측이고 1차 소비자는 정책이다.
+- **(2026-07-28 측정 · 2026-07-29 감사로 조건 명시)** Jul-27 `cube_in_cup_all3` 체크포인트(orbax 디렉터리, 43 MB)의 held-out 성능. **아래 두 줄은 같은 체크포인트·같은 threshold인데 숫자가 다르다. 분할이 다르기 때문이고 둘 다 맞다.**
+  - **0720 test split만**(success n=166), threshold 0.5, **크롭 없는 입력**, 2026-07-28 Kanu GPU: recall **100.0%** / FPR **0.0%** / acc **100.0%** (§12.3)
+  - **0720 held-out 전체**(test 166 + val 100 = success n=266, 6 takes), threshold 0.5, **크롭 없는 입력**: recall **86.8%** — [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 「처음 측정된 held-out success recall (0720)」
+  - 차이는 전부 **val split에 들어 있는 병리 take `take_21_20260720_210234`**(n=38, @0.5 recall 7.9%)가 만든다. §12.3에 산술 대조가 있다.
+  - **운영 기준은 보수적인 쪽(266프레임 = 86.8%)을 쓴다.** 그리고 **두 수치 모두 크롭 없는 입력에서 잰 것이라, 크롭이 활성인 현재 actor 경로에는 그대로 적용되지 않는다**(§12.1).
+- **(2026-07-29)** `DEFAULT_REWARD_THRESHOLD` 가 **0.2**로 내려왔다(`1b02857`). 0.85 → 0.5(`53d5cf6`) → 0.2다. 근거는 측정이 아니라 **비용 비대칭 판단**이며(false positive는 복구 불가, false negative는 사람이 메꾼다), 조건이 붙는다 — 자세한 것은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md). threshold는 learner fingerprint에 들어가므로 **다른 값으로 학습된 checkpoint resume은 fail-closed로 거부된다**(§4.7).
+- **(2026-07-29)** RealSense 시리얼 하드코딩을 걷어냈다(`43ba314`). 이 리그에는 D435 쌍이 두 벌 있고 **어느 쪽이 열거되는지가 07-28과 07-29 사이에 두 번 뒤집혔다.** `launch_cameras.sh` 는 이제 실제 USB 버스에서 해석한다(§11.10).
 
 ---
 
 ## 1. 현재 판정
 
-현재 milestone은 다음처럼 판정한다.
+**판정 기준일 2026-07-29, 기준 HEAD `43ba314`.** 아래 표와 §11/§12는 같은 시점을 말한다. 어긋나 보이면 §11/§12(측정 기록)가 우선이고 이 표가 틀린 것이다.
 
 | 범위 | 판정 |
 | --- | --- |
@@ -52,7 +76,10 @@
 | receive server + learner 단일 프로세스 composition | 구현·loopback 자동 검증 |
 | 실제 agent checkpoint/resume/continue | opt-in 실제 agent 자동 검증 |
 | actor gripper penalty wiring | 구현·자동 검증 |
-| classifier 실제 checkpoint local restore | load/SHA/warm-up만 검증, 분류 성능 미검증 — 사용한 `e329986b...`는 이후 0724 recall `0.0%`로 폐기 |
+| classifier 실제 checkpoint local restore | load/SHA/warm-up만 검증(2026-07-27, local CPU), 분류 성능 미검증 — 사용한 Jul-24 `e329986b...`는 이후 **0724 도메인·무크롭·@0.85 에서 recall `0.0%`** 로 폐기(§12.3) |
+| **reward classifier 분류 성능 (Jul-27 `cube_in_cup_all3`)** | **측정 완료 (2026-07-28, Kanu GPU, 크롭 없는 입력)** — 0720 test split(n=166) @0.5 recall 100.0% / FPR 0.0%; 0720 held-out 전체(n=266) @0.5 recall 86.8%; §12.3 |
+| **actor 경로의 classifier 입력 정합** | 🔴 **불일치. `3f199d4` 머지로 canonical branch에 유입됨** — 학습은 무크롭, actor는 `IMAGE_CROP` 적용. 위 성능 수치는 이 경로에 적용되지 않는다; §12.1 |
+| **Jul-27 checkpoint를 gRPC 경로에 pin** | **불가.** `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)이 `os.path.isfile`을 요구해 orbax **디렉터리**를 받지 못한다. 코드 기본 SHA는 아직 폐기된 Jul-24를 가리킨다; §7 P0-0, §12.6 |
 | JSONL + 실제 W&B offline artifact | 자동 검증 |
 | fake canonical demo | 생성기·strict loader·dry-run/synthetic-E2E scope gate 자동 검증 |
 | Kanu GPU production dry-run | actual classifier/agent, feature demo conversion, 128/32 RAM preflight 통과 |
@@ -62,18 +89,25 @@
 | 실제 robot actor → Kanu learner E2E | 미검증 |
 | frozen-trunk feature replay/demo | 구현·자동 검증; Kanu GPU dry-run/CTA smoke 통과 |
 | **robot actor 기동 (wrapper chain + task config)** | **구현·자동 검증 (`ee3240e`); §11.2** |
-| **actor → Kanu 실제 gRPC 왕복 100 step** | **실기 검증 (receive server 상대); §11.4** |
-| **workspace box / reset branch-cut 안전 게이트** | **구현·단위 검증; 실기 미검증** — `run_real_hil.py` 경로에서는 `ABS_POSE_LIMIT`이 0이라 박스가 아예 비활성이다; §11.3, §11.7 |
-| **2F-85 gripper, GELLO leader 하드웨어 경로** | **실기 검증** |
-| **팔 실제 구동 (`DRY_RUN=False`)** | **2026-07-28 실기 성공** — `run_real_hil.py --arm --scale 0.25`, 개입 64 스텝, `held=0`. 단 actor entrypoint는 아직 실기 미투입(다른 코드 경로); §11.9 |
-| **카메라 경로** | **2026-07-28 복구** — 허브 고장이 아니었다. 단 개체가 교체돼 시리얼이 바뀌었고, 크롭 상태의 관측 전 경로는 아직 실기 미검증; §11.10 |
-| **Kanu 실제 정책 서빙 (learner server)** | **미배포.** 2026-07-28 기준 Kanu에 HIL 프로세스가 **하나도 없다**(port 50053 미바인딩, GPU 유휴); §11.5, §12.5 |
+| **actor → Kanu 실제 gRPC 왕복 100 step** | **실기 검증 (2026-07-27, zero-action receive server 상대, fake-env actor); §11.4** |
+| **workspace box / reset branch-cut 안전 게이트** | **구현·단위 검증; 실기 미검증** — 팔이 움직인 07-28 세션은 `run_real_hil.py` 경로였고 거기서는 `DefaultUR7eEnvConfig.ABS_POSE_LIMIT`이 0이라 **박스가 아예 비활성**이었다. 즉 팔은 움직였지만 이 게이트는 여전히 실기에서 한 번도 작동한 적이 없다; §11.3, §11.7 |
+| **2F-85 gripper, GELLO leader 하드웨어 경로** | **실기 검증 (2026-07-27)** |
+| **팔 실제 구동 (`DRY_RUN=False`)** | **2026-07-28 실기 성공** — `run_real_hil.py --arm --scale 0.25`, 100 스텝 중 개입 64, `held=0`. **단 actor entrypoint(`run_remote_rlpd_actor.py`)는 아직 실기 미투입** — 다른 코드 경로다; §11.9 |
+| **actor entrypoint 실기 투입** | **미검증.** 지금까지 팔을 움직인 것은 전부 `run_real_hil.py` 다 |
+| **카메라 경로** | **2026-07-28 복구** — 허브 고장이 아니었다(재연결로 둘 다 정상). 다만 **어느 D435 쌍이 열거되는지가 07-28↔07-29에 뒤집혔고**, `43ba314` 가 시리얼 하드코딩을 실제 버스 해석으로 바꿨다. **크롭 상태의 canonical observation 전 경로는 아직 실기 미검증**; §11.10 |
+| **Kanu 실제 정책 서빙 (learner server)** | **미배포.** 2026-07-29 기준 Kanu에 HIL 프로세스가 **하나도 없다**(port 50053 미바인딩, GPU 유휴). zero-action receive server조차 떠 있지 않다; §11.5, §12.5 |
+| **canonical robot demo** | **없음 — 실제 정책 서빙의 유일한 하드 블로커.** `buffer_period=0` 이라 `--checkpoint-path` 를 줘도 pickle이 안 쓰인다(CLI 플래그도 없음); §7 P0-2, §11.7 |
 
 즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, unified schema v2 bounded fake learning/checkpoint/resume serving까지 확인했다. fake-data milestone은 완료다.
 
-다만 위 판정표에서 classifier 항목은 **artifact I/O 판정일 뿐 reward 품질 판정이 아니다.** 위 모든 통과 결과는 `e329986b...` checkpoint로 얻은 것이고, 그 checkpoint는 2026-07-28 실측에서 0724 도메인 recall `0.0%`로 폐기됐다. synthetic/fake acceptance가 검증한 범위는 파이프라인 배선(load, warm-up, ingress, CTA, publish, checkpoint)이지 reward 품질이 아니므로 위 통과 기록 자체는 그대로 유효하다. 그러나 **실기 run에는 새 정본 classifier가 필요하다**(4.8, 7절 P0 참조).
+다만 위 판정표에서 `classifier 실제 checkpoint local restore` 항목은 **artifact I/O 판정일 뿐 reward 품질 판정이 아니다.** 위 모든 fake/synthetic 통과 결과는 `e329986b...` checkpoint로 얻은 것이고, 그 checkpoint는 2026-07-28 실측에서 0724 도메인 recall `0.0%`(무크롭, @0.85)로 폐기됐다. synthetic/fake acceptance가 검증한 범위는 파이프라인 배선(load, warm-up, ingress, CTA, publish, checkpoint)이지 reward 품질이 아니므로 **위 통과 기록 자체는 그대로 유효하다.** 그러나 **실기 run에는 새 정본 classifier가 필요하다**(§4.8, §7 P0-0).
 
-robot actor 쪽은 “실행 불가”에서 시작해 2026-07-28에 **팔 실구동**과 **카메라 복구**를 마쳤고 frame-map은 단위행렬로 측정됐다(§11.9, §11.10). 남은 것은 **actor entrypoint의 실기 투입**(지금까지 팔을 움직인 것은 전부 `run_real_hil.py`라는 다른 코드 경로다), **크롭에 맞춘 classifier 재학습**(§12), 그리고 **Kanu에 진짜 정책 서버를 올리는 것** 세 가지다.
+robot actor 쪽은 "실행 불가"에서 시작해 2026-07-28에 **팔 실구동**과 **카메라 복구**를 마쳤고 frame-map은 단위행렬로 측정됐다(§11.9, §11.10). 남은 것은 네 가지다.
+
+1. **actor entrypoint(`run_remote_rlpd_actor.py`)의 실기 투입** — 지금까지 팔을 움직인 것은 전부 `run_real_hil.py` 라는 다른 코드 경로다.
+2. **크롭에 맞춘 classifier 재학습** — 머지로 실재하게 된 결함이다(§12).
+3. **canonical robot demo 확보** — Kanu 정책 서빙의 선결 조건(§7 P0-2).
+4. **Kanu에 진짜 정책 서버 배포**(§11.5).
 
 ## 2. 작업 위치와 branch
 
@@ -81,10 +115,16 @@ robot actor 쪽은 “실행 불가”에서 시작해 2026-07-28에 **팔 실�
 
 | 용도 | 위치 | branch/commit | 상태 |
 | --- | --- | --- | --- |
-| canonical 운영 checkout | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | 최종 server/learner/local-hardware 통합 위치 |
-| learner/hardware 통합 기준점 | 위 canonical branch에 포함 | `248255f` | learner `8f242d8` 계열과 hardware `6a0b127`을 병합; schema v2 검증 완료 |
+| canonical 운영 checkout | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` (= `origin/HEAD`) | 최종 server/learner/actor/local-hardware 통합 위치 |
+| learner/hardware 통합 기준점 | 위 canonical branch에 포함 | `248255f` (2026-07-27) | learner `8f242d8` 계열과 hardware `6a0b127`을 병합; schema v2 검증 완료 |
+| **robot actor 통합 merge** | 위 canonical branch에 포함 | **`3f199d4` (2026-07-29)** | 부모 `3ff5f80` + `1a4f93d`. `test/hil-hardware-comms` 를 흡수. `5fb716b..3f199d4` = 23 commit |
+| reward threshold 인하 | 위 canonical branch에 포함 | `1b02857` (2026-07-29) | `DEFAULT_REWARD_THRESHOLD` 0.5 → **0.2** |
+| **기준 HEAD** | 위 canonical branch | **`43ba314` (2026-07-29)** | RealSense 시리얼을 실제 USB 버스에서 해석 (§11.10) |
+| ⚠️ 구 actor worktree | `/home/laptop3/gello_worktrees/hil-hardware-comms` | `test/hil-hardware-comms` @ `1a4f93d` | **더 이상 작업 위치가 아니다.** 머지 완료. 디스크에 남아 있을 뿐 |
 
-통합 lineage는 historical base `f0dd3e7` 위의 learner snapshot `8f242d8`, synthetic acceptance 문서 `5322119`, hardware contract fix `6a0b127`을 `248255f`에서 합쳤다. 최종 작업 branch는 `feat/gello-ur7e-humble-22.04` 하나다.
+통합 lineage는 historical base `f0dd3e7` 위의 learner snapshot `8f242d8`, synthetic acceptance 문서 `5322119`, hardware contract fix `6a0b127`을 `248255f`에서 합치고, 그 위에 actor/하드웨어 계열 23 commit을 `3f199d4`에서 합쳤다. 최종 작업 branch는 `feat/gello-ur7e-humble-22.04` 하나다.
+
+`5fb716b..43ba314` 누적 diff: **70 files changed, +9,903 −395.**
 
 ### 2.2 역사적 통합 이력
 
@@ -353,11 +393,13 @@ production CLI는 `--resume-latest`뿐 아니라 explicit `--resume-path`에도 
 - exact grasp-penalty allowed values `[0, configured penalty]`
 - JAX/JAXLIB/Flax/Distrax/TFP version
 
-resume에서 document 또는 SHA가 다르면 즉시 실패한다. **reward threshold도 fingerprint에 들어가므로 threshold 0.85로 학습한 checkpoint는 기본값이 0.5가 된 지금 그대로 resume되지 않는다**(`53d5cf6`에서 `DEFAULT_REWARD_THRESHOLD`를 0.5로 낮췄다). 이 거부는 의도된 동작이다 — reward function이 바뀌면 다른 MDP이므로 lineage를 섞으면 안 된다. 구 lineage를 이어받으려면 `--reward-threshold 0.85`를 명시해야 하며, 근거와 판단은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다. 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
+resume에서 document 또는 SHA가 다르면 즉시 실패한다. **reward threshold도 fingerprint에 들어간다**(`scripts/run_rlpd_learner_server.py` 의 run contract). 기본값은 **0.85 → 0.5(`53d5cf6`, 2026-07-29) → 0.2(`1b02857`, 2026-07-29)** 로 두 번 내려왔고, 현재 `ur_env/rlpd_receive_server.py:73` 의 `DEFAULT_REWARD_THRESHOLD = 0.2` 다. 따라서 **0.85 또는 0.5로 학습한 checkpoint는 기본값 0.2인 지금 그대로 resume되지 않는다.** 이 거부는 의도된 동작이다 — reward function이 바뀌면 다른 MDP이므로 lineage를 섞으면 안 된다. 구 lineage를 이어받으려면 `--reward-threshold` 로 그때의 값을 명시해야 하며, 0.2를 고른 근거(측정이 아니라 비용 비대칭 판단)와 거기 붙는 조건은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다. 🪤 **actor와 learner의 threshold 불일치를 막는 가드는 아직 없다.** 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
 
 ### 4.8 reward classifier와 Flax local-I/O 수정
 
-> ⚠️ **이 절이 다루는 checkpoint `e329986b...`는 폐기 대상이다.** 2026-07-28 Kanu 실측에서 0724 도메인 success recall이 `0.0%`(성공 1,123 프레임 중 0건, mean 확률 `0.007`)였다. threshold를 아무리 낮춰도 살아나지 않는다. 실기 learner에 이 checkpoint를 물리면 로봇이 성공해도 reward가 영원히 0이므로 HIL-SERL 학습이 시작되지 않는다.
+> ⚠️ **이 절이 다루는 checkpoint `e329986b...`(Jul-24)는 폐기 대상이다.** **2026-07-28 Kanu GPU 실측**에서 **0724 도메인 success 프레임 1,123장 / 크롭 없는 입력 / threshold 0.85** 기준 recall이 `0.0%`(1,123장 중 0건, mean 확률 `0.007`)였다. threshold를 아무리 낮춰도 살아나지 않는다. 실기 learner에 이 checkpoint를 물리면 로봇이 성공해도 reward가 영원히 0이므로 HIL-SERL 학습이 시작되지 않는다.
+>
+> ※ **같은 checkpoint가 0720 test split에서는 recall `93.4%` @0.85 / FPR `0.0%` 다**(§12.3). 즉 "이 모델은 아무것도 못 맞힌다"가 아니라 **"새 도메인(0724)으로 전혀 일반화하지 못한다"** 가 정확한 서술이다. 두 숫자를 조건 없이 나란히 인용하면 모순처럼 보인다.
 >
 > 아래에 남긴 SHA, 경로, load/warm-up 수치는 **2026-07-27 시점의 역사적 기록**이며 지우지 않는다. 다만 그때 검증한 것은 SHA/load/warm-up까지이고 **분류 성능은 검증하지 않았다.**
 >
@@ -388,7 +430,7 @@ e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
 4. `flax.io.BackendMode.DEFAULT`를 명시적으로 선택한다.
 5. 그 뒤 upstream classifier checkpoint loader를 호출한다.
 
-실제 local artifact의 load/warm-up이 성공했다. 별도 측정에서 전체 준비 약 7.89초, warm-up 약 674 ms였고 zero-image smoke probability는 약 `0.081304`였다. 이 수치는 GPU production latency 기준이 아니라 local acceptance 관측값이다. zero-image smoke는 runtime이 유한한 확률을 낸다는 것만 보이며 **분류 정확도/recall과는 무관하다** — 실제 성공 프레임에 대한 recall은 이때 측정하지 않았고, 이후 실측에서 `0.0%`로 확인됐다.
+실제 local artifact의 load/warm-up이 성공했다. 별도 측정에서 전체 준비 약 7.89초, warm-up 약 674 ms였고 zero-image smoke probability는 약 `0.081304`였다. **이 timing은 2026-07-27 laptop3 로컬 CPU acceptance 관측값이며 GPU production latency 기준이 아니다** (참고: Jul-27 checkpoint의 Kanu GPU 실측은 load 13.5 s, 워밍업 후 1.03 ms/frame — §12.3). zero-image smoke는 runtime이 유한한 확률을 낸다는 것만 보이며 **분류 정확도/recall과는 무관하다** — 실제 성공 프레임에 대한 recall은 이때 측정하지 않았고, 이후 2026-07-28 실측에서 0724 도메인 `0.0%`로 확인됐다.
 
 ### 4.9 logging, W&B, protobuf
 
@@ -436,16 +478,27 @@ fake data로도 확인할 수 없는 것:
 
 ## 5. 검증 현황
 
-### 5.1 unified schema v2 최종 회귀
+### 5.1 회귀 suite
 
-learner/hardware 통합 merge `248255f`에서 확인한 최종 결과는 다음과 같다.
+**현재값 (2026-07-29, `43ba314`, 이 문서 작성 중 재실행):**
+
+```text
+serl_ur_infra/tests:  333 passed, 11 skipped in 3.47s
+ur_gello_bringup:     436 passed in 7.38s
+```
+
+`serl_ur_infra` 는 §9의 venv+overlay 명령으로, `ur_gello_bringup` 은 `-p no:launch_testing` 로 돌렸다. **actor 머지(`3f199d4`)로 테스트가 253 → 333으로 늘었다** — 늘어난 80개가 actor/wrapper/task-config 쪽이다.
+
+🪤 `third_party/hil-serl/serl_launcher` 를 `PYTHONPATH` 에서 빼면 **조용히 299**로 떨어지고, 사라지는 것이 하필 `test_cube_in_cup_config.py` / `test_frame_wrappers.py` 다. 게다가 skip 사유가 "submodule is not checked out"이라고 **거짓말한다**(서브모듈은 체크아웃돼 있다). 새 worktree는 서브모듈 미초기화로 296/17이 된다. **녹색이 아니라 passed 수를 볼 것.**
+
+**역사값 (2026-07-27, learner/hardware 통합 merge `248255f` 시점):**
 
 ```text
 serl_ur_infra: 253 passed, 4 skipped, 6 warnings in 3.10s
 ur_gello_bringup: 436 passed in 7.35s
 ```
 
-skip은 JAX 비용이 큰 opt-in 실제 agent/E2E 경로다. 같은 unified tree에서 실제 frozen-feature agent `2 passed in 22.66s`, 실제 checkpoint `1 passed in 33.61s`, 실제 localhost fake E2E `1 passed in 32.77s`를 별도 실행했다. 실패는 0이었다. UR/GELLO suite는 system pytest/anyio plugin 충돌을 피하기 위해 문서대로 `-p no:anyio`를 사용했다.
+skip은 JAX 비용이 큰 opt-in 실제 agent/E2E 경로다. 같은 unified tree에서 실제 frozen-feature agent `2 passed in 22.66s`, 실제 checkpoint `1 passed in 33.61s`, 실제 localhost fake E2E `1 passed in 32.77s`를 별도 실행했다. 실패는 0이었다. 당시 UR/GELLO suite는 system pytest/anyio plugin 충돌을 피하기 위해 `-p no:anyio`를 사용했다. **위 opt-in 3종은 2026-07-29 기준 HEAD에서 재실행하지 않았다** — 07-27 관측값이다.
 
 ### 5.2 opt-in 실제 agent checkpoint/resume
 
@@ -593,12 +646,14 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 
 ### P0 — 실기 production 승인 전 필수
 
-0. **사용 가능한 reward classifier 부재 — 현재 최상위 차단점**
-   - 지금까지 모든 dry-run/E2E가 사용한 `e329986b...`는 0724 도메인 recall `0.0%`로 폐기됐다. 이 상태로 실기를 돌리면 reward가 영원히 0이라 학습이 시작조차 하지 않는다.
-   - 사용자가 지정한 새 정본은 Kanu `~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150`(2026-07-27 생성, 약 43 MB)이며 단일 파일이 아니라 **orbax 디렉터리 포맷**이다.
-   - `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`는 `os.path.isfile()`을 강제하므로 orbax 디렉터리를 주면 즉시 `FileNotFoundError`로 죽는다. **orbax 디렉터리 load와 디렉터리용 digest 계약을 먼저 구현해야 한다.**
-   - `scripts/run_rlpd_learner_server.py`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`와 `scripts/run_rlpd_receive_server.py`의 `DEFAULT_CHECKPOINT_SHA256`는 아직 폐기된 SHA를 기본값으로 갖고 있다(2026-07-29 확인). orbax 지원이 선행돼야 하므로 이번에는 코드를 고치지 않았다. 그때까지 CLI에서 expected-SHA 옵션을 생략하지 않는다.
-   - 새 정본에 대한 recall/FPR, `IMAGE_CROP` 적용 여부, actor/learner threshold 정합은 아직 측정하지 않았다.
+0. **사용 가능한 reward classifier 부재 — 현재 최상위 차단점** *(2026-07-29 갱신)*
+   - 지금까지 모든 dry-run/E2E가 사용한 Jul-24 `e329986b...`는 **0724 도메인·무크롭·@0.85 에서 recall `0.0%`** 로 폐기됐다(§12.3). 이 상태로 실기를 돌리면 reward가 영원히 0이라 학습이 시작조차 하지 않는다.
+   - 새 정본은 Kanu `~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150`(2026-07-27 생성, 약 43 MB)이며 단일 파일이 아니라 **orbax 디렉터리 포맷**이다.
+   - ✅ **~~새 정본의 recall/FPR 미측정~~ → 해소.** 2026-07-28 Kanu GPU에서 측정했다(§12.3): **크롭 없는 입력** 기준 0720 test split(n=166) @0.5 recall 100.0% / FPR 0.0%, 0720 held-out 전체(n=266) @0.5 recall 86.8%.
+   - 🔴 **단 그 수치는 크롭 없는 입력의 것이다.** 현재 actor 경로는 `IMAGE_CROP`을 적용하고, 그 상태의 성능은 recall@0.85 100.0% → 33.3%로 무너진다(§12.1, 성공 프레임 36장). **머지(`3f199d4`) 이후 이 경로가 canonical branch의 기본 경로다.** 해결은 크롭에 맞춘 재학습(§12.7).
+   - 🪤 **`checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)이 `os.path.isfile()`을 강제**하므로 orbax 디렉터리를 주면 즉시 `FileNotFoundError`로 죽는다. **orbax 디렉터리 load와 디렉터리용 digest 계약 구현이 Jul-27 전환의 선결 조건이다.**
+   - `scripts/run_rlpd_learner_server.py:72`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`와 `scripts/run_rlpd_receive_server.py:34`의 `DEFAULT_CHECKPOINT_SHA256`는 **여전히 폐기된 Jul-24 SHA를 기본값으로 갖고 있다**(2026-07-29 `43ba314` 에서 재확인). 위 orbax 지원이 선행돼야 하므로 아직 고치지 않았다. **그때까지 CLI에서 expected-SHA 옵션을 생략하지 않는다.**
+   - actor/learner threshold 정합 가드는 아직 없다(§4.7). 현재 코드 기본값은 양쪽 다 `0.2`(`1b02857`)다.
 
 1. **production lifecycle bounded/continuous GPU acceptance**
    - JAX/JAXLIB 0.5.3 GPU production dry-run, 단일 feature CTA, laptop→Kanu synthetic E2E step 1/resume step 2는 통과했다.
@@ -610,13 +665,16 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
    - 사용자가 지정한 현재 fake-data acceptance는 완료됐다.
    - fake는 bounded `--synthetic-e2e`에서만 live learner에 허용되고 production robot-data scope에는 의도적으로 차단된다.
    - 실제 robot serving 단계에는 canonical EEF/action/grasp-penalty demo가 필요하다.
-   - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 `--run-id`를 노출하지 않고 `remote_actor.py:224`에서 `uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
-   - **생산 경로는 존재한다**: `remote_actor.py`의 `_dump_data`가 `--checkpoint-path` 를 받으면 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl` 을 남기고, `load_demo_pickles`(`demo.py:92-98`)가 바로 그 `{"meta":…, "transition":…}` 형식을 받는다. 즉 receive server를 띄운 채 텔레오퍼레이션으로 성공 에피소드를 녹화하면 그 pickle이 `--demo-path` 입력이 된다. strict loader 계약(canonical v2 스키마, action `(7,)` f32 `[-1,1]` 마지막 원소 `{-1,0,1}`, reward/mask `{0,1}`, `grasp_penalty ∈ {0, -0.02}`)을 실제 dump로 아직 확인하지 않았다.
+   - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 **`--run-id`를 노출하지 않고**(2026-07-29 재확인: CLI에 없음) `remote_actor.py:243`에서 `uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
+   - **생산 경로는 존재한다**: `remote_actor.py`의 `_dump_data`(`remote_actor.py:189-198`)가 `--checkpoint-path` 를 받으면 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl` 을 남기고, `load_demo_pickles`(`ur_env/learner/demo.py:310-317`, 단건은 `load_demo_pickle` `demo.py:299-307`)가 바로 그 `{"meta":…, "transition":…}` 형식을 받는다. 즉 receive server를 띄운 채 텔레오퍼레이션으로 성공 에피소드를 녹화하면 그 pickle이 `--demo-path` 입력이 된다. strict loader 계약(canonical v2 스키마, action `(7,)` f32 `[-1,1]` 마지막 원소 `{-1,0,1}`, reward/mask `{0,1}`, `grasp_penalty ∈ {0, -0.02}`)을 실제 dump로 아직 확인하지 않았다.
+   - 🪤 **선결 조건: `buffer_period = 0`**(`ur_experiments/cube_in_cup.py:265`). 0이면 `_dump_data` 가 호출되지 않아 `--checkpoint-path` 를 줘도 pickle이 **하나도** 안 쓰인다. 이 값을 뒤집는 CLI 플래그도 없다(§11.7).
+   - 🪤 **`--mock-policy-noise` 로 채운 데이터는 demo로 쓰면 안 된다.** `1a4f93d` 이후 모든 전이에 `meta.policy_actions_synthetic=true` 가 박힌다.
 
 3. **실제 robot/task/camera E2E**
-   - task config의 `GRASP_PENALTY`(`-0.02`), action convention, camera key/shape/timing을 확인한다. → task config는 `ur_experiments/cube_in_cup.py`로 확정됐고 `GRASP_PENALTY`도 서버 기본값과 일치한다(§11.2).
-   - robot laptop → SSH tunnel → Kanu → classifier/replay → policy response를 검증한다. → **receive server 상대로는 100-step 왕복 검증 완료**(§11.4). 실제 정책 응답은 learner server 배포 후로 남는다.
-   - **카메라가 현재 물리적으로 차단 상태다**(§11.6). actor 전체 경로는 카메라 없이 돌 수 없고, 팔 단독 검증은 `run_real_hil.py` 경로로만 가능하다.
+   - task config의 `GRASP_PENALTY`(`-0.02`), action convention, camera key/shape/timing을 확인한다. → task config는 `ur_experiments/cube_in_cup.py`로 확정됐고 `GRASP_PENALTY`(`cube_in_cup.py:223`)도 서버 기본값과 일치한다(§11.2).
+   - robot laptop → SSH tunnel → Kanu → classifier/replay → policy response를 검증한다. → **zero-action receive server 상대로는 100-step 왕복 검증 완료**(2026-07-27, fake-env actor; §11.4). 실제 정책 응답은 learner server 배포 후로 남는다.
+   - ⚠️ **~~카메라가 현재 물리적으로 차단 상태다~~ → 2026-07-28에 해소됐다**(§11.10 — 허브 고장이 아니었다). §11.6은 07-27 시점의 기록으로만 읽어라.
+   - **남은 것은 "카메라를 켠 상태의 canonical observation 전 경로"다.** 아직 실기 미검증이고, 그 경로가 바로 §12.1의 크롭 불일치가 실제로 물리는 지점이다.
 
 4. **continuous learner degraded monitoring**
    - 현재 learner fault는 stdout/JSONL event로만 확인하며 gRPC health는 last-known-good serving 때문에 ready일 수 있다.
