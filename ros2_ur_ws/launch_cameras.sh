@@ -36,22 +36,96 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 
-# Serials updated 2026-07-28: the previously configured pair (147122072740 /
-# 243222072700) belongs to cameras that are not connected and that this machine
-# has never enumerated -- kernel logs back to 2026-07-05 only ever show the two
-# below.  Binding by a serial that is absent does not degrade gracefully; the
-# camera simply never comes up.  Model classes are unchanged (plain D435 -> cam1,
-# D435IF -> cam2), which is the only evidence tying each unit to its mount, so
-# confirm with one arm jog: cam2 is the WRIST camera, so its background must
-# sweep while the gripper fingers stay fixed in frame.
-CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
-CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
+# Serials are a PREFERENCE, not a requirement -- resolve_serials() below falls
+# back to whatever is actually plugged in.  Two different D435 pairs have been
+# on this rig: (147122072740, 243222072700) and (151623020789, 322743060038),
+# and which pair enumerates has flipped twice (2026-07-28, then back on
+# 2026-07-29).  Binding by an absent serial does NOT fail loudly -- the camera
+# simply never comes up and callers see "no frame" rather than "wrong serial",
+# which is why this is auto-detected instead of hardcoded.
+#
+# Mount assignment is by model class: plain D435 -> cam1 (SCENE), D435IF/D435i
+# -> cam2 (CLOSE-UP / wrist).  That is the only evidence tying each unit to its
+# mount, so confirm with one arm jog: cam2 is the WRIST camera, so its
+# background must sweep while the gripper fingers stay fixed in frame.
+CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
+CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
 CAM1_NAME="${CAM1_NAME:-cam1}"
 CAM2_NAME="${CAM2_NAME:-cam2}"
 COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
 # Viewer is ON by default (opt-OUT, unlike run_recorder.sh's opt-IN CAMS): for
 # ACT deploy, eyeballing cam1=scene / cam2=close-up is a safety-relevant check.
 VIEW="${VIEW:-true}"
+
+# --- Resolve serials against what is actually on the USB bus ------------------
+# Enumeration does NOT open a streaming lock, so this is safe to run even while
+# another process holds the cameras (it just re-reports the same devices).
+resolve_serials() {
+    local resolved
+    resolved="$(CAM1_SERIAL="$CAM1_SERIAL" CAM2_SERIAL="$CAM2_SERIAL" python3 - <<'PY'
+import os, sys
+
+try:
+    import pyrealsense2 as rs
+except ImportError:
+    print("SKIP pyrealsense2 not importable; using configured serials as-is", file=sys.stderr)
+    raise SystemExit(3)
+
+want1, want2 = os.environ["CAM1_SERIAL"], os.environ["CAM2_SERIAL"]
+devs = [(d.get_info(rs.camera_info.name), d.get_info(rs.camera_info.serial_number))
+        for d in rs.context().query_devices()]
+
+if len(devs) < 2:
+    for name, serial in devs:
+        print(f"    connected: {name}  {serial}", file=sys.stderr)
+    print(f"ERROR only {len(devs)} RealSense device(s) found, need 2", file=sys.stderr)
+    raise SystemExit(1)
+
+present = {serial for _, serial in devs}
+if want1 in present and want2 in present:
+    print(f"{want1} {want2}")
+    raise SystemExit(0)
+
+# Configured pair is not what is plugged in.  Assign by model class instead:
+# the IMU/IF variants report "D435I..."; the plain unit reports "D435".
+imu = [s for n, s in devs if "d435i" in n.lower()]
+plain = [s for n, s in devs if "d435i" not in n.lower()]
+for name, serial in devs:
+    print(f"    connected: {name}  {serial}", file=sys.stderr)
+print(f"WARN configured serials ({want1}, {want2}) are not both connected", file=sys.stderr)
+
+if len(plain) == 1 and len(imu) == 1:
+    print(f"WARN auto-selected by model class: cam1={plain[0]} (plain D435), "
+          f"cam2={imu[0]} (D435IF/i)", file=sys.stderr)
+    print(f"{plain[0]} {imu[0]}")
+    raise SystemExit(0)
+
+# Ambiguous: same model class on both mounts.  Order is arbitrary, so say so.
+ordered = sorted(s for _, s in devs)[:2]
+print(f"WARN model classes are ambiguous; falling back to serial sort order: "
+      f"cam1={ordered[0]} cam2={ordered[1]}", file=sys.stderr)
+print("WARN VERIFY THE PANES BEFORE RECORDING -- cam1/cam2 may be swapped", file=sys.stderr)
+print(f"{ordered[0]} {ordered[1]}")
+PY
+)" || {
+        local rc=$?
+        # rc 3 = pyrealsense2 missing: not fatal, the realsense node does its own
+        # lookup.  Anything else means we genuinely cannot bring 2 cameras up.
+        if [ "$rc" != "3" ]; then
+            echo "###" >&2
+            echo "### Camera resolution failed. Check that both RealSense cameras are" >&2
+            echo "### plugged into USB 3 ports, then rerun.  Override explicitly with:" >&2
+            echo "###   CAM1_SERIAL=<serial> CAM2_SERIAL=<serial> $0" >&2
+            exit 1
+        fi
+        resolved=""
+    }
+    if [ -n "$resolved" ]; then
+        CAM1_SERIAL="$(echo "$resolved" | cut -d' ' -f1)"
+        CAM2_SERIAL="$(echo "$resolved" | cut -d' ' -f2)"
+    fi
+}
+resolve_serials
 
 # --- ROS2 Humble environment -------------------------------------------------
 source /opt/ros/humble/setup.bash
