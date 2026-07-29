@@ -1,14 +1,15 @@
 # 00 — 셋업 · 빌드 · 안전
 
-대상 checkout: `/home/laptop3/gello_worktrees/hil-hardware-comms` (브랜치 `test/hil-hardware-comms`)
+대상 checkout: `/home/laptop3/gello_software` (브랜치 `feat/gello-ur7e-humble-22.04`)
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software
 ```
 
-> 🔧 **정정 (2026-07-27):** 이전 판은 `WT=/home/laptop3/gello_software`였다. `ros2_ur_ws/**`
-> 절차(§2.1, §5, §6)는 두 checkout에서 동일하게 동작하지만, `serl_ur_infra`의 신규 코드는
-> 워크트리에만 있다. 이유는 `README.md` §2.
+> 🔧 **정정 (2026-07-29):** 2026-07-27 판은 `WT=/home/laptop3/gello_worktrees/hil-hardware-comms`
+> 였다. 머지 커밋 `3f199d4`가 그 브랜치를 통합 checkout으로 가져왔으므로 **이제는 통합
+> checkout이 정본**이다. 워크트리는 `1a4f93d`에 멈춰 있어 threshold 0.2와 카메라 시리얼
+> 자동 해석이 빠져 있다. 이유는 `README.md` §2.
 
 ---
 
@@ -17,12 +18,13 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 ```bash
 cd $WT
 git status --short          # 다른 사람이 만든 커밋 안 된 수정 확인
-git log --oneline -3
-git worktree list
+git log --oneline -3        # 3f199d4 머지 위에 있는지 확인
+git submodule status        # 앞의 '-' = 미초기화 (§2.3)
 ```
 
-**커밋 안 된 수정이 보이면 지우지 말 것.** 위 hardware 변경은 commits `4171e7a`,
-`6a0b127`과 learner/hardware merge `248255f`에 통합됐다. canonical checkout에는 별도의
+**커밋 안 된 수정이 보이면 지우지 말 것.** 하드웨어 변경은 commits `4171e7a`,
+`6a0b127`과 learner/hardware merge `248255f`에, HIL 안전 수정은 `d49d0f6`~`ee3240e`에,
+actor 하드웨어 작업은 merge `3f199d4`에 통합됐다. checkout에는 별도의
 사용자 산출물이 있을 수 있으므로 `git checkout .`, `git stash`, `git clean -fd`를 자동으로
 실행하지 않는다. 이 디렉터리의 `파일:줄` 근거가 어긋나면 `rg`로 내용을 다시 찾는다.
 
@@ -63,7 +65,7 @@ python3 -m pip install --user -e $WT/serl_ur_infra --no-deps
 
 ### 2.3 (필요할 때만) upstream hil-serl 서브모듈
 
-canonical checkout에서 다음으로 상태를 확인한다.
+다음으로 상태를 확인한다.
 
 ```bash
 cd $WT && git submodule status
@@ -75,6 +77,9 @@ cd $WT && git submodule status
 ```bash
 git -C $WT submodule update --init third_party/hil-serl
 ```
+
+📌 2026-07-29 실측: `third_party/hil-serl`은 초기화되어 있다(`-` 없음).
+**미초기화 상태의 증상이 "에러"가 아니라 "조용한 skip"이라는 점이 중요하다** — §4.2 참조.
 
 ---
 
@@ -88,7 +93,7 @@ git -C $WT submodule update --init third_party/hil-serl
 - 래퍼 스크립트들은 **스크립트 자신의 위치 기준**으로 자동 설정한다:
   `export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"`
   — `run_ur7e_gello_real.sh:100`, `run_eef_gui.sh:23`, `run_hil_gui.sh:24`,
-  `run_operator_console.sh:20`, `remote_helpers.sh:49`.
+  `run_operator_console.sh:19`, `remote_helpers.sh:49`, `run_hil_actor.sh:255`.
 - **함정:** `${GELLO_REPO_ROOT:-...}`는 *이미 설정된 값이 있으면 그것을 쓴다*.
   셸에 예전 `GELLO_REPO_ROOT=$HOME/gello_software`가 export되어 있으면,
   다른 checkout의 스크립트를 실행해도 **예전 경로의 `gello/` 코드가 로드될 수 있다.**
@@ -131,7 +136,7 @@ ROS Humble의 `setup.bash`는 `AMENT_TRACE_SETUP_FILES` 같은 변수를 **정�
 > 새 스크립트를 쓸 때 `set -u`를 쓰고 싶으면, ROS/워크스페이스 setup을 source하는
 > 구간만 `set +u` … `set -u`로 감싼다. 위 두 파일이 정본 패턴이다.
 
-### 3.4 🛑 인터프리터와 `PYTHONPATH` — 오늘 실기에서 4번 실패한 자리
+### 3.4 🛑 인터프리터와 `PYTHONPATH` — 2026-07-27 실기에서 4번 실패한 자리
 
 2026-07-27 실기 세션에서 actor 기동이 **코드가 아니라 실행 환경 때문에만** 4번 실패했다.
 아래 두 규칙이 그 전부다. (래퍼 `ros2_ur_ws/run_hil_actor.sh`가 이걸 강제한다 → `09` §0.)
@@ -221,12 +226,20 @@ python3 -m pytest test/ -q -p no:anyio
 - **ROS 환경이 필요하다.** `env -u PYTHONPATH`로 돌리면
   `ImportError: cannot import name 'LaunchContext' from 'launch'`로 컬렉션이 중단된다
   (`test/test_launch_derivation.py`).
-- 실측(2026-07-27, 워크트리): **`436 passed in 10.14s`**.
-- 이 스위트는 실행 중 **타이밍 baseline을 직접 찍는다**:
-  `[timing] worst-case tick = 1.314 ms (on a near-singular pose; budget 4.0 ms @250Hz)`
-  (`test/test_ur_kin.py`의 (k) 항목). 즉 타이밍 근거를 요구받으면 이 명령이 곧 산출물이다.
+- 📌 실측: **`436 passed in 7.09s`** (2026-07-29, 통합 checkout).
+  2026-07-27 워크트리 실측은 `436 passed in 10.14s`였다 — 개수는 같다.
+- 이 스위트는 실행 중 **타이밍 baseline을 직접 찍는다** (`test/test_ur_kin.py`의 (k) 항목,
+  `test_k_worst_case_tick_timing`). 즉 타이밍 근거를 요구받으면 이 명령이 곧 산출물이다.
 
-### 4.2 `serl_ur_infra` — 332 tests
+  > ### ⚠️ 이 타이밍 숫자를 고정값으로 인용하지 말 것
+  > 테스트는 350개 pose(generic 150 / near-singular 150 / unreachable 50)를 돌려
+  > **그 실행에서 가장 느렸던 하나**를 찍는다. 값도, 붙는 pose 이름도 실행마다 바뀐다.
+  > 📌 2026-07-29: `worst-case tick = 0.836 ms (on a generic pose; budget 4.0 ms @250Hz)`
+  > 📌 2026-07-27: `worst-case tick = 1.314 ms (on a near-singular pose; ...)`
+  > **판정 기준은 "예산 4.0 ms 미만"이지 특정 값이 아니다.** 예산을 넘으면 출력에
+  > `WARNING: exceeds budget`이 붙는다 (`test_ur_kin.py:445-446`).
+
+### 4.2 `serl_ur_infra` — 333 tests
 
 ```bash
 cd $WT/serl_ur_infra
@@ -235,7 +248,25 @@ PYTHONPATH="$WT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages
 /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest tests -q -p no:anyio
 ```
 
-실측(2026-07-27): **`332 passed, 11 skipped, 1 xfailed in 3.46s`**.
+📌 실측(2026-07-29): **`333 passed, 11 skipped in 3.39s`**.
+2026-07-27 워크트리 실측은 `332 passed, 11 skipped, 1 xfailed`였다 — 머지로 1개 늘었고
+xfail은 없어졌다. **개수를 기대값으로 하드코딩하지 말고, 아래 세 함정 때문에 개수가
+줄지 않았는지만 본다.**
+
+동등한 대안(플러그인 자동로딩까지 끄고 리포 루트에서 실행):
+
+```bash
+cd $WT
+set +u; source /opt/ros/humble/setup.bash; source ros2_ur_ws/install/setup.bash; set -u
+OVERLAY=$(python3 -c "import ur_gello_bringup,os;print(os.path.dirname(os.path.dirname(ur_gello_bringup.__file__)))")
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONPATH="$PWD/serl_ur_infra:$PWD/third_party/hil-serl/serl_launcher:$OVERLAY" \
+  /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest -q -p no:cacheprovider serl_ur_infra/tests
+```
+
+📌 2026-07-29: 같은 `333 passed, 11 skipped`.
+(이 형태는 `OVERLAY`를 하드코딩하지 않아 오버레이 레이아웃이 바뀌어도 버틴다.
+`env -u PYTHONPATH`가 **`OVERLAY` 계산 뒤에** 와야 하는 점만 주의.)
 
 세 부분이 전부 필요하고, 각각 빠뜨렸을 때의 증상이 다르다:
 
@@ -243,7 +274,14 @@ PYTHONPATH="$WT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages
 |---|---|---|
 | `env -u PYTHONPATH` (= ROS 경로가 남음) | **`collected 0 items / 1 skipped`** → `no tests collected`. **에러가 없어서 통과한 것처럼 보인다** | `PYTHONPATH=/opt/ros/humble/... pytest tests` → 0 collected |
 | venv python 대신 `python3` | 4개 파일이 **영원히 멈춘다**(각각 무한 hang): `test_actor_grpc_transport.py`, `test_actor_identity_pinning.py`, `test_actor_smoke.py`, `test_rlpd_receive_smoke.py`. 나머지는 정상 통과하므로 "느린 테스트"로 착각하기 쉽다 | 45 s 타임아웃 4/4 발생. venv에서는 각각 21/11/2/1 = **35 passed** |
-| 오버레이 `PYTHONPATH` (ur_gello_bringup / serl_launcher) | hang도 실패도 없이 **조용히 skip**된다: `test_cube_in_cup_config`, `test_frame_wrappers`, `test_reset_branch_cut` 등 (`299 passed`로 끝남) | 332 → 299 |
+| `serl_launcher` 경로 | hang도 실패도 없이 **조용히 skip**된다: `test_cube_in_cup_config`, `test_frame_wrappers`, `test_reset_branch_cut` 등 | 📌 2026-07-29: `333 passed, 11 skipped` → **`300 passed, 13 skipped`** |
+
+> ### 🪤 skip 사유가 거짓말을 한다
+> serl_launcher가 없을 때 뜨는 skip 메시지는
+> `third_party/hil-serl submodule is not checked out`이다. **서브모듈은 초기화돼 있는데도
+> 그렇게 뜬다** — 실제 원인은 그 경로가 `PYTHONPATH`에 없는 것이다.
+> 그러므로 **"초록색인가"가 아니라 "passed 개수가 유지되는가"로 판정한다.**
+> 새로 만든 worktree에서 서브모듈이 정말 미초기화면 개수가 더 떨어진다.
 
 > ### 🔧 정정: "`--ignore=tests/test_learner_policy_checkpoint.py`가 필수"는 틀렸다
 > 이전 판은 `test_learner_policy_checkpoint.py:15`의 모듈 레벨 `pytest.importorskip("jax")`가
@@ -367,12 +405,12 @@ Ctrl-C에 대한 정확한 거동: 브리지가 죽으면 컨트롤러는 **마�
 
 | 착각 | 실제로 일어나는 일 | 근거 |
 |---|---|---|
-| **RL 데드맨을 놓으면 팔이 선다** | **아니다.** 개입만 해제되고 **정책이 즉시 팔을 계속 움직인다.** `GelloIntervention.action()`은 미개입 시 정책 액션을 그대로 통과시킨다 | `serl_ur_infra/ur_env/envs/wrappers.py:287-290` |
-| **HIL GUI DISENGAGE = 정지** | **아니다.** GUI는 `/hil/deadman`만 발행한다. 로봇도 브리지도 건드리지 않는다. DISENGAGE는 "정책으로 복귀"다 | `gello_hil_gui_node.py:6-10`, `:38-41` |
-| **GUI가 죽으면 팔이 선다** | **아니다.** 0.5 s 하트비트 끊김 워치독은 `engaged=False`로 fail-safe할 뿐 → **정책이 이어받는다** | `wrappers.py:145` (`STALE_S = 0.5`), `:158-165` |
-| **ESC를 누르면 정지한다** | **아니다.** `self.terminate=True` → 그 **에피소드가 끝나고**, 그 다음 `reset()`이 `go_to_reset()`으로 **팔을 RESET_JOINTS로 이동시킨다.** ESC는 "정지"가 아니라 "지금 에피소드 끝내고 리셋 자세로 가"다. 게다가 pynput 리스너라 **터미널 포커스**가 필요하고, 반영은 다음 step 경계에서다 | `ur7e_env.py:203`(리스너), `:474`(reset→go_to_reset), `:482`(`go_to_reset`) |
+| **RL 데드맨을 놓으면 팔이 선다** | **아니다.** 개입만 해제되고 **정책이 즉시 팔을 계속 움직인다.** `GelloIntervention.action()`은 미개입 시 정책 액션을 그대로 통과시킨다 | `serl_ur_infra/ur_env/envs/wrappers.py:330-343` |
+| **HIL GUI DISENGAGE = 정지** | **아니다.** GUI는 `/hil/deadman`만 발행한다. 로봇도 브리지도 건드리지 않는다. DISENGAGE는 "정책으로 복귀"다 | `gello_hil_gui_node.py:5-10`, `:39-45` |
+| **GUI가 죽으면 팔이 선다** | **아니다.** 0.5 s 하트비트 끊김 워치독은 `engaged=False`로 fail-safe할 뿐 → **정책이 이어받는다** | `wrappers.py:144` (`STALE_S = 0.5`), `:166-177` |
+| **ESC를 누르면 정지한다** | **아니다.** `self.terminate=True` → 그 **에피소드가 끝나고**, 그 다음 `reset()`이 `go_to_reset()`으로 **팔을 RESET_JOINTS로 이동시킨다.** ESC는 "정지"가 아니라 "지금 에피소드 끝내고 리셋 자세로 가"다. **게다가 pynput 전역 리스너라 터미널 포커스가 필요 없다 — 아무 창에서 누른 ESC도 잡힌다.** 반영은 다음 step 경계에서다 | `ur7e_env.py:197-208`(리스너), `:505-512`(reset→go_to_reset), `:520`(`go_to_reset`) |
 | **펜던트 속도 슬라이더를 0%로 내리면 정지** | **아니다.** 속도 스케일일 뿐이며 명령 스트림은 계속 흐른다. 슬라이더를 올리는 순간 밀린 명령이 그대로 실행된다. 정지 수단으로 쓰지 말 것 | (UR PolyScope 동작. 리포 근거 없음 — 조작 원칙) |
-| **`DRY_RUN=True`니까 안전하다** | 조건부로 맞다. `DRY_RUN`은 `URRosBackend(dry_run=...)`로 전달되어 명령 발행을 막지만, **`run_rviz_hil.py`는 `DRY_RUN=False`를 일부러 박아 놨다**(`tests/run_rviz_hil.py:56`). 그 스크립트를 **실기에 겨누지 말 것** | `config.py:131`, `run_rviz_hil.py:34-35`, `:56` |
+| **`DRY_RUN=True`니까 안전하다** | 조건부로 맞다. `DRY_RUN`은 `URRosBackend(dry_run=...)`로 전달되어 명령 발행을 막지만, **`run_rviz_hil.py`는 `DRY_RUN=False`를 일부러 박아 놨다**(`tests/run_rviz_hil.py:55`). 또 `run_real_hil.py --arm`과 actor의 `--arm`은 **CLI로 `DRY_RUN`을 끈다.** 그 스크립트들을 무심코 실기에 겨누지 말 것 | `config.py:153`, `cube_in_cup.py:227`, `run_rviz_hil.py:34`, `:55` |
 | **`pos_scale:=0.0`이면 팔이 안 움직인다** | **아니다.** TCP 위치만 고정되고 회전 채널은 100% 살아 있어 팔이 크게 스윙한다 | `03_EEF_MODE.md` §2, `config/ur7e_gello_eef.yaml:66-73` |
 
 ### 6.1.1 🔧 새로 확인된 위험: 리셋이 손목을 **한 바퀴 돌릴 수 있었다** (H3, 수정됨)
@@ -399,13 +437,17 @@ raw 관절 공간에서 선형 보간하며 2π를 모른다. `cube_in_cup`의 `
 
 **수정됨** (commit `d49d0f6`): `go_to_reset()`이 먼저 `ur_kin.wrapped_nearest(target, q)`로
 목표를 **팔의 현재 회전수**로 옮긴 뒤 거리 가드·명령·도착 판정을 전부 그 값으로 한다
-(`ur7e_env.py:507-540`). 회귀 테스트 `tests/test_reset_branch_cut.py` (10 passed).
+(`ur7e_env.py:520`의 `go_to_reset`, wrap은 `:567-591`).
+회귀 테스트 `tests/test_reset_branch_cut.py` (📌 2026-07-29 재실행 **10 passed**).
 
 > ⚠️ **팔꿈치(index 2)는 일부러 감싸지 않는다.** 팔꿈치 가동범위가 ±π라 "더 짧은" 래핑
 > 목표가 도달 불가 영역에 놓이기 때문이다. 그래서 branch-safe 거리는 순진한 원형 거리
 > 2.755가 아니라 **3.5281**이다.
 >
-> **하드웨어에서는 아직 확인되지 않았다.** 첫 실기 리셋은 `DRY_RUN`으로 로그만 보고,
+> **하드웨어에서는 아직 확인되지 않았다.** 2026-07-28 실기 세션이 팔을 움직였지만
+> `run_real_hil.py --reset-mode startup`은 **기동 시점의 실제 관절을 그대로 `RESET_JOINTS`로
+> 잡으므로** ±π 경계를 건드리지 않는다 — 이 경로는 그때 실행되지 않았다.
+> `cube_in_cup`의 `RESET_JOINTS`로 첫 실기 리셋을 할 때는 `DRY_RUN`으로 로그만 보고,
 > 명령된 `wrist_3` 값이 현재 값 근처인지 눈으로 확인한 뒤에 arm한다.
 
 ### 6.2 protective stop 복구

@@ -1,5 +1,44 @@
+# ⛔ 폐기된 문서 — 2026-07-24 시점의 기록 (실행하지 마라)
+
+> **이 문서는 superseded 되었다. 현재 진입점은
+> [`HANDOFF_NEXT_SESSION_KO.md`](./HANDOFF_NEXT_SESSION_KO.md) 다.**
+> 이 파일은 **2026-07-24에 무엇을 알고 있었는지**의 기록으로만 남긴다. 사료로서의 가치는 있지만,
+> **여기 적힌 설치 명령·포트·CLI를 그대로 따라 하면 실패한다.** 아래 대조표를 먼저 읽어라.
+>
+> 지금 유효한 문서: [`HANDOFF_NEXT_SESSION_KO.md`](./HANDOFF_NEXT_SESSION_KO.md)(진입점) ·
+> [`HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md`](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)(learner) ·
+> [`REMOTE_ACTOR_GRPC.md`](./REMOTE_ACTOR_GRPC.md)(전송) ·
+> [`HIL_SERL_KANU_RUNBOOK_KO.md`](./HIL_SERL_KANU_RUNBOOK_KO.md)(서버 운용) ·
+> [`REWARD_CLASSIFIER_THRESHOLD_KO.md`](./REWARD_CLASSIFIER_THRESHOLD_KO.md)(reward threshold) ·
+> [`../docs/testing/09_HIL_ACTOR_RUNBOOK.md`](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)(actor 실기).
+
+## ⛔ 이 문서에서 지금 틀린 것 (따라 하면 깨지는 순서대로)
+
+| 이 문서의 서술 | 2026-07-29 현재 | 근거 |
+| --- | --- | --- |
+| **§3 "`jax==0.4.35`를 명시적으로 핀"** (`jax[cuda12_pip]==0.4.35` / `jax[cpu]==0.4.35`) | **틀렸다. 런타임이 `jax`/`jaxlib` `0.5.3`을 요구하며 fail-closed로 죽는다.** 0.4.35를 깔면 learner가 시작조차 못 한다 | `ur_env/learner/agent.py:104-150`(`validate_learner_dependencies`, 기대값 jax/jaxlib 0.5.3, flax 0.10.5, distrax 0.1.5, tensorflow_probability 0.25.0, wandb 0.26.0) ← `scripts/run_rlpd_learner_server.py:488` 이 호출 |
+| **§2·§4 통신 = agentlace, 포트 5588(데이터)/5589(파라미터)** | **틀렸다. 전송은 gRPC 단일 포트 `50053`**(SSH 터널 로컬 `50153`)으로 교체됐다. `network.type='agentlace'`는 **명시적으로 거부**된다 | `ur_env/actor_network.py:1205-1215`(`agentlace` → `NotImplementedError`), `scripts/run_rlpd_learner_server.py:85`, `ur_experiments/cube_in_cup.py:273` |
+| **§5 CLI `train_rlpd.py --learner` / `--actor --ip=...`** | 그런 진입점을 쓰지 않는다. 현재는 `scripts/run_rlpd_learner_server.py`(learner) / `scripts/run_remote_rlpd_actor.py`(actor)다 | 위 두 파일 |
+| **§1·§4 🔴 `clip_safety_box` 미작동** | **구현됐고 명령 경로에 배선됐다**(`PolicyDeltaController(clip_pose=...)` → 명령 자세에만 적용, 관측에는 미적용). 다만 `ABS_POSE_LIMIT_*`를 채우지 않는 config에서는 **여전히 no-op**이다(기본값이 0 벡터) | `ur_env/envs/ur7e_env.py:334`(구현)·`:188`·`:357`(배선), `ur_env/envs/policy_delta_controller.py:140-141`, `tests/test_clip_safety_box.py`, `ur_env/envs/config.py:76-77`(0 기본값) |
+| **§1·§4 🟠 wrapper 미포팅**(`RelativeFrame`·`Quat2Euler`·`Chunking`·`GripperPenalty`) | **포팅됐다** | `ur_env/envs/frame_wrappers.py`(RelativeFrame, Quat2EulerWrapper), `ur_env/envs/chunking.py`(obs_horizon=1만), `ur_env/envs/wrappers.py`(GripperPenaltyWrapper) |
+| **§1 "태스크 config 없음"** | **생겼다** — `cube_in_cup`. **그리고 이 config가 `IMAGE_CROP`을 켜면서 reward classifier 전처리 불일치를 유입시켰다**(미해결) | `ur_experiments/cube_in_cup.py:211-214`, `ur_experiments/mappings.py`, [`REWARD_CLASSIFIER_THRESHOLD_KO.md`](./REWARD_CLASSIFIER_THRESHOLD_KO.md) |
+| **§1 "리워드 분류기는 우리 범위 밖"** | 학습은 여전히 외부지만, **크롭 정합 재학습과 threshold는 이제 우리 문제다** | 같은 문서 |
+| **§3.2 actor venv = `~/actor_venv`** | 실제 경로는 `/home/laptop3/venvs/gello-hil-actor` | [`HANDOFF_NEXT_SESSION_KO.md`](./HANDOFF_NEXT_SESSION_KO.md) |
+| **부록 A 머신 팩트**(디스크 여유, `nvidia-smi` 드라이버 불일치 등) | 2026-07-24 정찰 스냅샷이다. 그 뒤 재확인하지 않았다 — **현재 상태는 미확인**이므로 직접 확인 없이 인용하지 마라 | — |
+
+**반대로 아직 유효한 것**(즉 이 문서가 "미완"이라고 적은 것 중 지금도 미완인 것):
+`GRASP_POSE` 미선언(트리 전체에 정의 없음) · `RANDOM_RESET`/`RANDOM_XY_RANGE` no-op
+(`ur_env/envs/config.py:39-40`, `ur_env/envs/ur7e_env.py:536` TODO) · `PolicyDeltaController` 단순화판
+(`ur_env/envs/policy_delta_controller.py` 상단 TODO 그대로) · `save_video` no-op
+(`ur_env/envs/ur7e_env.py:776-778`) · 부트스트랩 데모 미수집.
+이 항목들의 현재 상태도 이 문서가 아니라 위 진입점 문서에서 확인하라.
+
+---
+
 # HIL-SERL on UR7e+GELLO — 현재 상황 & 다음 할 일 (서버 핸드오프)
 
+> ⛔ **아래는 2026-07-24 원문이다. 갱신하지 않았고, 그대로 실행하면 안 된다.** 위 대조표 참조.
+>
 > 작성 2026-07-24. 목적: **학습/추론은 서버(`kanu`)에서 돌린다**는 결정에 맞춰,
 > 로봇 랩톱(`laptop3`)에서 준비한 내용과 남은 작업을 서버에서 그대로 이어받도록 정리.
 > 배경 설계는 [`README.md`](README.md), env 상태 스냅샷은
@@ -36,6 +75,9 @@
 
 ## 2. 아키텍처 — actor/learner 분리 + 서버 플랜
 
+> ⛔ **[2026-07-29] 아래 다이어그램의 전송 계층은 폐기됐다.** agentlace 5588/5589가 아니라
+> **gRPC 단일 포트 50053**(터널 로컬 50153)이다. actor/learner 분리라는 큰 그림만 유효하다.
+
 ```
    ┌─────────────── 로봇 랩톱 laptop3 (actor) ───────────────┐        ┌──── 서버 kanu (learner) ────┐
    │  UR7e + GELLO + RealSense                                │        │  GPU (RLPD/SAC 학습)        │
@@ -56,6 +98,12 @@
 ---
 
 ## 3. 설치 레시피 (정찰로 검증됨 — 그대로 쓰면 됨)
+
+> ⛔ **[2026-07-29] 이 절의 명령을 실행하지 마라.** `jax==0.4.35` 핀은 이제 **틀렸다** —
+> 런타임이 `0.5.3`을 요구하고 불일치 시 `LearnerDependencyError`로 죽는다
+> (`ur_env/learner/agent.py:104-150`). "그대로 쓰면 됨"이라는 이 절의 제목은 07-24 기준이다.
+> 현재 설치 절차는 [`HIL_SERL_KANU_RUNBOOK_KO.md`](./HIL_SERL_KANU_RUNBOOK_KO.md) 와
+> [`HANDOFF_NEXT_SESSION_KO.md`](./HANDOFF_NEXT_SESSION_KO.md) 에 있다.
 
 ### ⚠️ 공통 landmine — jax 버전 반드시 핀
 hil-serl README의 **CPU 설치 라인은 무핀**(`pip install --upgrade "jax[cpu]"`)인데, 이러면 **jax 0.6.2**가 깔리고 거기선 `jax.tree_map`이 **제거**되어 있어 `serl_launcher`(common/common.py, wrappers/chunking.py 등에서 `jax.tree_map` 직접 호출)가 **런타임 크래시**(`AttributeError`). `pip install`은 성공으로 보고하므로 더 함정.
@@ -106,6 +154,9 @@ python -c "import rclpy, jax, ur_env; print('actor stack OK')"  # 반드시 ROS 
 
 ## 4. 실기 학습 전 메워야 할 코드 gap (Franka 원본 대비)
 
+> ⛔ **[2026-07-29] 이 표는 07-24 기준이다.** `clip_safety_box`와 wrapper 4종은 그 뒤 구현됐고,
+> `PolicyDeltaController`·`save_video`·`GRASP_POSE`·`RANDOM_*`는 아직 열려 있다. 상단 대조표 참조.
+
 | 심각도 | gap | 위치 / 내용 | 참고 |
 | --- | --- | --- | --- |
 | 🔴 안전 | `clip_safety_box` 미작동 | `ur7e_env.py:229-240` `_apply_action`에 `TODO`. `ABS_POSE_LIMIT_LOW/HIGH`가 config엔 있으나 명령 자세를 자르지 않음. RL은 사람 없이 탐색하므로 **실기 전 필수**. | Franka는 매 스텝 `clip_safety_box` 호출 |
@@ -119,6 +170,10 @@ python -c "import rclpy, jax, ur_env; print('actor stack OK')"  # 반드시 ROS 
 ---
 
 ## 5. HIL-SERL 실행 파이프라인 (순서)
+
+> ⛔ **[2026-07-29] 아래 CLI는 존재하지 않는 진입점이다.** `train_rlpd.py --learner/--actor` 대신
+> `scripts/run_rlpd_learner_server.py` / `scripts/run_remote_rlpd_actor.py` 를 쓴다.
+> 실행 순서(라벨링 → classifier → 데모 → 학습)라는 큰 틀만 유효하다.
 
 ```
 ① record_success_fail.py   → 성공/실패 라벨링            [외부에서 진행 중]
@@ -140,6 +195,10 @@ python -c "import rclpy, jax, ur_env; print('actor stack OK')"  # 반드시 ROS 
 ---
 
 ## 6. 다음 할 일 (우선순위)
+
+> ⛔ **[2026-07-29] 이 목록은 소진됐거나 폐기됐다.** 1·2번(task config, wrapper 체인)과 3번
+> (`clip_safety_box`)은 완료됐고, 4번의 "agentlace 스모크 테스트"는 gRPC로 대체됐다.
+> 현재 우선순위는 [`HANDOFF_NEXT_SESSION_KO.md`](./HANDOFF_NEXT_SESSION_KO.md) 를 보라.
 
 1. **task config 1개 작성** — 최소 난이도 태스크(cube_in_cup 이하)로. §4의 값들 실측/기입. `examples/experiments/<task>/{config.py,wrapper.py}` 대응. `mappings.py`(우리 쪽 등가물)에 등록.
 2. **wrapper 체인 정리** — `RelativeFrame`/`Quat2Euler`/`SERLObs`/`Chunking`/`GripperPenalty`를 UR 로컬에서 안전 import 가능하게(re-export 또는 최소 포팅). `pyspacemouse`/구식 `gym` 딸림 방지.

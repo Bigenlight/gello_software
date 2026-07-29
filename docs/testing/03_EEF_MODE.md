@@ -5,16 +5,21 @@
 
 정본: `docs/ros2/GELLO_UR7E_EEF_MODE.md`. 여기서는 테스트 관점의 요약 + 이 브랜치의 실행 명령만 담는다.
 
-> ### 2026-07-27 실기 세션의 영향: **없음 (의도적으로)**
-> 오늘 진전된 것은 RL/HIL 쪽(`04`~`09`)이고 EEF 텔레옵 경로는 건드리지 않았다.
-> 이 문서의 판정은 그대로 유효하다.
+> ### 2026-07-27 · 2026-07-29(머지) 실기/코드 변경의 영향: **없음 (의도적으로)**
+> 진전된 것은 RL/HIL 쪽(`04`~`09`)이고 EEF 텔레옵 경로는 건드리지 않았다.
+> 머지 `3f199d4` 이후에도 `config/ur7e_gello_eef.yaml`과 `gello_ur_bridge_node.py`는
+> 그대로다. 이 문서의 판정은 유효하다.
 >
 > 다만 **RL 경로와 혼동하지 말 것**: EEF 텔레옵의 `keepout`/`sigma_min` 감속/branch-lock IK는
 > `PolicyDeltaController`(RL)에는 **없다** (`08_OPEN_GAPS.md` G2). 새로 생긴
 > `clip_safety_box`는 **RL 경로 전용**이고 EEF 텔레옵에는 적용되지 않는다.
+>
+> 반대 방향도 참이다: RL 쪽 속도 3층(`ACTION_SCALE`/`GOVERNOR`/`UPSAMPLER`)은
+> **이 문서의 검증된 텔레옵 값에 맞춰 고정**돼 있다 (`config.py:65-108`). 여기 §2.1의
+> yaml 값이 RL 쪽 상한의 근거이므로, 이 값을 바꾸면 RL 쪽도 같이 재검토해야 한다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
 cd $WT/ros2_ur_ws
 ```
 
@@ -40,10 +45,14 @@ ros2 topic echo /gello_ur_bridge/eef/state
 cd $WT/ros2_ur_ws && ./run_eef_gui.sh
 ```
 
-> **시작 시 팔은 움직이지 않는다.** `control_mode:=eef`면 `run_ur7e_gello_real.sh`가
-> `start_mode`를 자동으로 `switch_only`로 잡는다 (`run_ur7e_gello_real.sh:86-92`, `:135-140`).
-> 컨트롤러 스위치는 제자리에서 일어나고 브리지가 팔을 그 자리에 홀드한다.
-> 팔은 **`eef_engage`(GUI 큰 토글) 이후에만** 움직인다.
+> **시작 시 팔은 움직이지 않는다.** `control_mode:=eef`면 launch 파일이 `start_mode`를
+> 자동으로 `switch_only`로 유도한다 (`run_ur7e_gello_real.sh:86-88`이 그 규칙을 적어 두고,
+> `:121-136`이 배너로 다시 확인시킨다). 컨트롤러 스위치는 제자리에서 일어나고 브리지가
+> 팔을 그 자리에 홀드한다. 팔은 **`eef_engage`(GUI 큰 토글) 이후에만** 움직인다.
+>
+> 🛑 `START_MODE`를 손으로 넘겨 덮어쓸 수 있다 (`:105`). `control_mode=eef`에
+> `start_mode=gello`를 주면 **기동하자마자 팔이 GELLO 자세로 스윕한다** — 스크립트가
+> 그 조합에 대해 경고를 찍는다 (`:149`). 기동 배너를 읽고 시작할 것.
 
 ---
 
@@ -200,8 +209,12 @@ ros2 topic echo --once /gello_ur_bridge/eef/commanded_pose    # 우리 FK 기준
 - 어긋나면: 상대 텔레옵에는 대체로 무해하지만(왕복 항등이 우리 DH 안에서 닫힘) **절대 좌표
   정밀도를 기대하면 안 된다.** mm를 크게 넘으면 P7 진행 전 에스컬레이션.
 - 이것은 **HIL-SERL에 직접 영향을 준다**: RL env의 `TCP_POSE_SOURCE` 기본이 `"driver"`
-  (`config.py:114`)이므로 관측은 **벤더 FK**로 오는데, 명령 경로와 개입 앵커는 **우리 DH**를
-  쓴다. 두 계가 다르면 관측과 명령이 서로 다른 좌표계 위에 있게 된다. → `08_OPEN_GAPS.md`
+  (`config.py:132`, `cube_in_cup.py:128`)이므로 관측은 **벤더 FK**로 오는데, 명령 경로와
+  개입 앵커는 **우리 DH**를 쓴다. 두 계가 다르면 관측과 명령이 서로 다른 좌표계 위에 있게
+  된다. → `08_OPEN_GAPS.md` G7
+  (오프라인 실측으로 이 불일치의 크기는 **중앙값 0.6 mm**로 확인됐다 — G7 참조.
+  그리고 실기 러너 `run_real_hil.py`는 기본이 `--tcp-source fk`라 이 경로에서는
+  관측과 명령이 같은 계에 있다.)
 
 ---
 

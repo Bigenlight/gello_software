@@ -1,14 +1,22 @@
 # HIL-SERL gRPC receive server 작업 정리
 
-## 저장 위치
+> **상태: 과거 milestone 기록.** 2026-07-29에 머지된 트리 기준으로 재검증하면서
+> 아래 세 가지를 정정했다 — 브랜치/worktree 위치, 19-D `state` 순서(v1 순서로
+> 적혀 있었고 그건 틀렸다), reward threshold(문서에 숫자를 적지 않는다).
+> Kanu에는 2026-07-29 현재 이 서버가 떠 있지 않다(port 50053 미바인딩, GPU 유휴).
 
-- Git 브랜치: `feat/hil-rl-receive-server`
-- 원격 브랜치: `origin/feat/hil-rl-receive-server`
-- 로컬 전용 worktree: `/tmp/gello-hil-rl-receive-server`
-- Kanu 전용 worktree: `/tmp/gello-hil-rl-receive-server-v2`
+## 저장 위치 (2026-07-29 정정)
 
-worktree는 브랜치를 안전하게 checkout한 작업 디렉터리일 뿐이다. 구현 내용은
-원격 브랜치에 커밋되어 있으므로 `/tmp` 디렉터리에만 저장된 상태가 아니다.
+- 통합 브랜치: **`feat/gello-ur7e-humble-22.04`** (= `origin/HEAD`). 이 milestone의
+  코드는 여기에 병합돼 있다.
+- ~~`feat/hil-rl-receive-server` / `origin/feat/hil-rl-receive-server`~~ —
+  **더 이상 존재하지 않는다.** 로컬·원격 어디에도 없다(2026-07-29 `git branch -a` 확인).
+  이 이름으로 checkout하려 하면 실패한다.
+- `/tmp/gello-hil-rl-receive-server` (laptop3), `/tmp/gello-hil-rl-receive-server-v2`
+  (Kanu 전용 worktree): `/tmp`이므로 **남아 있다고 가정하지 않는다.** laptop3에서는
+  이미 사라졌다(2026-07-29 확인). 필요하면 통합 브랜치에서 새로 만든다.
+
+구현 내용은 통합 브랜치에 커밋되어 있으므로 `/tmp` 디렉터리에만 저장된 상태가 아니다.
 
 ## 이번 단계의 목표와 범위
 
@@ -89,21 +97,57 @@ buffer에 넣는다. 문자열 ID는 학습 tensor에 섞지 않고 bounded side
 
 Canonical observation은 다음 세 tensor로 고정돼 있다.
 
+```text
+schema id:   hil-serl-ur-canonical-observation-v2
+schema hash: 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903
+```
+
 - `state`: `float32 (1, 19)`
 - `cam1`: RGB `uint8 (1, 128, 128, 3)`
 - `cam2`: RGB `uint8 (1, 128, 128, 3)`
 
-Schema hash에는 shape/dtype뿐 아니라 19개 state feature의 순서도 들어간다.
-순서는 TCP position XYZ, Euler XYZ, linear velocity XYZ, angular velocity XYZ,
-force XYZ, torque XYZ, gripper position이다.
+Schema hash에는 shape/dtype뿐 아니라 19개 state feature의 **순서**도 들어간다.
+
+> 🪤 **2026-07-29 정정.** 이 문서는 순서를 "TCP position XYZ, Euler XYZ,
+> linear velocity XYZ, angular velocity XYZ, force XYZ, torque XYZ, gripper
+> position"이라고 적고 있었다. **그건 v1 순서이고 지금 계약과 다르다.**
+> flat layout은 upstream `SERLObsWrapper`가 만들고 `gym.spaces.Dict`가 proprio
+> 그룹을 **알파벳 순으로 재정렬**하므로 실제 순서는 다음과 같다.
+
+```text
+[0]     gripper_pose   gripper_position          <- gripper는 index 0. -1이 아니다
+[1:4]   tcp_force      x, y, z
+[4:10]  tcp_pose       position x,y,z + euler x,y,z
+[10:13] tcp_torque     x, y, z
+[13:19] tcp_vel        linear x,y,z + angular x,y,z
+```
+
+`state[0, -1]`은 gripper가 아니라 TCP angular velocity z다. gripper는
+`GRIPPER_POSITION_INDEX` / `gripper_position_from_state()`로만 읽는다.
+shape `(1,19)`가 같다고 v1 peer와 v2 peer가 호환되는 것이 아니다.
+
+hash를 손으로 옮겨 적지 않는다. 코드에서 다시 뽑는다(2026-07-29에 위 값과
+일치함을 확인):
+
+```bash
+PYTHONPATH=serl_ur_infra python3 -c \
+  "from ur_env.observation_schema import CANONICAL_OBSERVATION_SCHEMA_HASH as h; print(h)"
+```
 
 Reward는 server classifier가 최종 권한을 가진다.
 
-- `probability > 0.5`: `reward=1`, `done=true`, `mask=0`
+- `probability > threshold`: `reward=1`, `done=true`, `mask=0` (엄격한 초과 비교)
 - 그 외: `reward=0`
 - classifier 성공과 local time-limit truncation이 동시에 발생하면 성공 종료가
   우선한다.
 - classifier 또는 buffer 삽입이 실패하면 ACK하지 않고 server가 fail-stop한다.
+
+> ⚠️ **threshold 숫자를 이 문서에서 베끼지 마라.** 이틀 사이 0.85 → 0.5 → 0.2로
+> 두 번 움직였다. 권위 있는 값은 `ur_env/rlpd_receive_server.py`의
+> `DEFAULT_REWARD_THRESHOLD` 하나뿐이고, 그게 `--threshold`의 기본값이다.
+> 그래서 `--threshold`를 아예 주지 않는 것이 코드와 어긋나지 않는 유일한 방법이다.
+> 2026-07-29 확인 시점 값은 `0.2`였다. 근거는
+> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md).
 
 ## Buffer와 ACK 의미
 
@@ -129,13 +173,28 @@ Docker는 사용하지 않았다. 공유 conda `il` 환경도 변경하지 않�
 protobuf 3.20.3은 저장소에 체크인된 generated gRPC module과 Kanu의 protobuf
 7.x가 호환되지 않아 overlay 안에서만 사용한다.
 
+> ⚠️ **이 overlay를 production learner에 재사용하지 않는다.** protobuf 3.20.3 핀이
+> `run_rlpd_learner_server.py`가 요구하는 `wandb` import를 깨뜨린다. learner는
+> 별도의 CUDA 환경을 쓴다 —
+> [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.2절.
+
+> ℹ️ Kanu `il` 환경은 lock에서 벗어나 있다(2026-07-29 팩트 시트 기준:
+> numpy 2.2.5 / orbax 0.11.12 / grpcio 1.80.0 vs lock 1.26.4 / 0.11.5 / 1.74.0).
+> 런타임 fail-closed 대상이 jax·flax·distrax·tfp·wandb뿐이라 이 셋은 자동으로
+> 걸리지 않는다. overlay를 다시 만들 때 실제 값을 기록해 둔다.
+
 정확한 생성·실행 명령은 [RL_RECEIVE_SERVER.md](./RL_RECEIVE_SERVER.md)에 있다.
 
-## 파이프라인 스모크 결과 (분류 성능 미검증)
+## 파이프라인 스모크 결과 — 2026-07-27 기록 (분류 성능 미검증, 재입력 금지)
 
-Kanu GPU 7과 실제 checkpoint를 사용했다. 아래는 **transport/classifier I/O/buffer
-배선이 동작한다는 스모크 결과**이며, classifier의 **분류 성능(recall·FPR)은
-검증하지 않았다.** load 성공과 warm-up 시간은 artifact가 열렸다는 사실만 말한다.
+> 📌 **아래는 그날 나온 값의 기록이다.** GPU 번호·포트 점유·타이밍은 그때의 상황이지
+> 고정값이 아니고, 지금 Kanu에서는 아무것도 돌고 있지 않다. **checkpoint 경로와 SHA를
+> 여기서 복사해 새 run에 넣지 마라.**
+
+그날 비어 있던 GPU(당시 index 7)와 당시 checkpoint를 사용했다. 아래는
+**transport/classifier I/O/buffer 배선이 동작한다는 스모크 결과**이며,
+classifier의 **분류 성능(recall·FPR)은 검증하지 않았다.** load 성공과 warm-up
+시간은 artifact가 열렸다는 사실만 말한다.
 
 > ⚠️ 여기서 쓴 checkpoint `e329986b...`는 이후 **폐기됐다.** 2026-07-28 Kanu
 > 실측에서 0724 도메인 success recall이 `0.0%`였다(성공 1,123 프레임 중 0건,
@@ -159,14 +218,18 @@ Kanu GPU 7과 실제 checkpoint를 사용했다. 아래는 **transport/classifie
 - replay와 intervention 실제 batch sampling: 성공
 - 검증 batch image shape: `(8, 2, 128, 128, 3)`
 - 검증 batch state shape: `(8, 1, 19)`
-- 로컬 전체 test suite: 74 passed
+- 로컬 전체 test suite: 74 passed — **이 milestone 시점의 개수다.** 통합 브랜치의
+  현재 기준선은 `serl_ur_infra/tests` 전체에서 **333 passed / 11 skipped**다
+  (2026-07-29 laptop3 실행 확인). 74와 비교해 회귀 여부를 판단하지 않는다.
 
-검증 후 server와 SSH tunnel은 정상 종료해 GPU 7과 port 50053을 반환했다.
-전용 worktree와 overlay는 재실행을 위해 남겨두었다.
+검증 후 server와 SSH tunnel은 정상 종료해 그날 쓰던 GPU와 port 50053을 반환했다.
+당시 전용 worktree와 overlay를 재실행용으로 남겨두었지만 둘 다 `/tmp`이므로
+지금 남아 있다고 가정하지 않는다.
 
 ## 주요 구현 파일
 
-- `ur_env/proto/actor_transport.proto`: gRPC source of truth
+- `proto/actor_transport.proto`: gRPC source of truth (**경로 정정 2026-07-29** —
+  `ur_env/proto/`에는 생성물 `actor_transport_pb2*.py`만 있다)
 - `ur_env/actor_network.py`: transport-independent session, validation, dedupe
 - `ur_env/grpc_actor_transport.py`: gRPC client/server adapter
 - `ur_env/remote_actor.py`: laptop actor loop 및 transition 작성
@@ -175,14 +238,28 @@ Kanu GPU 7과 실제 checkpoint를 사용했다. 아래는 **transport/classifie
 - `scripts/run_rlpd_receive_server.py`: Kanu receive server entrypoint
 - `scripts/run_rlpd_receive_smoke_client.py`: 100-step acceptance client
 
-## 다음 작업
+## 다음 작업 — 2026-07-29 갱신
 
-1. fake zero action을 versioned JAX policy inference로 교체
-2. replay/intervention 50:50 sampling을 사용하는 RLPD learner 연결
-3. learner parameter를 inference snapshot에 원자적으로 교체
-4. checkpoint에 learner step과 policy version 저장
-5. 필요하면 ACK 전에 disk append journal을 추가해 transition을 복구 가능하게 함
-6. 실제 laptop UR task config, camera contract, reset/fault 및 workspace safety 검증
+이 절의 1~4번은 그 뒤에 **구현됐다.** `scripts/run_rlpd_learner_server.py`가
+versioned JAX policy inference, replay/intervention 50:50 RLPD learner,
+policy snapshot 원자 교체, learner step/policy version을 담은 checkpoint를 모두
+갖고 있다. 그 절차는 이 문서가 아니라
+[HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)에 있다.
 
-Learner를 붙이기 전까지 이 브랜치는 receive server milestone의 기준점으로
-사용한다.
+~~1. fake zero action을 versioned JAX policy inference로 교체~~ (완료)
+~~2. replay/intervention 50:50 sampling을 사용하는 RLPD learner 연결~~ (완료)
+~~3. learner parameter를 inference snapshot에 원자적으로 교체~~ (완료)
+~~4. checkpoint에 learner step과 policy version 저장~~ (완료)
+
+남은 것:
+
+5. ACK 전 disk append journal — **미구현.** replay/intervention은 여전히 RAM-only이고
+   process를 재시작하면 내용이 사라진다.
+6. 실제 laptop UR task config는 `ur_experiments/cube_in_cup.py`로 존재하지만,
+   camera contract·reset/fault·workspace safety는 **실기 미검증**이다.
+   `scripts/run_remote_rlpd_actor.py`는 실기에서 한 번도 실행된 적이 없다.
+7. 정본 orbax classifier를 이 서버에 물릴 수 없다 — `checkpoint_sha256()`이
+   `os.path.isfile()`을 강제한다. 디렉터리 digest 계약이 선행돼야 한다.
+
+이 문서는 receive-only milestone의 기준점 기록으로 남긴다. 새 작업의 출발점은
+통합 브랜치와 learner runbook이다.

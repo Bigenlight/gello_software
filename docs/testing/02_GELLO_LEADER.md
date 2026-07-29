@@ -3,7 +3,7 @@
 **상태: 실기 검증 완료.** 모터 응답, 발행 주기, 드롭, 트리거 스팬 전부 통과.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
 ```
 
 ---
@@ -12,13 +12,13 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 
 | 항목 | 값 | 근거 |
 |---|---|---|
-| 포트 | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0` | `config/ur7e_gello.yaml:9`, 노드 기본값 `gello_publisher_node.py:71-74` |
+| 포트 | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0` | `config/ur7e_gello.yaml:10` |
 | Baud | **57600** | `gello/dynamixel/driver.py:166` (기본값), `docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md:46` |
 | 프로토콜 | Dynamixel **2.0** | `driver.py:251` |
-| 팔 모터 ID | 1, 2, 3, 4, 5, 6 | `ur7e_gello.yaml:10` |
+| 팔 모터 ID | 1, 2, 3, 4, 5, 6 | `ur7e_gello.yaml:11` |
 | 그리퍼(트리거) ID | **7** | `ur7e_gello.yaml:24` (`gripper_config[0]`) |
-| 토크 | **항상 OFF (passive read-only)** | `driver.py:190`(`_torque_enabled = False`), `:289`, `gello_publisher_node.py:129` 주석 |
-| 발행 주기 | 30.0 Hz | `ur7e_gello.yaml:27`, `gello_publisher_node.py:84` |
+| 토크 | **항상 OFF (passive read-only)** | `driver.py:189`(`_torque_enabled = False`), `:289`, `gello_publisher_node.py:165` 주석 |
+| 발행 주기 | 30.0 Hz | `ur7e_gello.yaml:26`, `gello_publisher_node.py:84` (파라미터 기본값) |
 
 > ### 🔒 불변식: GELLO에 토크/파워를 인가하지 않는다
 > 드라이버는 초기화 시 모든 서보의 토크를 **비활성화**하고(`driver.py:288-289`),
@@ -29,7 +29,9 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 
 ---
 
-## 2. 실측 결과 (PASS)
+## 2. 📌 실측 결과 — 기록 (PASS, 2026-07-27)
+
+> **관측 기록이다.** 재현 목표치로 읽는다. 여기 숫자를 config에 옮겨 적을 일은 없다.
 
 | 판정 항목 | 기대 | **실측** | 판정 |
 |---|---|---|---|
@@ -72,7 +74,8 @@ id -nG | tr ' ' '\n' | grep -x dialout
 **⚠️ 이 스크립트는 GELLO 시리얼 포트를 점유한다. `gello_publisher`가 떠 있으면
 먼저 내려야 한다** (두 프로세스가 같은 FTDI를 못 쓴다).
 
-`$WT/../scan.py` 같은 임시 위치에 저장하고 실행한다 (리포에 커밋하지 말 것):
+`/tmp/gello_scan.py`에 저장하고 실행한다 (리포에 커밋하지 말 것 — 아래 실행 명령이
+그 경로를 쓴다):
 
 ```python
 #!/usr/bin/env python3
@@ -224,6 +227,10 @@ env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
 2026-07-27 실기에서 **PASS한 것은 GELLO 리더 발행 경로(§2)까지**이고,
 "리더 트리거 → RL 개입 그리퍼"는 여전히 미검증이다. 둘을 섞지 말 것.
 
+> 🔧 **2026-07-29 갱신:** 2026-07-28에 `run_real_hil.py --arm`으로 팔을 구동해 개입 경로가
+> 실기에서 돌았지만, 그 러너는 **기본값이 그리퍼 비활성**(`ACTION_SCALE[2]=0.0`)이라
+> 이 항목은 그대로 미검증이다. 확인하려면 `--gripper`를 명시해야 한다.
+
 ---
 
 ## 6. 실패 모드
@@ -234,7 +241,7 @@ env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
 | `warning, comm failed: <code>` 반복 | 배선·전원·baud | §3.2 스캔 |
 | `Unexpected joint state length (got N, expected 7); skipping cycle.` | 모터 하나가 응답 안 함 → 사이클 스킵. **노드는 안 죽고 토픽만 끊긴다** | `gello_publisher_node.py:174-181`. §3.2로 어느 ID인지 특정 |
 | `get_joint_state() failed, skipping cycle: ...` | 일시적 읽기 글리치. 2초 throttle 로그 | `:169-173` |
-| 토픽은 나오는데 값이 이상 | `joint_offsets` / `joint_signs` 캘리브레이션 | `ur7e_gello.yaml:11-22`. `scripts/gello_get_offset.py` |
+| 토픽은 나오는데 값이 이상 | `joint_offsets` / `joint_signs` 캘리브레이션 | `ur7e_gello.yaml:15`(offsets) / `:21`(signs). `scripts/gello_get_offset.py` |
 
 > **중요:** 위 두 skip 경로 모두 **노드를 죽이지 않는다.** 토픽이 조용히 멈출 뿐이다.
 > 그래서 "GELLO가 끊겼다"는 프로세스 존재 여부가 아니라 **`ros2 topic hz`로** 확인해야 한다.

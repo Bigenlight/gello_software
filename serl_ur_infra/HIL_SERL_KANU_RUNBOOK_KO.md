@@ -16,7 +16,7 @@
 - ⚠️ **reward threshold 숫자를 이 문서에서 베끼지 마라.** 이틀 사이에 0.85 → 0.5(`53d5cf6`) → **0.2**(`1b02857`)로 두 번 움직였다. 권위 있는 값은 코드 상수 하나뿐이다:
   `serl_ur_infra/ur_env/rlpd_receive_server.py`의 `DEFAULT_REWARD_THRESHOLD`.
   근거와 조건은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
-  아래 명령들은 값을 적어 넣지 않고 2.2절에서 코드로부터 읽어온 `$HIL_REWARD_THRESHOLD`를 쓴다.
+  아래 명령들은 값을 적어 넣지 않고 2.0절에서 코드로부터 읽어온 `$HIL_REWARD_THRESHOLD`를 쓴다(2026-07-29 확인 시점 값은 `0.2`였다).
   threshold는 **fingerprint에 포함된다**(`run_rlpd_learner_server.py`의 `run_contract["reward_classifier"]["threshold"]`).
   다른 threshold로 만든 checkpoint는 resume이 fail-closed로 거부된다 — 의도된 동작이다.
 - Kanu learner server는 `127.0.0.1:50053`에만 bind하고 laptop은 SSH local forwarding으로 접속한다.
@@ -94,7 +94,7 @@ cd "$HIL_KANU_REPO"
 git submodule update --init --recursive third_party/hil-serl
 ```
 
-> 🪤 test suite는 **녹색인지가 아니라 passed 개수**로 판단한다. laptop3 canonical checkout에서 완전한 기준선은 **333 passed / 11 skipped**다(2026-07-29 실행 확인). `PYTHONPATH`에서 `third_party/hil-serl/serl_launcher`를 빼면 조용히 299로 줄고, submodule을 초기화하지 않은 새 worktree에서는 296 / 17이 된다. 두 경우 모두 실패는 하나도 안 나오므로 "green"만 보면 못 잡는다. skip 사유 문자열("submodule is not checked out")도 그대로 믿지 않는다.
+> 🪤 test suite는 **녹색인지가 아니라 passed 개수**로 판단한다. laptop3 canonical checkout에서 완전한 기준선은 **333 passed / 11 skipped**다(2026-07-29 실행 확인). `PYTHONPATH`에서 `third_party/hil-serl/serl_launcher`를 빼면 조용히 **300 passed / 13 skipped**로 줄고, submodule을 초기화하지 않은 새 worktree에서는 296 / 17이 된다. 두 경우 모두 실패는 하나도 안 나오므로 "green"만 보면 못 잡는다. skip 사유 문자열("submodule is not checked out")도 그대로 믿지 않는다.
 >
 > laptop3 기준선 재현 명령(테스트는 laptop3에서 돌린다. Kanu에서 돌리는 절차가 아니다):
 >
@@ -127,7 +127,7 @@ git submodule update --init --recursive third_party/hil-serl
 
 > 🪤 **드리프트는 자동으로 안 걸린다.** runtime fail-closed 대상은 jax / jaxlib / flax / distrax / tensorflow_probability (+ W&B enabled 시 wandb) **뿐**이다. 위 표에서 🔴 표시된 numpy·orbax·grpcio는 lock에서 벗어나 있는데도 CLI가 아무 말 없이 시작한다. orbax 드리프트는 특히 1.3절의 checkpoint 포맷 문제와 같은 축에 있으므로, run 전에 실제 값을 기록해 둔다.
 >
-> 위 실측 열은 **팩트 시트에서 가져온 값**이고 laptop3에서 코드로 재확인할 수 없다(이 PC에는 JAX/Flax가 없다). 아래 1.2절 preflight 블록을 실제로 돌려 나온 값이 권위 있다.
+> 위 실측 열은 **2026-07-29 공유 팩트 시트에서 가져온 값**이고 laptop3에서 코드로 재확인할 수 없다(이 PC에는 JAX/Flax가 설치돼 있지 않다). 아래 preflight 블록을 실제로 돌려 나온 값이 권위 있다.
 
 `requirements-learner.lock`은 CPU-local 검증 환경용으로 `jaxlib==0.5.3`을 포함한다. 공유 Kanu conda environment에 그대로 설치하거나 upgrade하지 않는다. 별도의 CUDA-capable environment를 준비하고 그 interpreter 경로를 명시한다.
 
@@ -181,21 +181,43 @@ nvidia-smi
 
 ### 1.3 immutable assets
 
-#### 1.3.1 reward classifier — 현재 정본 (orbax 디렉터리)
+#### 1.3.0 classifier checkpoint 한눈에 — 어느 것을, 무슨 포맷으로, 코드는 뭘 pin 중인가
 
-사용자가 지정한 현재 정본은 Kanu의 다음 경로다. 2026-07-27 생성, 약 43 MB.
+| | **Jul-24 (폐기)** | **Jul-27 `cube_in_cup_all3` (정본)** |
+| --- | --- | --- |
+| Kanu 경로 | `~/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150` | `~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150` |
+| 포맷 | **단일 파일** flax msgpack, 약 87 MB | **orbax 디렉터리**, 약 43 MB (`_CHECKPOINT_METADATA`, `manifest.ocdbt`, `ocdbt.process_0/` …) |
+| SHA-256 | `e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997` | **없음 — 단일 파일이 아니라서 정의되지 않는다** |
+| 성능 | 0724 도메인 success recall **0.0%** (성공 1,123 프레임 중 0건, mean 확률 `0.007`). held-out 0720 test(무크롭)에서는 93.4% @0.85 | 0720 test split(n=166, 무크롭) 100.0% @0.5, FPR 0.0%. 0720 held-out pool(test 166 + val 100 = 266프레임, 6 take) 86.8% @0.5 / 83.1% @0.85 |
+| 코드 기본값이 pin 중? | ✅ **예** — `run_rlpd_learner_server.py`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`, `run_rlpd_receive_server.py`의 `DEFAULT_CHECKPOINT_SHA256`가 둘 다 위 SHA다 (2026-07-29 코드 확인) | ❌ 아니오 |
+| 지금 CLI로 로드 가능? | 예 (다만 폐기됐으므로 실기에 쓰지 않는다) | ❌ **아니오** — 1.3.1의 차단점 |
+
+> 정본의 두 성능 수치가 다른 건 **분할이 달라서**이고 둘 다 맞다 — 100.0%는 test split(166프레임)만, 86.8%는 val을 포함한 266프레임이며 차이는 전부 취약 take인 `take_21`이 val에 있기 때문이다. 보수적으로 보려면 **266프레임 쪽(86.8% @0.5)**을 쓴다. (참고: 이 둘 중 어느 것도 leave-one-take-out CV가 아니다. 진짜 CV는 `fold_take_01/02/03` 별도 체크포인트이고 @0.5에서 89.5 / 89.9 / 86.5로 오히려 더 높다.)
+> 두 수치 모두 **크롭 없는 입력**에서 측정됐다. 실제 actor 경로는 `ur7e_env.get_im()`이 `IMAGE_CROP`을 적용하므로 이 숫자가 그대로 옮겨가지 않는다. 미해결 항목이며 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
+> `take_21`은 **양쪽 checkpoint 모두** 약하다.
+
+#### 1.3.1 reward classifier — 현재 정본 (orbax 디렉터리, 아직 로드 불가)
 
 ```text
 /home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150
 ```
 
-> ⚠️ 이 정본은 **단일 파일이 아니라 orbax checkpoint 디렉터리**다(`_CHECKPOINT_METADATA`, `manifest.ocdbt`, `ocdbt.process_0/` 등). 따라서 아래가 성립한다.
->
-> - **단일 SHA-256 검증이 불가능하다.** 1.3.2의 `sha256sum --check --strict` 형태 명령은 디렉터리에 대해 작동하지 않는다. 실제 출력은 `sha256sum: <path>: Is a directory` / `<path>: FAILED open or read` / `WARNING: 1 listed file could not be read`이고 exit code는 `1`이다(2026-07-29 확인).
-> - `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`는 `os.path.isfile()`을 강제하므로, 이 경로를 `--classifier-checkpoint`/`--checkpoint`에 그대로 주면 CLI가 `FileNotFoundError`로 즉시 죽는다.
-> - 즉 **현재 CLI는 이 정본을 아직 로드할 수 없다.** orbax 디렉터리 load와 디렉터리용 digest 계약(예: 파일별 SHA manifest)을 먼저 구현해야 실기 run이 가능하다. 이 문서는 코드가 그렇게 되어 있다는 사실만 기록하며, 우회 방법을 제시하지 않는다.
->
-> 현재 단계에서 가능한 것은 존재/구조 확인뿐이다.
+2026-07-27 생성, 약 43 MB. 이 정본은 **단일 파일이 아니라 orbax checkpoint 디렉터리**다. 따라서 아래가 성립한다.
+
+- **단일 SHA-256이 정의되지 않는다.** 1.3.2의 `sha256sum --check --strict` 형태 명령은 디렉터리에 대해 작동하지 않는다. 출력은 `sha256sum: <path>: Is a directory` / `<path>: FAILED open or read` / `WARNING: 1 listed file could not be read`이고 exit code는 `1`이다(2026-07-29 확인).
+- 🪤 **차단점(코드로 확인함):** `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`이 `os.path.isfile()`을 강제한다. 그리고 `RewardClassifierRuntime.__init__`은 **loader보다 먼저** 이 함수를 호출한다. 그래서 이 경로를 `--classifier-checkpoint`/`--checkpoint`에 주면 classifier를 열어보기도 전에 `FileNotFoundError`로 죽는다.
+- 🔍 **아직 확인 못 한 것:** 그 SHA 게이트를 넘겼을 때 upstream loader가 orbax 디렉터리를 실제로 읽을 수 있는지는 laptop3에서 확인할 수 없다(이 PC에 JAX/Flax가 없다). `load_classifier_func()`는 `flax.training.checkpoints.restore_checkpoint()`를 호출하고, 같은 리포의 ZMQ 뷰어(`remote_reward_classifier_server.py`)는 같은 함수에 **orbax 디렉터리를 넘겨 쓰고 있다** — 즉 로드 자체는 될 가능성이 높지만 **이 CLI 경로에서 검증된 적은 없다.**
+
+**정본으로 전환하려면 바뀌어야 하는 것(순서대로):**
+
+1. 디렉터리용 digest 계약을 정한다 — 예: 파일별 SHA-256 manifest. `--expected-*-sha256`는 `_validated_sha256()`이 정확히 64자 hex를 요구하므로 "검사 끄기" 값이 없다. 계약을 바꾸지 않으면 우회할 방법 자체가 없다.
+2. `checkpoint_sha256()`의 `os.path.isfile()` 강제를 그 계약에 맞게 확장한다.
+3. `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256` / `DEFAULT_CHECKPOINT_SHA256`의 폐기 SHA 기본값을 걷어낸다.
+4. 그 다음에야 orbax 디렉터리 로드를 실제로 한 번 통과시켜 본다.
+
+이 문서는 코드가 그렇게 되어 있다는 사실만 기록하며 **우회 방법을 제시하지 않는다.** 차단점 추적은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)에 있다.
+
+현재 단계에서 가능한 것은 존재/구조 확인뿐이다.
 
 ```bash
 export HIL_CLASSIFIER=/home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150
@@ -204,6 +226,8 @@ test -d "$HIL_CLASSIFIER" || echo "정본은 디렉터리여야 한다"
 ls -la "$HIL_CLASSIFIER"
 du -sh "$HIL_CLASSIFIER"
 ```
+
+> ℹ️ 같은 artifact를 쓰는 **다른 경로**가 하나 더 있다. ZMQ 뷰어(`run_remote_reward_classifier_server.sh` → `tcp://127.0.0.1:5594`)는 `classifier_ckpt/cube_in_cup_all3` 디렉터리를 그대로 받아서 이미 정본을 서빙한다. **그건 사람이 눈으로 보는 뷰어이고, gRPC RL 경로(port 50053)와 아무 호출 관계가 없다.** 뷰어가 정본으로 돈다고 해서 learner가 정본을 쓸 수 있게 되는 것이 아니다. 두 경로를 섞지 않는다.
 
 #### 1.3.2 reward classifier — 폐기 (recall 0%)
 
@@ -274,7 +298,24 @@ state group order: gripper_pose, tcp_force, tcp_pose, tcp_torque, tcp_vel
 gripper_position index: 0
 ```
 
-shape `(1,19)`만 같다고 v1과 v2를 혼합하지 않는다. actor/server는 ordered schema hash를 pin하고 gripper는 `GRIPPER_POSITION_INDEX`/`gripper_position_from_state()`로만 읽는다. `state[0,-1]`은 v2에서 gripper가 아니다.
+19-D flat layout(알파벳 그룹 순서, 2026-07-29 코드에서 재계산해 확인):
+
+```text
+[0]     gripper_pose   : gripper_position
+[1:4]   tcp_force      : x, y, z
+[4:10]  tcp_pose       : position x,y,z + euler x,y,z
+[10:13] tcp_torque     : x, y, z
+[13:19] tcp_vel        : linear x,y,z + angular x,y,z
+```
+
+shape `(1,19)`만 같다고 v1과 v2를 혼합하지 않는다. actor/server는 ordered schema hash를 pin하고 gripper는 `GRIPPER_POSITION_INDEX`/`gripper_position_from_state()`로만 읽는다. `state[0,-1]`은 v2에서 gripper가 아니라 TCP angular velocity z다.
+
+> 위 hash를 손으로 옮겨 적지 않는다. 값은 `ur_env/observation_schema.py`가 schema document로부터 계산하며, 언제든 코드에서 다시 뽑을 수 있다:
+>
+> ```bash
+> PYTHONPATH=serl_ur_infra python3 -c \
+>   "from ur_env.observation_schema import CANONICAL_OBSERVATION_SCHEMA_HASH as h; print(h)"
+> ```
 
 ## 2. run directory와 disk preflight
 
@@ -299,6 +340,22 @@ fresh run의 checkpoint root에는 기존 `checkpoint_*` entry가 없어야 한�
 checkpoint 하나의 payload는 약 305 MiB다. schema v1과 최종 v2 Kanu synthetic E2E에서 `320,100,609 B`를 관측했다. production은 기본 5,000-step 주기이고 pruning하지 않는다. 예상 checkpoint 수에 payload 총량과 `--checkpoint-reserve-gib`를 더해 disk를 잡는다. synthetic E2E는 period 1이므로 target 1..10 제한을 우회하지 않는다.
 
 동일 checkpoint root에는 learner process 하나만 허용된다. `.learner-writer.lock`은 advisory lock metadata file이며 process 종료 후 파일 자체가 남아도 lock은 해제된다. 파일 존재 여부만 보고 임의 삭제하지 않는다.
+
+### 2.0 reward threshold를 코드에서 읽어온다
+
+threshold는 이틀 사이 0.85 → 0.5 → 0.2로 두 번 움직였다. 문서에 적힌 숫자를 베끼지 말고 **run 직전에 코드에서 읽는다.** 아래 값이 4·5·6절 모든 command에서 `--reward-threshold`로 들어간다.
+
+```bash
+export HIL_REWARD_THRESHOLD=$(
+  cd "$HIL_KANU_REPO" && PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra" "$HIL_KANU_PYTHON" -c \
+    "from ur_env.rlpd_receive_server import DEFAULT_REWARD_THRESHOLD as t; print(t)"
+)
+echo "reward threshold = $HIL_REWARD_THRESHOLD"
+```
+
+이 import는 JAX를 끌어오지 않으므로 numpy만 있는 interpreter에서도 된다(2026-07-29 laptop3에서 확인, 값 `0.2`).
+
+바꿔야 할 이유가 생기면 코드 상수를 먼저 바꾸고 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 근거를 남긴다. run 중간에 CLI 인자만 다른 값으로 주면 fingerprint가 달라져 그 lineage를 다시는 resume할 수 없다.
 
 ### 2.1 host RAM preflight
 
@@ -367,7 +424,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --port 50053 \
   --classifier-checkpoint "$HIL_CLASSIFIER" \
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
-  --reward-threshold 0.5 \
+  --reward-threshold "$HIL_REWARD_THRESHOLD" \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --demo-path "$HIL_FAKE_DEMO" \
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
@@ -391,13 +448,15 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
 
 성공 시 stdout에 `rlpd_learner_dry_run_passed`가 있어야 한다. JSONL과 W&B offline directory도 확인한다.
 
-2026-07-27 실제 검증은 Kanu 기존 repository가 dirty detached였기 때문에 그 tree를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 tree를 만들어 수행했다. `CUDA_VISIBLE_DEVICES=0`, `il` environment, 128/32 capacity에서 actual classifier + agent production dry-run이 통과했다. 아래 값은 `execution_scope` fingerprint field 추가 전의 역사적 dry-run 결과이며 현재 checkpoint resume identity로 사용하지 않는다.
+> 📌 **기록 (2026-07-27) — 재현용이지 재입력용이 아니다.**
+> Kanu 기존 repository가 dirty detached였기 때문에 그 tree를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 tree를 만들어 수행했다. `CUDA_VISIBLE_DEVICES=0`(그날 비어 있던 GPU일 뿐, 고정값 아님), `il` environment, 128/32 capacity에서 actual classifier + agent production dry-run이 통과했다.
+> 아래 fingerprint는 `execution_scope` field가 추가되기 **전**, threshold가 `0.85`이던 시점, 폐기된 Jul-24 classifier로 계산된 값이다. **지금 어떤 CLI에도 다시 입력하지 마라** — 현재 코드로 같은 명령을 돌려도 이 값은 나오지 않는다(정상). checkpoint resume identity로도 쓰지 않는다.
 
 ```text
-fingerprint: 8465e464b3f4eb638513eaa4ab3daea85a9435a9ddf47bdbf841a2c2f2aacce9
+fingerprint (2026-07-27 기록, 현재 무효): 8465e464b3f4eb638513eaa4ab3daea85a9435a9ddf47bdbf841a2c2f2aacce9
 ```
 
-별도 실제 GPU feature CTA smoke도 통과했다.
+별도 실제 GPU feature CTA smoke도 통과했다(같은 날의 기록).
 
 ```text
 backend: gpu
@@ -489,7 +548,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --port 50053 \
   --classifier-checkpoint "$HIL_CLASSIFIER" \
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
-  --reward-threshold 0.5 \
+  --reward-threshold "$HIL_REWARD_THRESHOLD" \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --demo-path "$HIL_SYNTH_FAKE_DEMO" \
   --checkpoint-root "$HIL_SYNTH_CHECKPOINT_ROOT" \
@@ -531,13 +590,15 @@ ssh -N -T -o ExitOnForwardFailure=yes \
 
 server에 `rlpd_learner_server_ready`가 출력된 뒤 laptop의 검증할 commit checkout에서 fake actor를 실행한다. 이 script는 robot env를 열지 않고 canonical raw observation을 gRPC로 보내는 acceptance tool이다. synthetic-only model ID `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`, observation schema, reward authority/model을 inference 전에 pin한다.
 
+이 script는 `rclpy`나 카메라를 열지 않으므로 ROS overlay 없이 gRPC 클라이언트 환경만 있으면 된다. 시스템 `python3`(grpcio 1.30.2)로 실행하지 않는다 — `/tmp/gello-hil-grpc-venv`(grpcio 1.74.0 / numpy 1.26.4 / protobuf 3.20.3, `requirements-grpc.lock`과 일치, 2026-07-29 확인)나 `/home/laptop3/venvs/gello-hil-actor/bin/python`을 쓴다.
+
 ```bash
-export HIL_LAPTOP_REPO=/home/laptop3/gello_software
+export HIL_LAPTOP_REPO=/home/laptop3/gello_software   # laptop3 전용 경로. Kanu에는 없다
 export HIL_SYNTH_RUN_ID=THE_EXACT_SAME_SYNTH_E2E_RUN_ID_USED_ON_KANU
 
 cd "$HIL_LAPTOP_REPO"
 PYTHONPATH="$HIL_LAPTOP_REPO/serl_ur_infra" \
-python serl_ur_infra/scripts/run_fake_e2e_actor.py \
+/tmp/gello-hil-grpc-venv/bin/python serl_ur_infra/scripts/run_fake_e2e_actor.py \
   --target 127.0.0.1:50053 \
   --actor-id fake-e2e-actor \
   --run-id "$HIL_SYNTH_RUN_ID-fresh" \
@@ -591,12 +652,19 @@ replay_size: 100
 checkpoint_roundtrip_verified: true
 ```
 
-### 5.4 2026-07-27 schema v1 interim 실측 결과
+### 5.4 실측 기록 (재입력 금지)
+
+> 📌 **이 절 전체가 과거 run의 기록이다.** 아래 fingerprint / checkpoint 이름 / RTT / 시각은 그때 나온 값이지 지금 나와야 하는 값이 아니다.
+> 두 결과 모두 **threshold `0.85`**, **폐기된 Jul-24 classifier**, 그리고 (v1 쪽은) 구 observation schema에서 나왔다.
+> 지금 코드로 같은 절차를 돌리면 fingerprint는 반드시 달라진다 — 그게 정상이다. **어떤 값도 CLI에 다시 입력하지 마라.**
+> 새 acceptance를 돌렸으면 이 절 밑에 새 날짜로 append하고 옛 블록은 그대로 둔다.
+
+#### 5.4.1 2026-07-27 schema v1 interim (superseded)
 
 Kanu GPU actual classifier/agent server와 laptop3 SSH tunnel/actor를 사용한 fresh + resume 두 process가 통과했다.
 
 ```text
-fingerprint:
+fingerprint (기록, 현재 무효):
 defda67b4463526a6aca4fb397327ff01b93ffd07b9250cc538a46b105bf96cb
 
 fresh:
@@ -615,10 +683,14 @@ resume fresh process:
 
 두 JSONL의 learner update loss는 모두 finite였다. replay 100/offline demo 2에서 batch 256의 online/demo 128:128 샘플링이 확인됐고 `policy_published`, `checkpoint_saved`, `learner_process_stopped(exit_code=0)` event가 모두 존재했다. 최종 pass stdout event는 gRPC/worker/logger cleanup 후 checkpoint full-load roundtrip과 trunk invariant을 통과한 경우에만 `checkpoint_roundtrip_verified=true`로 출력됐다.
 
-이 결과는 learner staging commit `8f242d8`의 pre-hardware canonical schema v1 interim 근거다. hardware commit `6a0b127`이 unified merge `248255f`에 병합되면서 schema ID는 v2, gripper index는 0, hash는 `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`이 됐다. 따라서 위 fingerprint/checkpoint는 final unified branch에서 authoritative하지 않다.
+이 결과는 learner staging commit `8f242d8`의 pre-hardware canonical schema v1 interim 근거다. hardware commit `6a0b127`이 unified merge `248255f`에 병합되면서 schema ID는 v2, gripper index는 0, hash는 `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`이 됐다(2026-07-29 코드에서 재계산해 일치 확인). 따라서 위 fingerprint/checkpoint는 final unified branch에서 authoritative하지 않다.
+
+#### 5.4.2 unified schema v2 acceptance, merge `248255f` (superseded)
+
+> 📌 이 블록도 기록이다. 이후 하드웨어 브랜치 머지(`3f199d4`)와 threshold 커밋(`1b02857`)이 올라갔으므로 아래 fingerprint는 현재 HEAD에서 재현되지 않는다.
 
 ```text
-final unified schema v2 acceptance (merge 248255f):
+final unified schema v2 acceptance (merge 248255f) — 기록, 현재 무효:
   fingerprint: fa1985378ad2729f466783e4f112d54022e14090430374a6531e4fb715440fcd
   serl default suite: 253 passed, 4 skipped, 6 warnings in 3.10s
   ur_gello suite: 436 passed in 7.35s
@@ -646,9 +718,11 @@ final unified schema v2 acceptance (merge 248255f):
 > echo "$HIL_CLASSIFIER_SHA256"   # e329986b... 이면 중단
 > ```
 >
-> **현재 상태로는 이 절을 실행할 수 없다.** 1.3.1의 새 정본은 orbax 디렉터리이고 `checkpoint_sha256()`가 `os.path.isfile()`을 강제하므로 CLI가 로드 단계에서 죽는다. orbax 디렉터리 load와 디렉터리 digest 계약이 먼저 구현돼야 한다. 이 차단점은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) 7절 P0-0에 있다.
+> **현재 상태로는 이 절을 실행할 수 없다.** 1.3.1의 새 정본은 orbax 디렉터리이고 `checkpoint_sha256()`가 `os.path.isfile()`을 강제하므로 CLI가 SHA 단계에서(로드 시도 전에) 죽는다. 디렉터리 digest 계약과 `checkpoint_sha256()` 확장이 먼저 필요하다 — 1.3.1의 전환 조건 목록을 본다. 차단점 추적은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)에 있다.
 >
-> `--reward-threshold`는 현재 `0.5`이며 fingerprint에 포함된다. production run이 시작된 뒤에는 threshold를 바꾸지 않는다 — 바꾸면 기존 lineage를 resume할 수 없다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
+> `--reward-threshold`에는 2.0절에서 코드로부터 읽은 `$HIL_REWARD_THRESHOLD`를 넣는다. 문서에서 숫자를 베끼지 않는다. threshold는 fingerprint에 포함되므로 **production run이 시작된 뒤에는 바꾸지 않는다** — 바꾸면 기존 lineage를 resume할 수 없다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
+>
+> ⚠️ 그리고 이 절의 전제인 **real canonical robot demo가 아직 존재하지 않는다.** 실기에서 팔을 움직인 것은 전부 `tests/run_real_hil.py`였고 그건 다른 코드 경로다. `run_remote_rlpd_actor.py`는 실기에서 한 번도 실행된 적이 없다(8절 참조). 게다가 `CubeInCupConfig.buffer_period`가 `0`이라 actor가 demo pickle을 아예 쓰지 않는다.
 
 이 절은 fake demo로 실행하면 안 된다. strict loader를 통과하는 실제 EEF-space canonical robot demo path를 지정한다.
 
@@ -685,7 +759,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --port 50053 \
   --classifier-checkpoint "$HIL_CLASSIFIER" \
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
-  --reward-threshold 0.5 \
+  --reward-threshold "$HIL_REWARD_THRESHOLD" \
   --reward-model-id cube-in-cup-checkpoint-150 \
   --demo-path "$HIL_REAL_DEMO" \
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
@@ -716,27 +790,57 @@ server는 online replay가 100개에 도달할 때까지 policy version 0으로 
 
 ## 7. SSH loopback tunnel
 
-Kanu server는 loopback에만 bind된다. laptop terminal에서 다음 tunnel을 유지한다.
+Kanu server는 loopback에만 bind된다. laptop terminal에서 tunnel을 유지한다.
+
+**원격 port는 항상 `50053`이고, 로컬 진입 port는 laptop3에서 비어 있는 아무 port여도 된다.** 두 값이 같을 필요가 없다.
 
 ```bash
+# 양쪽 같은 번호를 쓰는 형태 (로컬 50053이 비어 있을 때)
 ssh -N -T -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:50053:127.0.0.1:50053 \
   kanu
 ```
 
-다른 local process가 50053을 쓰고 있으면 양쪽에서 비어 있는 다른 port를 선택하고 server `--port`, tunnel 두 port, actor `--server-port`를 모두 같은 값으로 바꾼다.
+> 🪤 **laptop3의 실제 운용 관례는 로컬 `50153` → 원격 `50053`이다.** 2026-07-27에 로컬 `50053`이 다른 프로세스에 잡혀 있어서 옮겼고, 그 뒤로 운영 launcher가 그 값을 기본값으로 갖고 있다: `ros2_ur_ws/run_hil_actor.sh`의 `SERVER_PORT` 기본값이 `50153`이다(코드 확인). 이 runbook의 예시와 그 launcher를 섞어 쓰면 port가 어긋난다.
+>
+> ```bash
+> # laptop3 관례 형태
+> ssh -N -T -o ExitOnForwardFailure=yes \
+>   -L 127.0.0.1:50153:127.0.0.1:50053 \
+>   kanu
+>
+> ss -ltnp | grep 50153   # ssh가 127.0.0.1:50153 에서 LISTEN 중이어야 한다
+> ```
+
+어느 쪽을 쓰든 **로컬 진입 port와 actor `--server-port`가 같아야 하고**, tunnel의 원격 쪽과 server `--port`가 같아야 한다. 8절 command는 `--server-port 50053`으로 적혀 있으니 `50153` tunnel을 쓰면 그 값을 함께 바꾼다.
 
 ## 8. laptop robot actor
 
-실제 task config module은 `CONFIG_MAPPING`을 export하고 해당 config/environment에 `GRASP_PENALTY`가 있어야 한다. run 시작 전 `HIL_GRASP_PENALTY`를 task에서 승인된 값으로 설정하고 actor config와 server CLI가 같은지 확인한다. server는 offline/online data에서 `0` 또는 그 값만 허용한다. reward/termination은 Kanu classifier가 authoritative하다.
+> ⚠️ **`run_remote_rlpd_actor.py`는 실기에서 아직 한 번도 실행되지 않았다** (2026-07-29). 지금까지 UR7e를 움직인 것은 전부 `serl_ur_infra/tests/run_real_hil.py`이고 그건 다른 코드 경로다. 아래는 코드에 대해 검증한 command이지 실기 검증된 절차가 아니다.
+
+이 절은 **laptop3**에서 실행한다. `/home/laptop3/gello_software`는 laptop3의 canonical checkout이고 Kanu에는 없다.
+
+실제 task config module은 `CONFIG_MAPPING`을 export하고 해당 config/environment에 `GRASP_PENALTY`가 있어야 한다. run 시작 전 `HIL_GRASP_PENALTY`를 task에서 승인된 값으로 설정하고 actor config와 server CLI가 같은지 확인한다. server는 offline/online data에서 `0` 또는 그 값만 허용한다. `CubeInCupEnvConfig.GRASP_PENALTY = -0.02`다. reward/termination은 Kanu classifier가 authoritative하다.
+
+**interpreter와 ROS overlay.** actor는 `rclpy` / `ur_gello_bringup` / `cv2` / `pyrealsense2`를 import하므로 ROS 2 overlay를 source한 뒤 실행해야 한다. 그리고 시스템 `python3`의 grpcio는 **1.30.2**로, gRPC 계약이 요구하는 1.74.0이 아니다. 검증된 조합은 다음과 같다(2026-07-29 laptop3에서 확인).
+
+```bash
+set +u
+source /opt/ros/humble/setup.bash
+source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
+set -u
+# /home/laptop3/venvs/gello-hil-actor: grpcio 1.74.0, system-site-packages=true
+#   -> rclpy / cv2 / pyrealsense2 / gymnasium 모두 보임
+```
 
 ```bash
 cd /home/laptop3/gello_software
 
 PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
-python serl_ur_infra/scripts/run_remote_rlpd_actor.py \
-  --exp-name EXPERIMENT_NAME \
-  --ur-config-module PYTHON_MODULE_WITH_CONFIG_MAPPING \
+/home/laptop3/venvs/gello-hil-actor/bin/python \
+  serl_ur_infra/scripts/run_remote_rlpd_actor.py \
+  --exp-name cube_in_cup \
+  --ur-config-module ur_experiments.mappings \
   --network-type grpc \
   --server-host 127.0.0.1 \
   --server-port 50053 \
@@ -745,8 +849,28 @@ python serl_ur_infra/scripts/run_remote_rlpd_actor.py \
   --observation-schema-hash 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903 \
   --expected-model-id hil-serl-hybrid-sac-resnet10-trunk-cache-v1 \
   --expected-reward-authority server_classifier \
-  --expected-reward-model-id cube-in-cup-checkpoint-150
+  --expected-reward-model-id cube-in-cup-checkpoint-150 \
+  --deadman topic
 ```
+
+`--observation-schema-hash`는 1.4절 one-liner로 코드에서 다시 뽑아 대조한다.
+`--expected-model-id`는 production scope의 값이다(`ur_env/learner/config.py`의 `FROZEN_TRUNK_MODEL_REVISION`). bounded synthetic server에 붙을 때는 `...-synthetic-e2e-v1`이며 5절의 `run_fake_e2e_actor.py`가 그 값을 자체적으로 pin하므로 이 command로 대체하지 않는다.
+`--expected-reward-model-id`는 코드 상수가 아니라 **server `--reward-model-id`에 넣은 문자열**이다. 양쪽이 정확히 같아야 하고, classifier artifact를 바꾸면 양쪽 모두 새 이름으로 바꾼다.
+
+### 8.1 arm 하기 전에
+
+| 플래그 | 기본값 | 의미 |
+| --- | --- | --- |
+| `--arm` | **off** | 없으면 task config의 `DRY_RUN`이 유지되어 **팔도 그리퍼도 움직이지 않는다.** 붙이면 UR7e가 물리적으로 움직인다. arm 시 command topic publisher 수를 세어 이중 publisher면 거부한다(teleop bridge가 떠 있으면 실패한다) |
+| `--deadman` | `topic` | `topic` = `/hil/deadman` 20 Hz 하트비트 + staleness 워치독. `spacebar`는 전역 pynput 리스너에 워치독이 없어 ON으로 붙어버릴 수 있다 — **실기에서는 `topic`만 쓴다** |
+| `--mock-policy-noise S` | `0.0` | zero-action server 상대로 로봇을 움직여 개입 경로를 실증하는 용도. 6개 pose 채널에만 N(0,S) 노이즈, gripper 채널은 손대지 않는다. 이 run의 모든 전이에 `meta.policy_actions_synthetic=true`가 박힌다 — **demo나 정책 근거로 쓰면 안 된다** |
+| `--fake-env` | off | robot/카메라 없이 wrapper/network 계약만 확인 |
+
+첫 시도에서는 초기 SAC 정책의 action 크기가 확인되지 않았다는 점을 감안해 `--mock-policy-noise`를 작게 주거나 낮은 scale로 시작한다.
+
+⚠️ 열려 있는 두 가지 위험:
+- workspace box. `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_LOW/HIGH`는 `zeros((6,))`이고 env가 이를 강제하지 않는다(`tests/run_real_hil.py`의 주석이 같은 사실을 적어 둔다). `CubeInCupEnvConfig`는 실측 박스를 채워 두었지만, 그 값이 실제로 클리핑에 쓰이는지는 arm 전에 확인한다. DRY RUN 300스텝 중 241스텝이 박스 밖이었고 최대 73.9 cm 이탈한 실측이 있다.
+- 전역 ESC 리스너. `ur_env/envs/ur7e_env.py:197-208`이 pynput 전역 리스너를 건다. deadman과 별개로 **아무 창에서나 ESC를 누르면 에피소드가 끝난다.**
 
 실제 robot 전에 같은 command에 `--fake-env`를 붙여 wrapper/network contract를 확인한다. 단 task config의 fake environment 구현 여부는 별도로 확인한다.
 
@@ -846,6 +970,9 @@ JAX/native backend가 hang하면 join이 계속될 수 있다. 즉시 `SIGKILL`�
 - 폐기된 classifier `e329986b...`로 6절 실기 run 실행
 - `--expected-classifier-sha256`/`--expected-checkpoint-sha256` 생략(코드 기본값이 폐기된 SHA다)
 - production run 시작 이후 `--reward-threshold` 변경
+- 이 문서에 적힌 threshold 숫자를 command에 그대로 베끼기 — 2.0절에서 코드로부터 읽는다
+- 5.4절·4절의 과거 fingerprint/checkpoint 값을 CLI에 재입력 (전부 옛 threshold·폐기 classifier 기준의 기록이다)
+- orbax 정본 디렉터리를 `--classifier-checkpoint`/`--checkpoint`에 그대로 지정 (1.3.1의 전환 조건이 먼저다)
 - fake demo를 bounded `--synthetic-e2e` 외의 live learner에 사용
 - `--synthetic-e2e`에 real/synthetic 혼합 demo, restored step +1이 아닌 target, target 0/음수/11 이상, replay capacity 100 미만, transition count 100 이외, timeout 1..1,800초 범위 밖을 사용
 - allowlist와 다른 actor/run ID로 synthetic server에 접속하거나 production model ID를 synthetic actor에 pin

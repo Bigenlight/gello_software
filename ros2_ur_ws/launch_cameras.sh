@@ -8,7 +8,7 @@
 # you can VISUALLY CONFIRM the camera mapping:
 #
 #     cam1 = SCENE   (tripod, 3rd person)  -> left pane
-#     cam2 = CLOSE-UP (workspace)          -> right pane
+#     cam2 = WRIST (gripper-mounted)       -> right pane
 #
 # A swapped mapping silently degrades the trained ACT policy (the model was
 # trained with a fixed cam1=scene / cam2=close-up convention), so the viewer is
@@ -38,18 +38,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 
 # Serials are a PREFERENCE, not a requirement -- resolve_serials() below falls
 # back to whatever is actually plugged in.  Two different D435 pairs have been
-# on this rig: (147122072740, 243222072700) and (151623020789, 322743060038),
-# and which pair enumerates has flipped twice (2026-07-28, then back on
-# 2026-07-29).  Binding by an absent serial does NOT fail loudly -- the camera
+# named in this repo: (147122072740, 243222072700) and (151623020789,
+# 322743060038), but only the SECOND has ever enumerated here -- checked
+# 2026-07-29 across the full persistent journal, 97 boots back to 2025-07-28:
+# 650 hits for the second pair, 0 for the first, and no USB re-enumeration at
+# all on 07-29.  Binding by an absent serial does NOT fail loudly -- the camera
 # simply never comes up and callers see "no frame" rather than "wrong serial",
 # which is why this is auto-detected instead of hardcoded.
 #
 # Mount assignment is by model class: plain D435 -> cam1 (SCENE), D435IF/D435i
-# -> cam2 (CLOSE-UP / wrist).  That is the only evidence tying each unit to its
+# -> cam2 (WRIST, gripper-mounted).  That is the only evidence tying each unit to its
 # mount, so confirm with one arm jog: cam2 is the WRIST camera, so its
 # background must sweep while the gripper fingers stay fixed in frame.
-CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
-CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
+# Defaults are the pair this machine actually enumerates.  Checked 2026-07-29
+# across the full persistent journal (97 boots, back to 2025-07-28):
+#   journalctl -k --boot=all | grep -c 151623020789\|322743060038   -> 650
+#   journalctl -k --boot=all | grep -c 147122072740\|243222072700   -> 0
+# The older pair has never appeared on this host, so defaulting to it would
+# send every launch down the WARN fallback below even when the rig is fine.
+CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
+CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
 CAM1_NAME="${CAM1_NAME:-cam1}"
 CAM2_NAME="${CAM2_NAME:-cam2}"
 COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
@@ -144,7 +152,7 @@ trap cleanup EXIT INT TERM
 
 echo "### launch_cameras.sh — RealSense pair for ACT deploy"
 echo "###   cam1 = SCENE (tripod, 3rd person)  D435    serial ${CAM1_SERIAL}"
-echo "###   cam2 = CLOSE-UP (workspace)        D435if  serial ${CAM2_SERIAL}"
+echo "###   cam2 = WRIST (gripper-mounted)     D435if  serial ${CAM2_SERIAL}"
 echo "###   profile ${COLOR_PROFILE} | logs -> ${TMPDIR_RUN}/cam1_launch.log, cam2_launch.log"
 
 # --- Launch both cameras backgrounded ----------------------------------------
@@ -217,7 +225,7 @@ if [ "${VIEW}" = "false" ] || [ "${VIEW}" = "0" ]; then
 else
     echo "### READY — both cameras streaming at ~30 Hz. Opening viewer window ..."
     echo "###"
-    echo "### CHECK NOW: left pane must show the WHOLE SCENE, right pane the CLOSE-UP."
+    echo "### CHECK NOW: left pane must show the WHOLE SCENE, right pane the WRIST (gripper-mounted)."
     echo "### If they look swapped, Ctrl-C and re-check camera serials before deploying."
     echo "###"
     echo "### Keep this terminal open. Press Ctrl-C HERE to stop both cameras cleanly."
@@ -231,7 +239,7 @@ else
         --cam1-topic "${CAM1_TOPIC}" \
         --cam2-topic "${CAM2_TOPIC}" \
         --cam1-label "cam1 - SCENE - ${CAM1_SERIAL}" \
-        --cam2-label "cam2 - CLOSE-UP - ${CAM2_SERIAL}" &
+        --cam2-label "cam2 - WRIST - ${CAM2_SERIAL}" &
     VIEWER_PID=$!
     wait "${VIEWER_PID}"
 fi

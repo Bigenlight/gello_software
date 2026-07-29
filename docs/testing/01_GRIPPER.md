@@ -5,7 +5,7 @@
 정본 문서: `docs/ros2/GELLO_UR7E_GRIPPER.md`. 이 문서는 HIL 관점의 검증 절차/판정 기준만 다룬다.
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
 ```
 
 ---
@@ -26,15 +26,15 @@ robotiq_gripper 노드 ──Modbus RTU over TCP──► 192.168.10.11:54321 �
 
 | 인터페이스 | 타입 | 단위 계약 | 근거 |
 |---|---|---|---|
-| `/robotiq_gripper_controller/gripper_cmd` | `control_msgs/action/GripperCommand` | `position` = **미터 gap**. `0.0` = 완전 **닫힘**, `0.085` = 완전 **열림** | `robotiq_gripper_modbus_node.py:16-19`, `_m_to_pos():221` |
+| `/robotiq_gripper_controller/gripper_cmd` | `control_msgs/action/GripperCommand` | `position` = **미터 gap**. `0.0` = 완전 **닫힘**, `0.085` = 완전 **열림** | `robotiq_gripper_modbus_node.py:16-19`, `_m_to_pos():219` |
 | `/robotiq_gripper/set_closed` | `std_srvs/srv/SetBool` | `data: true` = **닫기** | `:20`, `:127` |
-| `/robotiq_gripper/command_percent` (sub) | `std_msgs/Float32` | `0.0` = **열림** … `1.0` = **닫힘** | `:23`, `:131` |
-| `/robotiq_gripper/position_percent` (pub) | `std_msgs/Float32` | `pos255/255.0`. `0.0` = 열림, `1.0` = 닫힘 | `:398` |
-| `/robotiq_gripper/joint_states` (pub) | `sensor_msgs/JointState` | `pos255/255 * knuckle_closed_rad(0.8)` | `:395`, `:76` |
+| `/robotiq_gripper/command_percent` (sub) | `std_msgs/Float32` | `0.0` = **열림** … `1.0` = **닫힘** | `:23`, `:131-132` |
+| `/robotiq_gripper/position_percent` (pub) | `std_msgs/Float32` | `pos255/255.0`. `0.0` = 열림, `1.0` = 닫힘 | `:135`(선언), `:399`(발행) |
+| `/robotiq_gripper/joint_states` (pub) | `sensor_msgs/JointState` | `pos255/255 * knuckle_closed_rad(0.8)` | `:396`, `:76` |
 
 > ⚠️ **미터(액션)와 percent(토픽)는 방향이 반대다.** 액션은 `0.085 = 열림`, percent는 `1.0 = 닫힘`.
 > 두 개를 섞어 쓰다 부호가 뒤집히면 그게 곧 crush다. 코드에서 이 변환은
-> `_m_to_pos()` 하나에만 있다 (`:221`).
+> `_m_to_pos()` 하나에만 있다 (`:219`).
 
 ---
 
@@ -80,7 +80,10 @@ ros2 topic hz   /robotiq_gripper/position_percent
 
 ---
 
-## 3. 실측 결과 (PASS)
+## 3. 📌 실측 결과 — 기록 (PASS)
+
+> **이 표는 2026-07-27 세션의 관측 기록이다.** 재현 목표치로 읽되, 설정값으로
+> 옮겨 적을 것은 없다(전부 읽기 결과다).
 
 | 판정 항목 | 기대 | **실측** | 판정 |
 |---|---|---|---|
@@ -95,9 +98,11 @@ ros2 topic hz   /robotiq_gripper/position_percent
 > (`:256`) / `<= 5` (`:271`) 또는 `gOBJ in (1,2)`(물체 접촉 = stalled)로 도달을 판정하므로,
 > 255에 도달하지 않아도 `reached_goal`은 정상적으로 뜬다.
 
-> **방향 육안 확인이 왜 게이트였나:** `ur7e_env.py:434-437`에 명시적으로
+> **방향 육안 확인이 왜 게이트였나:** `_send_gripper_command()`(`ur7e_env.py:709`)의
+> docstring `:723-725`에 명시적으로
 > `VERIFY(hw): on first hardware bring-up confirm direction and scale by eye —
 > a silent inversion here is a crush-or-drop hazard`라고 적혀 있었다. 이 게이트는 해소됐다.
+> (주석은 코드에 그대로 남아 있다 — 주석을 보고 "미검증"이라고 판단하지 말 것.)
 
 ---
 
@@ -110,7 +115,7 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 | `gripper_command_topic` | `/robotiq_gripper/command_percent` | 모드버스 노드의 `~/command_percent` sub |
 | `gripper_state_topic` | `/robotiq_gripper/position_percent` | 모드버스 노드의 `~/position_percent` pub |
 
-근거: `serl_ur_infra/ur_env/envs/config.py:99-100`, `ros_backend.py:91`, `:117`.
+근거: `serl_ur_infra/ur_env/envs/config.py:116-117`(`ROS` dict), `ros_backend.py:91`, `:117`.
 노드 이름이 `robotiq_gripper`(`ur7e_gripper_only.launch.py`의 `name=`)이므로 `~/`가 그대로 맞는다.
 
 ### 4.1 RL의 그리퍼 액션은 3-state 이산이다
@@ -121,11 +126,16 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 - `>= +0.5` → 열기 (`send_gripper_percent(0.0)`), 단 현재 위치 `> 0.15`일 때만
 - 그 사이 → **홀드(아무것도 안 함)**
 
-그리고 `GRIPPER_SLEEP = 0.6 s` 디바운스가 걸린다 (`ur7e_env.py:422-446`, `config.py:124`).
+그리고 `GRIPPER_SLEEP = 0.6 s` 디바운스가 걸린다
+(`ur7e_env.py:709-741`, 임계는 `:728`/`:731`; `config.py:146`).
+`ACTION_SCALE[2]`의 기본값은 **1.0**이다 (`config.py:73` = `[0.0125, 0.0625, 1.0]`).
 
 > 텔레옵(연속 스트리밍)과 달리 RL은 **이산**이다. 이유: hil-serl의 하이브리드 에이전트가
 > grasp를 별도 이산 critic으로 학습하고, `GripperPenaltyWrapper`가 open/close **이벤트**를
-> 가정하며, 2F-85가 물리적으로 1회 작동에 ~0.5 s 걸리기 때문 (`ur7e_env.py:423-431`).
+> 가정하며, 2F-85가 물리적으로 1회 작동에 ~0.5 s 걸리기 때문 (`ur7e_env.py:714-722`).
+>
+> ⚠️ 단, 실기 러너 `run_real_hil.py`는 기본적으로 `ACTION_SCALE[2] = 0.0`으로 그리퍼를
+> **끈다**. `--gripper`를 줘야 켜진다 → `04_HIL_INTERVENTION.md` §6.3.
 
 ### 4.2 스트리밍 보호 장치
 
@@ -134,7 +144,7 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 - `command_rate_hz` 기본 20.0 → 최소 50 ms 간격 (`:82`)
 - `command_deadband` 기본 0.01 → 그보다 작은 변화는 버림 (`:83`)
 - **예외:** 변화량 `>= 0.5`인 큰 점프는 rate limit을 즉시 통과한다 —
-  비상 완전개방/폐쇄가 지연되지 않도록 (`:343-345`)
+  비상 완전개방/폐쇄가 지연되지 않도록 (`:343-345` docstring, 구현 `:355-358`)
 
 ---
 
@@ -145,8 +155,8 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 | 시나리오 | 결과 | 해결 |
 |---|---|---|
 | `run_ur7e_gripper.sh` 두 개 동시 실행 | 두 번째가 `no/invalid status response` | 하나만 띄운다 |
-| 이전 세션이 Ctrl-C로 안 죽고 남음 | 새 세션이 못 붙음 | `pgrep -af robotiq_gripper_modbus` 후 정리. 노드는 `destroy_node()`에서 `close()`로 포트를 놓는다 (`:400-411`) — SIGKILL로 죽이면 로봇이 포트를 늦게 회수한다 |
-| **팔 드라이버(`ur_robot_driver`)와 그리퍼 노드를 동시에** | 드라이버가 `use_tool_communication:=true`로 `:54321`을 이미 점유 | 그리퍼를 **TCP가 아니라 시리얼**로 붙인다: `serial_port:=/tmp/ttyUR` (`ur7e_gripper_only.launch.py:42-49`) |
+| 이전 세션이 Ctrl-C로 안 죽고 남음 | 새 세션이 못 붙음 | `pgrep -af robotiq_gripper_modbus` 후 정리. 노드는 `destroy_node()`에서 `close()`로 포트를 놓는다 (`:401-411`) — SIGKILL로 죽이면 로봇이 포트를 늦게 회수한다 |
+| **팔 드라이버(`ur_robot_driver`)와 그리퍼 노드를 동시에** | 드라이버가 `use_tool_communication:=true`로 `:54321`을 이미 점유 | 그리퍼를 **TCP가 아니라 시리얼**로 붙인다: `serial_port:=/tmp/ttyUR` (`ur7e_gripper_only.launch.py:41-42`, `:57`; 노드 쪽 파라미터는 `robotiq_gripper_modbus_node.py:69` — 비어 있지 않으면 TCP 대신 serial) |
 
 > **HIL 세션에서 반드시 기억할 것:** `run_ur7e_gello_real.sh`는 팔 드라이버 + 그리퍼를
 > **함께** 띄우고, 그리퍼는 드라이버가 만든 공유 `/tmp/ttyUR` 브리지를 쓴다
@@ -158,7 +168,7 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 | 증상 | 원인 | 확인 |
 |---|---|---|
 | `no/invalid status response` | ① 로봇 POWER_OFF (가장 흔함), ② RS485 URCap 미설치, ③ `:54321` 타 클라이언트 점유 | `echo -e 'robotmode\n' \| nc 192.168.10.11 29999` → RUNNING 확인. `pgrep -af "robotiq\|tool_communication"` |
-| 붙었다 끊겼다 반복 | 중간에 I/O 실패 → `_drop_connection()` → 재연결 루프 (`:203-215`, `:155-162`) | 노드 로그의 `gripper move failed:` 확인 |
+| 붙었다 끊겼다 반복 | 중간에 I/O 실패 → `_drop_connection()` → 재연결 루프 (`:203-215`, `:155-164`) | 노드 로그의 `gripper move failed:` 확인 |
 | 액션은 되는데 스트리밍이 씹힘 | deadband/rate limit | §4.2. 액션 실행 후 `_last_cmd_pct`를 동기화하는 코드가 있다 (`:255-261`) — 없으면 스트리밍이 재개 안 되는 버그였음 |
 
 ---
@@ -179,6 +189,10 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 > 🔧 **2026-07-27 재확인:** §3의 실측치(열림 0.0118 / 빈손닫힘 0.8980 = 229/255 /
 > 피드백 5.000 Hz)는 이번 실기 세션에서도 그대로 재현됐다. **§6의 완료 판정은 유효하다.**
 > 아래 미검증 항목은 여전히 미검증이다 — §6과 섞지 말 것.
+>
+> 🔧 **2026-07-29 머지 반영:** 머지(`3f199d4`)는 그리퍼 경로를 바꾸지 않았다.
+> 2026-07-28 실기 세션이 팔을 구동했지만 `run_real_hil.py`의 기본은 그리퍼 **비활성**
+> (`ACTION_SCALE[2]=0.0`)이므로 아래 미검증 항목은 **하나도 해소되지 않았다.**
 
 - [ ] **RL 경로**(`/robotiq_gripper/command_percent`)로 그리퍼가 실제로 움직이는지 —
       env에서 액션 `[0,0,0,0,0,0,-1]` / `[0,...,+1]`을 쏴서 확인. `07_FAILURE_INJECTION.md` E12.

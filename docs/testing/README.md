@@ -86,7 +86,7 @@ export WT=/home/laptop3/gello_software
 > ### 통합 상태 (2026-07-29)
 > 통합 브랜치 `feat/gello-ur7e-humble-22.04`. 머지 커밋 `3f199d4`(부모 `3ff5f80` + `1a4f93d`)가
 > `test/hil-hardware-comms`를 가져왔고, 그 위에 `1b02857`(threshold 0.2),
-> `43ba314`(RealSense 시리얼 live-bus 해석)이 있다. 하드웨어 계약 변경은 `6a0b127` /
+> `43ba314`·`fb48100`(RealSense 시리얼 live-bus 해석), `792092a`(문서 재정렬)이 있다. 하드웨어 계약 변경은 `6a0b127` /
 > merge `248255f`, HIL 안전 수정은 `d49d0f6`~`ee3240e`.
 > 작업 전 `git status`를 확인하고 기존 사용자 변경을 지우지 않는 원칙은 그대로다.
 
@@ -98,7 +98,7 @@ export WT=/home/laptop3/gello_software
 |---|---|---|---|
 | 1 | UR7e 도달성·상태 | **PASS** | `Robotmode: RUNNING`, `Safetystatus: NORMAL`, remote control `true`, IP `192.168.10.11` |
 | 2 | 그리퍼 경로 (Modbus over tool-comm :54321) | **PASS** | 열기 `position_percent`=0.0118, 빈손 완전닫힘=0.8980(=229/255), 액션 `position: 0.085`(=열림) → `reached_goal: true`, 피드백 5.000 Hz (std 1.3 ms) |
-| 3 | 그리퍼 **방향** 육안 확인 | **PASS** | crush 게이트 해소. `_send_gripper_command`의 `VERIFY(hw)` 주석(`ur7e_env.py:437`) 조건 충족 |
+| 3 | 그리퍼 **방향** 육안 확인 | **PASS** | crush 게이트 해소. `_send_gripper_command`의 `VERIFY(hw)` 주석(`ur7e_env.py:723-725`) 조건 충족. 📌 2026-07-27 |
 | 4 | GELLO 리더 (Dynamixel) | **PASS** | baud 57600, ID1~6 = model 1200, ID7 = model 1190 전부 응답 |
 | 5 | GELLO 발행 안정성 | **PASS** | 30.004 Hz (std 0.15 ms), 30초 901샘플, 드롭 0, `comm failed` 0회, 트리거 0.000~1.000 전 구간 |
 | 6 | EEF 텔레옵 (실기) | **PASS** (사용자 직접 검증) | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef` + `./run_eef_gui.sh` |
@@ -108,14 +108,14 @@ export WT=/home/laptop3/gello_software
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
 | 9b | HIL 개입 루프 (**실기, 팔 구동**) | **PASS (2026-07-28, `run_real_hil.py` 경로에 한함)** | `--arm --scale 0.25`, 100스텝 중 개입 64, `held=0`. 개입 불변식 4종(anchor-latch 0 / gain-latch 0 / 저장==실행 1.000 / held-rate 0%) 통과. **frame-map = 단위행렬**(포화 제외 잔차 0.093, 기준 0.15). → `04` §4.5 |
 | 9b′ | 같은 루프를 **actor entrypoint**로 | **미검증** | 팔을 움직인 것은 전부 `run_real_hil.py`다. `scripts/run_remote_rlpd_actor.py`는 **실기에서 한 번도 안 돌았다** — 다른 코드 경로다 → `09` §7 |
-| 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py:81-140`, `wrappers.py`, `tests/test_gello_gripper_wiring.py`(23 passed); commit `6a0b127` |
+| 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py:81-155`, `wrappers.py:301-328`, `tests/test_gello_gripper_wiring.py`(📌 2026-07-29 **23 passed**); commit `6a0b127`. 07-28 실기도 이 채널은 껐다 |
 | 10 | gRPC actor 루프백 스모크 | **PASS (오프라인)** | `test_actor_grpc_transport/identity_pinning/smoke/rlpd_receive_smoke` = **35 passed** (venv python). 같은 4개 파일이 **시스템 python3에서는 무한 hang** → §0-1 |
 | 10b | **Kanu 왕복 (Stage A, fake-env)** | 📌 **PASS (2026-07-27 기록)** | 100스텝 acceptance 통과. 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버였다. 절차·수치 정본은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) |
 | 10c | 레이턴시 실측 (Kanu 왕복) | 📌 **측정됨 (2026-07-27) — 예산 소진 상태** | RTT p50 **58.6** / p95 **75.8** / p99 **97.1 ms**. 관측 96.1 KiB → 10 Hz에 **7.9 Mbit/s**. **병목은 WiFi 대역폭**이고 p99가 10 Hz 예산(100 ms)을 거의 다 쓴다 → `05` §5.3 |
 | 11 | RealSense 2대 동시 스트림 | **미검증(이 브랜치에서)** | → `06_SENSORS.md` |
 | 11b | RealSense QoS 호환성 | **PASS (해소됨)** | 퍼블리셔가 RELIABLE/TRANSIENT_LOCAL → 백엔드의 기본 reliable 구독과 호환. 이전의 "best-effort면 콜백이 안 뜬다" 우려는 **이 리그에서는 해소**. 단 TRANSIENT_LOCAL 부작용 있음 → `06` §3 |
 | 11c | cam1/cam2 역할 | **정정됨 / 손목 배정은 미확정** | cam1 = 삼각대 SCENE, cam2 = 손목(wrist). 다만 **연결된 두 개체 중 어느 쪽이 손목인지는 모델 클래스 추론**이고 육안 미확인이다 → `06` §1.1 |
-| 11d | 카메라 시리얼 | **자동 해석됨 (commit `43ba314`)** | `launch_cameras.sh`가 live USB 버스와 대조해 모델 클래스로 배정한다. 📌 2026-07-29 sysfs 실측: `151623020789` D435 + `322743060038` D435if, 둘 다 5000M → `06` §1.1 |
+| 11d | 카메라 시리얼 | **하드코딩 폐기 — 자동 해석 (`43ba314`, `fb48100`)** | 이 리그에 D435 쌍이 **두 벌** 있고 어느 쪽이 열거되는지가 두 번 뒤집혔다. `ros2_ur_ws/_resolve_camera_serials.sh`가 live USB 버스와 대조해 모델 클래스로 배정한다(plain D435→cam1, D435IF→cam2). **문서·명령줄에 특정 시리얼을 적지 말 것** → `06` §1.1 |
 | 12 | `clip_safety_box` (워크스페이스 박스) | **구현·단위검증, 실기 경로에서는 비활성** | `tests/test_clip_safety_box.py` **26 passed**. 실측 박스는 `cube_in_cup`에만 있고, 팔을 구동한 `run_real_hil.py`는 `DefaultUR7eEnvConfig`(0벡터)를 써서 박스가 꺼진 채 돌았다 → `08` G1 |
 | 12b | `go_to_reset` branch-cut | **수정·단위검증, 실기 미검증** | `tests/test_reset_branch_cut.py` **10 passed**. 실측 케이스: wrist_3 +3.1795 → 목표 −3.1331은 물리적으로 0.029 rad인데 예전 코드는 6.31 rad로 계산·명령했다 → `08` G13 |
 | 13 | 장애 주입 매트릭스 | **미검증 (E13 제외)** | → `07_FAILURE_INJECTION.md` |
@@ -124,26 +124,28 @@ export WT=/home/laptop3/gello_software
 
 ---
 
-## 2. checkout 지도 (2026-07-27 갱신)
+## 2. checkout 지도 (2026-07-29 갱신 — 머지 후)
 
-| 역할 | 경로 | 브랜치 | 무엇이 여기에만 있나 |
+| 역할 | 경로 | 브랜치 | 상태 |
 |---|---|---|---|
-| 통합 checkout | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | (오늘 이전의 통합 상태) |
-| **HIL 하드웨어·통신 작업본 ⭐** | `/home/laptop3/gello_worktrees/hil-hardware-comms` | `test/hil-hardware-comms` | `ur_experiments/`, `clip_safety_box`, branch-cut reset, `run_hil_actor.sh`, `run_hil_preposition.sh`, 09 런북 |
+| **정본 checkout ⭐ (여기서 작업한다)** | `/home/laptop3/gello_software` | `feat/gello-ur7e-humble-22.04` | `ur_experiments/`, `clip_safety_box`, branch-cut reset, `run_hil_actor.sh`, `run_hil_preposition.sh` **전부 여기 있다** |
+| HIL 하드웨어·통신 작업본 (구) | `/home/laptop3/gello_worktrees/hil-hardware-comms` | `test/hil-hardware-comms` | **머지 완료 (`1a4f93d` → `3f199d4`). 머지 이전에 멈춰 있다 — 여기서 실행하지 말 것** |
 | 보상 오버라이드 작업본 | `/home/laptop3/gello_worktrees/human-reward-override` | `feat/human-reward-override` | (범위 밖) |
 
 ```bash
-git -C /home/laptop3/gello_software worktree list   # 세 개가 다 보인다
+git -C /home/laptop3/gello_software worktree list
+git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보여야 한다
 ```
 
 세션 시작마다 `git status`와 `git submodule status`를 확인하고, checkout에 이미 있던
 사용자 변경이나 submodule 내 산출물을 `reset`, `clean`, `stash`로 지우지 않는다.
 `third_party/hil-serl`은 pinned submodule이며 직접 수정하지 않는다.
 
-> ⚠️ **여러 에이전트/사람이 같은 워크트리를 동시에 고치고 있다.** 파일이 몇 분 사이에
+> ⚠️ **여러 에이전트/사람이 같은 checkout을 동시에 고치고 있다.** 파일이 몇 분 사이에
 > 바뀔 수 있다. 숫자를 인용하기 전에 `git log --oneline -5`로 최신 커밋을 확인할 것 —
-> 실제로 오늘 `ABS_POSE_LIMIT_LOW[2]`가 `0.1785` → `0.185`로, `RESET_MAX_DIST_RAD`가
-> `0.5` → `0.9`로 바뀌었다 (commit `ee3240e`).
+> 실제로 `ABS_POSE_LIMIT_LOW[2]`가 `0.1785` → `0.185`로, `RESET_MAX_DIST_RAD`가
+> `0.5` → `0.9`로(`ee3240e`), `DEFAULT_REWARD_THRESHOLD`가 `0.85` → `0.5` → `0.2`로
+> (`53d5cf6`, `1b02857`) 바뀌었다.
 
 ---
 
@@ -151,16 +153,16 @@ git -C /home/laptop3/gello_software worktree list   # 세 개가 다 보인다
 
 | 파일 | 내용 |
 |---|---|
-| [`00_SETUP_AND_SAFETY.md`](00_SETUP_AND_SAFETY.md) | 워크트리 셋업·빌드·환경변수 함정, 세션 전 체크리스트, **비상 정지 우선순위와 "정지가 아닌 것들"** |
-| [`01_GRIPPER.md`](01_GRIPPER.md) | Robotiq 2F-85 단독/통합 검증 (**완료**) |
-| [`02_GELLO_LEADER.md`](02_GELLO_LEADER.md) | GELLO 리더 검증 + Dynamixel 진단 스캔 (**완료**) |
-| [`03_EEF_MODE.md`](03_EEF_MODE.md) | EEF 단계 상승 P6 → P7 → P8 → P9a → P9b |
-| [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) | 데드맨, 앵커/gain 래치, 좌표계 3×3 검증, 개입 메타데이터 계약 |
-| [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, schema fail-fast, 레이턴시 예산, Kanu 터널 |
-| [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대, QoS 함정, 19-D state 계약 |
-| [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 (유발·기대·확인·PASS·복구) |
-| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 미해결 안전 갭과 임시 완화책 |
-| [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** (Stage A fake-env / Stage B 실센서 DRY_RUN, `run_hil_actor.sh`, Kanu 왕복 결과) |
+| [`00_SETUP_AND_SAFETY.md`](00_SETUP_AND_SAFETY.md) | checkout 셋업·빌드·환경변수 함정(인터프리터/`PYTHONPATH`), 오프라인 테스트 2종, 세션 전 체크리스트, **비상 정지 우선순위와 "정지가 아닌 것들"** |
+| [`01_GRIPPER.md`](01_GRIPPER.md) | Robotiq 2F-85 단독 검증(**PASS**) + RL/개입 배선과 `:54321` 단일 클라이언트 규칙 |
+| [`02_GELLO_LEADER.md`](02_GELLO_LEADER.md) | GELLO 리더 검증(**PASS**) + Dynamixel 진단 스캔 + 트리거가 별도 토픽인 이유 |
+| [`03_EEF_MODE.md`](03_EEF_MODE.md) | EEF 텔레옵 단계 상승 P6 → P7 → P8 → P9a → P9b (사용자 검증 완료, 재현 절차) |
+| [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) | 데드맨 2종, 앵커/gain 래치, mock RViz 루프, **실기 러너 `run_real_hil.py`**, 좌표계 3×3, 그리퍼 개입, 개입 메타데이터 계약 |
+| [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, 포트 기본값, schema fail-fast(v2), 레이턴시 예산, Kanu 터널 |
+| [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대(시리얼·크롭·역할), QoS/TRANSIENT_LOCAL 함정, 토픽 유량 점검, 19-D state 계약, F/T 프레임 |
+| [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
+| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 미해결 안전 갭 G1~G18과 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록 |
+| [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — `run_hil_actor.sh` preflight, actor CLI(`--arm`/`--deadman`/`--mock-policy-noise`), Stage A fake-env / Stage B 실센서, Kanu 서버 기동 |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
 
@@ -179,41 +181,52 @@ git -C /home/laptop3/gello_software worktree list   # 세 개가 다 보인다
 
 ```
 [A] 오프라인 (로봇 불필요, 위험 0)
- A1  워크트리 빌드                     -> 00 §2
- A2  ur_gello_bringup 단위테스트 436개  -> 00 §4.1  [PASS 2026-07-27]
- A3  serl_ur_infra 단위테스트 332개     -> 00 §4.2  [PASS 2026-07-27]
+ A1  ROS2 워크스페이스 빌드             -> 00 §2
+ A2  ur_gello_bringup 단위테스트 436개  -> 00 §4.1  [PASS 2026-07-29]
+ A3  serl_ur_infra 단위테스트 333개     -> 00 §4.2  [PASS 2026-07-29]
  A4  gRPC 루프백 스모크 (mock 서버)     -> 05 §2    [PASS 오프라인]
         ↓
 [B] 하드웨어 단독 (팔 미동작)
  B1  로봇 도달성 / dashboard 상태       -> 00 §5   [PASS]
  B2  그리퍼 단독                        -> 01      [PASS]
  B3  GELLO 리더 단독                    -> 02      [PASS]
- B4  RealSense 2대                      -> 06 §1
+ B4  RealSense 2대                      -> 06 §1   [미검증]
         ↓
 [C] mock 하드웨어 + RViz (실기 위험 0)
- C1  mock RViz HIL 개입 루프            -> 04 §3
- C2  좌표계 3x3 검증                    -> 04 §5
+ C1  mock RViz HIL 개입 루프            -> 04 §3   [미검증]
+ C2  좌표계 3x3 검증                    -> 04 §5   [오프라인 실측으로 대체 통과]
         ↓
 [D] 실기 EEF 텔레옵 (팔 움직임)  ** 사람이 E-STOP 위에 손 **
- D1  P6  pos_scale:=0.0                 -> 03 §2   [사용자 검증 완료]
- D2  P7  병진 위주                      -> 03 §3   [사용자 검증 완료]
- D3  P8  회전 위주                      -> 03 §4   [사용자 검증 완료]
- D4  P9a / P9b 6-DoF + 재클러치         -> 03 §5   [사용자 검증 완료]
+ D1  P6  pos_scale:=0.0                 -> 03 §4   [사용자 검증 완료]
+ D2  P7  병진 위주                      -> 03 §5   [사용자 검증 완료]
+ D3  P8  회전 위주                      -> 03 §6   [사용자 검증 완료]
+ D4  P9a / P9b 6-DoF + 재클러치         -> 03 §7   [사용자 검증 완료]
+        ↓
+[D'] 실기 HIL 개입 (팔 움직임, zero-policy)  ** run_real_hil.py **
+ D'1 DRY_RUN 300스텝 + CSV 검토          -> 04 §4.5 [PASS 2026-07-28]
+ D'2 --arm --scale 0.25, 개입 불변식 4종 -> 04 §4.5 [PASS 2026-07-28]
         ↓
 [E] 장애 주입 (팔 움직임 포함)
- E1  통신/프로세스 계열 (E1~E5)         -> 07
- E2  로봇 안전 계열 (E6~E11)            -> 07
+ E1  통신/프로세스 계열 (E1~E5)         -> 07      [미검증]
+ E2  로봇 안전 계열 (E6~E11)            -> 07      [미검증]
         ↓
 [F] 원격 통신 (Kanu)
  F1  SSH 터널 + 스키마 핸드셰이크       -> 05 §6, 09 §2   [PASS 2026-07-27]
  F2  레이턴시 예산 실측                  -> 05 §5.3       [측정 완료 — 예산 소진]
- F3  Stage A actor (fake-env) 왕복       -> 09            [PASS 2026-07-27]
- F4  Stage B actor (실센서, DRY_RUN)     -> 09            [미검증]
+ F3  Stage A actor (fake-env) 왕복       -> 09 §3         [PASS 2026-07-27]
+ F4  Stage B actor (실센서, DRY_RUN)     -> 09 §4         [미검증]
         ↓
 [G] RL 정책 경로 실기 투입  <-- 08_OPEN_GAPS.md의 갭이 닫히기 전에는 금지
 ```
 
-**현재 위치: [A]·[B]·[D] 완료, [F1]~[F3] 완료. [C]/[E]/[F4] 미착수.**
+**현재 위치: [A]·[B1~B3]·[D]·[D′] 완료, [F1]~[F3] 완료. [B4]/[C]/[E]/[F4] 미착수.**
 
-> [F]가 [C]/[E]보다 먼저 끝난 것은 순서를 어긴 게 아니라, [F]가 **로봇을 전혀 움직이지 않는
-> fake-env 경로**이기 때문이다. 팔이 움직이는 단계는 여전히 [D]까지만 검증돼 있다.
+> - [F]가 [C]/[E]보다 먼저 끝난 것은 순서를 어긴 게 아니라, [F]가 **로봇을 전혀 움직이지 않는
+>   fake-env 경로**이기 때문이다.
+> - [D′]가 [C]보다 먼저 끝난 것은 순서를 어긴 것이 맞다. mock RViz 루프를 건너뛰고 실기에서
+>   개입 경로를 검증했다. 그래서 [C]는 **여전히 미검증이고**, mock 전용 완화값
+>   (`run_rviz_hil.py`의 `DRY_RUN=False` / `ACTION_SCALE 0.3 m/s`)을 실기 config로
+>   가져오지 않도록 특히 조심해야 한다 → `04` §3.
+> - [D′]에서 움직인 것은 **정책이 아니라 zero-policy + 사람 개입**이다. [G]는 그대로 금지다.
+> - [F4]의 actor entrypoint는 [D′]와 **다른 코드 경로**다. [D′] PASS를 actor PASS로
+>   승격하지 말 것.

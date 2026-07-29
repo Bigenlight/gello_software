@@ -5,14 +5,17 @@
 | 항목 | 상태 |
 |---|---|
 | cam1/cam2 역할 정의 | **정정됨** — cam2는 **손목** 카메라 (§1.1) |
+| 어느 물리 개체가 손목인가 | **미확정** — 모델 클래스 추론. 팔 한 번 흔들면 끝난다 (§1.3) |
+| 카메라 시리얼 | **하드코딩 폐기 (`43ba314`, `fb48100`)** — live USB 버스에서 자동 해석 (§1.1) |
 | QoS 호환성 | **PASS** — RealSense는 RELIABLE/TRANSIENT_LOCAL (§3) |
 | 19-D state 레이아웃 | **PASS** — 알파벳순, 그리퍼 index 0 (§5.2) |
 | F/T wrench 프레임 | **정정됨** — tool0가 맞고 upstream과 일치 (§5.3) |
 | RealSense 2대 동시 스트림 안정성 | **미검증** (§1.2, §2) |
 | 7개 토픽 유량 루프 | **미검증** (§3.1) |
+| 분류기 ↔ 크롭 정합 | 🔴 **깨짐, 머지로 이 브랜치에 유입됨** (§4의 G15 박스) |
 
 ```bash
-export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
+export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
 ```
 
 ---
@@ -21,23 +24,63 @@ export WT=/home/laptop3/gello_worktrees/hil-hardware-comms
 
 ### 1.1 계약 — 🔧 **cam2는 손목 카메라다 (정정 2026-07-27)**
 
-> ### 🔧 시리얼 정정 (2026-07-28) — 카메라 개체가 교체됐다
-> 이전 판의 `147122072740` / `243222072700`은 **이 PC가 커널 로그상 한 번도 본 적 없는
-> 하드웨어**다(2026-07-05까지 소급 확인). 아래 표는 실제 연결된 개체로 갱신했다.
-> **없는 시리얼로 바인딩하면 조용히 안 뜬다** — 오류가 아니라 "프레임 없음"으로 보인다.
-> 아직 옛 시리얼이 남은 곳: `docs/ros2/GELLO_UR7E_{ACT,DIFFUSION,FM}_DEPLOY.md`,
+> ## 🛑 시리얼 정정 (2026-07-29) — **시리얼을 하드코딩하지 마라**
+>
+> 리포 여러 곳에 D435 시리얼이 **두 쌍** 등장하지만, **이 호스트가 실제로 열거한 것은 한 쌍뿐이다.**
+> 전체 영속 저널(97 부팅, 2025-07-28 ~ 현재)로 확인했다 — `151623020789`/`322743060038` 650회,
+> `147122072740`/`243222072700` **0회**. 07-29에는 USB 재열거 자체가 없었으므로 "쌍이 뒤집혔다"는
+> 관찰은 근거가 없다. (2026-07-28 판의 "옛 쌍은 본 적 없다"는 서술이 맞았다.)
+>
+> 그렇더라도 **시리얼을 하드코딩하지 않는 것이 옳다** — 아래 실패 모드 때문이다.
+>
+> `43ba314` / `fb48100`이 하드코딩된 상수를 없애고 **live USB 버스에서 자동 해석**하도록
+> 바꿨다 (`ros2_ur_ws/_resolve_camera_serials.sh`, `launch_cameras.sh`와 `run_recorder.sh`가
+> 이걸 source한다). 동작:
+>
+> | 상황 | 동작 |
+> |---|---|
+> | 설정된 두 시리얼이 **둘 다 연결돼 있음** | 그대로 사용. 아무것도 출력하지 않는다 |
+> | 아님 + 모델 클래스가 갈림 | **plain D435 → cam1(SCENE), D435IF/i → cam2(손목)**로 배정하고 `WARN auto-selected by model class:` 출력 |
+> | 아님 + 두 대가 같은 클래스 | 시리얼 정렬 순서로 떨어지고 `WARN VERIFY THE PANES BEFORE RECORDING` 출력 |
+> | 연결 2대 미만 | **hard error**. 연결된 것을 나열하고 오버라이드 문법을 안내한 뒤 종료 |
+> | `pyrealsense2` import 불가 | `SKIP` (비치명적). 설정값을 그대로 쓰고 realsense 노드가 자체 조회한다 |
+>
+> **그러므로 런북의 명령 블록에 시리얼을 적을 이유가 없다.** 필요하면 오버라이드만 쓴다:
+>
+> ```bash
+> CAM1_SERIAL=<serial> CAM2_SERIAL=<serial> ./launch_cameras.sh
+> ```
+>
+> ### 왜 이 수정이 필요했나 — 실패 모드가 조용하다
+> 없는 `serial_no`로 realsense2_camera를 바인딩해도 **에러가 나지 않는다.** 노드는 뜨고,
+> `ros2 topic info`의 Publisher count도 1이 되고, 아무것도 publish하지 않는다.
+> 모든 소비자가 "프레임 없음"으로 볼 뿐이라 **뽑힌 카메라와 잘못 설정된 카메라를
+> 스택 어디에서도 구별할 수 없다.** 그게 자동 해석으로 바꾼 이유다.
+>
+> 아직 옛 시리얼이 리터럴로 남은 곳(이 문서 소유 범위 밖):
+> `docs/ros2/GELLO_UR7E_{ACT,DIFFUSION,FM}_DEPLOY.md`,
 > `ros2_ur_ws/src/gello_{policy,recorder}/README.md`, 별도 저장소 `gello_software_remote_classifier`.
 >
-> **미확정**: 연결된 두 대 중 어느 개체가 손목에 달렸는지. 아래 배정은 모델 클래스 추론이고
-> USB 포트 순서도 녹화 당시와 뒤바뀌었다. 팔을 흔들어 cam2 창을 보면 끝난다.
+> **미확정**: 연결된 두 대 중 **어느 물리 개체가 손목에 달렸는지.** 위 배정은 모델 클래스
+> 추론이다. 팔을 흔들어 cam2 창을 보면 끝난다 (§1.3).
 
 | | cam1 | cam2 |
 |---|---|---|
 | 역할 | **SCENE** (삼각대, 3인칭, 고정) | 🔧 **WRIST** — 그리퍼에 **강체로 장착**. 팔과 함께 움직인다 |
-| 시리얼 | `151623020789` (plain D435) | `322743060038` (D435IF) |
+| 모델 클래스 | plain **D435** | **D435IF/i** (IMU 변종) |
+| 시리얼 | **자동 해석** — 문서/명령줄에 적지 않는다 (위 박스) | 동일 |
 | 토픽 | `/cam1/cam1/color/image_raw/compressed` | `/cam2/cam2/color/image_raw/compressed` |
 | 프로파일 | `1280x720x30` (둘 다 동일) | 동일 |
 | `cube_in_cup` 크롭 | `img[20:670, 340:990]` (650×650) | `img[0:720, 420:1140]` (720×720) |
+
+무엇이 실제로 선택됐는지 보려면 `launch_cameras.sh`의 기동 배너를 읽는다:
+
+```
+###   cam1 = SCENE (tripod, 3rd person)  D435    serial <해석된 값>
+###   cam2 = CLOSE-UP (workspace)        D435if  serial <해석된 값>
+```
+
+(배너의 `CLOSE-UP (workspace)` 문구는 **낡았다** — cam2는 손목이다. 아래 폐기 박스 참조.)
 
 근거: `serl_ur_infra/ur_experiments/cube_in_cup.py`의 `IMAGE_CROP` 주석 —
 > *"cam1 is the fixed tripod scene camera. cam2 is the WRIST camera, rigidly mounted to the
@@ -73,34 +116,60 @@ cd $WT/ros2_ur_ws
 VIEW=false ./launch_cameras.sh   # 뷰어 없이
 ```
 
-- 스크립트가 **두 스트림이 실제로 ~25 Hz 이상 흐를 때까지 최대 30초 대기**하고,
+- 스크립트가 먼저 `_resolve_camera_serials.sh`를 source해 **시리얼을 live 버스와 대조**한다
+  (§1.1). 자동 배정이 일어나면 `WARN`이 뜨므로 **기동 로그를 읽는다.**
+- 그다음 **두 스트림이 실제로 ~25 Hz 이상 흐를 때까지 최대 30초 대기**하고,
   실패하면 명확히 죽는다 (`launch_cameras.sh`의 `wait_for_stream`).
 - 로그는 `/tmp/launch_cameras_<timestamp>/cam{1,2}_launch.log`.
 - **Ctrl-C 한 번으로 뷰어 + 카메라 2대가 깨끗이 정리된다.** 고아 프로세스가 남지 않도록
   `_kill_and_wait`(유예 후 SIGKILL) + 이름 기반 `pkill` 백스톱까지 들어 있다.
+- 시리얼을 강제하려면 `CAM1_SERIAL=... CAM2_SERIAL=... ./launch_cameras.sh`.
+  둘 다 실제로 연결돼 있으면 자동 해석이 조용히 통과시킨다.
 
 ### 1.3 🛑 cam1/cam2 매핑 육안 확인은 안전 관련 절차다
 
 뷰어가 **기본 ON**인 이유가 있다. 매핑이 뒤집히면 학습된 정책이 **조용히** 열화된다
-(`launch_cameras.sh:12-16`). 판정 기준은 §1.1의 정정된 표를 쓴다:
+(`launch_cameras.sh`의 머리말 주석). 판정 기준은 §1.1의 정정된 표를 쓴다:
 
 - **좌측 창 = cam1 = 전체 장면.** 팔을 움직여도 **배경이 고정**돼 있다.
 - **우측 창 = cam2 = 손목.** 팔을 움직이면 **화면 전체가 흐르고**, 그리퍼 손가락은
   **같은 자리에 남는다.** ← 이 한 가지 동작으로 두 카메라를 즉시 구별할 수 있다.
 
-바뀌어 있으면 Ctrl-C하고 시리얼부터 다시 확인한다.
+> ### 🛑 이 팔 한 번 흔들기가 지금 **미해결 항목을 닫는 유일한 방법**이다
+> 어느 물리 개체가 손목에 달렸는지는 코드로 알 수 없다. `_resolve_camera_serials.sh`의
+> 배정은 **모델 클래스 추론**(plain D435 → cam1)이고, 두 대가 같은 클래스면 시리얼
+> 정렬 순서로 떨어진다. 스크립트 자신이 그때 `VERIFY THE PANES BEFORE RECORDING`을 찍는다.
+> **한 번 확인하고 이 문서에 날짜와 함께 기록하라.**
 
-### 1.4 `serial_no`는 반드시 따옴표로 감싼다
+바뀌어 있으면 Ctrl-C하고 §1.4의 sysfs 명령으로 무엇이 붙어 있는지부터 본다.
+
+### 1.4 손으로 `ros2 launch`할 때: `serial_no`는 반드시 따옴표로 감싼다
+
+**보통은 `launch_cameras.sh`를 쓰면 되고 이 절은 필요 없다.** 단독으로 한 대만 띄워
+디버깅할 때만 쓴다.
 
 ```bash
 ros2 launch realsense2_camera rs_launch.py \
-    camera_name:=cam1 camera_namespace:=cam1 "serial_no:='151623020789'" \
+    camera_name:=cam1 camera_namespace:=cam1 "serial_no:='<시리얼>'" \
     "rgb_camera.color_profile:='1280x720x30'"
 ```
 
 `ros2 launch`는 CLI 인자 타입을 내용으로 추론한다. **전부 숫자인 시리얼을 그냥 넘기면
 정수로 강제 변환**되고, `serial_no`는 STRING 파라미터라 노드가 즉사한다
-(`launch_cameras.sh:130-134`). 이건 이 리포에서 실제로 물린 함정이다.
+(`launch_cameras.sh`의 `serial_no:='...'` 인용 주석). 이건 이 리포에서 실제로 물린 함정이다.
+
+`<시리얼>`은 **연결된 장치에서 읽어 온다.** 커널 sysfs로 보는 것이 가장 싸고
+스트리밍 락을 잡지 않는다:
+
+```bash
+for d in /sys/bus/usb/devices/*/; do
+  [ "$(cat "$d/idVendor" 2>/dev/null)" = "8086" ] || continue
+  echo "$(cat "$d/product" 2>/dev/null)  serial=$(cat "$d/serial" 2>/dev/null)  speed=$(cat "$d/speed" 2>/dev/null)"
+done
+```
+
+📌 2026-07-29 11시 이 명령의 출력은 D435 1대 + D435if 1대, 둘 다 `speed=5000`(USB3)이었다.
+**출력값을 스크립트에 옮겨 적지 말 것** — 다음 세션에 다시 뒤집힐 수 있다.
 
 ---
 
@@ -226,12 +295,12 @@ ros2 topic info /cam2/cam2/color/image_raw/compressed --verbose
 
 | 토픽 | env 설정 키 | 없으면 |
 |---|---|---|
-| `/joint_states` | `joint_states_topic` | `_update_currpos()`에서 `RuntimeError: no /joint_states received yet` (`ur7e_env.py:613`) |
-| `/joint_states`가 0.2 s 이상 낡음 | `JOINT_STATE_STALE_S` | `RuntimeError: /joint_states stale` (`:615-617`) |
-| `/tcp_pose_broadcaster/pose` | `tcp_pose_topic` | `TCP_POSE_SOURCE="driver"`일 때 `RuntimeError: no /tcp_pose_broadcaster/pose received` (`:624`). ⚠️ **`cube_in_cup`은 `"driver"`를 쓴다** — `"fk"`로 바꾸는 것은 단독 우회가 아니다 (§5.3 아래, `08` G1의 세트 3종) |
-| `/force_torque_sensor_broadcaster/wrench` | `wrench_topic` | **조용히 0으로 채워진다** — 관측 키는 유효한 채로 남는다 (`:597-600`). mock에서 정상 |
-| `/robotiq_gripper/position_percent` | `gripper_state_topic` | `pct is None` → `curr_gripper_pos = 0.0` = **"열림"으로 보임**. 조용한 오정보 |
-| `/camX/.../compressed` (또는 0.5 s 이상 낡음) | `IMAGE_STALE_S` | `RuntimeError: camera 'camX' has no fresh frame` (`:705-717`) |
+| `/joint_states` | `joint_states_topic` | `_update_currpos()`에서 `RuntimeError: no /joint_states received yet` (`ur7e_env.py:651`) |
+| `/joint_states`가 0.2 s 이상 낡음 | `JOINT_STATE_STALE_S` | `RuntimeError: /joint_states stale` (`:653-655`) |
+| `/tcp_pose_broadcaster/pose` | `tcp_pose_topic` | `TCP_POSE_SOURCE="driver"`일 때 `RuntimeError: tcp pose stale` / `no ... received` (`:660-668`). ⚠️ **`cube_in_cup`은 `"driver"`를 쓴다** (`cube_in_cup.py:128`) — `"fk"`로 바꾸는 것은 단독 우회가 아니다 (§5.3 아래, `08` G1의 세트 4종). 반면 `run_real_hil.py`는 기본이 `--tcp-source fk`다 |
+| `/force_torque_sensor_broadcaster/wrench` | `wrench_topic` | **조용히 0으로 채워진다** — 관측 키는 유효한 채로 남는다 (`:685-690`). mock에서 정상 |
+| `/robotiq_gripper/position_percent` | `gripper_state_topic` | `pct is None` → `curr_gripper_pos = 0.0` = **"열림"으로 보임**. 조용한 오정보 (`:681-683`) |
+| `/camX/.../compressed` (또는 0.5 s 이상 낡음) | `IMAGE_STALE_S` | `RuntimeError: camera 'camX' has no fresh frame (age=...s) — is launch_cameras.sh running?` (`:750-757`) |
 
 > ### 🛑 위 표에서 위험한 두 줄
 > **wrench와 gripper는 없어도 예외가 안 난다.** 0으로 채워진 F/T와 "열림"으로 보이는
@@ -242,40 +311,47 @@ ros2 topic info /cam2/cam2/color/image_raw/compressed --verbose
 
 ## 4. 이미지 파이프라인
 
-`ur7e_env.get_im()` (`ur7e_env.py:463-500`):
+`ur7e_env.get_im()` (`ur7e_env.py:743-775`):
 
 ```
 compressed JPEG → cv2.imdecode(BGR) → IMAGE_CROP[key](선택) → resize(128x128) → [..., ::-1](RGB)
 ```
 
 - 관측은 **RGB**, 표시는 BGR (FrankaEnv 관례).
-- `IMAGE_CROP`는 `DefaultUR7eEnvConfig`에서는 비어 있고, **태스크 config가 채운다.**
-  `cube_in_cup`은 **정사각 크롭**을 쓴다 (128×128 리사이즈에서 종횡비 왜곡이 없도록):
-  cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`.
-  크롭이 없으면 1280×720이 1:1로 눌려 **가로가 세로의 0.5625로 압축**된다.
+- `IMAGE_CROP`는 `DefaultUR7eEnvConfig`에서는 비어 있고(`config.py:26`), **태스크 config가
+  채운다.** `cube_in_cup`은 **정사각 크롭**을 쓴다 (128×128 리사이즈에서 종횡비 왜곡이
+  없도록): cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`
+  (`cube_in_cup.py:211-214`). 크롭이 없으면 1280×720이 1:1로 눌려 **가로가 세로의
+  0.5625로 압축**된다.
 
-> ### 🔴 알려진 충돌 (G15): 분류기는 크롭 없이 학습됐다 — **2026-07-28 증명됨**
+> ### 🔴 알려진 충돌 (G15): 분류기는 크롭 없이 학습됐다 — **머지로 이 브랜치에 들어왔다**
 > 학습은 크롭 없이 1280×720 full-frame을 128×128로 찌그러뜨렸다
 > (kanu `hil-serl/examples/cube_classifier_pipeline.py::preprocess_frame`,
 > `export_0724.py`가 `crop=None`을 넘긴다). 그런데 actor의 `ur7e_env.get_im()`은
 > **`IMAGE_CROP` 적용 후** 리사이즈한다. 즉 크롭을 켜는 순간 **분류기 입력이 분포 밖으로 나간다.**
 >
-> 증명: 픽셀 대조 MAE **0.00**(무크롭 가설, 100% 비트 일치) vs **21–35**(우리 크롭),
+> 증명(2026-07-28): 픽셀 대조 MAE **0.00**(무크롭 가설, 100% 비트 일치) vs **21–35**(우리 크롭),
 > 실제 체크포인트 실행에서 recall@0.85 **100.0% → 33.3%**, 개별 최저 P 0.0213.
 >
 > **🔧 이 문서의 이전 판은 원인을 `reward_classifier_runtime.decode_classifier_image()`로
 > 지목했는데 그것은 틀렸다.** 그 함수는 ZMQ 뷰어 전용이고 gRPC 경로와 **호출 관계가 없다.**
-> 뷰어는 raw 카메라 토픽을 직접 구독하므로 크롭 없이 리사이즈하는 것이 그쪽에서는 맞다. 서버 `_classifier_observation()`은 이미지 변환을 하나도 하지 않는
-> passthrough다. **고칠 위치는 actor의 `IMAGE_CROP`이다.**
+> 뷰어는 raw 카메라 토픽을 직접 구독하므로 크롭 없이 리사이즈하는 것이 그쪽에서는 맞다.
+> 서버 `_classifier_observation()`은 이미지 변환을 하나도 하지 않는 passthrough다
+> (`grep -n "resize\|cv2\." rlpd_receive_server.py` → 0 hit). **고칠 위치는 actor의
+> 크롭이 아니라 분류기 학습이다.**
 >
-> **현재 프로덕션은 안 망가져 있다** — 크롭을 켜는 task config가 kanu 브랜치에 없다.
-> **actor 브랜치 머지 시 유입된다.** 수정 선택지(크롭으로 재학습 vs 전처리 분리)는
-> `serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md` §12.7.
+> ### 🛑 2026-07-29 갱신 — "현재 프로덕션은 안 망가져 있다"는 **더 이상 사실이 아니다**
+> 이전 판은 "크롭을 켜는 task config가 대상 브랜치에 없어 아직 안 터진다"고 적었다.
+> **머지 `3f199d4`가 `serl_ur_infra/ur_experiments/`를 이 브랜치로 가져왔다.**
+> 이제 `EXP_NAME=cube_in_cup`으로 actor를 띄우면 크롭이 활성이다.
+> 남은 방어선은 `DRY_RUN=True` 하나뿐이다. 상세는 `08_OPEN_GAPS.md` G15.
 >
 > **`IMAGE_CROP` 값 자체는 정책 관점에서 올바르다 — 임의로 바꾸지 말 것.**
-- `DISPLAY_IMAGE`가 기본 `True` (`config.py:28`) → OpenCV 창이 뜬다. 헤드리스 세션에서는 끈다.
+> 해결은 이 크롭으로 분류기를 재학습하는 것이다 (파이프라인에 `--cam1-crop`/`--cam2-crop`
+> 인자가 이미 있다. 좌표 순서가 뒤집힌다: 이 리포는 `y0,y1,x0,x1`, 파이프라인은 `x0,y0,x1,y1`).
+- `DISPLAY_IMAGE`가 기본 `True` (`config.py:29`) → OpenCV 창이 뜬다. 헤드리스 세션에서는 끈다.
 - **RealSense를 두 번 열 수 없기 때문에** env는 pyrealsense2로 장치를 직접 열지 않고
-  `launch_cameras.sh`의 토픽을 구독한다 (`config.py:17-21`). 즉 `launch_cameras.sh`가
+  `launch_cameras.sh`의 토픽을 구독한다 (`config.py:17-25`). 즉 `launch_cameras.sh`가
   떠 있어야만 RL이 돈다. 반대로, 뷰어/레코더와 공존할 수 있다.
 
 ---
@@ -284,7 +360,7 @@ compressed JPEG → cv2.imdecode(BGR) → IMAGE_CROP[key](선택) → resize(128
 
 ### 5.1 무엇이 문제였나
 
-env는 `state`를 **중첩 dict**로 낸다 (`ur7e_env.py:404-416`):
+env는 `state`를 **중첩 dict**로 낸다 (`ur7e_env.py:692-707`):
 
 ```python
 {"tcp_pose": (7,), "tcp_vel": (6,), "gripper_pose": (1,), "tcp_force": (3,), "tcp_torque": (3,)}
@@ -312,7 +388,7 @@ env는 `state`를 **중첩 dict**로 낸다 (`ur7e_env.py:404-416`):
 > 반드시 `GRIPPER_POSITION_INDEX` / `gripper_position_from_state()`를 쓴다.
 > 숫자 인덱스를 call site에 다시 적지 않는다.
 
-2026-07-27 라이브 출력 (§5.2.1의 스니펫 결과):
+📌 라이브 출력 (§5.2.1의 스니펫 결과. 2026-07-29 재실행 — 머지 전후 동일):
 
 ```
 id   : hil-serl-ur-canonical-observation-v2
@@ -325,9 +401,9 @@ dim  : 19 grip@ 0
   tcp_vel      [13:19)
 ```
 
-- 이 해시는 **Kanu 서버와 동일함이 확인됐다** (`09_HIL_ACTOR_RUNBOOK.md` §2.1).
+- 이 해시는 2026-07-27에 **Kanu 서버와 동일함이 확인됐다** (`09_HIL_ACTOR_RUNBOOK.md` §2.1).
   그래도 매번 양쪽에서 출력해서 대조한다 — 해시를 문서에서 복사하지 말 것.
-- 회귀 테스트 `serl_ur_infra/tests/test_state_layout_contract.py`(**22 passed**)가
+- 회귀 테스트 `serl_ur_infra/tests/test_state_layout_contract.py`(📌 2026-07-29 **22 passed**)가
   **살아 있는 env + 살아 있는 gymnasium**에서 레이아웃을 다시 유도해서 대조한다.
   "알파벳순"을 하드코딩하지 않으므로, gymnasium이 바뀌면 테스트가 새 진실을 알려준다.
 
@@ -383,8 +459,11 @@ PY
 ## 6. 판정 체크리스트
 
 - [ ] `./launch_cameras.sh`가 30초 안에 두 스트림 ~30 Hz 도달
+- [ ] 기동 로그에 `WARN auto-selected by model class` 또는 `WARN model classes are ambiguous`가
+      **떴는지 확인** (뜨면 §1.1의 자동 배정이 일어난 것이다 — 뷰어 판정을 반드시 한다)
 - [ ] 뷰어 좌 = cam1 SCENE(배경 고정) / 우 = **cam2 WRIST(팔을 움직이면 배경이 흐르고
-      손가락은 제자리)** — §1.3의 "팔 한 번 움직여 보기"로 판정
+      손가락은 제자리)** — §1.3의 "팔 한 번 움직여 보기"로 판정.
+      **이 항목이 통과하면 §1.1의 "어느 개체가 손목인가" 미확정이 닫힌다 — 날짜와 함께 기록할 것**
 - [ ] `lsusb -t`에서 두 카메라 모두 5000M(USB3)
 - [ ] `cat /sys/module/uvcvideo/parameters/quirks` = `4294967295`
 - [ ] §3.1의 `topic hz` 루프에서 **7개 토픽 전부** 값이 나온다

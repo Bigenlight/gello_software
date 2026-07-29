@@ -22,8 +22,8 @@
 #     RATE=200 ./run_recorder.sh        # synchronized-table sample rate (Hz)
 #
 # Camera env vars (only used when CAMS=true or CAMS=1):
-#     CAM1_SERIAL    RealSense #1 serial (default 147122072740, a plain D435)
-#     CAM2_SERIAL    RealSense #2 serial (default 243222072700, a D435IF)
+#     CAM1_SERIAL    RealSense #1 serial (default 151623020789, a plain D435)
+#     CAM2_SERIAL    RealSense #2 serial (default 322743060038, a D435IF)
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
@@ -71,8 +71,8 @@ if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
     # on this rig and which one enumerates has flipped more than once. Binding by
     # an absent serial does NOT fail loudly -- the node comes up, publishes
     # nothing, and the recorder just writes an empty cam*.mp4.
-    CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
-    CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
+    CAM1_SERIAL="${CAM1_SERIAL:-151623020789}"
+    CAM2_SERIAL="${CAM2_SERIAL:-322743060038}"
     CAM1_NAME="${CAM1_NAME:-cam1}"
     CAM2_NAME="${CAM2_NAME:-cam2}"
     # Both cameras record at the same resolution/fps so the two MP4s line up

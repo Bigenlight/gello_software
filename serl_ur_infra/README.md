@@ -56,7 +56,7 @@ HIL-SERL actor/server/learner의 통합 상태, checkpoint, branch, Kanu 검증,
 | keepout 존 | ✅ | ❌ | |
 | anti-windup lag 클램프 | ✅ | ❌ (리더 폭주용이라 정책 경로엔 덜 급함) | |
 | 해석적 line search | ✅ | ❌ | |
-| 워크스페이스 박스 (`ABS_POSE_LIMIT`) | (keepout으로 대체) | ❌ config만 존재, 미작동 | |
+| 워크스페이스 박스 (`ABS_POSE_LIMIT`) | (keepout으로 대체) | 🟠 구현됨(`clip_safety_box`), 단 실기 미발동 | `run_real_hil.py`는 `DefaultUR7eEnvConfig`(=0)를 쓰므로 박스가 꺼진다. 측정 박스는 `cube_in_cup.py`에만 있다 |
 
 **교체 계획**: `eef_delta`의 step()은 "리더→T_des 앵커 매핑(전반부)" +
 "거버너→IK→게이트(후반부)"로 나뉜다. 후반부를 `step_task_target(T_des)` 같은

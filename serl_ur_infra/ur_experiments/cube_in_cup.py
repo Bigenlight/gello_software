@@ -123,7 +123,7 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     # frame.  Moving to true-TCP semantics means doing all four together:
     #   TCP_POSE_SOURCE -> "fk"
     #   TCP_OFFSET_XYZ_RPY -> [0, 0, 0.174, 0, 0, 0]
-    #   z limits -> shifted down by 0.174  (0.0045 .. 0.376)
+    #   z limits -> shifted down by 0.174  (0.011 .. 0.376)
     #   PolicyDeltaController -> integrate at fk(q) @ T_tool
     TCP_POSE_SOURCE: str = "driver"
     TCP_OFFSET_XYZ_RPY: list = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

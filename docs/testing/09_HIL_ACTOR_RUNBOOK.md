@@ -1,25 +1,30 @@
 # 09 — HIL actor 기동 런북 (Stage A: fake-env / Stage B: 실센서 DRY_RUN)
 
-> ### 🔧 정정 (2026-07-28) — actor entrypoint에 CLI 플래그 3개가 생겼다
-> 이 문서는 그 이전에 쓰였다. 아래가 바뀌었다:
-> - **`--arm`** — `DRY_RUN`을 CLI로 해제한다. "DRY_RUN 해제는 이 문서의 범위가 아니다"(§4)는
->   더 이상 맞지 않는다. `--arm` 사용 시 이중 퍼블리셔를 자동으로 거부한다.
-> - **`--deadman {topic,spacebar}`**, 기본 `topic` — 이전에는 `deadman`이 전혀 전달되지 않아
->   `SpacebarDeadman`(전역 pynput, 워치독 없음)으로 조용히 fallback했다. **G12 해결.**
-> - **`--mock-policy-noise SIGMA`** — zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증한다.
+> ## 🛑 지금 이 문서를 읽는 사람이 먼저 알아야 할 것 (2026-07-29)
 >
-> 또한 `clip_safety_box`는 **구현돼 있다**(§4의 "아직 구현되어 있지 않다"는 낡았다). 다만
-> `run_real_hil.py` 경로에서는 `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*`가 0이라 **비활성**이다.
+> 1. **actor entrypoint는 실기에서 한 번도 안 돌았다.** 지금까지 팔을 움직인 것은 전부
+>    `serl_ur_infra/tests/run_real_hil.py`(`04` §4.5)이고, **다른 코드 경로**다.
+>    `04`의 PASS를 이 문서의 PASS로 승격하지 말 것.
+> 2. **actor entrypoint에 CLI 플래그 3개가 생겼다** (§1.2에 정리):
+>    `--arm`, `--deadman {topic,spacebar}`(기본 `topic`), `--mock-policy-noise SIGMA`.
+>    §4의 "DRY_RUN 해제는 이 문서의 범위가 아니다"는 **더 이상 맞지 않는다.**
+> 3. **`clip_safety_box`는 구현돼 있다.** §4.1의 "아직 구현되어 있지 않다"는 낡았다 —
+>    그 자리에 지금의 사실을 다시 적어 뒀다.
+> 4. **🔴 머지가 분류기 크롭 불일치를 이 브랜치로 들여왔다** (`08` G15).
+>    `EXP_NAME=cube_in_cup`(= 래퍼 기본값)으로 띄우면 분류기 입력이 분포 밖이다.
+>    `DRY_RUN`은 팔만 막고 **보상/종단은 막지 않는다.** Stage B 전에 처리한다.
+> 5. **Kanu에 지금 아무것도 안 떠 있다** (port 50053 미바인딩, GPU 유휴).
+>    §2는 "이미 떠 있는 서버에 붙는" 절차가 아니라 **새로 띄우는** 절차다.
 >
 > 현재 상태는 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](../../serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 볼 것.
 
 > 이 문서는 **로봇 랩톱(`laptop3`)에서 HIL-SERL actor 프로세스를 띄우는 절차**만 다룬다.
 > 학습 알고리즘, 보상 분류기 학습, 정책 성능은 범위 밖이다.
 > 실행은 전부 `ros2_ur_ws/run_hil_actor.sh` 하나로 통일한다. **손으로 python 명령을
-> 치지 않는다** — 오늘 실기에서 그것 때문에만 4번 실패했다 (§0).
+> 치지 않는다** — 2026-07-27 실기에서 그것 때문에만 4번 실패했다 (§0).
 
 ```bash
-# 이 문서의 모든 명령이 쓰는 변수 (워크트리에서 작업 중이면 그 경로로 바꾼다)
+# 이 문서의 모든 명령이 쓰는 변수
 export WT=/home/laptop3/gello_software
 ```
 
@@ -28,9 +33,10 @@ export WT=/home/laptop3/gello_software
 
 ---
 
-## 0. 왜 이 런북과 래퍼가 생겼나 — 오늘의 실패 4건
+## 0. 왜 이 런북과 래퍼가 생겼나 — 📌 2026-07-27의 실패 4건
 
-2026-07-27 실기 세션에서 actor를 띄우는 데 **코드가 아니라 실행 명령 때문에만** 4번 실패했다.
+📌 2026-07-27 실기 세션에서 actor를 띄우는 데 **코드가 아니라 실행 명령 때문에만** 4번 실패했다.
+(아래 표는 그 세션의 기록이다. 래퍼가 생긴 뒤로는 재발하지 않았다.)
 
 | # | 증상 | 진짜 원인 | 래퍼가 막는 방법 |
 |---|---|---|---|
@@ -39,7 +45,7 @@ export WT=/home/laptop3/gello_software
 | 3 | 오버레이 없음 | `source install/setup.bash` 누락 | 래퍼가 `/opt/ros/humble/setup.bash` → `<repo>/ros2_ur_ws/install/setup.bash` 순서로 항상 소스 |
 | 4 | 상대경로 실패 | `cd` 안 함 | 래퍼가 repo root로 `cd` 하고 모든 경로를 절대경로로 만듦 |
 
-추가로 preflight [5]는 오늘까지 드러나지 않았던 함정 하나를 더 막는다:
+추가로 preflight [5]는 그때까지 드러나지 않았던 함정 하나를 더 막는다:
 `serl-ur-infra`가 **다른 checkout에 editable 설치**돼 있으면 `ur_env`는 import되지만
 지금 트리의 코드가 아니고, `ur_experiments`는 아예 없어서 `--ur-config-module`이 깨진다.
 preflight는 네 모듈이 **이 트리 안에서** 해석됐는지 경로로 검증한다.
@@ -57,8 +63,10 @@ cd $WT/ros2_ur_ws
 ./run_hil_actor.sh                     # Stage B
 ```
 
-* `--dry-preflight`와 `--help`만 래퍼가 소비한다. **나머지 인자는 전부 그대로 통과**한다
-  (`--fake-env`, `--save-video`, `--actor-id`, `--checkpoint-path`, …).
+* `--dry-preflight`와 `--help`만 래퍼가 **소비**한다. **나머지 인자는 전부 그대로 통과**한다
+  (`--arm`, `--deadman`, `--mock-policy-noise`, `--save-video`, `--actor-id`,
+  `--checkpoint-path`, …). `--fake-env`는 예외적으로 **관찰하고 통과시킨다** —
+  센서 점검을 WARN으로 강등하는 데 쓰고, actor에게도 넘긴다 (`run_hil_actor.sh:113-114`).
 * 래퍼가 먼저 넣는 기본 인자보다 **뒤에** 붙으므로, 같은 옵션을 다시 주면 사용자 값이 이긴다
   (argparse는 뒤가 이김).
 * `exec`로 프로세스를 대체하므로 **Ctrl-C가 곧바로 actor에게** 간다 (중간 래퍼 없음).
@@ -74,13 +82,36 @@ cd $WT/ros2_ur_ws
 | `OBS_SCHEMA_HASH` | `3459098d…0352903` | 양쪽이 같아야 한다 (§2.1) |
 | `EXPECTED_MODEL_ID` | `hil-serl-hybrid-sac-resnet10-trunk-cache-v1` | **서버 종류에 따라 반드시 바꾼다** (§2.3) |
 | `EXPECTED_REWARD_AUTHORITY` | `server_classifier` | |
-| `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-checkpoint-150` | 서버 `--reward-model-id`와 같아야 함 |
-| `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `0.6` / `0.8` | |
+| `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-checkpoint-150` | 서버 `--reward-model-id`와 같아야 함. **07-24 체크포인트 이름이다** — 새 체크포인트로 바꾸면 여기도 바꾼다 (`08` G19) |
+| `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `0.6` / `0.8` | 프로덕션 예산. 늘리지 말 것 (`05` §5) |
 | `HZ_TIMEOUT_S` | `6` | 토픽당 `ros2 topic hz` 대기 시간 |
 | `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. **실기에서는 쓰지 말 것** |
 | `ROS_SETUP` | `/opt/ros/humble/setup.bash` | |
 
-### 1.2 preflight가 보는 것
+📌 2026-07-29 확인: 위 기본값은 전부 `ros2_ur_ws/run_hil_actor.sh:65-93`과 일치한다.
+
+### 1.2 actor CLI 플래그 (래퍼가 통과시킨다)
+
+| 플래그 | 기본 | 무엇을 하나 |
+|---|---|---|
+| `--arm` | off | 태스크 config의 `DRY_RUN`을 **끈다** (`run_remote_rlpd_actor.py:63-71`, 적용 `:288`). ⚠️ **UR7e가 물리적으로 움직인다.** 이중 퍼블리셔가 있으면 거부하고, **컨트롤러 구독자가 0이어도 거부**한다 (`:156-198`) |
+| `--deadman {topic,spacebar}` | **`topic`** | 개입 데드맨 소스 (`:51-62`, 전달 `:220`). `spacebar`는 **전역 pynput + 워치독 없음**이라 실기 금지 |
+| `--mock-policy-noise SIGMA` | `0.0` (비활성) | 서버 액션을 σ의 zero-mean 가우시안으로 **대체**한다 (`:72-84`). zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증하는 용도. 교란된 액션이 **실행되는 값이자 저장되는 값**이라 버퍼는 자기일관적이다 |
+| `--fake-env` | off | ROS 백엔드도 `GelloIntervention`도 붙이지 않는다 (Stage A) |
+| `--checkpoint-path` | 없음 | ⚠️ **지금은 아무 효과가 없다.** 이건 transition pickle을 주기적으로 **쓰는** 경로인데, `cube_in_cup`의 `buffer_period = 0`이라 덤프 자체가 게이트에서 걸린다 (`cube_in_cup.py:265`, `rlpd_actor.py:258-270`) → `08` G20 |
+
+> ### 🛑 `--mock-policy-noise`로 만든 데이터를 demo로 쓰지 말 것
+> 전이마다 `meta.policy_actions_synthetic = true`가 박히고, actor가 종료 시
+> 그 사실을 경고한다 (`run_remote_rlpd_actor.py:341-346`).
+> 이건 **배선 실증용**이지 수집용이 아니다.
+
+> ### ⚠️ `--arm`을 이 문서로 처음 쓰는 사람에게
+> actor는 **정책 액션**을 실행한다. 초기 SAC 정책의 액션 크기는 **아직 확인된 적이 없다.**
+> 첫 시도는 zero-action 서버 + `--mock-policy-noise`(작은 σ)로 하거나,
+> 태스크 config의 `ACTION_SCALE`을 낮춰서 한다.
+> `run_real_hil.py`의 `--scale` 같은 배율 플래그는 actor에 **없다.**
+
+### 1.3 preflight가 보는 것
 
 | # | 점검 | 실패 시 |
 |---|---|---|
@@ -102,57 +133,82 @@ cd $WT/ros2_ur_ws
 
 ## 2. Kanu(서버) 쪽 — Stage A/B 공통 전제
 
-### 2.1 오늘 확인된 값 (2026-07-27)
+### 2.1 📌 2026-07-27 세션의 **기록** — 재입력용 설정값이 아니다
 
-| 항목 | 값 |
+> ## 🛑 이 표에서 값을 복사하지 마라
+> 아래는 그날 그 세션이 무엇을 썼는지의 **기록**이다. 커밋·GPU·체크포인트 SHA는
+> **전부 그 뒤에 바뀌었거나 바뀔 수 있다.** 각 항목 옆에 "지금은 어떻게 확인하나"를 적었다.
+
+| 항목 | 📌 그날의 값 | 지금은 |
+|---|---|---|
+| Kanu worktree | `/tmp/gello-hil-rl-receive-server-v2` @ `5fb716b` | **커밋이 다르다.** 랩톱과 같은 커밋인지 양쪽에서 `git rev-parse --short HEAD`로 대조한다 |
+| overlay venv | `/tmp/gello-hil-rl-receive-overlay-v2` | 경로는 유효하나 **learner에는 재사용 금지** (protobuf 3.20.3이 wandb를 깨뜨린다 → `05` §1.2) |
+| GPU | `CUDA_VISIBLE_DEVICES=7` | **7번 고정이 아니다.** `nvidia-smi`로 비어 있는 카드를 매번 다시 고른다 (2026-07-28 기준 5/6/7 전부 유휴) |
+| 서버 포트 | `50053` (loopback bind) | 그대로 (코드 기본값) |
+| 로컬 터널 입구 | `50153` → 원격 `50053` | 그대로 (`run_hil_actor.sh:72`의 `SERVER_PORT` 기본값도 50153) |
+| 분류기 checkpoint SHA-256 | `e329986b…d7a997` | 🔴 **그 체크포인트는 폐기 대상이다** — 새 도메인 recall 0.0 %. 그런데 코드 기본값이 아직 그것을 pin하고 있다 (`run_rlpd_receive_server.py:34`) → `08` G19 |
+| observation schema hash | `3459098d…0352903` | 📌 2026-07-29 랩톱에서 동일. **그래도 양쪽에서 출력해 대조한다** (`05` §4.2) |
+
+> 로컬 포트가 50053이 아니라 **50153**인 이유: 그날 로컬 50053이 다른 프로세스에
+> 잡혀 있었다. 터널 로컬 쪽만 바꾸고 원격 쪽은 50053 그대로 둔다. 이 배치가 코드
+> 기본값이 됐으므로 그대로 쓴다.
+
+📌 **Kanu 쪽 실제 경로** (`/home/laptop3/gello_software`는 kanu에 **없다**):
+
+| 무엇 | 경로 |
 |---|---|
-| Kanu worktree | `/tmp/gello-hil-rl-receive-server-v2` @ `5fb716b` |
-| overlay venv | `/tmp/gello-hil-rl-receive-overlay-v2` |
-| GPU | 7 (`CUDA_VISIBLE_DEVICES=7`) |
-| 서버 포트 | `50053` (loopback bind) |
-| 로컬 터널 입구 | `50153` → 원격 `50053` |
-| 분류기 checkpoint SHA-256 | `e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997` |
-| observation schema hash | `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903` (**양쪽 동일**) |
-
-> 포트가 50053이 아니라 **50153**인 이유: 로컬 50053이 다른 프로세스에 잡혀 있었다.
-> 터널 로컬 쪽만 바꾸고 원격 쪽은 50053 그대로 둔다.
+| 분류기 학습처 (YWhero/hil-serl fork, `agent/cube-in-cup-classifier` @ `d753571`) | `~/workspace/youngwoong/hil-serl` |
+| 학습 데이터 + 07-27 체크포인트 | `~/workspace/youngwoong/dataset/cube_in_cup_all3/` |
+| ZMQ 뷰어 + 07-24 체크포인트 | `~/workspace/youngwoong/gello_software_remote_classifier` |
+| 이 리포의 Kanu 전용 worktree | `/tmp/gello-hil-rl-receive-server-v2` |
+| python | `/home/junhyeong/miniconda3/envs/il/bin/python` |
 
 ### 2.2 Kanu에서 서버 띄우기
 
 ```bash
-# Kanu에서
+# Kanu에서 — 먼저 확인 3가지
 cd /tmp/gello-hil-rl-receive-server-v2
-git rev-parse --short HEAD          # 아래 주석 참조 — 5fb716b 고정 아님
-nvidia-smi                          # 쓰려는 GPU가 비어 있는지 매번 다시 확인
+git rev-parse --short HEAD          # 랩톱의 HEAD와 같은가? (특정 SHA를 기대하지 말 것)
+nvidia-smi                          # 쓰려는 GPU가 비어 있는가? (7번 고정 아님)
+ss -ltn | grep 50053                # 이미 잡혀 있지 않은가?
 
-# 위 `5fb716b`는 2026-07-27 시점의 Kanu worktree HEAD였다. actor 브랜치가 머지되면
-# 그 값이 아니게 되므로 특정 SHA를 기대하지 말 것 — 확인해야 할 것은 "이 트리가
-# 랩톱 쪽과 같은 커밋인가"이지 특정 해시가 아니다. 랩톱에서 `git rev-parse --short HEAD`를
-# 찍어 같은 값인지 대조하라. GPU도 7번 고정이 아니다(2026-07-28 기준 5/6/7 전부 유휴).
+export XLA_PYTHON_CLIENT_PREALLOCATE=false   # 필수. 안 하면 JAX가 카드를 통째로 선점한다
 
-CUDA_VISIBLE_DEVICES=7 \
+CUDA_VISIBLE_DEVICES=<위에서 고른 번호> \
 PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
 /tmp/gello-hil-rl-receive-overlay-v2/bin/python \
   serl_ur_infra/scripts/run_rlpd_receive_server.py \
   --host 127.0.0.1 \
   --port 50053 \
-  --checkpoint /home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150 \
-  --expected-checkpoint-sha256 e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997 \
-  --threshold 0.5 \
-  --reward-model-id cube-in-cup-checkpoint-150 \
-  --replay-capacity 50000 \
-  --intervention-capacity 10000 \
+  --checkpoint <체크포인트 경로> \
+  --expected-checkpoint-sha256 <그 체크포인트의 sha256> \
+  --reward-model-id <이 서버가 광고할 id> \
   --require-jax-backend gpu
 ```
 
-> **`--threshold`는 0.5다** (2026-07-29 정정, 이전 판은 0.85). 대상 브랜치 `53d5cf6`이
-> `DEFAULT_REWARD_THRESHOLD`를 0.5로 낮췄고, 이 문서의 예시가 0.85로 남아 있으면 코드
-> 기본값과 어긋난다. **단 그 근거 수치는 전부 크롭 없는 입력에서 측정된 것이라, 크롭이
-> 활성인 상태에서는 재측정이 필요하다** (G15 — `08_OPEN_GAPS.md`).
+> ### 🔧 `--threshold`를 빼 놓은 이유 (2026-07-29 정정)
+> 이전 판들은 `--threshold 0.85`, 그다음 `0.5`를 박아 뒀다. **둘 다 이제 틀리다.**
+> 코드 기본값은 **`0.2`**다 (`DEFAULT_REWARD_THRESHOLD`, `rlpd_receive_server.py:73`;
+> `0.85` → `0.5`(`53d5cf6`) → `0.2`(`1b02857`)).
+> 문서에 리터럴을 두면 또 어긋나므로 **생략해서 코드 기본값을 쓰게 한다.**
 >
-> threshold는 learner fingerprint에 들어간다(`run_rlpd_learner_server.py:548-552`).
-> 0.85로 학습된 checkpoint를 resume하려면 `--reward-threshold 0.85`를 명시해야 하며,
-> 아니면 게이트에서 **fail-closed로 거부**된다.
+> 명시해야 하는 경우는 하나뿐이다: **다른 threshold로 학습된 checkpoint를 resume할 때.**
+> threshold는 learner fingerprint의 `run_contract`에 들어가고
+> (`run_rlpd_learner_server.py:548-550`), 불일치는 **fail-closed로 거부**된다.
+> 그때는 learner 쪽에 `--reward-threshold <그 값>`을 준다.
+>
+> ⚠️ 그리고 threshold를 정한 근거 수치는 **전부 크롭 없는 입력에서 측정된 것**이다.
+> 크롭이 활성인 지금 경로에서는 재측정이 필요하다 (`08` G15).
+
+> ### 🔧 `--checkpoint` / `--expected-checkpoint-sha256`을 반드시 명시할 것
+> `--expected-checkpoint-sha256`을 생략하면 코드 기본값이 쓰이는데, 그것은
+> **폐기 대상인 07-24 체크포인트**(`e329986b…`)를 pin한다
+> (`scripts/run_rlpd_receive_server.py:34-36`). 새 도메인 recall 0.0 %다.
+> 후속 07-27 체크포인트는 **orbax 디렉터리**라 `checkpoint_sha256()`의 `os.path.isfile`
+> 요구를 통과하지 못한다 — 그게 기본값이 아직 옛것인 이유다 → `08` G19.
+>
+> `--replay-capacity` / `--intervention-capacity`도 뺐다. 코드 기본값이 정확히
+> 50000 / 10000이다 (`rlpd_receive_server.py:49-50`).
 
 근거: `serl_ur_infra/RL_RECEIVE_SERVER.md` §"Preferred Kanu runtime",
 `serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md` §"Kanu 실행 환경".
@@ -241,7 +297,7 @@ PYTHONPATH=$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH} \
   --host 127.0.0.1 --port 50153 --steps 100
 ```
 
-### 3.3 판정 — Stage A는 **통과했다** (2026-07-27, PASS)
+### 3.3 판정 — 📌 Stage A는 **통과했다** (2026-07-27 기록, PASS)
 
 서버 로그에서 확인된 값:
 
@@ -252,10 +308,29 @@ state_shape         : [8, 1, 19]
 
 * `replay_insert_count: 100` = 보낸 100개 transition이 전부 replay buffer에 삽입되고 ACK됨.
 * `state_shape: [8, 1, 19]` = 서버가 replay에서 **실제로 batch를 샘플링해 본** 결과
-  (batch 8 × chunk 1 × 19-D state). 19-D 순서는
-  TCP position XYZ / Euler XYZ / linear vel XYZ / angular vel XYZ / force XYZ / torque XYZ / gripper
-  (`serl_ur_infra/RL_RECEIVE_SERVER.md`, `ur_env/observation_schema.py`).
+  (batch 8 × chunk 1 × 19-D state).
 * 즉 **스키마 해시 일치 → 분류기 추론 → replay 삽입 → 샘플링 가능**까지 한 줄로 증명됐다.
+* ⚠️ 상대는 **zero-action 서버**였고 관측은 synthetic이었다. 이것은 **전송 계약의 증명**이지
+  정책·보상의 증명이 아니다.
+
+> ### 🔧 정정 (2026-07-29) — 이 절이 적고 있던 19-D 순서가 **틀렸다**
+> 이전 판은 `state_shape` 설명에
+> *"TCP position XYZ / Euler XYZ / linear vel XYZ / angular vel XYZ / force XYZ / torque XYZ /
+> gripper"* 라고 적고 `RL_RECEIVE_SERVER.md`를 근거로 달았다.
+> **그 문서가 옛 v1 순서에서 갱신되지 않았고, 이 문서가 그걸 그대로 복사했다.**
+>
+> canonical v2의 실제 순서는 **알파벳순**이다:
+>
+> ```
+> [0:1)  gripper_pose     [1:4)  tcp_force    [4:10) tcp_pose
+> [10:13) tcp_torque      [13:19) tcp_vel
+> ```
+>
+> 즉 **그리퍼는 index 0이고 `state[..., -1]`은 `tcp_angular_velocity_z`다.**
+> 근거는 `ur_env/observation_schema.py`(라이브 출력은 `05_COMMS_GRPC.md` §4.2),
+> 이유는 upstream `SERLObsWrapper`가 쓰는 `gym.spaces.Dict`가 매핑을 알파벳순으로
+> 재정렬하기 때문이다. **인덱스는 `GRIPPER_POSITION_INDEX` /
+> `gripper_position_from_state()`로만 읽는다.**
 
 ---
 
@@ -263,15 +338,27 @@ state_shape         : [8, 1, 19]
 
 ### 4.1 안전 전제 — 읽고 시작할 것
 
-* **`clip_safety_box`는 아직 구현되어 있지 않다** (`08_OPEN_GAPS.md`). 워크스페이스
-  박스는 명령을 자르지 않는다. → Stage B는 **DRY_RUN에서만** 한다.
+* 🔧 **`clip_safety_box`는 구현돼 있다** (2026-07-29 정정. 이전 판의 "아직 구현되어 있지
+  않다"는 낡았다). `UR7eEnv.clip_safety_box()` / `_clip_command_pose()`가 있고 후자가
+  `PolicyDeltaController(clip_pose=...)`로 배선되어 **명령 포즈**에 적용된다
+  (`ur7e_env.py:188`, `:334`, `:356`). 실측 박스는 `ur_experiments/cube_in_cup.py:162-167`.
+  **그러나 실기에서 클립이 발동한 적은 한 번도 없다** — 그래서 Stage B는 여전히
+  **DRY_RUN에서만** 한다. → `08_OPEN_GAPS.md` G1
+* 🔴 **분류기 크롭 불일치가 이 브랜치에서 활성이다** (`08` G15).
+  `EXP_NAME=cube_in_cup`이면 `IMAGE_CROP`이 적용되는데 pin된 분류기는 크롭 없이 학습됐다.
+  **`DRY_RUN`은 팔만 막고 보상/종단은 막지 않는다** — 잘못된 reward가 그대로 replay에
+  들어간다. Stage B로 데이터를 모으려면 이걸 먼저 처리한다.
 * `cube_in_cup` 태스크 config의 `DRY_RUN`은 **기본 `True`**
-  (`ur_experiments/cube_in_cup.py`). 이 래퍼는 그 값을 건드리지 않는다.
-  DRY_RUN 해제는 이 문서의 범위가 **아니다**.
+  (`ur_experiments/cube_in_cup.py:227`). 래퍼는 그 값을 건드리지 않는다.
+  🔧 다만 **actor의 `--arm`이 그 값을 끈다** (`run_remote_rlpd_actor.py:288`) —
+  "DRY_RUN 해제는 이 문서의 범위가 아니다"는 더 이상 맞지 않는다. §1.2 참조.
 * **이중 퍼블리셔 금지.** `gello_ur_bridge`(텔레옵 브리지)를 띄운 채로 actor를 올리면
   두 퍼블리셔가 `/forward_position_controller/commands`를 서로 다른 목표로 때린다.
-  preflight [9]가 이를 감지하고 **거부**한다. 거부당하면 브리지를 먼저 끈다.
+  preflight [9]가 이를 감지하고 **거부**한다(`--arm` 여부 무관). 거부당하면 브리지를 먼저 끈다.
+  `--arm`을 주면 actor 자신도 한 번 더 센다 (`:156-198`).
 * 펜던트 E-STOP을 손 닿는 곳에. 작업 공간을 비운다.
+* ⚠️ **ESC 키를 조심한다.** env가 전역 pynput 리스너를 띄우므로 **아무 창에서 누른 ESC가
+  에피소드를 끝내고, 다음 `reset()`이 팔을 `RESET_JOINTS`로 옮긴다** (`08` G17).
 
 ### 4.2 터미널 구성
 
@@ -317,11 +404,17 @@ ros2 run ur_gello_bringup robotiq_gripper_modbus \
 **T3 — 카메라 2대**
 
 ```bash
-cd $WT/ros2_ur_ws && VIEW=true ./launch_cameras.sh
+cd $WT/ros2_ur_ws && ./launch_cameras.sh        # 뷰어가 기본 ON이다
 ```
 
 뷰어로 **cam1 = 장면(삼각대), cam2 = 손목**을 눈으로 확인한다. 뒤바뀌면 관측이 조용히 망가진다.
+판정은 **팔을 한 번 흔들어** cam2 화면 전체가 흐르고 손가락이 제자리인지 보는 것이다.
 확인: 두 토픽 다 ≈30 Hz.
+
+> ⚠️ 시리얼은 이제 **live USB 버스에서 자동 해석된다** (`43ba314`/`fb48100`).
+> 기동 로그에 `WARN auto-selected by model class` 또는 `WARN model classes are ambiguous`가
+> 뜨면 자동 배정이 일어난 것이므로 **뷰어 판정을 반드시 한다.** 시리얼을 명령줄에
+> 적을 필요는 없다 — 강제하려면 `CAM1_SERIAL=... CAM2_SERIAL=...`. → `06_SENSORS.md` §1.1
 
 **T4 — GELLO 리더** (`/dev/ttyUSB0` 점유 — 두 개 띄우지 말 것)
 
@@ -394,13 +487,21 @@ EXPECTED_MODEL_ID=<서버가 광고하는 값> ./run_hil_actor.sh
 
 리셋은 **현재 자세 → `RESET_JOINTS`** 사이를 250 Hz 업샘플러로 그대로 쓸고 지나간다.
 그래서 그 거리가 `RESET_MAX_DIST_RAD`를 넘으면 **에러로 멈춘다 — 그게 의도된 안전 실패다.**
-`cube_in_cup`의 게이트는 **`RESET_MAX_DIST_RAD = 0.5`** 로 조여져 있다
-(`serl_ur_infra/ur_experiments/cube_in_cup.py:87`; 기본값 1.5보다 좁다).
 
-증상 (`ur_env/envs/ur7e_env.py:550-555`):
+> 🔧 **정정 (2026-07-29): 값이 `0.5`가 아니라 `0.9`다.**
+> `cube_in_cup`의 게이트는 **`RESET_MAX_DIST_RAD = 0.9`**이다
+> (`serl_ur_infra/ur_experiments/cube_in_cup.py:103`; `DefaultUR7eEnvConfig` 기본값 `1.5`보다
+> 좁다). `ee3240e`에서 `0.5` → `0.9`로 올라갔다 — `0.5`는 23테이크 중 **16개의 정상 종료
+> 자세를 거부**했기 때문이다(= 대부분의 에피소드 뒤에 `reset()`이 예외를 던졌다).
+> 이 문서가 `0.5`로 남아 있으면 "왜 안 걸리지?"로 시간을 버린다.
+
+거리는 **branch-cut safe**하게 계산된다 (`wrapped_nearest`, `08` G13) — 물리적으로 같은
+자세가 ~2π 떨어진 것으로 보고되지 않는다.
+
+증상 (`ur_env/envs/ur7e_env.py:588-592`):
 
 ```
-RuntimeError: reset distance 1.23 rad exceeds RESET_MAX_DIST_RAD=0.5 —
+RuntimeError: reset distance 1.23 rad exceeds RESET_MAX_DIST_RAD=0.9 —
   pre-position the arm with move-to-start first
 ```
 
@@ -413,7 +514,8 @@ RuntimeError: reset distance 1.23 rad exceeds RESET_MAX_DIST_RAD=0.5 —
 ros2 topic echo /joint_states --once
 ```
 
-멀다면 **actor를 내린 상태에서** 팔을 `RESET_JOINTS` 근처(0.5 rad 이내)로 사전 배치한다.
+멀다면 **actor를 내린 상태에서** 팔을 `RESET_JOINTS` 근처(**0.9 rad 이내**, 관절별 최대 차이
+기준)로 사전 배치한다. 참고로 23테이크의 정상 종료 자세는 중앙값 0.615 / 최대 0.774였다.
 전용 도구가 같은 트리에 있다 (**다른 담당 영역** — 그 스크립트의 자체 안내를 따를 것):
 
 ```bash
@@ -440,13 +542,17 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
   홀드하고 튀지 않는다.
 * GELLO 개입 중이면 T5 GUI에서 **DISENGAGE**.
 * 터널이 죽으면 actor는 타임아웃으로 실패한다. §2.4를 다시 띄우고 actor를 재시작한다.
-* Kanu 세션을 끝낼 때는 서버와 터널을 정상 종료해 **GPU 7과 포트 50053을 반납**한다.
+* Kanu 세션을 끝낼 때는 서버와 터널을 정상 종료해 **쓰던 GPU와 포트 50053을 반납**한다.
+  (📌 2026-07-29 현재 50053은 비어 있고 GPU도 유휴다. Kanu 디스크는 95 % 사용, 여유 90 G.)
 
 ---
 
 ## 7. 검증 상태표
 
-| # | 항목 | 상태 | 근거 / 실측치 (2026-07-27) |
+📌 A1~B1은 **2026-07-27 세션의 기록**이다. 그 뒤 머지가 있었으므로, 다시 돌릴 때는
+`--dry-preflight`부터 새로 돌려 값을 다시 만든다.
+
+| # | 항목 | 상태 | 📌 근거 / 실측치 (2026-07-27) |
 |---|---|---|---|
 | A1 | `run_hil_actor.sh` preflight (실기 모드) | **PASS** | 1회차 [1]~[9] 전부 초록: `/joint_states` 99.9–100.4 Hz, `/gello/joint_states` 29.98–30.02 Hz, cam1 30.03 Hz, cam2 30.02 Hz, 그리퍼 5.001 Hz, fpc `inactive`, commands 퍼블리셔 0 |
 | A1b | preflight가 **실제 장애를 잡아냈다** | **PASS** | 같은 세션 후반, cam1(이어서 cam2)의 노드는 살아 있고 `ros2 topic info`의 Publisher count도 1인데 데이터가 끊겼다. preflight [7]이 FAIL로 잡고 actor 기동을 막았다 → §5의 카메라 항목 |
@@ -454,9 +560,10 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A3 | `--fake-env`에서 센서 점검이 WARN으로 강등 | **PASS** | 격리 ROS 도메인에서 경고 4건 + 통과 |
 | A4 | PYTHONPATH 이어붙임 | **PASS** | `PYTHONPATH=/pre/existing`를 미리 잡고 실행해도 `ur_gello_bringup`이 오버레이에서 해석됨 |
 | A5 | 인자 통과 | **PASS** | `--fake-env --save-video --actor-id …`가 최종 argv 끝에 그대로 붙음 |
-| B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]` |
+| B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
-| B3 | DRY_RUN 해제(실제 팔 구동) | **금지** | `clip_safety_box` 미구현 (`08_OPEN_GAPS.md`) |
+| B3 | actor `--arm` (실제 팔 구동) | **금지** | 🔧 이유가 바뀌었다: `clip_safety_box`는 **구현됐다**. 지금 막는 것은 (a) `08` G15 크롭 불일치가 이 브랜치에서 활성, (b) 초기 정책 액션 크기 미확인, (c) B2 미검증. `08_OPEN_GAPS.md`의 게이트 선언 참조 |
+| B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
 
 ---
 

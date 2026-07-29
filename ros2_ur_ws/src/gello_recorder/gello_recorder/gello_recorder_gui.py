@@ -55,7 +55,7 @@ from PyQt5.QtWidgets import (
 # _resolve_camera_serials() below checks them against what pyrealsense2
 # actually enumerates on the USB bus and falls back by model class (or raises)
 # if the configured pair isn't plugged in. Two different D435 pairs have been
-# on this rig -- (147122072740, 243222072700) and (151623020789, 322743060038)
+# on this rig -- (151623020789, 322743060038) and (151623020789, 322743060038)
 # -- and which one enumerates has flipped more than once. Binding
 # realsense2_camera to an absent serial_no does NOT fail loudly: the node
 # comes up, publishes nothing, and this GUI's camera panes just show "no
@@ -63,8 +63,8 @@ from PyQt5.QtWidgets import (
 # instead of trusted blindly. See ros2_ur_ws/_resolve_camera_serials.sh (the
 # shell equivalent used by launch_cameras.sh / run_recorder.sh) for the full
 # incident history.
-DEFAULT_CAM1_SERIAL = "147122072740"   # plain D435
-DEFAULT_CAM2_SERIAL = "243222072700"   # D435IF
+DEFAULT_CAM1_SERIAL = "151623020789"   # plain D435
+DEFAULT_CAM2_SERIAL = "322743060038"   # D435IF
 DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"
@@ -163,7 +163,7 @@ def _launch_realsense(camera_name, serial, color_profile):
     *embedded* single quotes in the value itself. ``ros2 launch`` type-infers
     bare ``key:=value`` CLI args from their content, so an all-digit serial gets
     coerced to an integer and the node (which declares serial_no as a string)
-    dies instantly. Wrapping the value as ``serial_no:='147122072740'`` -- quote
+    dies instantly. Wrapping the value as ``serial_no:='151623020789'`` -- quote
     characters included in the argv string, NOT shell quoting -- forces a string.
     """
     argv = [
