@@ -100,11 +100,32 @@ ros2 run gello_recorder gello_recorder_gui
 | `CAMERA_WARMUP_S` | `4.0` | 각 카메라 첫 프레임 후 이 초만큼 지나야 Start 활성화 (warm-up 프레임 폐기) |
 | `RECORDER_OUTPUT_ROOT` | `$GELLO_REPO_ROOT/ros2_ur_ws/gello_logs` | take 폴더가 생성되는 루트 (`GELLO_REPO_ROOT` 미설정 시 `~/gello_software`) |
 
-예: `CAM1_SERIAL=151623020789 CAMERA_WARMUP_S=6 ros2 run gello_recorder gello_recorder_gui`
+예: `CAMERA_WARMUP_S=6 ros2 run gello_recorder gello_recorder_gui`
+
+> **시리얼은 적지 마라.** `CAM1_SERIAL`/`CAM2_SERIAL`은 기본값이 있고, 그 기본값조차 실행 시
+> USB 버스에서 자동 검증·교정된다. 리포에 D435 시리얼이 두 쌍 등장하는데 **그 둘은 같은
+> 카메라 2대의 서로 다른 필드**다 — `serial_no:=`가 매칭하는 `serial_number`
+> (`147122072740`/`243222072700`)와, `journalctl`이 보여주는 `asic_serial_number`
+> (`151623020789`/`322743060038`). 후자를 적으면 장치를 못 찾는데 **에러가 나지 않는다**
+> (노드는 뜨고 아무것도 publish하지 않아 빈 `cam*.mp4`가 남는다).
+> 자세한 것은 [`docs/testing/06_SENSORS.md`](../../../docs/testing/06_SENSORS.md) §1.1.
 
 > 참고: 헤드리스 노드의 ROS 파라미터 `camera_warmup_s` 기본값은 `3.0`으로, GUI 의 `4.0`과 **다릅니다** (둘은 독립적인 설정값).
 
 창을 닫으면 진행 중인 take 를 먼저 마무리 저장한 뒤 카메라 프로세스를 정리합니다. take 는 `<RECORDER_OUTPUT_ROOT>/take_<NN>_<YYYYmmdd_HHMMSS>/` 아래에 저장됩니다 (헤드리스의 `session_<stamp>/` 와 이름 규칙이 다름에 유의).
+
+> ### 🔴 reward classifier 학습 데이터는 **반드시 이 GUI 레코더로** 찍어라
+>
+> 이름 규칙 차이가 단순한 취향 문제가 아니다. 라벨링 파이프라인
+> (kanu의 `cube_classifier_pipeline.py prepare`)은 **`take_*/` 디렉터리만 읽는다.**
+> 헤드리스 `run_recorder.sh`가 만드는 `session_<stamp>/`는 **파이프라인에 보이지 않는다** —
+> 촬영은 정상적으로 끝나고, 라벨링 단계에서 "take가 없다"가 되어 세션 하나를 통째로 날린다.
+> 기존 학습 데이터도 전부 이 GUI로 찍은 것이다.
+>
+> 녹화 시점에는 **변환·크롭·리사이즈가 일절 없다.** CompressedImage의 JPEG 바이트가 그대로
+> `cam1.mp4`/`cam2.mp4`에 1280×720 원본으로 들어가고, 전처리는 전부 하류에서 일어난다.
+> **해상도를 1280×720에서 바꾸지 마라** — 128×128로 찌그러뜨리는 비율이 달라져 분류기가
+> 학습한 분포에서 벗어난다.
 
 #### 4-1. Teleop 바 — 텔레옵 일시정지 / 재개 (씬 리셋)
 
