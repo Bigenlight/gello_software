@@ -101,6 +101,18 @@ python serl_ur_infra/scripts/run_rlpd_learner_server.py \
   실패한다.
 - 카메라 frame index는 `cam1_frames`/`cam2_frames` timestamp로 MP4에 연결한다.
 
+2026-07-20 승인 23개 take를 직접 측정한 결과 원본은 10 Hz가 아니었다. count/duration
+기준으로 command·UR state는 take별 약 87–118 Hz, gripper는 약 35.8–37.7 Hz,
+cam1/cam2는 약 29.9–30.1 Hz였다. 변환기는 원본 행 번호나 고정 decimation 비율을 쓰지
+않고 timestamp 공통구간에 0.1초 격자를 만든다. 각 격자 시각에는 미래 보간 없이 직전 최신
+샘플을 선택하고, action은 command의 `t → t+0.1초` FK 차이로 다시 계산한다. 따라서 이
+데이터는 이미 올바른 10 Hz canonical pickle로 변환됐다.
+
+원본 stream이 10 Hz보다 느리면 직전 값이 여러 격자에 유지될 수 있다. 다만 이전 샘플의
+age가 기본 0.20초를 넘으면 변환을 거절한다. 이 경우 target Hz나 age 제한을 임의로 바꾸지
+말고 끊긴 take를 제외하거나 센서 기록을 복구한다. 10 Hz는 현재 actor/learner action 계약이라
+원본 native Hz에 맞춰 바꾸는 값이 아니다.
+
 ### observation
 
 실제 actor와 동일한 canonical v2를 만든다.
