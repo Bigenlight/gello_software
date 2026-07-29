@@ -33,6 +33,7 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
 | [REWARD_CLASSIFIER_LIVE_KO.md](REWARD_CLASSIFIER_LIVE_KO.md) | 라이브 reward classifier 뷰어 런북 (랩톱 CPU, 터미널 4개). **2026-07-29 실기 검증됨.** 인터프리터 함정 · 조용한 실패 · 트러블슈팅 |
 | [REWARD_TO_RL_INTEGRATION_KO.md](REWARD_TO_RL_INTEGRATION_KO.md) | **분류기를 개입·학습에 연결하는 사람이 읽을 것.** reward/termination 계약(서버 권위, `next_observations` 기준) · 개입의 **버퍼 이중 기록** · RLPD 50:50 배치 · 연결 순서 6단계 · 감시 지표. 코드에서 직접 추적해 작성 |
+| [RECORDED_TAKE_DEMO_CONVERSION_KO.md](RECORDED_TAKE_DEMO_CONVERSION_KO.md) | `gello_recorder`의 `vectors.h5`+MP4 take를 strict canonical offline demo pickle로 바꾸는 CLI·동기화·action 복원·라벨 계약 |
 
 ### 🗄️ 기록물 — 사료로만. 여기 적힌 명령을 실행하지 말 것
 

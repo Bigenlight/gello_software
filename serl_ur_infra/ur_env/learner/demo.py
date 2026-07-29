@@ -32,6 +32,25 @@ class DemoContractError(ValueError):
     """A pickle item is not a canonical learner transition."""
 
 
+class _NumpyCompatibilityUnpickler(pickle.Unpickler):
+    """Read trusted NumPy 2 artifacts in the pinned NumPy 1 learner env.
+
+    NumPy 2 serializes ndarray helpers under ``numpy._core``.  The Kanu/local
+    learner lock currently carries NumPy 1.26, where the same helpers live
+    under ``numpy.core``.  Only retry that exact private/public module rename;
+    every other global keeps normal pickle resolution and error behavior.
+    """
+
+    def find_class(self, module: str, name: str) -> Any:
+        try:
+            return super().find_class(module, name)
+        except ModuleNotFoundError:
+            if module == "numpy._core" or module.startswith("numpy._core."):
+                compatible = "numpy.core" + module.removeprefix("numpy._core")
+                return super().find_class(compatible, name)
+            raise
+
+
 @dataclass(frozen=True)
 class DemoSidecar:
     source_path: str
@@ -303,7 +322,10 @@ def load_demo_pickle(path: os.PathLike[str] | str) -> LoadedDemos:
     if not os.path.isfile(source_path):
         raise FileNotFoundError(source_path)
     with open(source_path, "rb") as stream:
-        value = pickle.load(stream)
+        # Pickles are explicitly trusted-local input at this boundary.  Keep
+        # that security contract while tolerating the NumPy 2 producer / NumPy
+        # 1 learner module rename used by the recorder conversion tool.
+        value = _NumpyCompatibilityUnpickler(stream).load()
     return load_demo_object(value, source_path=source_path)
 
 

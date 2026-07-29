@@ -50,7 +50,7 @@
   - ⚠️ 07-27 판본은 여기에 *"workspace box와 reset branch-cut 두 안전 게이트가 실제로 동작한다"* 를 덧붙였는데, **"동작한다"는 단위 테스트 기준이다.** 두 게이트는 2026-07-29 현재도 **실기에서 한 번도 작동한 적이 없다** — 팔이 움직인 07-28 세션은 박스가 꺼진 `run_real_hil.py` 경로였다(§11.7-3).
 - **(2026-07-27 실기 측정)** 검증 완료: 2F-85 gripper 개폐 방향, GELLO leader 7 모터, laptop→Kanu 100-step gRPC 왕복(`replay_insert_count:100`, schema hash 일치). 왕복 지연은 **WiFi·fake-env actor·zero-action receive server 조건**에서 RTT p50 58.6 / p95 75.8 / **p99 97.1 ms**, step당 96.1 KiB → 7.9 Mbit/s(§11.4).
   - ⚠️ 같은 항목의 "미검증: 팔 실제 구동, 카메라(하드웨어 고장), 개입 루프 실기"는 **2026-07-28에 셋 다 뒤집혔다** — 팔은 움직였고 개입 루프도 64 스텝 돌았으며(§11.9), 카메라는 허브 고장이 아니었다(§11.10). **단 그 세션은 `run_real_hil.py` 경로다.**
-- **(2026-07-27 추가 · 2026-07-28 이후 부분 정정)** Kanu에는 **실제 정책 inference server가 없다**. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 하며, 그 유일한 하드 블로커는 여전히 §7 P0-2의 canonical robot demo 부재다. Kanu 환경 자체는 추가 설치 없이 준비돼 있었다(§11.5, 2026-07-27 점검).
+- **(2026-07-27 추가 · 2026-07-29 이후 부분 정정)** Kanu에는 **실제 정책 inference server가 없다**. 실제 정책을 서빙하려면 `run_rlpd_learner_server.py`로 교체해야 한다. 기존 recorder take 변환 경로와 23개/2,037-transition smoke는 추가됐지만, 사람이 성공 outcome을 확인한 영구 demo artifact는 아직 없다(§7 P0-2, `RECORDED_TAKE_DEMO_CONVERSION_KO.md`). Kanu 환경 자체는 추가 설치 없이 준비돼 있었다(§11.5, 2026-07-27 점검).
   - ⛔ **폐기:** 이 항목의 07-27 판본에 있던 "`run_rlpd_receive_server.py` PID 1096786이 port 50053에 떠 있고 GPU 7에 12.3 GiB를 잡고 있다"는 **2026-07-28 이후로는 사실이 아니다.** Kanu에 HIL 프로세스가 하나도 없고 port 50053은 미바인딩, GPU 유휴다(§11.5, §12.5). 즉 지금은 **zero-action 서버조차 떠 있지 않다.**
   - ⛔ **폐기:** `/home/laptop3/gello_software` 는 **kanu에 존재하지 않는다.** kanu의 실제 경로는 §12.5 표.
 - **(2026-07-28 실기 측정)** 실기에서 **팔이 처음으로 움직였다** — `run_real_hil.py --arm --scale 0.25`, 100 스텝 중 개입 64, `held=0`, 개입 불변식 4종 통과. 같은 세션에서 **frame-map 측정을 마쳤다**: 좌표계 매핑은 **단위행렬**이고 부호 뒤집힘도 축 교환도 없다(포화 표본 제외 잔차 0.093, 기준 0.15; §11.9). 속도 3층은 검증된 EEF 텔레옵 값에 균일 1.25배로 정렬했다(`a5f9890`).
@@ -101,7 +101,7 @@
 | **actor entrypoint 실기 투입** | **미검증.** 지금까지 팔을 움직인 것은 전부 `run_real_hil.py` 다 |
 | **카메라 경로** | **2026-07-28 복구** — 허브 고장이 아니었다(재연결로 둘 다 정상). `43ba314` 가 시리얼 하드코딩을 실제 버스 해석으로 바꿨다. ⚠️ **07-29 11:14에 EPROTO 재발**, 그리고 그 커밋의 "시리얼 쌍이 뒤집혔다"는 전제가 커널 저널과 어긋난다. **크롭 상태의 canonical observation 전 경로는 여전히 실기 미검증**; §11.10 |
 | **Kanu 실제 정책 서빙 (learner server)** | **미배포.** 2026-07-29 기준 Kanu에 HIL 프로세스가 **하나도 없다**(port 50053 미바인딩, GPU 유휴). zero-action receive server조차 떠 있지 않다; §11.5, §12.5 |
-| **canonical robot demo** | **없음 — 실제 정책 서빙의 유일한 하드 블로커.** `buffer_period=0` 이라 `--checkpoint-path` 를 줘도 pickle이 안 쓰인다(CLI 플래그도 없음); §7 P0-2, §11.7 |
+| **canonical robot demo** | **영구 artifact/사람 라벨은 아직 없음.** 기존 `vectors.h5`+MP4를 변환하는 CLI가 추가됐고 `take_23` 제외 23개/2,037 transitions strict-load smoke는 통과했다. 성공 outcome 확인 후 artifact를 만들 것. 새 actor 녹화는 여전히 `buffer_period=0` 문제를 가진다; `RECORDED_TAKE_DEMO_CONVERSION_KO.md`, §7 P0-2, §11.7 |
 
 즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, unified schema v2 bounded fake learning/checkpoint/resume serving까지 확인했다. fake-data milestone은 완료다.
 
@@ -111,7 +111,7 @@ robot actor 쪽은 "실행 불가"에서 시작해 2026-07-28에 **팔 실구동
 
 1. **actor entrypoint(`run_remote_rlpd_actor.py`)의 실기 투입** — 지금까지 팔을 움직인 것은 전부 `run_real_hil.py` 라는 다른 코드 경로다.
 2. **크롭에 맞춘 classifier 재학습** — 머지로 실재하게 된 결함이다(§12).
-3. **canonical robot demo 확보** — Kanu 정책 서빙의 선결 조건(§7 P0-2).
+3. **기존 take의 성공 outcome 확인 후 canonical demo artifact 생성** — 변환기와 strict-load smoke는 완료됨; Kanu 정책 서빙의 선결 조건(§7 P0-2).
 4. **Kanu에 진짜 정책 서버 배포**(§11.5).
 
 ## 2. 작업 위치와 branch
@@ -670,12 +670,12 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
    - 기본 ring camera map `7,864,320,000 B` + offline demo + reserve 할당 후 장시간 RSS/VMS/GPU memory/compile/contention을 계측한다.
    - CPU용 `requirements-learner.lock`을 공유 Kanu env에 그대로 설치하지 않는다.
 
-2. **real serving용 canonical robot demo 부재 — 현재 유일한 하드 블로커**
+2. **real serving용 canonical robot demo 라벨/영구 artifact 부재**
    - 사용자가 지정한 현재 fake-data acceptance는 완료됐다.
    - fake는 bounded `--synthetic-e2e`에서만 live learner에 허용되고 production robot-data scope에는 의도적으로 차단된다.
-   - 실제 robot serving 단계에는 canonical EEF/action/grasp-penalty demo가 필요하다.
+   - 실제 robot serving 단계에는 canonical EEF/action/grasp-penalty demo가 필요하다. 기존 recorder take용 변환기와 23개/2,037-transition smoke는 완료됐으며, 남은 것은 사람 outcome 확인과 영구 artifact 생성이다.
    - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 **`--run-id`를 노출하지 않고**(2026-07-29 재확인: CLI에 없음) `remote_actor.py:243`에서 `uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
-   - **생산 경로는 존재한다**: `remote_actor.py`의 `_dump_data`(`remote_actor.py:189-198`)가 `--checkpoint-path` 를 받으면 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl` 을 남기고, `load_demo_pickles`(`ur_env/learner/demo.py:310-317`, 단건은 `load_demo_pickle` `demo.py:299-307`)가 바로 그 `{"meta":…, "transition":…}` 형식을 받는다. 즉 receive server를 띄운 채 텔레오퍼레이션으로 성공 에피소드를 녹화하면 그 pickle이 `--demo-path` 입력이 된다. strict loader 계약(canonical v2 스키마, action `(7,)` f32 `[-1,1]` 마지막 원소 `{-1,0,1}`, reward/mask `{0,1}`, `grasp_penalty ∈ {0, -0.02}`)을 실제 dump로 아직 확인하지 않았다.
+   - **생산 경로는 두 개다.** 기존 recorder take는 `scripts/convert_recorded_takes_to_demo.py`로 변환한다(`RECORDED_TAKE_DEMO_CONVERSION_KO.md`). 새 actor 녹화는 `remote_actor.py`의 `_dump_data`(`remote_actor.py:189-198`)가 `--checkpoint-path`를 받아 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고, `load_demo_pickles`가 그 `{"meta":…, "transition":…}` 형식을 바로 받는다.
    - 🪤 **선결 조건: `buffer_period = 0`**(`ur_experiments/cube_in_cup.py:265`). 0이면 `_dump_data` 가 호출되지 않아 `--checkpoint-path` 를 줘도 pickle이 **하나도** 안 쓰인다. 이 값을 뒤집는 CLI 플래그도 없다(§11.7).
    - 🪤 **`--mock-policy-noise` 로 채운 데이터는 demo로 쓰면 안 된다.** `1a4f93d` 이후 모든 전이에 `meta.policy_actions_synthetic=true` 가 박힌다.
 
@@ -731,9 +731,9 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 5. **크롭을 넣어 classifier를 재학습한다.** 파이프라인에 인자가 이미 있다(`--cam1-crop 340,20,990,670`, `--cam2-crop 420,0,1140,720`). 07-27 학습은 150 epoch에 46초였다. 크롭 값은 **체크포인트 옆에 sidecar로 기록하고 서버가 불일치 시 fail-closed** 하게 할 것 — 안 그러면 같은 결함이 다시 조용히 생긴다.
 6. **orbax 디렉터리 digest/load를 구현한다**(§7 P0-0). 이게 없으면 새 checkpoint를 gRPC 경로에 pin할 수 없고, 코드 기본값은 계속 폐기된 Jul-24를 가리킨다.
 
-**C. 합류 후 — canonical robot demo**
+**C. 합류 후 — canonical robot demo artifact**
 
-7. `buffer_period > 0` 로 만들 방법을 마련한 뒤(§7 P0-2), receive server를 띄운 채 텔레오퍼레이션으로 성공 에피소드를 녹화해 `--checkpoint-path` dump에서 canonical demo pickle을 만들고 strict loader를 통과하는지 확인한다.
+7. 우선 기존 2026-07-20 take의 성공 outcome을 사람이 확인하고 `RECORDED_TAKE_DEMO_CONVERSION_KO.md`대로 canonical pickle을 생성한다. 새 데이터를 actor 형식으로 다시 녹화하는 경로를 택할 때만 `buffer_period > 0` 배선을 추가한다(§7 P0-2).
 8. Kanu에 `run_rlpd_learner_server.py` 를 port 50053에 올린다. 순서는 fake demo `--dry-run` → production bounded run(§11.5). *(2026-07-29 기준 Kanu에는 내릴 receive server조차 떠 있지 않다.)*
 9. production-scope 5,000-step bounded learner run을 수행하고, 장시간 RSS/VMS/GPU memory/compile/contention과 W&B offline disk 증가를 계측한다.
 10. learner fault heartbeat와 shutdown escalation을 보강한 뒤 continuous mode를 승인한다.
@@ -1042,7 +1042,7 @@ actor가 pin해야 하는 값:
 1. **전역 ESC 리스너** (`ur_env/envs/ur7e_env.py:197-208`) — deadman 배선과 **별개**다. 아무 창에서 ESC를 누르면 `self.terminate` 가 서고 에피소드가 끝난다. 미수정.
 2. **`run_real_hil.py` 의 frame-map 판정이 포화 표본을 걸러내지 않는다.** 포화 구간에서는 명령 델타가 리더 변위와 무관하게 `ACTION_SCALE` 노름에 고정되므로 `robot_dp ≈ M @ leader_dp` 모델 자체가 성립하지 않는데, 판정은 그 표본을 넣고 최소자승을 돌린 뒤 FAIL을 띄우며 "좌표계를 의심하라"고 안내한다 — **오진 유도다.** `held`(거버너 거부)만 세고 ACTION_SCALE 노름 클립은 안 세는 것이 사각지대. 미수정. *(07-28 측정은 포화 표본을 손으로 걸러내서 통과시켰다 — §11.9. 즉 결함은 판정 코드에 남아 있고, 측정 자체는 유효하다.)*
 3. 🔴 **workspace box가 `run_real_hil.py` 에서 비활성이다.** `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*` 가 zeros(`ur_env/envs/config.py:76-77`)이고 측정된 박스는 `ur_experiments/cube_in_cup.py:162-167` 에만 있다. 코드가 0-부피 박스를 감지해 끄는 것은 올바른 처리지만, 실측 결과 **DRY RUN 300 스텝 중 241 스텝(80%)이 측정 박스 밖**이었고 시작점에서 **최대 73.9 cm** 이탈했다. `--arm` 이었다면 팔이 실제로 거기까지 갔다. 속도 제한은 *얼마나 빨리* 가는지만 막지 *어디로* 가는지는 안 막는다. **이것이 §1 판정표에서 "팔은 움직였는데 workspace box는 여전히 실기 미검증"인 이유다.**
-4. **`buffer_period = 0`** (`ur_experiments/cube_in_cup.py:265`) 이라 `--checkpoint-path` 를 줘도 demo pickle이 하나도 안 쓰인다. CLI 플래그도 없다 — **canonical demo 녹화의 선결 조건**이고, 그 demo가 Kanu 정책 서빙의 유일한 하드 블로커다(§7 P0-2).
+4. **`buffer_period = 0`** (`ur_experiments/cube_in_cup.py:265`) 이라 `--checkpoint-path` 를 줘도 actor-format demo pickle이 하나도 안 쓰인다. CLI 플래그도 없다. 기존 recorder take는 별도 converter로 살릴 수 있으므로, 이것은 **새 actor 직접 녹화 경로의 선결 조건**이다(§7 P0-2).
 
 ### 11.8 환경 함정 (반복 발생)
 

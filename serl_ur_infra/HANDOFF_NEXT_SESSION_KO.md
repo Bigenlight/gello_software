@@ -175,7 +175,9 @@ journalctl -k --boot=all | grep -c '147122072740\|243222072700'   # -> 0
 - **🔴 2순위 — receive server가 지금 체크포인트를 아예 못 읽는다.** `checkpoint_sha256()`이 파일만
   받는데 정본 체크포인트는 orbax **디렉터리**다 → `FileNotFoundError`. 게다가 코드 기본 SHA는
   **0724 도메인 recall 0.0%**인 폐기 체크포인트를 가리킨다 → 그대로 띄우면 **reward가 영구 0**이다(§5.3).
-- **canonical robot demo가 없다** — learner의 하드 블로커(§9).
+- **사람이 성공 outcome을 확인한 canonical demo artifact가 아직 없다.** 변환기와
+  23개/2,037-transition strict-load smoke는 완료됐다(§9,
+  `RECORDED_TAKE_DEMO_CONVERSION_KO.md`).
 
 ### 테스트 — 이 명령 그대로 (2026-07-29 canonical checkout에서 재실행, `fb48100` 이후 기준)
 
@@ -669,15 +671,22 @@ A의 결과를 본 뒤 (a)/(b) 중 의식적으로 고른다. **`checkpoint_sha2
 - **⚠️ overlay venv `/tmp/gello-hil-rl-receive-overlay-v2`를 재사용하지 말 것** —
   protobuf 3.20.3 핀이 wandb 0.26.0 import를 깨뜨린다.
 
-### 실제 정책 서빙의 하드 블로커: canonical robot demo가 없다
+### 실제 정책 서빙의 하드 블로커: canonical robot demo의 사람 라벨·영구 artifact가 아직 없다
 
 `run_rlpd_learner_server.py`의 `--demo-path`가 required이고 3중 검증된다.
 `--synthetic-e2e`는 서버가 run_id 화이트리스트를 강제하는데 액터가 `uuid4()`로 매번 새로 만들어 우회 불가.
 
-생산 경로는 코드에 있다 — `ur_env/remote_actor.py::_dump_data`(`:189`)가 `--checkpoint-path`를 받으면
+2026-07-29 이후에는 기존 recorder take를 직접 변환하는
+`scripts/convert_recorded_takes_to_demo.py`가 있다. `vectors.h5` native table과 두 MP4를
+10 Hz canonical transition으로 바꾸며, 자세한 계약은
+`RECORDED_TAKE_DEMO_CONVERSION_KO.md`를 따른다. 2026-07-20의 `take_23` 제외 23개는
+2,037 transitions로 변환·strict-load smoke까지 통과했지만, GUI가 성공 여부를 저장하지
+않았으므로 사람이 outcome을 확인하기 전에는 production demo artifact를 만들지 않는다.
+
+새로 actor 형식으로 직접 녹화하는 경로도 있다 — `ur_env/remote_actor.py::_dump_data`(`:189`)가 `--checkpoint-path`를 받으면
 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고 `load_demo_pickles`가 그 형식을 받는다.
 **단 `buffer_period`가 0이면 아무것도 안 쓴다**(`ur_experiments/cube_in_cup.py:265`) — **CLI 플래그도 없다.**
-canonical demo 녹화의 선결 조건이 이것이다.
+새 actor 녹화 경로를 택할 때의 선결 조건이 이것이다.
 
 또한 학습 시작 게이트는 **online replay ≥ 100 AND offline demo ≥ 1**이다. 둘 다 필요하다.
 

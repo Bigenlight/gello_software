@@ -768,7 +768,7 @@ final unified schema v2 acceptance (merge 248255f) — 기록, 현재 무효:
 >
 > `--reward-threshold`에는 2.0절에서 코드로부터 읽은 `$HIL_REWARD_THRESHOLD`를 넣는다. 문서에서 숫자를 베끼지 않는다. threshold는 fingerprint에 포함되므로 **production run이 시작된 뒤에는 바꾸지 않는다** — 바꾸면 기존 lineage를 resume할 수 없다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
 >
-> ⚠️ 그리고 이 절의 전제인 **real canonical robot demo가 아직 존재하지 않는다.** 실기에서 팔을 움직인 것은 전부 `tests/run_real_hil.py`였고 그건 다른 코드 경로다. `run_remote_rlpd_actor.py`는 실기에서 한 번도 실행된 적이 없다(8절 참조). 게다가 `CubeInCupConfig.buffer_period`가 `0`이라 actor가 demo pickle을 아예 쓰지 않는다.
+> ⚠️ production용 **사람 확인 완료 canonical demo artifact는 아직 존재하지 않는다.** 다만 기존 recorder의 `vectors.h5`+MP4를 바꾸는 `scripts/convert_recorded_takes_to_demo.py`가 추가됐고, `take_23` 제외 2026-07-20 23개/2,037 transitions 변환 및 strict-load smoke는 통과했다. 성공 outcome을 확인한 뒤 `RECORDED_TAKE_DEMO_CONVERSION_KO.md`대로 생성한다. 새 actor 직접 녹화는 여전히 `CubeInCupConfig.buffer_period=0`이라 pickle을 쓰지 않는다.
 
 이 절은 fake demo로 실행하면 안 된다. strict loader를 통과하는 실제 EEF-space canonical robot demo path를 지정한다.
 
