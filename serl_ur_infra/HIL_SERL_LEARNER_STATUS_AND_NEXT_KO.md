@@ -9,13 +9,15 @@
 > learner/hardware 통합 merge: `248255f` (schema v2 검증 및 canonical branch 통합 완료)
 >
 > Kanu 실행 절차: [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)
+>
+> reward threshold 근거와 classifier 실측: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)
 
 ## 한눈에 보기
 
 - receive server, 실제 hybrid SAC learner, versioned policy, strict replay ingress, gripper penalty, checkpoint/resume, JSONL/W&B를 **하나의 production CLI**로 조립하는 구현은 learner/hardware 통합 merge `248255f` 계열에 모였다. schema v2 검증과 최종 운영 위치 `/home/laptop3/gello_software`의 `feat/gello-ur7e-humble-22.04` 통합을 완료했다.
 - robot actor의 실제 실행 action을 기준으로 `grasp_penalty`를 생성하는 wrapper도 두 actor entrypoint에 배선됐다. learner ingress는 penalty 누락을 허용하지 않는다.
 - 실제 `SACAgentHybridSingleArm`을 사용해 CTA update → publish → checkpoint → fresh agent restore → production composition 재조립 → action/RNG/counter 확인 → 추가 update/checkpoint까지 검증했다.
-- 실제 reward classifier checkpoint는 로컬에서 SHA 검증, load, warm-up까지 성공했다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했다.
+- 실제 reward classifier checkpoint(`e329986b...`)는 로컬에서 **SHA 검증, load, warm-up까지만** 성공했다. 이것은 artifact I/O 검증이지 분류 성능 검증이 아니며, **분류 성능은 당시 검증하지 않았다.** 이후 2026-07-28 Kanu 실측에서 이 checkpoint의 0724 도메인 success recall이 `0.0%`(성공 1,123 프레임 중 0건, mean 확률 `0.007`)로 확인돼 **폐기 대상**이 됐다. 그대로 실기에 물리면 로봇이 성공해도 reward가 영원히 0이고 학습이 시작되지 않는다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md), 새 정본 경로는 [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.3에 있다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했고, 이 수정 자체는 계속 유효하다.
 - fake canonical demo generator가 추가됐다. 이 raw artifact는 construction `--dry-run` 또는 명시적으로 bounded된 `--synthetic-e2e` acceptance에만 허용된다. 일반 robot-data learner serving은 계속 거부한다.
 - unified schema v2 기본 suite는 `253 passed, 4 skipped, 6 warnings`, UR/GELLO suite는 `436 passed`다. 실제 frozen-trunk agent `2 passed`, checkpoint/resume `1 passed`, local fake E2E `1 passed`도 다시 통과했다.
 - 사용자가 현재 milestone 완료 조건으로 지정한 **fake data laptop→SSH tunnel→Kanu learning E2E**는 schema v2에서 exact 100 ingress→actual classifier→feature replay→CTA update→publish→checkpoint full-load roundtrip까지 통과했다. 새 Kanu process가 checkpoint를 `1/2/1`로 restore하고 policy version 1의 finite 7D action을 serving하는 것도 확인했다. 사용자 요청에 따라 v2 resume process의 불필요한 두 번째 SAC update는 생략했다.
@@ -36,7 +38,7 @@
 | receive server + learner 단일 프로세스 composition | 구현·loopback 자동 검증 |
 | 실제 agent checkpoint/resume/continue | opt-in 실제 agent 자동 검증 |
 | actor gripper penalty wiring | 구현·자동 검증 |
-| classifier 실제 checkpoint local restore | 로컬 실제 artifact 검증 및 회귀 테스트 |
+| classifier 실제 checkpoint local restore | load/SHA/warm-up만 검증, 분류 성능 미검증 — 사용한 `e329986b...`는 이후 0724 recall `0.0%`로 폐기 |
 | JSONL + 실제 W&B offline artifact | 자동 검증 |
 | fake canonical demo | 생성기·strict loader·dry-run/synthetic-E2E scope gate 자동 검증 |
 | Kanu GPU production dry-run | actual classifier/agent, feature demo conversion, 128/32 RAM preflight 통과 |
@@ -47,6 +49,8 @@
 | frozen-trunk feature replay/demo | 구현·자동 검증; Kanu GPU dry-run/CTA smoke 통과 |
 
 즉, 코드의 핵심 경계, 실제 agent state 복원, Kanu GPU construction/CTA, unified schema v2 bounded fake learning/checkpoint/resume serving까지 확인했다. fake-data milestone은 완료다.
+
+다만 위 판정표에서 classifier 항목은 **artifact I/O 판정일 뿐 reward 품질 판정이 아니다.** 위 모든 통과 결과는 `e329986b...` checkpoint로 얻은 것이고, 그 checkpoint는 2026-07-28 실측에서 0724 도메인 recall `0.0%`로 폐기됐다. synthetic/fake acceptance가 검증한 범위는 파이프라인 배선(load, warm-up, ingress, CTA, publish, checkpoint)이지 reward 품질이 아니므로 위 통과 기록 자체는 그대로 유효하다. 그러나 **실기 run에는 새 정본 classifier가 필요하다**(4.8, 7절 P0 참조).
 
 ## 2. 작업 위치와 branch
 
@@ -326,11 +330,19 @@ production CLI는 `--resume-latest`뿐 아니라 explicit `--resume-path`에도 
 - exact grasp-penalty allowed values `[0, configured penalty]`
 - JAX/JAXLIB/Flax/Distrax/TFP version
 
-resume에서 document 또는 SHA가 다르면 즉시 실패한다. 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
+resume에서 document 또는 SHA가 다르면 즉시 실패한다. **reward threshold도 fingerprint에 들어가므로 threshold 0.85로 학습한 checkpoint는 기본값이 0.5가 된 지금 그대로 resume되지 않는다**(`53d5cf6`에서 `DEFAULT_REWARD_THRESHOLD`를 0.5로 낮췄다). 이 거부는 의도된 동작이다 — reward function이 바뀌면 다른 MDP이므로 lineage를 섞으면 안 된다. 구 lineage를 이어받으려면 `--reward-threshold 0.85`를 명시해야 하며, 근거와 판단은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다. 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
 
 ### 4.8 reward classifier와 Flax local-I/O 수정
 
-실제 classifier artifact:
+> ⚠️ **이 절이 다루는 checkpoint `e329986b...`는 폐기 대상이다.** 2026-07-28 Kanu 실측에서 0724 도메인 success recall이 `0.0%`(성공 1,123 프레임 중 0건, mean 확률 `0.007`)였다. threshold를 아무리 낮춰도 살아나지 않는다. 실기 learner에 이 checkpoint를 물리면 로봇이 성공해도 reward가 영원히 0이므로 HIL-SERL 학습이 시작되지 않는다.
+>
+> 아래에 남긴 SHA, 경로, load/warm-up 수치는 **2026-07-27 시점의 역사적 기록**이며 지우지 않는다. 다만 그때 검증한 것은 SHA/load/warm-up까지이고 **분류 성능은 검증하지 않았다.**
+>
+> **Flax local-I/O backend 수정 기록(아래 5단계)은 계속 유효하며 새 정본 checkpoint에도 그대로 적용된다.**
+>
+> 새 정본 경로와 orbax 디렉터리 제약은 [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.3, 측정 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
+
+폐기된 classifier artifact(역사적 기록):
 
 ```text
 local:
@@ -353,7 +365,7 @@ e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
 4. `flax.io.BackendMode.DEFAULT`를 명시적으로 선택한다.
 5. 그 뒤 upstream classifier checkpoint loader를 호출한다.
 
-실제 local artifact의 load/warm-up이 성공했다. 별도 측정에서 전체 준비 약 7.89초, warm-up 약 674 ms였고 zero-image smoke probability는 약 `0.081304`였다. 이 수치는 GPU production latency 기준이 아니라 local acceptance 관측값이다.
+실제 local artifact의 load/warm-up이 성공했다. 별도 측정에서 전체 준비 약 7.89초, warm-up 약 674 ms였고 zero-image smoke probability는 약 `0.081304`였다. 이 수치는 GPU production latency 기준이 아니라 local acceptance 관측값이다. zero-image smoke는 runtime이 유한한 확률을 낸다는 것만 보이며 **분류 정확도/recall과는 무관하다** — 실제 성공 프레임에 대한 recall은 이때 측정하지 않았고, 이후 실측에서 `0.0%`로 확인됐다.
 
 ### 4.9 logging, W&B, protobuf
 
@@ -557,6 +569,13 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 ## 7. 남은 차단점
 
 ### P0 — 실기 production 승인 전 필수
+
+0. **사용 가능한 reward classifier 부재 — 현재 최상위 차단점**
+   - 지금까지 모든 dry-run/E2E가 사용한 `e329986b...`는 0724 도메인 recall `0.0%`로 폐기됐다. 이 상태로 실기를 돌리면 reward가 영원히 0이라 학습이 시작조차 하지 않는다.
+   - 사용자가 지정한 새 정본은 Kanu `~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150`(2026-07-27 생성, 약 43 MB)이며 단일 파일이 아니라 **orbax 디렉터리 포맷**이다.
+   - `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`는 `os.path.isfile()`을 강제하므로 orbax 디렉터리를 주면 즉시 `FileNotFoundError`로 죽는다. **orbax 디렉터리 load와 디렉터리용 digest 계약을 먼저 구현해야 한다.**
+   - `scripts/run_rlpd_learner_server.py`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`와 `scripts/run_rlpd_receive_server.py`의 `DEFAULT_CHECKPOINT_SHA256`는 아직 폐기된 SHA를 기본값으로 갖고 있다(2026-07-29 확인). orbax 지원이 선행돼야 하므로 이번에는 코드를 고치지 않았다. 그때까지 CLI에서 expected-SHA 옵션을 생략하지 않는다.
+   - 새 정본에 대한 recall/FPR, `IMAGE_CROP` 적용 여부, actor/learner threshold 정합은 아직 측정하지 않았다.
 
 1. **production lifecycle bounded/continuous GPU acceptance**
    - JAX/JAXLIB 0.5.3 GPU production dry-run, 단일 feature CTA, laptop→Kanu synthetic E2E step 1/resume step 2는 통과했다.

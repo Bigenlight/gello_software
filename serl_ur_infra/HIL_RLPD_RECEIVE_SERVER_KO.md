@@ -131,14 +131,26 @@ protobuf 3.20.3은 저장소에 체크인된 generated gRPC module과 Kanu의 pr
 
 정확한 생성·실행 명령은 [RL_RECEIVE_SERVER.md](./RL_RECEIVE_SERVER.md)에 있다.
 
-## 실제 검증 결과
+## 파이프라인 스모크 결과 (분류 성능 미검증)
 
-Kanu GPU 7과 실제 checkpoint를 사용했다.
+Kanu GPU 7과 실제 checkpoint를 사용했다. 아래는 **transport/classifier I/O/buffer
+배선이 동작한다는 스모크 결과**이며, classifier의 **분류 성능(recall·FPR)은
+검증하지 않았다.** load 성공과 warm-up 시간은 artifact가 열렸다는 사실만 말한다.
+
+> ⚠️ 여기서 쓴 checkpoint `e329986b...`는 이후 **폐기됐다.** 2026-07-28 Kanu
+> 실측에서 0724 도메인 success recall이 `0.0%`였다(성공 1,123 프레임 중 0건,
+> mean 확률 `0.007`). 아래 기록은 당시 실측 그대로 남기되, 이 checkpoint를
+> 신규 run에 사용하지 않는다. 측정 근거는
+> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md),
+> 새 정본 경로와 orbax 디렉터리 제약은
+> [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.3절에 있다.
 
 - checkpoint:
   `/home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150`
+  (폐기)
 - SHA-256:
   `e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997`
+  (폐기)
 - JAX backend: `gpu`
 - classifier load 및 JIT warm-up: 성공, 약 1.65초
 - laptop -> SSH tunnel -> Kanu gRPC synthetic steps: 100

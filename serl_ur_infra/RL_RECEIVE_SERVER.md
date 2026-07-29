@@ -99,6 +99,20 @@ CUDA/Python environment or creating a Docker image.
 
 Run the historical receive-only server from the canonical checkout:
 
+> ⚠️ **The classifier checkpoint below (`e329986b...`) is retired.** A 2026-07-28
+> measurement on Kanu found `0.0%` success recall on the 0724 domain (0 of 1,123
+> success frames above threshold; mean probability `0.007`). Running a robot
+> against it yields `reward=0` forever. The command is kept verbatim as the
+> historical receive-only milestone record — do not reuse the path or SHA for a
+> new run. The current canonical checkpoint and its orbax-directory constraints
+> are in [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) §1.3;
+> the measurement is in
+> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md).
+>
+> Also note `DEFAULT_CHECKPOINT_SHA256` in
+> `scripts/run_rlpd_receive_server.py` still defaults to that retired SHA as of
+> 2026-07-29, so never omit `--expected-checkpoint-sha256`.
+
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
 PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
@@ -135,6 +149,13 @@ no Agentlace socket or port is used.
 
 The following optional example uses GPU 7 and host networking so the process
 can remain bound to Kanu loopback:
+
+> ⚠️ **Same retired classifier as above.** The mounted checkpoint path and
+> `--expected-checkpoint-sha256 e329986b...` are the retired artifact with
+> `0.0%` recall on the 0724 domain. Kept as a historical record only; substitute
+> the current canonical checkpoint before any real run, and note that it is an
+> orbax *directory*, which this server's `checkpoint_sha256()` cannot hash
+> (`os.path.isfile()` is enforced).
 
 ```bash
 docker run \

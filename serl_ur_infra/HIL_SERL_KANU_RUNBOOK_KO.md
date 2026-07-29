@@ -5,9 +5,13 @@
 > 기준일: 2026-07-27 KST
 >
 > 구현 상태와 차단점: [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)
+>
+> reward threshold 근거와 classifier 실측: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)
 
 ## 먼저 읽을 요약
 
+- ⚠️ **이 문서의 모든 예시가 쓰던 classifier `e329986b...`는 폐기됐다.** 0724 도메인 success recall이 `0.0%`다. 실기에 물리면 reward가 영원히 0이다. 새 정본 경로와 orbax 디렉터리 제약은 1.3절에 있다. `--expected-classifier-sha256`/`--expected-checkpoint-sha256`는 **절대 생략하지 마라** — 코드 기본값이 아직 폐기된 SHA다.
+- ⚠️ reward threshold는 `53d5cf6`에서 0.85 → 0.5로 바뀌었고 **fingerprint에 포함된다.** 0.85로 학습한 checkpoint는 지금 명령으로 resume되지 않는다(의도된 거부).
 - Kanu learner server는 `127.0.0.1:50053`에만 bind하고 laptop은 SSH local forwarding으로 접속한다.
 - Kanu에서는 JAX/JAXLIB 0.5.3 CUDA 환경을 사용하고 CLI에 `--require-jax-backend gpu`를 반드시 준다.
 - fake canonical demo는 construction `--dry-run` 또는 bounded `--synthetic-e2e` acceptance에만 허용된다. production robot-data serving은 계속 자동 거부한다.
@@ -125,19 +129,64 @@ nvidia-smi
 
 ### 1.3 immutable assets
 
-actual reward classifier:
+#### 1.3.1 reward classifier — 현재 정본 (orbax 디렉터리)
+
+사용자가 지정한 현재 정본은 Kanu의 다음 경로다. 2026-07-27 생성, 약 43 MB.
 
 ```text
-/home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150
+/home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150
 ```
+
+> ⚠️ 이 정본은 **단일 파일이 아니라 orbax checkpoint 디렉터리**다(`_CHECKPOINT_METADATA`, `manifest.ocdbt`, `ocdbt.process_0/` 등). 따라서 아래가 성립한다.
+>
+> - **단일 SHA-256 검증이 불가능하다.** 1.3.2의 `sha256sum --check --strict` 형태 명령은 디렉터리에 대해 작동하지 않는다. 실제 출력은 `sha256sum: <path>: Is a directory` / `<path>: FAILED open or read` / `WARNING: 1 listed file could not be read`이고 exit code는 `1`이다(2026-07-29 확인).
+> - `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`는 `os.path.isfile()`을 강제하므로, 이 경로를 `--classifier-checkpoint`/`--checkpoint`에 그대로 주면 CLI가 `FileNotFoundError`로 즉시 죽는다.
+> - 즉 **현재 CLI는 이 정본을 아직 로드할 수 없다.** orbax 디렉터리 load와 디렉터리용 digest 계약(예: 파일별 SHA manifest)을 먼저 구현해야 실기 run이 가능하다. 이 문서는 코드가 그렇게 되어 있다는 사실만 기록하며, 우회 방법을 제시하지 않는다.
+>
+> 현재 단계에서 가능한 것은 존재/구조 확인뿐이다.
+
+```bash
+export HIL_CLASSIFIER=/home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150
+
+test -d "$HIL_CLASSIFIER" || echo "정본은 디렉터리여야 한다"
+ls -la "$HIL_CLASSIFIER"
+du -sh "$HIL_CLASSIFIER"
+```
+
+#### 1.3.2 reward classifier — 폐기 (recall 0%)
+
+아래는 2026-07-27까지의 모든 dry-run/E2E가 사용한 **구 checkpoint**다. 역사적 기록으로 남기며 **신규 run에는 사용하지 않는다.**
+
+```text
+경로:
+/home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150
+
+SHA-256:
+e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
+
+상태:
+폐기 — 0724 도메인 success recall 0.0% (성공 1,123 프레임 중 0건, mean 확률 0.007)
+```
+
+이 checkpoint로 통과한 과거 dry-run/E2E 결과는 파이프라인 배선 검증으로서 그대로 유효하다. 다만 그 검증 범위는 SHA/load/warm-up과 ingress 배선이었고 **분류 성능은 검증되지 않았다.** 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
+
+> ⚠️ **expected-SHA 옵션을 절대 생략하지 마라.**
+> `scripts/run_rlpd_learner_server.py`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`와 `scripts/run_rlpd_receive_server.py`의 `DEFAULT_CHECKPOINT_SHA256`는 **2026-07-29 현재도 위 폐기된 SHA를 기본값으로 갖고 있다.** orbax 지원이 선행돼야 하므로 코드는 아직 고치지 않았다.
+> 옵션을 생략한 채 구 checkpoint 파일을 주면 검사가 조용히 통과하고, 폐기된 classifier로 run이 시작된다. 항상 `--expected-classifier-sha256`(learner) 또는 `--expected-checkpoint-sha256`(receive server)를 명시하고, 그 값이 실제로 쓰려는 artifact의 것인지 확인한다.
+
+4절 dry-run과 5절 bounded synthetic E2E는 fake demo로 배선만 확인하는 절차이고 과거 실측이 구 checkpoint로 수행됐다. 그 결과를 **재현**할 때만 아래 두 변수로 1.3.1의 값을 덮어쓴다. 6절 실기 run에는 사용하지 않는다.
+
+```bash
+# 폐기된 구 checkpoint — 4/5절 과거 acceptance 재현 전용
+export HIL_CLASSIFIER=/home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150
+export HIL_CLASSIFIER_SHA256=e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
+
+printf '%s  %s\n' "$HIL_CLASSIFIER_SHA256" "$HIL_CLASSIFIER" | sha256sum --check --strict -
+```
+
+#### 1.3.3 ResNet repository asset
 
 expected SHA-256:
-
-```text
-e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
-```
-
-ResNet repository asset expected SHA-256:
 
 ```text
 175745d43d30233eb01b5369465d1c24c11b8ee71ccb734cc1c1bca13e07f57b
@@ -146,14 +195,13 @@ ResNet repository asset expected SHA-256:
 검사 명령:
 
 ```bash
-export HIL_CLASSIFIER=/home/junhyeong/workspace/youngwoong/gello_software_remote_classifier/classifier_ckpt/cube_in_cup/checkpoint_150
 export HIL_RESNET_SOURCE="$HIL_KANU_REPO/third_party/hil-serl/examples/experiments/resnet10_params.pkl"
-export HIL_CLASSIFIER_SHA256=e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997
 export HIL_RESNET_SHA256=175745d43d30233eb01b5369465d1c24c11b8ee71ccb734cc1c1bca13e07f57b
 
-printf '%s  %s\n' "$HIL_CLASSIFIER_SHA256" "$HIL_CLASSIFIER" | sha256sum --check --strict -
 printf '%s  %s\n' "$HIL_RESNET_SHA256" "$HIL_RESNET_SOURCE" | sha256sum --check --strict -
 ```
+
+ResNet asset은 단일 파일이므로 위 검사가 그대로 유효하다. classifier와 달리 SHA 계약이 바뀌지 않았다.
 
 upstream classifier는 `/home/junhyeong/.serl/resnet10_params.pkl`도 사용한다. 파일이 이미 있으면 같은 SHA인지 확인한다. 다르면 지우거나 덮어쓰지 말고 run을 중단한다.
 
@@ -250,6 +298,8 @@ sha256sum "$HIL_FAKE_DEMO"
 ## 4. Kanu GPU dry-run
 
 dry-run은 실제 classifier, ResNet, dual raw/cached hybrid SAC agent, raw demo의 one-time frozen-trunk conversion, feature RAM preflight, production composition, fingerprint, JSONL/W&B offline을 준비하지만 gRPC port를 bind하거나 learner update를 실행하지 않는다.
+
+아래 command의 `$HIL_CLASSIFIER`/`$HIL_CLASSIFIER_SHA256`는 1.3.2의 **폐기된 구 checkpoint** 값을 전제한다. 이 절이 검증하는 것은 construction 배선이지 분류 성능이 아니므로 재현 목적에는 그대로 쓸 수 있다. 새 정본으로 dry-run하려면 1.3.1의 orbax 제약을 먼저 해소해야 한다.
 
 ```bash
 cd "$HIL_KANU_REPO"
@@ -348,6 +398,8 @@ nvidia-smi
 ### 5.1 fresh step 1 server
 
 dry-run 산출물과 섞지 않도록 새 run root를 쓴다. 아래 generator는 output을 overwrite하지 않으므로 완전히 새 `HIL_SYNTH_RUN_ID`를 지정한다.
+
+4절과 마찬가지로 이 절의 `$HIL_CLASSIFIER`/`$HIL_CLASSIFIER_SHA256`는 1.3.2의 폐기된 구 checkpoint 값을 전제한다. bounded synthetic acceptance가 검증하는 것은 ingress/CTA/publish/checkpoint/resume 배선이지 reward 품질이 아니므로 재현 목적에는 그대로 쓴다.
 
 ```bash
 export HIL_SYNTH_RUN_ID=UNIQUE_SYNTH_E2E_RUN_ID
@@ -530,6 +582,21 @@ final unified schema v2 acceptance (merge 248255f):
 사용자 요청에 따라 final v2 resume process의 두 번째 SAC update는 생략했다. continued update/checkpoint는 local actual integration test와 위 schema v1 full resume run에서 이미 검증됐다.
 
 ## 6. real canonical demo가 준비된 뒤 bounded learner run
+
+> ⚠️ **이 절은 실기 production 진입점이다. 구 checkpoint(`e329986b...`)로 실행하지 마라.**
+>
+> 그 checkpoint는 0724 도메인 success recall이 `0.0%`다(성공 1,123 프레임 중 0건, mean 확률 `0.007`). 그대로 실행하면 **로봇이 실제로 성공해도 classifier가 한 번도 threshold를 넘지 않으므로 reward가 영원히 0이고, HIL-SERL 학습이 시작조차 하지 않는다.** threshold를 더 낮춰도 해결되지 않는다.
+>
+> 아래 command의 `$HIL_CLASSIFIER`/`$HIL_CLASSIFIER_SHA256`가 1.3.2의 폐기 값으로 남아 있지 않은지 실행 직전에 반드시 확인한다.
+>
+> ```bash
+> echo "$HIL_CLASSIFIER"
+> echo "$HIL_CLASSIFIER_SHA256"   # e329986b... 이면 중단
+> ```
+>
+> **현재 상태로는 이 절을 실행할 수 없다.** 1.3.1의 새 정본은 orbax 디렉터리이고 `checkpoint_sha256()`가 `os.path.isfile()`을 강제하므로 CLI가 로드 단계에서 죽는다. orbax 디렉터리 load와 디렉터리 digest 계약이 먼저 구현돼야 한다. 이 차단점은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) 7절 P0-0에 있다.
+>
+> `--reward-threshold`는 현재 `0.5`이며 fingerprint에 포함된다. production run이 시작된 뒤에는 threshold를 바꾸지 않는다 — 바꾸면 기존 lineage를 resume할 수 없다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
 
 이 절은 fake demo로 실행하면 안 된다. strict loader를 통과하는 실제 EEF-space canonical robot demo path를 지정한다.
 
@@ -724,6 +791,9 @@ JAX/native backend가 hang하면 join이 계속될 수 있다. 즉시 `SIGKILL`�
 
 ## 12. 현재 허용하지 않는 것
 
+- 폐기된 classifier `e329986b...`로 6절 실기 run 실행
+- `--expected-classifier-sha256`/`--expected-checkpoint-sha256` 생략(코드 기본값이 폐기된 SHA다)
+- production run 시작 이후 `--reward-threshold` 변경
 - fake demo를 bounded `--synthetic-e2e` 외의 live learner에 사용
 - `--synthetic-e2e`에 real/synthetic 혼합 demo, restored step +1이 아닌 target, target 0/음수/11 이상, replay capacity 100 미만, transition count 100 이외, timeout 1..1,800초 범위 밖을 사용
 - allowlist와 다른 actor/run ID로 synthetic server에 접속하거나 production model ID를 synthetic actor에 pin
