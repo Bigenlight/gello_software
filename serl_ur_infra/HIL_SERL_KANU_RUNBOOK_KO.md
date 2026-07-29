@@ -2,9 +2,10 @@
 
 > 상태: **실물 로봇 production learning smoke 진입 가능**. 실제 arm 실행은 아직 operator 검증 항목이다.
 >
-> 기준일: **2026-07-29 18:53 KST**. 현재 실기 준비 기준 커밋은 **`18e3696`**이다.
+> 기준일: **2026-07-29 18:53 KST**. 현재 실기 준비 **코드 기준선**은 **`18e3696`**이다.
 > 이 커밋은 no-arm 무전송 probe, deadman heartbeat fail-stop, proof 기반 controller
 > handoff, JAX-before-gRPC 초기화, deterministic/stochastic policy 사전 warm-up을 모두 포함한다.
+> 그 이후 문서-only descendant는 허용하되 양쪽 exact HEAD가 같은지는 매번 명령으로 확인한다.
 >
 > 검증 브랜치: `feat/gello-ur7e-humble-22.04`. laptop3 infra 전체
 > **459 passed, 11 skipped**, controller handoff shell mock **14 passed**. Kanu 실제
@@ -20,7 +21,8 @@
 
 ### 2026-07-29 최종 준비 증거
 
-- laptop3와 Kanu 영속 checkout의 HEAD는 `18e3696`으로 동기화됐다.
+- 실제 E2E 실행 시점에 laptop3와 Kanu 영속 checkout의 HEAD는 `18e3696`으로 동기화됐다.
+  아래 증거를 기록한 문서 commit 뒤에는 branch tip이 달라질 수 있으므로 현재 HEAD는 직접 읽는다.
 - 실제 23-take/2,037-transition demo, 정본 Orbax classifier, ResNet-10, 실제 hybrid
   SAC agent, production ring 50k/10k를 사용한 dry-run이 통과했다. fingerprint는
   `c952dc2e292675dc6aa033d5c470ee34c28c6589430ddba2cd98fadaeadb9cd5`, RAM gate는
@@ -247,7 +249,7 @@ ssh kanu 'df -h ~/workspace'
 
 | 경로 | 정체 | 상태 |
 | --- | --- | --- |
-| **`~/gello_software_hil`** | **HIL-SERL run용 영속 checkout.** branch `feat/gello-ur7e-humble-22.04`, HEAD `18e3696`, clean. submodule `third_party/hil-serl` @ `c32939b` 초기화 완료 | ✅ **이것을 쓴다** |
+| **`~/gello_software_hil`** | **HIL-SERL run용 영속 checkout.** branch `feat/gello-ur7e-humble-22.04`, code baseline `18e3696` 포함, clean. exact HEAD는 `git rev-parse HEAD`로 확인. submodule `third_party/hil-serl` @ `c32939b` 초기화 완료 | ✅ **이것을 쓴다** |
 | `~/workspace/youngwoong/gello_software` | 위 worktree의 **주 저장소**(`.git` 1.1 GB object store를 공유한다). 현재 branch `rescue/kanu-worktree-20260729-014633` @ `7148f54` | ⛔ **동기화하지 않는다** — 아래 설명 |
 | `~/workspace/youngwoong/gello_software_remote_classifier` | ZMQ 뷰어 checkout. `feat/remote-cube-classifier-viewer` @ `a2733ee`, clean. **Jul-24 폐기 checkpoint**도 여기 있다 | 확인됨 |
 | `~/workspace/youngwoong/hil-serl` | classifier 학습처. YWhero/hil-serl fork, branch `agent/cube-in-cup-classifier` @ `d753571` | 확인됨 |
