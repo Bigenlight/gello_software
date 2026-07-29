@@ -559,6 +559,7 @@ export HIL_RUN_ROOT="/absolute/persistent/path/hil-serl-runs/$HIL_RUN_ID"
 export HIL_CHECKPOINT_ROOT="$HIL_RUN_ROOT/checkpoints"
 export HIL_WANDB_DIR="$HIL_RUN_ROOT/wandb"
 export HIL_JSONL_PATH="$HIL_RUN_ROOT/logs/learner.jsonl"
+export HIL_MEMORY_PREFLIGHT_PATH="$HIL_RUN_ROOT/logs/memory-preflight.jsonl"
 export HIL_RESNET_CACHE="$HIL_RUN_ROOT/assets/resnet10_params.pkl"
 export HIL_GRASP_PENALTY=-0.02
 export HIL_SUCCESS_CONFIRMATIONS=1
@@ -627,11 +628,19 @@ required = feature replay/intervention fixed tensors
 
 기본 50k/10k의 replay/intervention fixed tensor는 `7,875,840,000 B`(camera `7,864,320,000 B` 포함)다. offline demo는 transition당 current/next, cam1/cam2 map을 추가한다. Linux `MemAvailable`이 required보다 작으면 할당 전에 실패한다.
 
+각 실행의 판정은 `--memory-preflight-path` JSONL에 append된다(생략하면
+`--jsonl-path` 옆 `memory-preflight.jsonl`). 첫 `forecast_before_model_setup`은
+모델 생성 전 전체 예상량을 검사하고, 통과한 경우
+`gate_before_replay_allocation`이 demo/model 적재 뒤 현재 `MemAvailable`을 다시
+검사한다. 어느 단계든 `decision=rejected`이면 기록을 먼저 `fsync`한 뒤 learner와
+gRPC worker를 시작하지 않는다.
+
 `--demo-extraction-batch-size`는 startup one-time trunk conversion의 temporary device/host batch를 제어한다. fake demo는 2, production default는 64를 사용하되 GPU memory가 부족하면 실험 기록을 남기고 줄인다. 이 값은 persistent pool size나 feature 의미를 바꾸지 않는다.
 
 ```bash
 grep '^MemAvailable:' /proc/meminfo
 free -h
+tail -n 2 "$HIL_MEMORY_PREFLIGHT_PATH"
 ```
 
 ## 3. fake acceptance demo 생성
@@ -688,6 +697,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
   --checkpoint-reserve-gib 2 \
   --jsonl-path "$HIL_JSONL_PATH" \
+  --memory-preflight-path "$HIL_MEMORY_PREFLIGHT_PATH" \
   --wandb-dir "$HIL_WANDB_DIR" \
   --wandb-mode offline \
   --wandb-project hil-serl \
@@ -1048,6 +1058,7 @@ export HIL_RUN_ROOT="/absolute/persistent/path/hil-serl-runs/$HIL_RUN_ID"
 export HIL_CHECKPOINT_ROOT="$HIL_RUN_ROOT/checkpoints"
 export HIL_WANDB_DIR="$HIL_RUN_ROOT/wandb"
 export HIL_JSONL_PATH="$HIL_RUN_ROOT/logs/learner.jsonl"
+export HIL_MEMORY_PREFLIGHT_PATH="$HIL_RUN_ROOT/logs/memory-preflight.jsonl"
 export HIL_RESNET_CACHE="$HIL_RUN_ROOT/assets/resnet10_params.pkl"
 export HIL_GRASP_PENALTY=-0.02
 
@@ -1080,6 +1091,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
   --checkpoint-reserve-gib 2 \
   --jsonl-path "$HIL_JSONL_PATH" \
+  --memory-preflight-path "$HIL_MEMORY_PREFLIGHT_PATH" \
   --wandb-dir "$HIL_WANDB_DIR" \
   --wandb-mode offline \
   --wandb-project hil-serl \
@@ -1247,6 +1259,7 @@ find "$HIL_CHECKPOINT_ROOT" -maxdepth 2 -type f \
   \( -name 'completion.json' -o -name 'metadata.json' \) -print
 
 tail -n 50 "$HIL_JSONL_PATH"
+tail -n 2 "$HIL_MEMORY_PREFLIGHT_PATH"
 df -h "$HIL_RUN_ROOT"
 ```
 

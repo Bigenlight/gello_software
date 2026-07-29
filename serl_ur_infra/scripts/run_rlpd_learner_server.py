@@ -182,6 +182,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--jsonl-path")
+    parser.add_argument(
+        "--memory-preflight-path",
+        help=(
+            "append-only JSONL audit for startup RAM gates; defaults to "
+            "memory-preflight.jsonl beside --jsonl-path"
+        ),
+    )
     parser.add_argument("--wandb-dir")
     parser.add_argument(
         "--wandb-mode",
@@ -453,6 +460,100 @@ def _preflight_combined_feature_memory(
     return available
 
 
+def _memory_preflight_path(
+    args: argparse.Namespace, checkpoint_manager: CheckpointManager
+) -> Path:
+    if args.memory_preflight_path:
+        return Path(args.memory_preflight_path).expanduser().resolve()
+    learner_log = Path(
+        args.jsonl_path
+        or checkpoint_manager.root / "logs" / "learner.jsonl"
+    ).expanduser().resolve()
+    return learner_log.with_name("memory-preflight.jsonl")
+
+
+def _append_memory_preflight_record(
+    path: os.PathLike[str] | str, record: dict[str, object]
+) -> Path:
+    """Durably append one startup decision before learner service starts."""
+
+    destination = Path(path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    with destination.open("a", encoding="utf-8") as stream:
+        stream.write(payload + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return destination
+
+
+def _record_combined_feature_memory_preflight(
+    *,
+    report_path: os.PathLike[str] | str,
+    phase: str,
+    replay_bytes: int,
+    demo_bytes: int,
+    reserve_bytes: int,
+    replay_capacity: int,
+    intervention_capacity: int,
+    demo_transition_count: int,
+    demo_sha256: list[str],
+) -> int:
+    """Use the existing RAM gate and persist both acceptance and refusal."""
+
+    available = system_available_memory_bytes()
+    refusal: FeatureReplayMemoryError | None = None
+    try:
+        checked_available = _preflight_combined_feature_memory(
+            replay_bytes=replay_bytes,
+            demo_bytes=demo_bytes,
+            reserve_bytes=reserve_bytes,
+            available_bytes=available,
+        )
+    except FeatureReplayMemoryError as exc:
+        checked_available = available
+        refusal = exc
+
+    required = replay_bytes + demo_bytes + reserve_bytes
+    record = {
+        "event": "rlpd_learner_memory_preflight",
+        "schema_version": 1,
+        "time_ns": time.time_ns(),
+        "phase": phase,
+        "decision": "rejected" if refusal is not None else "accepted",
+        "available_memory_bytes": checked_available,
+        "replay_fixed_tensor_bytes": replay_bytes,
+        "demo_tensor_bytes_in_this_gate": demo_bytes,
+        "reserve_bytes": reserve_bytes,
+        "required_available_bytes": required,
+        "margin_bytes": checked_available - required,
+        "replay_capacity": replay_capacity,
+        "intervention_capacity": intervention_capacity,
+        "offline_demo_transition_count": demo_transition_count,
+        "offline_demo_sha256": demo_sha256,
+    }
+    if refusal is not None:
+        record["refusal_detail"] = str(refusal)
+    destination = _append_memory_preflight_record(report_path, record)
+    _emit(
+        "rlpd_learner_memory_preflight",
+        phase=phase,
+        decision=record["decision"],
+        available_memory_bytes=checked_available,
+        required_available_bytes=required,
+        margin_bytes=checked_available - required,
+        report_path=str(destination),
+    )
+    if refusal is not None:
+        raise refusal
+    return checked_available
+
+
 def _validate_jax_backend(actual: str, required: str) -> str:
     actual = str(actual).strip().lower()
     if actual != required:
@@ -590,6 +691,18 @@ def _run_locked(
         intervention_capacity=args.intervention_capacity,
     )
     demo_memory_estimate = estimate_feature_demo_memory(demo_count)
+    memory_preflight_path = _memory_preflight_path(args, checkpoint_manager)
+    available_memory_bytes = _record_combined_feature_memory_preflight(
+        report_path=memory_preflight_path,
+        phase="forecast_before_model_setup",
+        replay_bytes=replay_memory_estimate.fixed_tensor_bytes,
+        demo_bytes=demo_memory_estimate.total_bytes,
+        reserve_bytes=feature_memory_reserve_bytes,
+        replay_capacity=args.replay_capacity,
+        intervention_capacity=args.intervention_capacity,
+        demo_transition_count=demo_count,
+        demo_sha256=demo_sha256,
+    )
     resnet_source = Path(
         args.resnet_source or default_resnet_source()
     ).expanduser().resolve()
@@ -677,11 +790,6 @@ def _run_locked(
         resume_path=resume_path,
     )
     _validate_synthetic_progress_target(args, prepared_state)
-    available_memory_bytes = _preflight_combined_feature_memory(
-        replay_bytes=replay_memory_estimate.fixed_tensor_bytes,
-        demo_bytes=demo_memory_estimate.total_bytes,
-        reserve_bytes=feature_memory_reserve_bytes,
-    )
     feature_extractor = FrozenResNet10TrunkExtractor(
         agent_template,
         resnet_asset_path=resnet_source,
@@ -706,12 +814,26 @@ def _run_locked(
     del demos
     gc.collect()
 
+    available_before_replay_bytes = _record_combined_feature_memory_preflight(
+        report_path=memory_preflight_path,
+        phase="gate_before_replay_allocation",
+        replay_bytes=replay_memory_estimate.fixed_tensor_bytes,
+        # The converted demo and model are resident now, so their RAM is
+        # already reflected in MemAvailable and must not be counted twice.
+        demo_bytes=0,
+        reserve_bytes=feature_memory_reserve_bytes,
+        replay_capacity=args.replay_capacity,
+        intervention_capacity=args.intervention_capacity,
+        demo_transition_count=demo_count,
+        demo_sha256=demo_sha256,
+    )
     raw_ingress = FeatureReplayIngress(
         feature_extractor=feature_extractor,
         replay_capacity=args.replay_capacity,
         intervention_capacity=args.intervention_capacity,
         seed=config.seed,
         expected_grasp_penalty=args.grasp_penalty,
+        available_memory_bytes=available_before_replay_bytes,
         memory_reserve_bytes=feature_memory_reserve_bytes,
     )
     ingress = FaultGatedReplayIngress(raw_ingress)
@@ -740,6 +862,10 @@ def _run_locked(
             ),
             "feature_memory": {
                 "available_at_preflight_bytes": available_memory_bytes,
+                "available_before_replay_allocation_bytes": (
+                    available_before_replay_bytes
+                ),
+                "preflight_report_path": str(memory_preflight_path),
                 "replay_fixed_tensor_bytes": (
                     replay_memory_estimate.fixed_tensor_bytes
                 ),

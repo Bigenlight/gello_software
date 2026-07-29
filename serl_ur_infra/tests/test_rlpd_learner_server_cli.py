@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -56,6 +57,7 @@ def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
     assert args.grasp_penalty == pytest.approx(-0.02)
     assert args.utd_ratio == 1
     assert args.feature_memory_reserve_gib == pytest.approx(2.0)
+    assert args.memory_preflight_path is None
     assert args.demo_extraction_batch_size == 64
     assert args.synthetic_e2e is False
     assert not hasattr(args, "require_grasp_penalty")
@@ -526,3 +528,52 @@ def test_combined_feature_memory_preflight_accounts_for_demo_and_reserve():
             reserve_bytes=30,
             available_bytes=59,
         )
+
+
+def test_memory_preflight_persists_acceptance_and_refusal(tmp_path, monkeypatch):
+    report = tmp_path / "logs" / "memory-preflight.jsonl"
+    available = 60
+    monkeypatch.setattr(
+        _MODULE, "system_available_memory_bytes", lambda: available
+    )
+    common = {
+        "report_path": report,
+        "phase": "forecast_before_model_setup",
+        "replay_bytes": 10,
+        "demo_bytes": 20,
+        "reserve_bytes": 30,
+        "replay_capacity": 50_000,
+        "intervention_capacity": 10_000,
+        "demo_transition_count": 2_037,
+        "demo_sha256": ["a" * 64],
+    }
+
+    assert _MODULE._record_combined_feature_memory_preflight(**common) == 60
+    first = json.loads(report.read_text().splitlines()[0])
+    assert first["decision"] == "accepted"
+    assert first["required_available_bytes"] == 60
+    assert first["margin_bytes"] == 0
+    assert first["offline_demo_transition_count"] == 2_037
+
+    available = 59
+    with pytest.raises(_MODULE.FeatureReplayMemoryError):
+        _MODULE._record_combined_feature_memory_preflight(**common)
+    second = json.loads(report.read_text().splitlines()[1])
+    assert second["decision"] == "rejected"
+    assert second["margin_bytes"] == -1
+    assert "persistent tensors" in second["refusal_detail"]
+
+
+def test_memory_preflight_defaults_beside_learner_jsonl(tmp_path):
+    args = _MODULE._parse_args(
+        [
+            *_required_args(tmp_path),
+            "--jsonl-path",
+            str(tmp_path / "run" / "logs" / "learner.jsonl"),
+        ]
+    )
+    manager = SimpleNamespace(root=tmp_path / "checkpoints")
+
+    assert _MODULE._memory_preflight_path(args, manager) == (
+        tmp_path / "run" / "logs" / "memory-preflight.jsonl"
+    ).resolve()
