@@ -3,14 +3,12 @@
 이 문서는 **아직 닫히지 않은 것**만 모은다. "곧 고칠 것" 같은 낙관적 표현을 쓰지 않는다.
 각 항목은 코드 근거 → 왜 위험한가 → **지금 쓸 수 있는 완화책** 순이다.
 
-> ## 🛑 게이트 선언
-> **G2 · G4 · G6 · G9가 닫히고, G1 · G3 · G13이 실기에서 확인되기 전에는
-> RL 정책 경로로 실기 UR7e를 구동하지 않는다.**
-> `DRY_RUN`은 기본값 `True`로 둔다 (`config.py:153`, `cube_in_cup.py:227`).
->
-> ⚠️ **2026-07-28에 팔이 실제로 움직였다. 그것은 이 게이트의 위반이 아니다** — 그때 돈 것은
-> 정책이 아니라 **zero-policy + 사람 개입**(`run_real_hil.py --arm --scale 0.25`)이었다.
-> 다만 그 세션은 **워크스페이스 박스가 꺼진 채로** 돌았다 (G1). 게이트는 그대로 유효하다.
+> ## 🛑 게이트 기록과 현재 사실
+> 이 문서의 이전 판은 G2/G4/G6/G9가 닫히기 전 policy 실기를 금지했다. 2026-07-29 사용자의
+> 명시적 승인 아래 first E2E smoke가 그 경계를 넘어 실제 policy 48 transition을 실행했다.
+> 이것을 “모든 gap이 닫혔다”로 해석하지 않는다. 결과는 원형 검증 PASS이고 continuous
+> production 승인은 아니다. 최신 판정은
+> [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)에 있다.
 
 ### 현황 요약 (2026-07-29, 머지 `3f199d4` 이후)
 
@@ -19,7 +17,7 @@
 | G1 | `clip_safety_box` | 🟢 구현·단위검증 | 🟠 **구현됐지만 실기에서 돌린 경로에서는 꺼져 있었다** — 아래 참조 |
 | G2 | `PolicyDeltaController` 단순화판 | 🔴 | 🔴 (변화 없음) |
 | G3 | 그리퍼 개입 | 🟡 코드 수정됨 | 🟡 (변화 없음 — 07-28 세션은 그리퍼 채널을 껐다) |
-| G4 | 두 퍼블리셔 충돌 / 업샘플러 스테일 | 🟠 | 🟠 **actor에도 가드 추가**(G4a 더 좁아짐), G4b는 그대로 |
+| G4 | 두 퍼블리셔 충돌 / 업샘플러 스테일 | 🟠 | 🟡 publisher 가드 유지, **G4b target-stale braking HOLD 구현** |
 | G5 | 19-D state 순서 | 🟢 | 🟢 (변화 없음) |
 | G6 | staleness 시 예외 | 🟠 | 🟠 |
 | G7 | 명목 DH ↔ 캘리브레이션 | 🟠 | 🟠 |
@@ -28,14 +26,17 @@
 | G10 | pinned submodule | 🟡 | 🟡 (📌 07-29 현재 초기화돼 있음) |
 | G11 | build/gripper shell | 🟢 | 🟢 |
 | G12 | 스페이스바 데드맨 기본값 | 🟢 해결 | 🟢 **해결 확정** — 두 entrypoint 모두 `--deadman` 기본값 `topic` |
-| G13 | 리셋 branch-cut | 🟡 수정·단위검증 | 🟡 (변화 없음 — 07-28 세션이 이 경로를 안 탔다) |
+| G13 | 리셋 branch-cut | 🟡 수정·단위검증 | 🟢 preposition과 100-step episode reset 경로를 첫 actor 실기에서 통과 |
 | G14 | 시스템 grpcio 1.30.2 손상 | 🟠 완화만 | 🟠 (📌 07-29 재확인: 여전히 1.30.2) |
-| G15 | 분류기 전처리 ↔ 크롭 불일치 | 🔴 증명됨·미유입 | 🟡 **코드 해결(sidecar 분리) · 실기 미검증.** 잔여 결함은 크롭이 아니라 **가림** — 아래 G15 §잔여 |
-| G16 | 10 Hz 레이턴시 예산 소진 | 🟠 | 🟠 유선 전환 필요. sidecar는 **+2.8% 상행**만 더한다(q95, 쌍 13.32 KiB 실측). 링크가 세션 간 **6배** 흔들리는 것이 진짜 문제 |
+| G15 | 분류기 전처리 ↔ 크롭 불일치 | 🔴 증명됨·미유입 | 🟡 sidecar가 실물 actor에 유입됨. **per-step verdict 관측과 가림**은 남음 |
+| G16 | 10 Hz 레이턴시 예산 소진 | 🟠 | 🔴 첫 실기에서 RPC deadline 발생. 첫 publish 5.474 s + 동시 학습/추론 contention |
 | **G17** | **전역 ESC 리스너** | (미기재) | 🟠 **신규 기재** — 데드맨과 별개, 아무 창의 ESC가 에피소드를 끝낸다 |
 | **G18** | **`ACTION_SCALE`이 learner fingerprint에 없다** | (미발견) | 🟠 **신규** — 스케일이 바뀌어도 경고 없이 resume된다 |
 | **G19** | **`checkpoint_sha256()`가 orbax 디렉터리를 pin 못 한다** | (미발견) | 🟢 **해결.** `directory_sha256()` 위임 + 두 기본 SHA 교체. G15과 **같은 변경**에서 처리됐다 |
 | **G20** | **canonical demo가 없다** | (미발견) | 🟢 **해결(2026-07-29)** — 사용자가 `take_23` 제외 23개를 success로 승인했고 2,037-transition 영구 artifact를 laptop3/Kanu에서 검증 |
+| **G21** | **첫 publish/동시 learner가 actor RPC를 막음** | (미발견) | 🔴 replay 201에서 실제 `DEADLINE_EXCEEDED` — 아래 |
+| **G22** | **commissioning ENGAGED gate가 policy-first 시작을 막음** | (미발견) | 🟠 wrapper는 policy-first 지원, launcher UX 미분리 |
+| **G23** | **success 후 scene reset WAIT/Resume와 verdict GUI 없음** | (미발견) | 🔴 reset 뒤 즉시 새 episode |
 
 ```bash
 export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
@@ -260,7 +261,7 @@ README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**
 
 ---
 
-## G4 — 두 퍼블리셔 충돌 + 명령 스트림 타임아웃 부재 🔴
+## G4 — 두 퍼블리셔 충돌 + 명령 스트림 timeout 🟡
 
 ### G4a — 두 퍼블리셔
 
@@ -293,23 +294,16 @@ ros2 topic info /forward_position_controller/commands --verbose | grep -c "Node 
 > **`run_rviz_hil.py`(mock 러너)에는 여전히 없다.** 그리고 사람이 손으로 두 스택을
 > 띄우는 것은 어떤 가드도 막지 못한다 — 그래서 G4a는 🟠이지 🟢이 아니다.
 
-### G4b — 업샘플러에 타깃 스테일 정책이 없다
+### G4b — target-stale braking HOLD 구현됨
 
-```python
-# ros_backend.py:417-421
-# Once at the target it keeps publishing the held pose; if the env dies
-# the robot simply holds position. TODO(together): target-staleness
-# policy (stop publishing after N s without a fresh target?), to be
-# decided with the other safe-stop cases.
-```
+`ca19652`부터 250 Hz streamer는 마지막 target timestamp가 0.30초를 넘으면 기존 먼 목표를
+계속 추종하지 않는다. 현재 속도와 8 rad/s² 가속도 제한으로 계산한 braking endpoint로 목표를
+바꾸고 HOLD한다 (`ros_backend.py::AccelerationLimitedJointStreamer.tick`,
+`request_hold`). GELLO가 ENGAGED인 채 joints가 0.3초 stale이어도 같은 braking HOLD와
+controller re-anchor를 사용한다.
 
-- 프로세스가 죽으면 daemon 스레드도 죽으니 괜찮다.
-- **프로세스는 살아 있는데 env 루프만 멈춘 경우**(카메라 디코드 hang, gRPC 대기 등)에는
-  업샘플러가 **마지막 타깃을 무한히 재발행**한다. 지시하는 사람이 없는 명령이 계속 나간다.
-- 시나리오 E3b (`07_FAILURE_INJECTION.md`)에서 관측하기로 되어 있으나 **미실행**이다.
-
-**완화책:** 세션 중 `ros2 topic hz /forward_position_controller/commands`를 별도 창에 띄워
-두고, 러너가 멈췄는데 250 Hz가 유지되면 즉시 Ctrl-C/E-STOP.
+남는 위험은 publisher가 아예 사라지는 host/power loss와 실제 controller_manager 장애다.
+actor 정상/예외 종료에서는 publisher 소멸 뒤 FPC -> STJC 자동 복귀가 실물에서 확인됐다.
 
 ---
 
@@ -510,7 +504,7 @@ gain이 1.0으로 고정이고(`:126-127`), 하트비트 워치독이 없다.
 
 ---
 
-## G13 — 리셋이 손목을 **한 바퀴 돌릴 수 있었다** 🟡 (수정됨, 실기 미검증)
+## G13 — 리셋이 손목을 **한 바퀴 돌릴 수 있었다** 🟢 (수정·실기 확인)
 
 ### 사실
 
@@ -541,16 +535,12 @@ gain이 1.0으로 고정이고(`:126-127`), 하트비트 워치독이 없다.
 `RESET_JOINTS`까지의 branch-safe 거리가 중앙값 0.615 / 최대 0.774라서, `0.5`는
 **23개 중 16개의 정상 종료 자세를 거부**했다 (= 대부분의 에피소드 뒤에 `reset()`이 예외).
 
-### 남은 위험
+### 실기 확인과 남은 규칙
 
-- **실기에서 이 리셋을 한 번도 실행하지 않았다.**
-  🔧 2026-07-28에 팔이 움직였지만 `run_real_hil.py --reset-mode startup`은
-  **기동 시점의 실제 관절을 그대로 `RESET_JOINTS`로 잡는다** — ±π 경계를 건드리지 않으므로
-  이 경로가 실행되지 않았다. 이 갭은 그 세션으로 닫히지 **않았다.**
-- 닫으려면 `cube_in_cup`의 `RESET_JOINTS`를 쓰는 경로(actor 또는 `--ur-config-module`)로
-  가야 한다. 첫 실기 리셋은 `DRY_RUN`으로 로그만 보고,
-  명령된 `wrist_3`가 현재 값 근처인지 눈으로 확인한 뒤 arm한다 (`07` E14).
-- 이 함정은 `go_to_reset()` 밖에도 있다. **`RESET_JOINTS`와 관절값을 비교하는 새 코드는
+- 2026-07-29 `run_hil_preposition.sh`가 실제 `cube_in_cup RESET_JOINTS`로 이동했고,
+  `wrist_3`의 raw target `-3.1331`과 live `+3.1501`을 safe error `0.0000`으로 판정했다.
+  첫 actor run도 201 transition 동안 100-step episode 경계를 통과해 같은 env reset 경로를 썼다.
+- 이 함정은 `go_to_reset()` 밖에는 여전히 적용된다. **`RESET_JOINTS`와 관절값을 비교하는 새 코드는
   전부 branch-cut safe여야 한다.** 순진한 차이는 동일 자세를 ~2π 떨어진 것으로 보고한다.
   `cube_in_cup.py:82-89`가 그 이유를 데이터로 적어 뒀다 (시연 표본의 96 %가 `wrist_3 < -π`).
 
@@ -604,7 +594,7 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 
 ---
 
-## G15 — 분류기가 **크롭 없이 학습됐는데 액터는 크롭해서 먹인다** 🟡 코드 해결 · 실기 미검증
+## G15 — 분류기 크롭 불일치 🟡 sidecar 배선 실기 PASS · verdict 관측 미완료
 
 > ### ✅ 2026-07-29 (후속): **닫혔다 — 분류기에게 무크롭 sidecar를 따로 준다**
 > 액터가 분류기 전용 무크롭 원본 JPEG를 관측에 실어 보낸다(약 2 Hz, 팔 정지 시).
@@ -613,7 +603,8 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 > 서버가 조용히 뜨고 reward가 영구 0이 된다.
 >
 > **🔴 두 가지를 같이 기억할 것:**
-> 1. **실기 미검증.** 코드·단위테스트까지다.
+> 1. 첫 실물 actor가 production sidecar 설정으로 transition을 전송했다. 다만 per-transition
+>    probability/verdict가 GUI나 영구 JSONL에 없어 장면별 online 판정 정합은 아직 미확인이다.
 > 2. **가림(occlusion)은 안 고쳐졌다** — 아래 §잔여. 그건 크롭이 아니라 카메라 배치 문제다.
 >
 > 아래 07-28/29 판의 기록은 **그대로 보존한다.** 이 갭이 왜 최상위 블로커였는지,
@@ -1106,6 +1097,61 @@ artifact로 충족됐다. 다만 actor 자체의 주기적 pickle 기록 배선�
 
 ---
 
+## G21 — 첫 publish와 동시 learner가 actor RPC를 막는다 🔴
+
+첫 실제 production-model actor run은 replay 201개를 accepted한 뒤
+`Step RPC DEADLINE_EXCEEDED`로 종료됐다. 과거 transition-100 cold JIT 문제는 startup
+warm-up으로 해소됐다. 이번 run의 상관관계는 다르다.
+
+- actor와 learner가 동시에 돌던 learner step 1~46 중앙값: 약 **1.123 s**
+- actor 종료 뒤 learner step 51~102 중앙값: 약 **457 ms**
+- 첫 `policy_published` 경계(step 50): **5.474 s**
+- 두 번째 publish(step 100): 약 **456 ms**
+- actor `Step RPC` deadline: **0.6 s**
+
+server가 transition을 accept한 뒤 다음 action을 inference하므로 response timeout에도 마지막
+transition 201은 exactly-once로 replay에 남을 수 있다. server fault나 네트워크 단절 로그는 없다.
+현재 가장 강한 해석은 첫 publish validation/smoke의 일회성 stall과 같은 GPU/process의
+learner/inference contention이다.
+
+**다음 조치:** transition ID 기준 server phase latency를 계측하고 actor-serving 우선순위를
+정한다. 원인을 숨기기 위해 timeout만 늘리지 않는다. learner-side policy publish와 그 version의
+actor/robot 수신을 별도 acceptance로 유지한다.
+
+---
+
+## G22 — commissioning ENGAGED gate와 policy-first HIL이 섞여 있다 🟠
+
+`GelloIntervention`의 정상 의미는 `DISENGAGED=policy`, `ENGAGED=GELLO override`다. 하지만
+`run_hil_actor.sh --arm`은 preflight와 controller switch 직전에 fresh ENGAGED heartbeat 3개를
+강제한다. 초기 untrained action이 거의 포화였던 첫 commissioning에는 타당했지만, “policy가
+먼저 수행하고 필요할 때만 사람이 개입”하는 정상 HIL 시작 UX와는 다르다.
+
+현재 우회 절차는 ENGAGED로 시작한 뒤 actor 기동이 끝나면 operator가 DISENGAGE하는 것이다.
+DISENGAGE는 정지/HOLD가 아니라 즉시 policy handback이므로 중단 수단으로 사용하지 않는다.
+
+**다음 조치:** heartbeat freshness는 유지하면서 `commissioning`과 `policy-first` startup mode를
+분리한다. wrapper의 action routing 자체를 다시 만들 필요는 없다.
+
+---
+
+## G23 — terminal verdict와 scene reset WAIT/Resume가 없다 🔴
+
+현재 classifier success 또는 local 100-step limit은 terminal ACK 뒤 곧바로 다음을 수행한다.
+
+```text
+env.reset() -> arm RESET_JOINTS 이동 -> 새 session -> BeginEpisode
+```
+
+gripper/실제 cube scene은 reset하지 않으며 operator 확인이나 WAIT가 없다. HIL GUI도 deadman/gain만
+보여 주고 actor가 이미 받은 `classifier_probability`, `success`, terminal reason을 표시하지 않는다.
+ENGAGED로 억지 대기하면 intervention transition을 계속 생성하므로 scene-reset gate를 대신하지 못한다.
+
+**다음 조치:** `SUCCESS/TIME_LIMIT -> HOMING -> WAIT_SCENE_READY -> operator START -> POLICY`
+상태 기계를 actor episode 경계에 넣고, GUI에 control owner와 classifier verdict를 노출한다.
+
+---
+
 ## 부록 — 다른 파일에서 발견된 낡은 서술
 
 **이 표의 항목은 전부 `docs/testing/` 밖이다. 고치는 것은 각 파일 소유자의 몫이고,
@@ -1124,4 +1170,3 @@ artifact로 충족됐다. 다만 actor 자체의 주기적 pickle 기록 배선�
 | `serl_ur_infra/ur_experiments/cube_in_cup.py:126` | true-TCP 전환 시 z 한계를 `0.0045 .. 0.376`이라고 적음 | **산술이 낡았다.** z 바닥이 `0.1785`→`0.185`로 올라갈 때 안 따라왔다. `0.185 − 0.174 = 0.011`이 맞다 → G1 |
 | `ros2_ur_ws/src/gello_policy/config/act_deploy.yaml:35` (및 diffusion/FM 형제) | 키 이름은 `start_pose`이고 값은 `[3.106, -1.817, 1.653, -1.618, -1.628, -3.195]`, 주석은 그냥 "the dataset's start pose" | 그건 **banana-in-pot** 자세다. cube_in_cup과 어깨에서 0.29 rad 차이 = TCP가 13 cm 높고 10 cm 뒤. **HIL에 복사하지 말 것.** cube_in_cup 값은 `[3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331]` (`cube_in_cup.py:90-92`). (07-27 판은 이 키를 `RESET_JOINTS`라고 불렀는데 그건 이 리포 쪽 이름이다) |
 | `docs/ros2/GELLO_UR7E_{ACT,DIFFUSION,FM}_DEPLOY.md`, `ros2_ur_ws/src/gello_{policy,recorder}/README.md` | 카메라 시리얼이 리터럴로 박혀 있음 | 시리얼은 이제 `_resolve_camera_serials.sh`가 live 버스에서 해석한다. 리터럴은 **둘 중 어느 쌍이든 동전 던지기** → `06_SENSORS.md` §1.1 |
-| `serl_ur_infra/README.md` 머리말 | "⚠️ UNTESTED SKELETON" | **여전히 맞다** (실기 RL **정책** 경로 미검증). 유지. 단 zero-policy + 사람 개입 경로는 07-28에 실기에서 돌았다 |

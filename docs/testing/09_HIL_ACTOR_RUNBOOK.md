@@ -2,9 +2,10 @@
 
 > ## 🛑 지금 이 문서를 읽는 사람이 먼저 알아야 할 것 (2026-07-29)
 >
-> 1. **actor entrypoint는 실기에서 한 번도 안 돌았다.** 지금까지 팔을 움직인 것은 전부
->    `serl_ur_infra/tests/run_real_hil.py`(`04` §4.5)이고, **다른 코드 경로**다.
->    `04`의 PASS를 이 문서의 PASS로 승격하지 말 것.
+> 1. **2026-07-29 actor entrypoint의 첫 실제 production-model run을 완료했다.**
+>    실제 replay 201개, intervention 153개, learner 102 step, policy version 2까지 갔다.
+>    첫 publish 경계에서 `Step RPC DEADLINE_EXCEEDED`로 종료됐으므로 continuous run은
+>    아직 PARTIAL이다.
 > 2. **actor entrypoint에 CLI 플래그 3개가 생겼다** (§1.2에 정리):
 >    `--arm`, `--deadman {topic,spacebar}`(기본 `topic`), `--mock-policy-noise SIGMA`.
 >    §4의 "DRY_RUN 해제는 이 문서의 범위가 아니다"는 **더 이상 맞지 않는다.**
@@ -15,21 +16,22 @@
 >    ~~머지가 크롭 불일치를 들여왔고 Stage B 전에 처리해야 한다~~는 더 이상 맞지 않는다.
 >    actor가 분류기에게 **자기 몫의 무크롭 128×128 JPEG(sidecar)**를 약 2 Hz로 따로 붙여
 >    보내고, 정책은 실측 `IMAGE_CROP`을 그대로 쓴다 (`05` §3.2).
->    **그러나 이 경로는 실기에서 한 번도 안 돌았다.** 그리고 `DRY_RUN`이 팔만 막고
->    **보상/종단은 막지 않는다**는 사실은 그대로다 — Stage B에서 replay에 들어가는 reward는
->    여전히 검증되지 않은 값이다. §4.4의 확인을 먼저 한다.
+>    이 경로는 첫 실제 actor run에서 production server로 전송됐다. 다만 현재 GUI/JSONL에는
+>    per-transition classifier probability가 보이지 않으므로 **online verdict 정합 검증**은
+>    아직 남아 있다. `DRY_RUN`이 팔만 막고 보상/종단은 막지 않는다는 사실도 그대로다.
 > 5. **actor에 sidecar 플래그 4개, 서버에 `--reward-model-id` 기본값이 생겼다.**
 >    `EXPECTED_REWARD_MODEL_ID`가 **`cube-in-cup-all3-ckpt150+sidecar-v1`**로 바뀌었고,
 >    옛 값 `cube-in-cup-checkpoint-150`은 **핸드셰이크에서 거부된다** (§1.1, §2.2).
-> 6. **Kanu에 지금 아무것도 안 떠 있다** (port 50053 미바인딩, GPU 유휴).
->    §2는 "이미 떠 있는 서버에 붙는" 절차가 아니라 **새로 띄우는** 절차다.
+> 6. 첫 E2E learner는 문서 작성 시점 PID `159159`, port 50053에서 아직 살아 있었다.
+>    다음 세션에는 이 값을 믿지 말고 `pgrep`/`ss`로 확인한다. 살아 있으면 duplicate를 띄우지 않는다.
 >
-> 현재 상태는 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](../../serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 볼 것.
+> 현재 상태는 [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)를 볼 것.
 
 > 이 문서는 **로봇 랩톱(`laptop3`)에서 HIL-SERL actor 프로세스를 띄우는 절차**만 다룬다.
 > 학습 알고리즘, 보상 분류기 학습, 정책 성능은 범위 밖이다.
-> 실행은 전부 `ros2_ur_ws/run_hil_actor.sh` 하나로 통일한다. **손으로 python 명령을
-> 치지 않는다** — 2026-07-27 실기에서 그것 때문에만 4번 실패했다 (§0).
+> 정상 운용은 `run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh` 세 wrapper로
+> 통일한다. actor만 진단할 때는 `run_hil_actor.sh`를 쓰되 **손으로 python 명령을 치지 않는다** —
+> 2026-07-27 실기에서 그것 때문에만 4번 실패했다 (§0).
 
 ```bash
 # 이 문서의 모든 명령이 쓰는 변수
@@ -61,6 +63,46 @@ preflight는 네 모듈이 **이 트리 안에서** 해석됐는지 경로로 �
 ---
 
 ## 1. `run_hil_actor.sh` — 사용법
+
+### 1.0 운영용 3-CLI quick start
+
+개별 terminal T0~T6 명령은 장애 진단의 정본으로 아래에 보존한다. 평상시 운용은 다음 세
+wrapper로 묶는다.
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws
+
+# Terminal A: Kanu learner + SSH tunnel
+./run_hil_server.sh
+
+# Terminal B: UR7e driver + gripper + GELLO reader
+./run_hil_hardware.sh
+
+# Terminal C: cameras + HIL GUI + preposition/preflight + armed actor
+./run_hil_session.sh
+```
+
+- A는 exact production learner를 재사용하거나 없을 때만 RAM/artifact gate 뒤 새로 띄우고,
+  local `50153 -> Kanu 50053` tunnel을 유지한다. `Ctrl-C`는 tunnel만 닫는다.
+- B는 UR7e/Robotiq/GELLO만 소유한다. 충돌·연결 해제 뒤 C를 내리고 B의 cleanup 완료 후 B만
+  다시 띄울 수 있다.
+- C는 카메라/GUI/preposition/armed preflight/actor를 순서대로 실행한다. 현재는 시작 전 GUI
+  `ENGAGED` 확인이 필요하고, actor 기동 후 `DISENGAGE`해야 policy 제어가 시작된다.
+
+읽기 전용/무접촉 진단은 다음과 같다.
+
+```bash
+./run_hil_server.sh --check
+./run_hil_hardware.sh --dry-run
+./run_hil_session.sh --no-arm --plan
+```
+
+매-step classifier 평가는 지연 진단이 필요할 때만
+`./run_hil_session.sh --classifier-sidecar-interval 1`로 켠다. 기본 cadence는 5 step이다.
+
+세 wrapper의 옵션과 현재 제약은
+[`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)
+§9를 따른다. 아래 개별 명령은 wrapper 고장이나 하드웨어 재연결을 진단할 때 사용한다.
 
 ```bash
 cd $WT/ros2_ur_ws
@@ -435,6 +477,7 @@ ros2 launch ur_robot_driver ur_control.launch.py \
   ur_type:=ur7e \
   robot_ip:=192.168.10.11 \
   headless_mode:=true \
+  launch_rviz:=false \
   initial_joint_controller:=scaled_joint_trajectory_controller \
   use_tool_communication:=true \
   tool_voltage:=24 \
@@ -710,10 +753,13 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
   strict 복귀한다. `controller cleanup PASS`를 확인한다. publisher가 남거나 controller 쌍이
   예상 밖이면 자동 switch를 거부하고 rc 70으로 끝나므로 `ros2 control list_controllers`와
   `ros2 topic info -v /forward_position_controller/commands`를 직접 확인한다.
-* GELLO 개입 중이면 T5 GUI에서 **DISENGAGE**.
+* **DISENGAGE는 정지가 아니다.** 살아 있는 actor에서 누르면 즉시 policy가 제어한다.
+  actor terminal의 Ctrl-C 또는 필요 시 E-STOP으로 actor/robot을 먼저 멈추고,
+  `controller cleanup PASS` 뒤 GUI 상태를 정리한다.
 * 터널이 죽으면 actor는 타임아웃으로 실패한다. §2.4를 다시 띄우고 actor를 재시작한다.
 * Kanu 세션을 끝낼 때는 서버와 터널을 정상 종료해 **쓰던 GPU와 포트 50053을 반납**한다.
-  (📌 2026-07-29 현재 50053은 비어 있고 GPU도 유휴다. Kanu 디스크는 95 % 사용, 여유 90 G.)
+  문서의 PID/GPU 스냅샷을 믿지 말고 `run_hil_server.sh --check`와 Terminal 1 READY 배너에서
+  현재 process/run root를 확인한다.
 
 ---
 
@@ -730,11 +776,11 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A3 | `--fake-env`에서 센서 점검이 WARN으로 강등 | **PASS** | 격리 ROS 도메인에서 경고 4건 + 통과 |
 | A4 | PYTHONPATH 이어붙임 | **PASS** | `PYTHONPATH=/pre/existing`를 미리 잡고 실행해도 `ur_gello_bringup`이 오버레이에서 해석됨 |
 | A5 | 인자 통과 | **PASS** | `--fake-env --save-video --actor-id …`가 최종 argv 끝에 그대로 붙음 |
-| A6 | `--arm` controller handoff | **실기 PASS / 자동 복귀 재실기 대기** | 2026-07-29 실물에서 RESET proof 뒤 STJC→FPC strict switch와 postcondition이 통과했다. `ca19652`의 publisher-first teardown·FPC→STJC 자동 복귀는 focused control 137 tests를 통과했고 다음 실기 종료에서 최종 확인한다 |
+| A6 | `--arm` controller handoff + 자동 복귀 | **실기 PASS** | RESET proof 뒤 STJC→FPC strict switch, actor deadline 예외 뒤 publisher-first teardown과 FPC→STJC `controller cleanup PASS`를 실제 controller_manager에서 확인 |
 | B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
-| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **첫 B3와 결합 / 미검증** | no-arm은 transition을 보내지 않으므로 GUI ENGAGE + 정지 GELLO 상태의 첫 `--arm`에서 확인한다. live 확률 판독구는 아직 없다 |
-| B3 | actor `--arm` (실제 팔 구동) | **부분 PASS / `ca19652` 재실기 대기** | 이전 코드로 실물 handoff·policy/GELLO 구동까지 진입했으나 transition 100의 lazy JAX compile 때문에 RPC timeout이 났다. `ca19652`는 port bind 전 3-cycle warm-up과 250 Hz 가속도 제한 보간을 넣었고 Kanu 실측 steady cycle 466 ms/no-submit RTT 47.75 ms를 통과했다. 첫 재시험은 GUI를 미리 ENGAGE하고 GELLO를 정지 anchor에 둔 §4.4 smoke로만 시작한다 |
+| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **배선 PASS / verdict 관측 미완료** | production sidecar 설정으로 실제 transition이 들어갔다. per-transition `p(success)`를 GUI/영구 로그에서 볼 수 없어 장면별 판정 정합은 아직 미확인 |
+| B3 | actor `--arm` (실제 팔 구동) | **핵심 E2E PASS / continuous PARTIAL** | replay 201, intervention 153, learner 102/gradient 204, policy publish v1/v2. 첫 publish가 5.474 s 걸린 경계에서 actor `Step RPC` 0.6 s timeout. learner publish가 actor에 전달됐다는 증거는 별도 미확인 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
 
 ---

@@ -1,9 +1,11 @@
 # HIL-SERL learner Kanu 실행 runbook
 
-> 상태: **실물 로봇 production learning smoke 진입 가능**. 실제 arm 실행은 아직 operator 검증 항목이다.
+> 상태: **첫 실물 production-model learning smoke 완료**. 실제 transition 201개와
+> learner 102 step/policy version 2까지 갔지만 첫 publish 경계의 RPC deadline 때문에
+> continuous run은 아직 PARTIAL이다.
 >
 > 기준일: **2026-07-29 21:05 KST**. 현재 실기 준비 **코드 기준선**은 **`ca19652`**이다.
-> 이 커밋은 no-arm 무전송 probe, deadman/leader-loss HOLD, proof 기반 controller
+> 이 커밋은 no-arm 무전송 probe, deadman heartbeat fail-stop/GELLO leader-loss braking HOLD, proof 기반 controller
 > handoff와 종료 후 자동 복귀, 250 Hz 가속도 제한 보간, JAX update 사전 warm-up을 모두 포함한다.
 > 그 이후 문서-only descendant는 허용하되 양쪽 exact HEAD가 같은지는 매번 명령으로 확인한다.
 >
@@ -21,6 +23,15 @@
 
 ### 2026-07-29 최종 준비 증거
 
+> **🆕 첫 실제 robot E2E 결과:** 아래 준비를 마친 fresh lineage
+> `/home/junhyeong/hil-serl-data/runs/cube_in_cup_real_20260729_120225`에 replay **201**,
+> intervention **153**(76.12%), offline demo 2,037이 들어갔다. learner **102** /
+> gradient **204**, policy publish **v1@50 / v2@100**까지 정상이다. 다만 learner-side
+> publish가 timeout 전에 actor로 전달됐다는 per-RPC 증거는 없다. actor는 첫 publish 경계에서
+> `Step RPC DEADLINE_EXCEEDED`로 종료됐고 controller는 FPC -> STJC로 자동 복귀했다.
+> 정량 해석과 다음 방향은
+> [HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](./HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)에 있다.
+
 - `ca19652`에서 실제 model/demo/production capacity로 startup update path를 세 번
   warm-up했다. cycle은 **46.83 s → 37.22 s → 466 ms**였고, 이 작업은 port bind 전에
   끝났다. learner/gradient/policy counter는 모두 0이었다. 증거 root:
@@ -29,8 +40,9 @@
   **47.75 ms**, Step RPC/robot action/replay insert 모두 0으로 통과했다. probe가 inference
   RNG를 한 번 소비한 run은 종료·보존했고, 실제 transition용 fresh lineage
   `/home/junhyeong/hil-serl-data/runs/cube_in_cup_real_20260729_120225`를 새로 띄웠다.
-  기록 시점 PID는 `159159`, GPU 5, port 50053, counter는 모두 0이다. 이 PID가 이후에도
-  살아 있다고 가정하지 말고 `pgrep`/`ss`/JSONL로 확인한다.
+  이 lineage가 위 첫 robot E2E에 사용됐다. 문서 작성 시점 PID는 `159159`, GPU 5,
+  port 50053으로 여전히 health-ready였고 counter는 102/204/2다. PID와 process 생존은
+  다음 세션에 `pgrep`/`ss`/JSONL로 다시 확인한다.
 
 - 실제 E2E 실행 시점에 laptop3와 Kanu 영속 checkout의 HEAD는 `18e3696`으로 동기화됐다.
   아래 증거를 기록한 문서 commit 뒤에는 branch tip이 달라질 수 있으므로 현재 HEAD는 직접 읽는다.
@@ -46,8 +58,29 @@
 - 그 probe의 초기 untrained policy action은 `max_abs=0.99894`였다. 범위 위반은 아니지만
   거의 포화이므로 첫 실기는 **GUI를 먼저 ENGAGE하고 actor를 시작**하며, 사람이 명시적으로
   policy에 넘길 준비가 될 때까지 DISENGAGE하지 않는다.
-- 검증 후 disposable server와 tunnel은 정상 종료했다. 즉 이 문서를 읽는 시점에 port
-  50053/50153이 떠 있다고 가정하지 말고 아래 명령으로 새 production lineage를 시작한다.
+- 검증용 disposable server와 tunnel은 정상 종료했다. 별도의 첫 E2E production learner는
+  문서 작성 시점에 살아 있었지만, 다음 세션에 PID/port 생존을 가정하지 않는다. 아래 운영
+  wrapper가 exact process를 검사해 살아 있으면 재사용하고, 없을 때만 새 production lineage를
+  시작한다.
+
+## 정상 운용용 laptop 명령
+
+Kanu의 긴 수동 CLI는 계약 감사와 장애 진단을 위해 아래에 보존한다. 평상시에는 laptop3에서
+다음 한 명령이 learner 확인/재사용 또는 새 기동과 SSH tunnel을 함께 소유한다.
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws
+./run_hil_server.sh
+```
+
+- `./run_hil_server.sh --check`: artifact/process/gRPC 상태만 읽고 learner/tunnel을 만들지 않는다.
+- 정확한 healthy learner가 있으면 재사용한다. duplicate·non-production process는 거절한다.
+- learner가 없을 때만 production SHA/CLI/GPU/RAM gate 뒤 unique run root에 detached로 시작한다.
+- `Ctrl-C`는 이 wrapper의 tunnel만 닫고 Kanu learner는 계속 실행한다.
+- `--new-lineage`는 healthy/initializing learner가 있으면 그것을 멈추거나 재사용하지 않고 거절한다.
+
+나머지 두 laptop 명령을 포함한 전체 절차는
+[HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](./HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) §9가 정본이다.
 
 ## Claude 전달용: 실물 로봇 학습 smoke 최소 절차
 
@@ -176,6 +209,11 @@
 | 0~99 | 0 | 0 | 0 | warm-up 중이지만 초기 SAC policy inference는 계속 제공 |
 | 100 | 1 | 2 | 0 | 첫 실제 CTA update 완료 |
 | 149 | 50 | 100 | 1 | 첫 검증 snapshot publish; 이후 RPC가 version 1 policy action 사용 |
+
+이 표의 accepted transition 수는 **learner가 backlog 없이 즉시 따라잡을 때의 update eligibility
+상한**이다. 실제 wall-clock publish는 늦을 수 있다. 첫 실물 run에서는 actor와 learner의
+contention으로 첫 publish가 replay 약 200 부근에서 일어났고 5.474초가 걸렸다. 따라서
+`policy_published` event만으로 그 version의 action이 actor/robot에 전달됐다고 판정하지 않는다.
 
 최소 learning smoke PASS는 JSONL의 `learner_update`에서 `learner_step=1`, `gradient_step=2`와 finite loss/timing을 확인하는 것이다. **학습된 policy가 다시 로봇으로 전달되는 것까지** 확인하려면 `policy_published`의 `learner_step=50`, `policy_version=1`과 그 이후 actor RPC를 확인한다. classifier sidecar build failure, classifier가 한 번도 평가되지 않은 episode 경고, `rlpd_learner_worker_fault`, `rlpd_learner_actor_service_fault`, non-finite update 중 하나라도 나오면 FAIL이다.
 
@@ -1209,10 +1247,10 @@ ssh -N -T -o ExitOnForwardFailure=yes \
 
 ## 8. laptop robot actor
 
-> ⚠️ **`run_remote_rlpd_actor.py --arm`은 실기에서 아직 한 번도 실행되지 않았다**
-> (2026-07-29). 실제 모델 + fake env no-submit gRPC probe는 통과했지만 UR7e를 움직인 것은
-> 전부 `serl_ur_infra/tests/run_real_hil.py`의 다른 경로다. 아래는 첫 실기용으로 준비·검증한
-> command이지 이미 실기 통과한 절차는 아니다.
+> ✅ **`run_remote_rlpd_actor.py --arm`은 2026-07-29 실제 UR7e에서 실행됐다.**
+> policy/GELLO 제어권 전환, 201 transition, online learner update와 controller 자동 복귀까지
+> 확인했다. 다만 첫 publish 경계의 RPC timeout이 남아 있으므로 아래 command는 연속 운용
+> 완료 절차가 아니라 재현/후속 진단 절차다.
 
 이 절은 **laptop3**에서 실행한다. `/home/laptop3/gello_software`는 laptop3의 canonical checkout이고 Kanu에는 없다.
 

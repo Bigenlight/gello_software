@@ -1,5 +1,11 @@
 # 다음 세션 인수인계 — HIL-SERL 실기 투입
 
+> **⛔ 현재 상태 문서로는 대체됐다.** 이 문서는 첫 production-model actor 실기 이전의
+> 하드웨어·classifier 조사 기록이므로 본문에 “actor 실기 미실행”, “sidecar 실기 미검증” 같은
+> 현재는 틀린 문장이 남아 있다. 다음 세션은 먼저
+> [HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](./HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)를
+> 읽는다. 세부 측정 근거를 추적할 때만 이 문서의 해당 절을 참고한다.
+
 > 갱신: 2026-07-29 KST · branch `feat/gello-ur7e-humble-22.04` · 기준 머지 `3f199d4` 이후
 > (문서 커밋이 계속 올라오므로 HEAD 해시는 고정하지 않는다)
 >

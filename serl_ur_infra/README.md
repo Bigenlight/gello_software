@@ -3,16 +3,16 @@
 `third_party/hil-serl`의 `serl_robot_infra`(Franka 전용)에 대응하는 **UR7e + GELLO** robot infra.
 `FrankaEnv`의 관측/액션 계약을 그대로 복제해서 hil-serl의 wrapper 체인·actor 루프가 무수정으로 돌게 한다.
 
-> 🚩 **이 리포에 처음 왔다면** 루트 [`CLAUDE.md`](../CLAUDE.md) → [`HANDOFF_NEXT_SESSION_KO.md`](HANDOFF_NEXT_SESSION_KO.md)
+> 🚩 **이 리포에 처음 왔다면** 루트 [`CLAUDE.md`](../CLAUDE.md) →
+> [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)
 > 순서로 읽어라. 이 README는 **env 설계 규약**과 **이 디렉터리 문서 색인**이지 현재 상태 문서가 아니다.
 
 > ⚠️ **정책 경로는 여전히 `config.DRY_RUN=True`(명령 미발행)가 기본이다.**
-> (2026-07-29 정정: 예전 머리말의 "⚠️ UNTESTED SKELETON / 실기 사용 금지"는 **절반만 낡았다.**
-> **여전히 맞는 쪽 — RL 정책 경로는 실기 미검증이다.** 정책이 팔을 움직인 적이 없고,
-> actor entrypoint `scripts/run_remote_rlpd_actor.py`도 실기에서 돈 적이 없다.
-> **낡은 쪽 — zero-policy + 사람 개입 경로는 실기에서 돌았다.** 2026-07-28에 실기 팔을 구동해
-> 검증했다 — `tests/run_real_hil.py`, `docs/testing/04_HIL_INTERVENTION.md` §4.5.
-> 두 경로는 **서로 다른 코드**다. "실기 검증"을 인용할 때 어느 쪽인지 반드시 밝힐 것.)
+> 실제 명령은 검증된 `run_hil_actor.sh --arm`만 이 값을 해제한다. 2026-07-29 첫
+> production-model 실기에서 policy 48 transition, GELLO intervention 153 transition,
+> Kanu learner 102 step/policy version 2와 controller 자동 복귀까지 확인했다. 따라서 예전
+> "UNTESTED SKELETON / 정책 실기 미검증" 머리말은 낡았다. 다만 첫 publish 경계의 RPC timeout으로
+> continuous run은 PARTIAL이며, learner-side v1/v2 publish가 actor/robot에 전달됐다는 증거는 없다.
 
 > 🆕 **(2026-07-29) reward classifier는 이제 정책과 다른 이미지를 본다 — G15 해소.**
 > 분류기는 무크롭 프레임으로 학습됐는데 actor가 **정책의 크롭된** 관측을 먹이고 있었다
@@ -22,8 +22,9 @@
 > (`3459098d…` — hash는 `CANONICAL_OBSERVATION_SPEC` 문서에서 나오지 wire payload에서 나오지 않는다).
 > 계약은 `ur_env/classifier_sidecar.py`, 전모는
 > [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) §12.1.
-> ⚠️ **실기 미검증 — 자동 테스트까지다.** 그리고 **팔 가림 병리(`take_21`)는 안 고쳐졌다**;
-> 정지 게이트가 완화할 뿐 진짜 해법은 카메라 배치다.
+> production actor 배선은 첫 실물 E2E에서 사용됐다. 다만 GUI/영구 JSONL에 per-transition
+> probability가 없어 online verdict 정합은 아직 미확인이다. **팔 가림 병리(`take_21`)도
+> 안 고쳐졌다**; 정지 게이트가 완화할 뿐 진짜 해법은 카메라 배치다.
 
 최종 운영 checkout은 `/home/laptop3/gello_software`, branch는 `feat/gello-ur7e-humble-22.04` 하나다.
 2026-07-29 머지 `3f199d4`로 로봇/하드웨어 작업이 이 브랜치에 들어왔다 — **워크트리 분리 시절 서술은
@@ -38,7 +39,8 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 
 | 문서 | 무엇인가 |
 | --- | --- |
-| [HANDOFF_NEXT_SESSION_KO.md](HANDOFF_NEXT_SESSION_KO.md) | **진입점.** 현재 상태 · 리그 실측값 · 다음 할 일 · 함정. 이 하나로 작업을 시작할 수 있게 쓰여 있다 |
+| [HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) | **현재 진입점.** 첫 실물 E2E 증거, PASS/미완료 경계, 3-CLI와 다음 우선순위 |
+| [HANDOFF_NEXT_SESSION_KO.md](HANDOFF_NEXT_SESSION_KO.md) | 첫 E2E 이전의 하드웨어/classifier 상세 조사 기록. 최신 상태 지침으로 쓰지 않는다 |
 | [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 상태 기록. learner 구현 §1–10 / actor·하드웨어 §11 / reward classifier 조사 §12. 위 문서보다 깊다 |
 | [HIL_SERL_KANU_RUNBOOK_KO.md](HIL_SERL_KANU_RUNBOOK_KO.md) | Kanu에서 learner를 띄우는 절차 (dry-run → bounded run) |
 | [REWARD_CLASSIFIER_THRESHOLD_KO.md](REWARD_CLASSIFIER_THRESHOLD_KO.md) | reward threshold를 0.85 → 0.2로 내린 근거 + 2026-07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해 인용할 것 |

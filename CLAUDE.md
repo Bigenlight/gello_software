@@ -14,7 +14,8 @@ laptop3                                        kanu (GPU 서버)
 ```
 
 laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 kanu에서** 돌리고 gRPC로 실시간
-통신한다. reward 권위는 서버에 있다. 10 Hz 루프라 스텝 예산이 100 ms인데 현재 RTT p99가 97.1 ms다.
+통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz지만 현재 RPC timeout은 0.6 s이고,
+첫 실물 online-learning run에서 동시 학습/추론 contention 때문에 그 deadline을 넘었다.
 분류기는 정책 관측이 아니라 **자기 전용 무크롭 이미지(sidecar)를 약 2 Hz로** 따로 받는다.
 
 **branch `feat/gello-ur7e-humble-22.04`** (origin/HEAD). 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
@@ -24,29 +25,33 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 
 ## 지금 상태 한 줄
 
-**되는 것** — 하드웨어 경로 · 텔레옵 · 사람 개입 · gRPC 왕복 · **라이브 reward classifier 뷰어**.
-전부 실기에서 확인했다.
+**2026-07-29 첫 실물 production-model E2E smoke 성공.** 실제 UR7e에서
+`ENGAGE=GELLO`, `DISENGAGE=policy`를 확인했고, Kanu에 online transition **201개**
+(intervention **153개**)가 들어가 learner **102 step / gradient 204 / policy version 2**까지
+진행했다. actor의 RPC deadline 예외 뒤 controller도 FPC에서 STJC로 자동 복귀했다.
 
-**🆕 크롭 불일치(G15)는 코드에서 해결됐다 — 재학습이 아니라 분리(decoupling)로.** 액터가 분류기에게
-**무크롭 원본 JPEG를 sidecar로 따로** 보낸다(`ur_env/classifier_sidecar.py`). 정책은 측정된
-`IMAGE_CROP`을 그대로 유지한다. 같은 커밋에서 checkpoint 디렉터리 해시(G19)도 고쳤다.
-**단 실기에서는 아직 한 번도 안 돌렸다** — 코드·단위테스트까지다.
+**크롭 불일치(G15)는 재학습이 아니라 분리(decoupling)로 해결됐고 실물 actor 경로에도
+들어갔다.** 액터가 분류기에게 **무크롭 원본 JPEG를 sidecar로 따로** 보낸다
+(`ur_env/classifier_sidecar.py`). 정책은 측정된 `IMAGE_CROP`을 그대로 유지한다. 같은 변경에서
+checkpoint 디렉터리 해시(G19)도 고쳤다. 단 이번 run은 per-transition classifier 확률을 GUI나
+영구 로그로 관측하지 못했으므로 **online verdict 정합 검증은 아직 남아 있다.**
 
 > **이전 판 문구(보존):** *"안 되는 것 — RL 루프의 reward. 뷰어는 믿어도 되고 RL reward는
 > 믿으면 안 된다."* 이 경고는 sidecar 이전 기준이다. 이제 뷰어와 RL 경로는 **같은 그림**을 본다
 > (같은 무크롭 JPEG, 같은 `decode_classifier_image()` 레시피).
 
-**안 되는 것** — actor entrypoint(`scripts/run_remote_rlpd_actor.py`)는 실기에서 한 번도 돌지 않았다.
-그리고 sidecar가 **고치지 못하는 것이 하나 남아 있다**: 팔이 cam1 시야를 쓸고 지나갈 때의
-**가림(occlusion)**. `take_21`은 @0.85 recall 0%, @0.05에서도 57.9%다. 원인은 전처리도 라벨도 아닌
-**시야**다. 정지 게이트가 완화할 뿐이고, 진짜 해결은 **팔이 가로지르지 않는 카메라 배치**다.
+**아직 안 되는 것** — 연속 운용 중 첫 policy publish 경계에서 `Step RPC`가 0.6초를 넘어 actor가
+종료됐다. startup cold-JIT는 해결됐지만, 실제 actor와 함께 돌 때 learner step 중앙값이 약
+1.12초였고 첫 publish는 5.47초였다. 또한 launcher는 commissioning용 `ENGAGED` 시작을 강제하고,
+classifier verdict GUI와 `SUCCESS -> HOME -> scene reset WAIT -> operator RESUME` 상태 기계가 없다.
+sidecar가 고치지 못하는 cam1 **가림(occlusion)**도 남아 있다.
 
 ## 읽는 순서 — 이 셋만 읽고 멈춰라
 
 1. **이 파일** — 무엇을 만들고 있고 어디를 봐야 하는지. (2분)
-2. [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md) —
-   **진입점.** 현재 상태 · 리그 실측값 · 다음 할 일 · 함정. **이 문서 하나만 읽고 바로 이어서
-   작업할 수 있게** 쓰여 있다. (30분)
+2. [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) —
+   **현재 진입점.** 첫 실물 E2E의 증거, 정확한 PASS/미완료 경계, HIL 제어권 의미, 다음 구현
+   우선순위와 재현 CLI. (15분)
 3. [`docs/testing/08_OPEN_GAPS.md`](docs/testing/08_OPEN_GAPS.md) — 지금 무엇이 깨져 있는지.
    **G15(크롭 불일치)가 어떻게 sidecar로 닫혔고 무엇이 안 닫혔는지(가림), 워크스페이스 박스가
    꺼져 있던 이유(G1)가 여기 있다.**
@@ -60,6 +65,8 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 
 | 문서 | 무엇이 들어 있나 |
 | --- | --- |
+| [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) | **최신 정본.** 2026-07-29 실물 E2E 결과와 다음 방향 |
+| [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md) | 첫 E2E 이전의 상세 리그 조사 기록. 최신 상태 지침은 위 문서가 대체 |
 | [`serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 기록. learner 구현 §1–10 / actor·하드웨어 §11 / classifier 조사 §12 |
 | [`serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md) | threshold를 0.85 → 0.2로 내린 근거 + 07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해서 인용할 것 |
 | [`docs/testing/README.md`](docs/testing/README.md) | 하드웨어·통신 검증 런북 인덱스(00~09) + 항목별 PASS/미검증 상태표 |
@@ -71,7 +78,7 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 | 하려는 일 | 문서 |
 | --- | --- |
 | 셋업 · 빌드 · 인터프리터 함정 · 비상 정지 | [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) |
-| HIL actor 기동 (preflight, Stage A fake-env / Stage B 실센서) | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) |
+| 실물 HIL 세션 기동 (운영용 3-CLI, preflight, actor) | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) — 정상 운용은 `run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh` 세 terminal |
 | kanu에서 learner 띄우기 | [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) |
 | 녹화 take를 learner용 offline demo로 변환 | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) (`40b99f8`) — **`--outcome success\|truncated`는 사람이 명시한다.** 변환기는 성공을 추측하지 않는다. learner는 offline demo가 0이면 학습을 시작하지 않는다 |
 | 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
@@ -86,10 +93,10 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 | 작업 | 시작점 |
 | --- | --- |
 | **분류기를 개입·학습에 연결** | [`serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md`](serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md) — reward/termination 계약, 개입 이중 라우팅, RLPD 50:50, 연결 순서. **코드에서 직접 추적해 쓴 문서다.** 아래 두 블로커가 선행 조건 |
-| ~~크롭 불일치 해소~~ → **sidecar 실기 검증** | `08_OPEN_GAPS.md` G15 → `ur_env/classifier_sidecar.py` (모듈 docstring이 설계 근거 전부). 코드는 들어갔고 **실기 검증이 남았다**. **`IMAGE_CROP`을 지우는 건 여전히 해결이 아니다** |
+| ~~크롭 불일치 해소~~ → **sidecar verdict 가시화** | `08_OPEN_GAPS.md` G15 → `ur_env/classifier_sidecar.py` (모듈 docstring이 설계 근거 전부). production actor 배선은 첫 실물 E2E에서 사용됐다. 남은 것은 per-transition probability/verdict GUI·영구 로그 검증이다. **`IMAGE_CROP`을 지우는 건 여전히 해결이 아니다** |
 | ~~checkpoint 로딩~~ → **해결됨(G19)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임해 orbax **디렉터리**를 해시한다. 두 `DEFAULT_*_SHA256` 상수도 은퇴 체크포인트(`e329986b…`)에서 교체됐다 |
 | **canonical demo artifact** (learner 시작 조건) | ✅ 2026-07-29 사람 승인·생성 완료. `take_23` 제외 23 take → 2,037 transition, SHA256 `f9718558…032fa`; laptop3와 Kanu strict-load 통과. 경로·품질 주의는 [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) + `08_OPEN_GAPS.md` G20 |
-| actor entrypoint 실기 첫 투입 | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) §7 (팔을 움직인 건 전부 `tests/run_real_hil.py`였다 — 다른 코드 경로다) |
+| actor entrypoint 실기 재실행·timeout 계측 | [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) + [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) |
 | 개입 루프·좌표계·메타데이터 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) |
 | 장애 주입 매트릭스 (거의 미검증) | [`docs/testing/07_FAILURE_INJECTION.md`](docs/testing/07_FAILURE_INJECTION.md) |
 
@@ -138,7 +145,11 @@ serl_ur_infra/
   scripts/run_remote_rlpd_actor.py actor entrypoint
   tests/run_real_hil.py            실기 개입 러너 (파일 상단 주석이 안전 설계를 설명)
 ros2_ur_ws/
-  run_hil_actor.sh                 actor 실행 래퍼 (preflight 9종)
+  run_hil_server.sh                Terminal 1: Kanu learner 검증/재사용·기동 + SSH tunnel
+  run_hil_hardware.sh              Terminal 2: UR7e + Robotiq + passive GELLO supervisor
+  run_hil_session.sh               Terminal 3: cameras + GUI + preposition/preflight + actor
+  run_hil_actor.sh                 actor 실행 래퍼 (11단계 preflight + controller cleanup)
+  run_hil_preposition.sh           RESET pose 이동 + controller handoff proof 생성
   run_hil_gui.sh                   데드맨/개입 GUI
   launch_cameras.sh                RealSense 2대 (시리얼 자동 해석)
   run_classifier_viewer.sh         라이브 분류기 뷰어 (랩톱 CPU)
@@ -155,6 +166,6 @@ ros2_ur_ws/
   *(이전 판은 "해결은 classifier 재학습이다"라고 적었다 — 재학습은 채택되지 않았다. 분리를
   택한 덕분에 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 측정값이 전부 살아남았다.)*
 - **테스트는 passed 수를 볼 것.** PYTHONPATH에서 `serl_launcher`가 빠지면 조용히 떨어지고
-  skip 사유가 거짓말을 한다. 기준선은 **429 passed / 11 skipped**(classifier sidecar 반영 후 실측).
-  *(HEAD `40b99f8`에서는 337이었고, 옛 문서의 333은 그보다도 이전 값이다.)*
+  skip 사유가 거짓말을 한다. 2026-07-29 실기 준비 기준선은 **497 passed / 11 skipped**다.
+  *(HEAD `40b99f8`에서는 337이었고, 옛 문서의 333/429는 그보다 이전 값이다.)*
 - **메인 브랜치는 여러 사람이 공유한다.** 머지·리베이스 전에 상대 checkout이 깨끗한지 확인할 것.

@@ -79,7 +79,8 @@ export WT=/home/laptop3/gello_software
    약 2 Hz로, **팔이 정지해 있을 때만** 따로 붙여 보낸다. **`IMAGE_CROP`은 그대로다** —
    실측값이고 정책이 1차 소비자다. proto 변경 0, **observation schema hash 불변**.
    → `08_OPEN_GAPS.md` G15, `05_COMMS_GRPC.md` §3.2
-   ⚠️ **다만 실기에서 한 번도 안 돌았고**, 팔 가림(occlusion) 문제는 **안 고쳐졌다.**
+   첫 production-model actor run에서 sidecar 설정으로 실제 transition이 들어갔다. 다만
+   per-transition verdict를 GUI/영구 로그로 보지 못했고, 팔 가림(occlusion)도 **안 고쳐졌다.**
    그리고 `reward_model_id`가 **`cube-in-cup-all3-ckpt150+sidecar-v1`**로 바뀌어
    옛 값 `cube-in-cup-checkpoint-150`은 **핸드셰이크에서 거부된다.**
 
@@ -111,21 +112,21 @@ export WT=/home/laptop3/gello_software
 | 8 | 타이밍 baseline | **매 실행 재측정** | `test_ur_kin.py`(k)가 매 실행마다 찍는다. 📌 2026-07-29 실측 `worst-case tick = 0.836 ms (generic pose)`, 2026-07-27은 `1.314 ms (near-singular)`. **값도 pose 종류도 실행마다 바뀐다 — 고정값으로 인용하지 말 것.** 판정은 "예산 4.0 ms @250 Hz 미만"이다 |
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
 | 9b | HIL 개입 루프 (**실기, 팔 구동**) | **PASS (2026-07-28, `run_real_hil.py` 경로에 한함)** | `--arm --scale 0.25`, 100스텝 중 개입 64, `held=0`. 개입 불변식 4종(anchor-latch 0 / gain-latch 0 / 저장==실행 1.000 / held-rate 0%) 통과. **frame-map = 단위행렬**(포화 제외 잔차 0.093, 기준 0.15). → `04` §4.5 |
-| 9b′ | 같은 루프를 **actor entrypoint**로 | **미검증** | 팔을 움직인 것은 전부 `run_real_hil.py`다. `scripts/run_remote_rlpd_actor.py`는 **실기에서 한 번도 안 돌았다** — 다른 코드 경로다 → `09` §7 |
+| 9b′ | 같은 루프를 **actor entrypoint**로 | **핵심 E2E PASS / continuous PARTIAL** | 실제 replay 201, GELLO intervention 153, policy 48. learner 102/gradient 204/policy publish v2. 첫 publish 경계 RPC timeout 뒤 controller cleanup PASS → 최신 상태 문서 |
 | 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py:81-155`, `wrappers.py:301-328`, `tests/test_gello_gripper_wiring.py`(📌 2026-07-29 **23 passed**); commit `6a0b127`. 07-28 실기도 이 채널은 껐다 |
 | 10 | gRPC actor 루프백 스모크 | **PASS (오프라인)** | `test_actor_grpc_transport/identity_pinning/smoke/rlpd_receive_smoke` = **35 passed** (venv python). 같은 4개 파일이 **시스템 python3에서는 무한 hang** → §0-1 |
 | 10b | **Kanu 왕복 (Stage A, fake-env)** | 📌 **PASS (2026-07-27 기록)** | 100스텝 acceptance 통과. 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버였다. 절차·수치 정본은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) |
 | 10c | 레이턴시 실측 (Kanu 왕복) | 📌 **두 세션이 약 6배 다르다 — 세션마다 재측정** | 07-27: RTT p50 **58.6** / p95 75.8 / **p99 97.1 ms**, 링크 약 **13 Mbit/s**. 07-29(**유휴 리그**): ssh-실효 **약 83 Mbit/s**(min 75.5/max 98.5), ICMP p50 **1.75** / p99 24.4 ms, 손실 0%. 링크는 **2.4 GHz ch.3 `iptime_709`**(5 GHz SSID 없음), kanu는 **캠퍼스 4홉**이지 WAN이 아니다. 🛑 **"해결됐다"로 읽지 마라** — 07-29는 카메라·actor·조작자가 **전부 꺼진** 상태였다. 유선 NIC `enx00e04c3600bd`가 **있는데 안 꽂혀 있다** → `05` §5.3 |
 | 10d | 관측·sidecar 대역폭 | 📌 **측정됨 (2026-07-29)** | 관측 **98,888 B = 96.57 KiB/step**(이미지는 **raw uint8**, 장당 48 KiB) → 10 Hz **7.911 Mbit/s**. sidecar q95 쌍 **13.32 KiB** @2 Hz → 합계 **8.129 Mbit/s (+2.8 %)**, 부착 스텝 **+8.4 ms** @13 Mbit/s. 기각된 720p passthrough는 쌍 **400 KiB**, +252 ms → `05` §5.4 |
-| 11 | RealSense 2대 동시 스트림 | **미검증(이 브랜치에서)** | → `06_SENSORS.md` |
+| 11 | RealSense 2대 동시 스트림 | **actor 실기 PASS** | preflight와 실제 actor loop에서 cam1/cam2 약 30 Hz 확인 → `06_SENSORS.md` |
 | 11b | RealSense QoS 호환성 | **PASS (해소됨)** | 퍼블리셔가 RELIABLE/TRANSIENT_LOCAL → 백엔드의 기본 reliable 구독과 호환. 이전의 "best-effort면 콜백이 안 뜬다" 우려는 **이 리그에서는 해소**. 단 TRANSIENT_LOCAL 부작용 있음 → `06` §3 |
 | 11c | cam1/cam2 역할 | **정정됨 / 손목 배정은 미확정** | cam1 = 삼각대 SCENE, cam2 = 손목(wrist). 다만 **연결된 두 개체 중 어느 쪽이 손목인지는 모델 클래스 추론**이고 육안 미확인이다 → `06` §1.1 |
 | 11d | 카메라 시리얼 | **하드코딩 폐기 — 자동 해석 (`43ba314`, `fb48100`)** | 이 리그에 D435 쌍이 **두 벌** 있고 어느 쪽이 열거되는지가 두 번 뒤집혔다. `ros2_ur_ws/_resolve_camera_serials.sh`가 live USB 버스와 대조해 모델 클래스로 배정한다(plain D435→cam1, D435IF→cam2). **문서·명령줄에 특정 시리얼을 적지 말 것** → `06` §1.1 |
 | 12 | `clip_safety_box` (워크스페이스 박스) | **구현·단위검증, 실기 경로에서는 비활성** | `tests/test_clip_safety_box.py` **26 passed**. 실측 박스는 `cube_in_cup`에만 있고, 팔을 구동한 `run_real_hil.py`는 `DefaultUR7eEnvConfig`(0벡터)를 써서 박스가 꺼진 채 돌았다 → `08` G1 |
-| 12b | `go_to_reset` branch-cut | **수정·단위검증, 실기 미검증** | `tests/test_reset_branch_cut.py` **10 passed**. 실측 케이스: wrist_3 +3.1795 → 목표 −3.1331은 물리적으로 0.029 rad인데 예전 코드는 6.31 rad로 계산·명령했다 → `08` G13 |
+| 12b | `go_to_reset` branch-cut | **실기 경로 PASS** | preposition과 실제 actor의 100-step episode reset 경로를 통과. 기존 단위검증도 유지 → `08` G13 |
 | 13 | 장애 주입 매트릭스 | **미검증 (E13 제외)** | → `07_FAILURE_INJECTION.md` |
-| 14 | **RL 정책** 경로로 실기 팔 구동 | **금지 / 미검증** | `DRY_RUN=True`가 기본(`config.py:153`, `cube_in_cup.py:227`). 07-28에 움직인 것은 **정책이 아니라 zero-policy + 사람 개입**이다. `08_OPEN_GAPS.md`의 갭이 닫히기 전에는 정책 경로 해제 금지 |
-| 15 | reward classifier ↔ 크롭 정합 | 🟢 **코드에서 해결 (2026-07-29) / 실기 미검증** | ~~학습은 무크롭, actor는 `IMAGE_CROP` 적용, recall@0.85 100% → 33.3%~~. **분리로 해결했다** — 분류기는 actor가 따로 붙이는 **무크롭 sidecar**를 먹고, 정책은 크롭을 유지한다. 그래서 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 무크롭 스윕이 **이 경로에 그대로 적용된다.** ⚠️ **실기 미검증**이고 확인 절차는 `09` §4.4 → `08` G15 |
+| 14 | **RL 정책** 경로로 실기 팔 구동 | **원형 PASS / continuous PARTIAL** | 48 non-intervention transition에서 policy가 실제 action 소유. 첫 publish 5.474 s + 동시 contention으로 0.6 s RPC timeout → `08` G21 |
+| 15 | reward classifier ↔ 크롭 정합 | 🟡 **sidecar 실기 유입 / verdict 관측 미완료** | 분류기는 무크롭 sidecar, 정책은 crop을 유지한다. production server로 실제 transition은 들어갔으나 per-step `p(success)` GUI/영구 로그와 가림 검증이 남음 → `08` G15/G23 |
 | 15b | 분류기 checkpoint SHA pin (orbax 디렉터리) | 🟢 **해결 (2026-07-29)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임. 두 `DEFAULT_*_SHA256`가 폐기된 `e329986b…`(새 도메인 recall 0%)에서 **`512b6575…62846d`**(= `classifier_ckpt/cube_in_cup_all3/checkpoint_150`, 정규 파일 14개)로 교체. **learner fingerprint가 한 번 깨진다 — 의도된 것** → `08` G19 |
 | 16 | canonical offline demo artifact | 🟢 **해결 (2026-07-29)** | 사용자가 `take_23` 제외 23개 take를 success로 승인했고 2,037-transition 영구 pickle을 생성했다. laptop3/Kanu strict-load와 SHA256 일치를 확인했다 → `08` G20 |
 
@@ -169,7 +170,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대(시리얼·크롭·역할), QoS/TRANSIENT_LOCAL 함정, 토픽 유량 점검, 19-D state 계약, F/T 프레임 |
 | [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
 | [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전 갭 **G1~G20**과 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록. G15/G19/G20은 2026-07-29에 닫혔다 |
-| [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — `run_hil_actor.sh` preflight, actor CLI(`--arm`/`--deadman`/`--mock-policy-noise`/**sidecar 플래그 4종**), Stage A fake-env / Stage B 실센서, **§4.4 뷰어↔서버 확률 대조**, Kanu 서버 기동 |
+| [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, Kanu 서버 기동 |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
 
@@ -197,7 +198,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
  B1  로봇 도달성 / dashboard 상태       -> 00 §5   [PASS]
  B2  그리퍼 단독                        -> 01      [PASS]
  B3  GELLO 리더 단독                    -> 02      [PASS]
- B4  RealSense 2대                      -> 06 §1   [미검증]
+ B4  RealSense 2대                      -> 06 §1   [actor 실기 PASS]
         ↓
 [C] mock 하드웨어 + RViz (실기 위험 0)
  C1  mock RViz HIL 개입 루프            -> 04 §3   [미검증]
@@ -221,13 +222,17 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
  F1  SSH 터널 + 스키마 핸드셰이크       -> 05 §6, 09 §2   [PASS 2026-07-27]
  F2  레이턴시 예산 실측                  -> 05 §5.3       [세션마다 재측정 — 값이 6배 흔들린다]
  F3  Stage A actor (fake-env) 왕복       -> 09 §3         [PASS 2026-07-27]
- F3b 분류기 sidecar 뷰어↔서버 대조       -> 09 §4.4       [미검증 — F4/G 전에 한다]
- F4  Stage B actor (실센서, DRY_RUN)     -> 09 §4         [미검증]
+ F3b 분류기 sidecar production 전송       -> 09 §4.4       [배선 PASS / verdict 미확인]
+ F4  no-arm live-sensor policy probe      -> 09 §4         [PASS, transition 0]
         ↓
-[G] RL 정책 경로 실기 투입  <-- 08_OPEN_GAPS.md의 갭이 닫히기 전에는 금지
+[G] RL 정책 경로 실기 first E2E          [핵심 PASS / continuous PARTIAL]
+ G1  policy/GELLO 실제 action 전환        [PASS]
+ G2  replay201 -> learner102 -> publish v2 [PASS, actor의 v1/v2 수신은 미확인]
+ G3  첫 publish 경계 RPC deadline          [FAIL — 08 G21]
 ```
 
-**현재 위치: [A]·[B1~B3]·[D]·[D′] 완료, [F1]~[F3] 완료. [B4]/[C]/[E]/[F4] 미착수.**
+**현재 위치: 실물 HIL-SERL 원형 [G1~G2]까지 도달했다. 다음 blocker는 [G3] 동시
+학습/추론 latency와 policy-first/episode GUI 운영 흐름이다.**
 
 > - [F]가 [C]/[E]보다 먼저 끝난 것은 순서를 어긴 게 아니라, [F]가 **로봇을 전혀 움직이지 않는
 >   fake-env 경로**이기 때문이다.
@@ -235,6 +240,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 >   개입 경로를 검증했다. 그래서 [C]는 **여전히 미검증이고**, mock 전용 완화값
 >   (`run_rviz_hil.py`의 `DRY_RUN=False` / `ACTION_SCALE 0.3 m/s`)을 실기 config로
 >   가져오지 않도록 특히 조심해야 한다 → `04` §3.
-> - [D′]에서 움직인 것은 **정책이 아니라 zero-policy + 사람 개입**이다. [G]는 그대로 금지다.
-> - [F4]의 actor entrypoint는 [D′]와 **다른 코드 경로**다. [D′] PASS를 actor PASS로
->   승격하지 말 것.
+> - [D′]에서 움직인 것은 zero-policy + 사람 개입이었지만, [G]에서는 실제 policy 48 transition과
+>   GELLO intervention 153 transition이 실행됐다. 두 실험을 섞어 인용하지 않는다.
+> - 이전 판의 “[G] 금지” gate는 사용자의 명시적 승인 아래 first smoke에서 넘어갔다. 이는
+>   원형 검증 승인이지 `08_OPEN_GAPS.md`의 모든 항목이 닫혔다는 뜻이 아니다.
