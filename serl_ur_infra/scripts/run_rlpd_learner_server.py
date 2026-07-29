@@ -228,6 +228,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "contain only 0 or this non-positive value"
         ),
     )
+    parser.add_argument(
+        "--utd-ratio",
+        type=int,
+        default=1,
+        help=(
+            "outer learner steps permitted per newly accepted online "
+            "transition after replay warm-up; CTA remains independently 2:1"
+        ),
+    )
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument(
         "--max-message-bytes", type=int, default=16 * 1024 * 1024
@@ -316,6 +325,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         "demo_extraction_batch_size",
         "max_workers",
         "max_message_bytes",
+        "utd_ratio",
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
@@ -378,7 +388,10 @@ def _validate_args(args: argparse.Namespace) -> None:
 def _learner_config(args: argparse.Namespace) -> LearnerConfig:
     """Build the fingerprinted algorithm config for production or acceptance."""
 
-    config_options: dict[str, object] = {"wandb_mode": args.wandb_mode}
+    config_options: dict[str, object] = {
+        "wandb_mode": args.wandb_mode,
+        "utd_ratio": args.utd_ratio,
+    }
     if args.synthetic_e2e:
         # Keep the real batch=256, replay threshold=100, CTA ratio, optimizer,
         # and model.  Only lifecycle periods are shortened so one bounded fake
@@ -826,6 +839,9 @@ def _run_locked(
         )
         worker = LearnerWorker(
             assembly.learner,
+            replay_insert_count=lambda: (
+                raw_ingress.status().replay_insert_count
+            ),
             target_learner_step=args.target_learner_step,
             poll_interval=args.poll_interval,
         )
@@ -865,6 +881,8 @@ def _run_locked(
             jax_backend=jax_backend,
             jax_device_count=len(jax.devices()),
             feature_encoding=raw_ingress.feature_encoding_id,
+            utd_ratio=config.utd_ratio,
+            critic_to_actor_ratio=config.cta_ratio,
             feature_replay_fixed_tensor_bytes=(
                 replay_memory_estimate.fixed_tensor_bytes
             ),
