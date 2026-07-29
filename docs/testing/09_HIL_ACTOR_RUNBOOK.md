@@ -67,6 +67,7 @@ cd $WT/ros2_ur_ws
 
 ./run_hil_actor.sh --help              # 상단 주석(용도/안전/중단) 출력
 ./run_hil_actor.sh --dry-preflight     # 점검만. actor를 기동하지 않는다 (안전)
+./run_hil_actor.sh --dry-preflight --arm  # marker/live pose까지 arm 준비를 읽기 전용 검증
 ./run_hil_actor.sh --fake-env          # Stage A
 ./run_hil_actor.sh                     # Stage B
 ```
@@ -93,7 +94,9 @@ cd $WT/ros2_ur_ws
 | `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-all3-ckpt150+sidecar-v1` | 서버 `--reward-model-id`와 같아야 함. **id가 체크포인트 + 입력 계약(sidecar)을 둘 다 담는다** — 어긋나면 핸드셰이크에서 거부된다. *(이전 값 `cube-in-cup-checkpoint-150`은 이제 거부된다)* |
 | `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `0.6` / `0.8` | 프로덕션 예산. 늘리지 말 것 (`05` §5) |
 | `HZ_TIMEOUT_S` | `6` | 토픽당 `ros2 topic hz` 대기 시간 |
-| `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. **실기에서는 쓰지 말 것** |
+| `HIL_PREPOSITION_MARKER` | `$XDG_RUNTIME_DIR/hil-preposition.ready` | `run_hil_preposition.sh`와 actor가 공유하는 0600 proof. 보통 직접 지정하지 않는다 |
+| `HIL_PREPOSITION_MARKER_MAX_AGE_S` | `900` | marker 최대 수명. 1~3600초만 허용 |
+| `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. `--arm`과 같이 쓰면 **즉시 FAIL** |
 | `ROS_SETUP` | `/opt/ros/humble/setup.bash` | |
 
 📌 2026-07-29 확인: 위 기본값은 전부 `ros2_ur_ws/run_hil_actor.sh:65-93`과 일치한다.
@@ -102,8 +105,8 @@ cd $WT/ros2_ur_ws
 
 | 플래그 | 기본 | 무엇을 하나 |
 |---|---|---|
-| `--arm` | off | 태스크 config의 `DRY_RUN`을 **끈다** (`run_remote_rlpd_actor.py:63-71`, 적용 `:288`). ⚠️ **UR7e가 물리적으로 움직인다.** 이중 퍼블리셔가 있으면 거부하고, **컨트롤러 구독자가 0이어도 거부**한다 (`:156-198`) |
-| `--deadman {topic,spacebar}` | **`topic`** | 개입 데드맨 소스 (`:51-62`, 전달 `:220`). `spacebar`는 **전역 pynput + 워치독 없음**이라 실기 금지 |
+| `--arm` | off | 태스크 config의 `DRY_RUN`을 끄기 전에 shell preflight가 controller 쌍과 퍼블리셔 0을 확인한다. STJC active/FPC inactive이면 유효한 preposition marker + 현재 RESET 자세(≤0.10 rad)를 재검증하고 strict switch한다. 이미 FPC active/STJC inactive이면 marker는 생략하지만 **live RESET 자세는 동일하게 요구**한다. 그 외는 actor 미기동. ⚠️ **UR7e가 물리적으로 움직인다.** |
+| `--deadman {topic,spacebar}` | **`topic`** | 개입 데드맨 소스. 최신 `engaged=0`은 정책 복귀, 첫 heartbeat 뒤 0.5 s 단절은 액터 fail-stop. `spacebar`는 **전역 pynput + 워치독 없음**이라 실기 금지 |
 | `--mock-policy-noise SIGMA` | `0.0` (비활성) | 서버 액션을 σ의 zero-mean 가우시안으로 **대체**한다 (`:72-84`). zero-action 서버 상대로 로봇을 움직여 개입 경로를 실증하는 용도. 교란된 액션이 **실행되는 값이자 저장되는 값**이라 버퍼는 자기일관적이다 |
 | `--fake-env` | off | ROS 백엔드도 `GelloIntervention`도 붙이지 않는다 (Stage A) |
 | `--checkpoint-path` | 없음 | ⚠️ **실질적으로 아무 pickle도 안 나온다.** 다만 이유는 아래 각주대로 이전 판의 설명과 다르다 → `08` G20 |
@@ -162,11 +165,14 @@ cd $WT/ros2_ur_ws
 | 6 | `SERVER_HOST:SERVER_PORT` TCP connect (3s) | FAIL — 터널/서버 확인 |
 | 7 | `/joint_states`, `/gello/joint_states`, cam1/cam2 compressed | 실기 모드 FAIL / fake-env WARN |
 | 7b | `/robotiq_gripper/position_percent` | WARN (19-D state의 그리퍼 채널) |
-| 8 | `forward_position_controller`가 `inactive`인지 | `active`면 **WARN** (실수 발행 시 팔이 즉시 움직임) |
+| 8 | STJC/FPC의 정확한 상태 쌍 | `active/inactive`(handoff 전) 또는 `inactive/active`(이미 완료)만 허용. 둘 다 active/inactive면 FAIL |
 | 9 | `/forward_position_controller/commands`의 **퍼블리셔 수** | 1개라도 있으면 **FAIL·거부** (이 리그 최대 하자) |
+| 10 | `--dry-preflight --arm`이면 현재 관절 오차 ≤0.10 rad. switch 전 상태면 marker·수명·owner/mode·ROS domain·RESET 값도 확인 | 하나라도 다르면 FAIL. 이미 FPC active인 idempotent 경로도 임의 자세면 거부. 검증만 하고 switch하지 않음 |
 
-모든 점검은 **읽기 전용**이다 — `ros2 topic hz` / `ros2 topic info` /
-`ros2 control list_controllers` / TCP connect뿐이고, 로봇에 아무것도 발행하지 않는다.
+`--dry-preflight`의 모든 점검은 **읽기 전용**이다. 실제 `--arm`은 [1]~[10]이
+통과한 다음에만 publisher 수를 다시 세고 strict controller switch를 수행한다. switch 후
+`STJC=inactive`, `FPC=active`, publisher 0을 다시 확인하며 하나라도 실패하면 actor를 exec하지 않는다.
+이 handoff는 reset/preposition 이동을 자동 호출하지 않는다.
 
 ---
 
@@ -487,7 +493,9 @@ cd $WT/ros2_ur_ws && ./run_hil_gui.sh
 ```
 
 ENGAGE/DISENGAGE 버튼 + 감도 슬라이더. 20 Hz 하트비트를 `/hil/deadman`에 쏜다.
-0.5 s 끊기면 env가 자동으로 개입을 해제한다. **스페이스바 데드맨은 쓰지 않는다**
+첫 메시지가 15 s 안에 없으면 actor 시작을 거부한다. 한 번 받은 뒤 0.5 s 끊기면
+`DeadmanHeartbeatStaleError`로 actor가 종료되고 정책 fallback은 실행되지 않는다.
+정상 DISENGAGE 메시지만 정책에 제어를 돌려준다. **스페이스바 데드맨은 쓰지 않는다**
 (워치독이 없어 stuck-ON 위험 — `04_HIL_INTERVENTION.md` §1.1).
 
 **T0 — 터널** (§2.4)
@@ -497,12 +505,26 @@ ENGAGE/DISENGAGE 버튼 + 감도 슬라이더. 20 Hz 하트비트를 `/hil/deadm
 ```bash
 cd $WT/ros2_ur_ws
 
-# 1) 먼저 점검만. 여기서 초록불이 안 뜨면 actor를 띄우지 않는다.
-./run_hil_actor.sh --dry-preflight
+# 1) actor를 내린 채 RESET 자세를 검증/사전 배치한다.
+#    이미 0.10 rad 안이면 이동 없이 proof만 만들고 종료한다.
+#    멀면 기존 GO gate를 통과한 뒤에만 JTC 궤적이 움직인다.
+./run_hil_preposition.sh
 
-# 2) 통과하면 기동
-EXPECTED_MODEL_ID=<서버가 광고하는 값> ./run_hil_actor.sh
+# 2) 실제 --arm과 같은 handoff 조건을 읽기 전용으로 검사한다.
+#    이 명령은 controller를 전환하지도 actor를 띄우지도 않는다.
+EXPECTED_MODEL_ID=<서버가 광고하는 값> \
+  ./run_hil_actor.sh --dry-preflight --arm --deadman topic
+
+# 3) B3 승인 조건을 별도로 만족하고 GUI를 ENGAGE한 뒤에만 실제 기동.
+#    marker + live pose를 다시 확인하고 STJC -> FPC strict switch 후 actor를 exec한다.
+EXPECTED_MODEL_ID=<서버가 광고하는 값> \
+  ./run_hil_actor.sh --arm --deadman topic
 ```
+
+`run_hil_actor.sh`는 `run_hil_preposition.sh`를 대신 실행하지 않는다. 즉 `--arm` 한 줄이
+사전 배치 이동을 몰래 시작하는 일은 없다. proof가 없거나 15분이 지났거나, proof 뒤 팔이
+RESET 자세에서 벗어났으면 전환 전에 실패한다. 현재 검증 상태표의 B3 금지는 controller
+handoff와 별개인 policy/sidecar 갭 때문에 계속 유효하다.
 
 ### 4.3 실기 모드 preflight의 통과 기준 (2026-07-27 실측 예시)
 
@@ -516,8 +538,9 @@ EXPECTED_MODEL_ID=<서버가 광고하는 값> ./run_hil_actor.sh
 [6] TCP 127.0.0.1:50153 — 연결 성공
 [7] /joint_states ≈ 100.4 Hz · /gello/joint_states ≈ 30.0 Hz
     cam1 ≈ 30.0 Hz · cam2 ≈ 30.0 Hz · 그리퍼 ≈ 5.0 Hz
-[8] forward_position_controller = inactive (안전한 기본 상태)
+[8] scaled_joint_trajectory_controller=active, forward_position_controller=inactive
 [9] 퍼블리셔 0개 — actor가 유일한 퍼블리셔가 된다
+[10] preposition marker + 현재 RESET 자세 확인 (읽기 전용; switch하지 않음)
 ```
 
 ### 4.4 🔎 크롭 불일치가 **실제로** 고쳐졌는지 확인 — 팔을 움직이기 전에 한다
@@ -595,7 +618,8 @@ EXPECTED_MODEL_ID=<서버가 광고하는 값> ./run_hil_actor.sh
 | `ur_experiments: 찾을 수 없음` | 지금 checkout에 `serl_ur_infra/ur_experiments/`가 없다 = 브랜치가 틀렸다 |
 | `TCP …:50153 연결 실패` | 터널이 죽었다. §2.4 재실행 → 그래도 안 되면 Kanu에서 서버가 살아 있는지 확인 |
 | `cam1 … 에서 6s 동안 메시지가 없다` | 카메라 노드는 살아 있는데 스트림이 멈춘 상태일 수 있다. `ros2 topic info`의 Publisher count가 1인데 `hz`가 비면 **USB 재연결 후 `launch_cameras.sh` 재기동** |
-| `forward_position_controller = ACTIVE` (WARN) | 의도한 것이 아니면 `ros2 control switch_controllers --deactivate forward_position_controller` |
+| `예상 밖 controller 조합` | STJC/FPC가 둘 다 active 또는 둘 다 inactive다. 수동으로 우회하지 말고 driver/이전 actor 종료 상태를 확인 |
+| `arm handoff proof 검증 실패` | actor를 내리고 `./run_hil_preposition.sh`를 실행. 이미 RESET 0.10 rad 안이면 움직이지 않고 새 marker만 만든다 |
 | `퍼블리셔가 N개 있다` (FAIL) | 텔레옵 브리지/다른 러너가 살아 있다. `ros2 topic info -v /forward_position_controller/commands`로 범인을 찾아 끄고 재실행 |
 
 ### 5.1 `RESET_MAX_DIST_RAD` 게이트 (실기에서 자주 만난다)
@@ -641,9 +665,13 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 보간 이동하며, 조작자의 명시적 승인 뒤에만 움직인다. `gello_move_to_start`를 맨손으로
 단독 실행하는 방법은 이 리그에서 검증되지 않았으므로 여기에 적지 않는다.
 
+성공 시 스크립트는 현재 사용자만 읽고 쓸 수 있는 proof marker를 만든다. marker는 기본
+15분만 유효하며 RESET 값, ROS domain, 허용오차를 담는다. `run_hil_actor.sh --arm`은 marker만
+믿지 않고 `/joint_states`를 다시 읽어 관절별 최대 오차 0.10 rad 이하를 재확인한다.
+
 > ⚠️ 사전 배치 도구가 도는 동안에는 그것이 팔의 명령 소유자다. **끝난 뒤 반드시 내리고**
-> actor preflight [8]이 `forward_position_controller = inactive`, [9]가 퍼블리셔 0개를
-> 보고하는지 확인한 다음 actor를 띄운다.
+> `./run_hil_actor.sh --dry-preflight --arm`에서 [8] controller 쌍, [9] 퍼블리셔 0,
+> [10] proof + live pose를 모두 확인한 다음 actor를 띄운다.
 
 게이트 값을 **키워서 통과시키지 말 것** — 그러면 리셋이 작업 공간을 가로질러 쓸고 간다.
 
@@ -675,10 +703,11 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A3 | `--fake-env`에서 센서 점검이 WARN으로 강등 | **PASS** | 격리 ROS 도메인에서 경고 4건 + 통과 |
 | A4 | PYTHONPATH 이어붙임 | **PASS** | `PYTHONPATH=/pre/existing`를 미리 잡고 실행해도 `ur_gello_bringup`이 오버레이에서 해석됨 |
 | A5 | 인자 통과 | **PASS** | `--fake-env --save-video --actor-id …`가 최종 argv 끝에 그대로 붙음 |
+| A6 | `--arm` controller handoff | **오프라인 PASS / 실기 미검증** | marker 부재·stale·pose 변경·기존 publisher·예상 밖 controller 조합·FPC-active 임의 자세를 거부하고 정상 strict switch·postcondition·live-pose idempotent 경로를 shell mock 14개 테스트로 확인. 실물 controller_manager에서는 아직 실행하지 않음 |
 | B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
 | B2c | **분류기 sidecar 실기 왕복** (§4.4) | **미검증(TODO)** | 코드·단위테스트까지다. sidecar는 **실기에서 한 번도 안 붙어 봤다.** B3보다 먼저 한다 |
-| B3 | actor `--arm` (실제 팔 구동) | **금지** | 🔧 이유가 또 바뀌었다: `clip_safety_box`는 **구현됐고**, ~~(a) G15 크롭 불일치~~는 **코드에서 닫혔다**(sidecar, `08` G15). 지금 막는 것은 (a′) **그 sidecar 경로가 실기 미검증**(B2c), (b) 초기 정책 액션 크기 미확인, (c) B2 미검증, (d) 팔 가림은 **여전히 안 고쳐졌다**. `08_OPEN_GAPS.md`의 게이트 선언 참조 |
+| B3 | actor `--arm` (실제 팔 구동) | **금지** | controller activation 누락은 proof 기반 strict handoff로 코드 해결됐지만 실기 미검증이다(A6). 계속 막는 것은 (a′) sidecar 경로 실기 미검증(B2c), (b) 초기 정책 액션 크기 미확인, (c) B2 미검증, (d) 팔 가림. `08_OPEN_GAPS.md`의 게이트 선언 참조 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
 
 ---

@@ -91,14 +91,22 @@
 
 1. laptop에서 §7의 SSH tunnel을 연다. 표준 구성은 local `50153` → Kanu `50053`이다.
 2. [actor runbook §4.2](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)의 T1~T5를 순서대로 띄운다: UR driver, gripper, cam1/cam2, GELLO publisher, HIL deadman GUI.
-3. 실제 transition을 보내기 전에는 읽기 전용 preflight만 실행한다.
+3. actor를 내린 상태에서 RESET 자세 proof를 만든 뒤, 실제 transition을 보내기 전에는
+   `--arm` handoff까지 읽기 전용으로 rehearsal한다.
 
    ```bash
    cd /home/laptop3/gello_software/ros2_ur_ws
-   ./run_hil_actor.sh --dry-preflight
+   ./run_hil_preposition.sh
+   ./run_hil_actor.sh --dry-preflight --arm --deadman topic
    ```
 
-   `--fake-env` actor나 arm 없는 actor를 production learner에 연결해 시험하지 않는다. 둘 다 실제로 실행되지 않은 action을 online replay에 넣을 수 있다.
+   `run_hil_preposition.sh`는 이미 RESET 자세 0.10 rad 안이면 팔을 움직이지 않고 proof만
+   만든다. 멀면 기존 `GO` 승인 뒤에만 JTC 궤적이 움직인다. `--dry-preflight --arm`은
+   marker/current pose/controller를 확인할 뿐 controller를 전환하지 않는다.
+
+   `--fake-env` actor는 production learner에 연결하지 않는다. arm 없는 actor는 이제
+   `BeginEpisode`/첫 inference까지만 확인하고 `env.step`/`Step`/replay insert 없이 종료하는
+   no-submit probe이므로 실제 transition smoke를 대신하지 못한다.
 
 4. preflight가 모두 통과하고 operator가 workspace/action scale/controller 상태를 확인한 뒤, deadman을 먼저 ENGAGE하여 첫 action부터 GELLO intervention이 우선하도록 한다. 그다음에만 실제 actor를 시작한다.
 
@@ -1198,8 +1206,8 @@ PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 
 | 플래그 | 기본값 | 의미 |
 | --- | --- | --- |
-| `--arm` | **off** | 없으면 task config의 `DRY_RUN`이 유지되어 **팔도 그리퍼도 움직이지 않는다.** 붙이면 UR7e가 물리적으로 움직인다. arm 시 command topic publisher 수를 세어 이중 publisher면 거부한다(teleop bridge가 떠 있으면 실패한다) |
-| `--deadman` | `topic` | `topic` = `/hil/deadman` 20 Hz 하트비트 + staleness 워치독. `spacebar`는 전역 pynput 리스너에 워치독이 없어 ON으로 붙어버릴 수 있다 — **실기에서는 `topic`만 쓴다** |
+| `--arm` | **off** | 없으면 task config의 `DRY_RUN`이 유지되고 controller를 전환하지 않는다. 실제 arm은 publisher 0과 정확한 STJC/FPC 상태를 확인한다. STJC active/FPC inactive이면 15분 이내 preposition marker + 현재 RESET 오차 ≤0.10 rad를 요구한 뒤 strict switch한다. 이미 FPC active/STJC inactive이면 marker는 생략하지만 live RESET 오차는 동일하게 요구한다. 실패하면 actor 미기동 |
+| `--deadman` | `topic` | `topic` = `/hil/deadman` 20 Hz 하트비트. 최신 DISENGAGE는 정책 복귀지만 첫 heartbeat 뒤 0.5 s 단절은 policy fallback 없이 actor fail-stop. `spacebar`는 전역 pynput 리스너에 워치독이 없어 ON으로 붙어버릴 수 있다 — **실기에서는 `topic`만 쓴다** |
 | `--mock-policy-noise S` | `0.0` | zero-action server 상대로 로봇을 움직여 개입 경로를 실증하는 용도. 6개 pose 채널에만 N(0,S) 노이즈, gripper 채널은 손대지 않는다. 이 run의 모든 전이에 `meta.policy_actions_synthetic=true`가 박힌다 — **demo나 정책 근거로 쓰면 안 된다** |
 | `--fake-env` | off | robot/카메라 없이 wrapper/network 계약만 확인 |
 

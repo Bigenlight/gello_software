@@ -22,6 +22,10 @@ explicit DEADMAN (hold-to-engage), not by output magnitude.
                       rate limit; correspondence recovers over a few steps)
     deadman release-> disengage, policy resumes instantly
 
+For the ROS-topic source, an explicit fresh release is different from losing
+the publisher: once a heartbeat has been received, 0.5 s of silence raises
+``DeadmanHeartbeatStaleError`` before any policy action reaches the robot.
+
 TODO(together):
 - deadman hardware: pynput key hold for now; USB footswitch later.
 - success/fail marking keys for record_success_fail.py (spacemouse buttons
@@ -74,6 +78,8 @@ class DeadmanSource:
     gain() == 1.0 means 1:1 leader->robot translation. Implementations must be
     thread-safe: is_engaged()/gain() are read from the env step thread while
     the underlying state is written from a listener / ROS callback thread.
+    A health-checked source may raise from is_engaged() when silence makes the
+    state unknowable; callers must not reinterpret that as a disengagement.
     """
 
     def is_engaged(self) -> bool:
@@ -127,6 +133,25 @@ class SpacebarDeadman(DeadmanSource):
         return 1.0
 
 
+class DeadmanHeartbeatStaleError(RuntimeError):
+    """A previously live deadman heartbeat crossed its safety deadline.
+
+    This is deliberately an exception rather than ``is_engaged() == False``.
+    ``False`` means the operator sent a fresh, explicit DISENGAGE and policy
+    control may resume.  A lost publisher provides no such authorization, so
+    the actor must stop before it can forward another policy action.
+    """
+
+    def __init__(self, *, age_s: float, stale_s: float):
+        self.age_s = float(age_s)
+        self.stale_s = float(stale_s)
+        super().__init__(
+            "/hil/deadman heartbeat stale: "
+            f"age={self.age_s:.3f}s exceeds {self.stale_s:.3f}s; "
+            "refusing policy fallback and stopping the actor"
+        )
+
+
 class RosTopicDeadman(DeadmanSource):
     """Deadman driven by /hil/deadman, published by the HIL GUI.
 
@@ -135,7 +160,7 @@ class RosTopicDeadman(DeadmanSource):
       data   [engaged, gain]      engaged in {0.0, 1.0}; gain in [0.10, 1.00]
       rate   20 Hz heartbeat      (published continuously, not only on change)
       QoS    default reliable, depth 10
-      stale  newest msg older than STALE_S -> engaged=False (fail-safe to policy)
+      stale  after first rx, newest msg older than STALE_S -> raise and stop actor
 
     Subscribes on the passed rclpy node (the URRosBackend node, spun in its bg
     thread), so callbacks fire without this class owning an executor.
@@ -166,9 +191,15 @@ class RosTopicDeadman(DeadmanSource):
     def is_engaged(self) -> bool:
         with self._lock:
             if self._last_rx is None:
-                return False  # no msg yet -> fail safe to policy
-            if time.monotonic() - self._last_rx > self.STALE_S:
-                return False  # staleness watchdog -> fail safe to policy
+                # The task config waits up to 15 s for the first heartbeat and
+                # rejects startup if none arrives.  Keep this method inert in
+                # that pre-start state so constructing the source is harmless.
+                return False
+            age_s = time.monotonic() - self._last_rx
+            if age_s > self.STALE_S:
+                raise DeadmanHeartbeatStaleError(
+                    age_s=age_s, stale_s=self.STALE_S
+                )
             return self._engaged_raw >= 0.5
 
     def gain(self) -> float:
@@ -311,8 +342,9 @@ class GelloIntervention(gym.ActionWrapper):
         gripper, so a dead trigger topic can neither drop a held payload nor
         clamp on something. Replaying the latch instead would keep re-issuing a
         grasp command derived from a signal we no longer have — the same
-        fail-safe-to-inert rule RosTopicDeadman applies to /hil/deadman. The
-        latch is preserved (not zeroed) so a brief dropout resumes the human's
+        fail-safe-to-inert rule used for the gripper trigger. (The independent
+        /hil/deadman heartbeat instead aborts the actor when stale.) The latch
+        is preserved (not zeroed) so a brief dropout resumes the human's
         last intent instead of forcing them to re-cross a threshold; a real
         release is a fresh trigger value, which arrives on the next message.
         Arm teleop is deliberately NOT gated on the trigger: losing the gripper

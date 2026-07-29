@@ -350,9 +350,9 @@ class CubeInCupConfig:
             )
 
         source = RosTopicDeadman(env.backend._node)
-        # A GUI that never started is otherwise SILENT: RosTopicDeadman fails
-        # safe to "not engaged", so the operator sees no error at all -- just an
-        # intervention that never triggers.  Wait for one heartbeat and say so.
+        # Before its first message RosTopicDeadman is inert; after the first it
+        # raises if the heartbeat becomes stale.  Reject the distinct
+        # never-started case here instead of silently running policy-only.
         deadline = time.monotonic() + 15.0
         while source._last_rx is None and time.monotonic() < deadline:
             time.sleep(0.05)

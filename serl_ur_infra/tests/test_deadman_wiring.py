@@ -25,7 +25,7 @@ These tests pin down three separate things:
   1. the actual resolution of ``deadman=None`` (test_* below assert the real
      class, so a future fix must update them deliberately);
   2. the ``RosTopicDeadman`` <-> GUI frozen contract (parse, staleness
-     fail-safe, gain clamp) so the GUI side can be trusted once it IS wired;
+     fail-stop, gain clamp) so the GUI side can be trusted once it IS wired;
   3. the intervention bookkeeping the server counts on
      (``intervened`` / ``intervene_action``), including the stuck-ON case.
 
@@ -36,11 +36,13 @@ importantly, so running the suite never installs a *global keyboard listener*
 on an operator's desktop.
 """
 
+import importlib.util
 import os
 import re
 import sys
 import time
 import types
+from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
@@ -54,6 +56,7 @@ sys.path.insert(0, _INFRA)
 sys.path.insert(0, os.path.join(_REPO, "ros2_ur_ws", "src", "ur_gello_bringup"))
 
 from ur_env.envs.wrappers import (  # noqa: E402
+    DeadmanHeartbeatStaleError,
     DeadmanSource,
     GelloExpert,
     GelloIntervention,
@@ -215,7 +218,7 @@ def test_gello_intervention_default_is_the_same_spacebar_fallback():
 def test_spacebar_deadman_has_no_heartbeat_watchdog():
     """Why the spacebar fallback is unsafe on real hardware, not merely wrong.
 
-    RosTopicDeadman fails safe when the signal goes stale (STALE_S).  The
+    RosTopicDeadman stops the actor when the signal goes stale (STALE_S). The
     spacebar has no such notion: if a key-release event is ever missed (X11
     focus loss, dropped listener), ``_engaged`` stays True forever and the
     human keeps "intervening" with a leader arm nobody is holding.
@@ -441,31 +444,181 @@ def test_short_message_degrades_to_safe_defaults(ros_node):
     assert deadman.is_engaged() is False
 
 
-def test_stale_heartbeat_fails_safe_to_policy(ros_node):
+@pytest.mark.parametrize("engaged_field", [0.0, 1.0])
+def test_stale_heartbeat_stops_instead_of_falling_back_to_policy(
+    ros_node, engaged_field
+):
     """The GUI beats at 20 Hz; 0.5 s of silence is ~10 lost messages.
 
-    This is the property the spacebar deadman does not have: if the GUI dies,
-    the operator walks away, or the network drops, control returns to the
-    policy instead of latching a human takeover that nobody is driving.
+    A fresh 0.0 is an explicit hand-back to policy.  Silence is not: after the
+    first message, losing either a fresh ENGAGE or fresh DISENGAGE stream must
+    abort the actor rather than authorize a policy action.
     """
 
     deadman = RosTopicDeadman(ros_node)
     assert RosTopicDeadman.STALE_S == 0.5
 
-    _publish(deadman, 1.0, 1.0)
-    assert deadman.is_engaged() is True
+    _publish(deadman, engaged_field, 1.0)
+    assert deadman.is_engaged() is (engaged_field >= 0.5)
 
     # still fresh (0.4 s < 0.5 s): a couple of dropped heartbeats are tolerated
     deadman._last_rx = time.monotonic() - 0.4
-    assert deadman.is_engaged() is True
+    assert deadman.is_engaged() is (engaged_field >= 0.5)
 
-    # stale: fail safe, WITHOUT any new message arriving to say so
+    # stale: fail closed, WITHOUT treating silence as a policy hand-back
     deadman._last_rx = time.monotonic() - 0.6
-    assert deadman.is_engaged() is False
+    with pytest.raises(DeadmanHeartbeatStaleError) as caught:
+        deadman.is_engaged()
+    assert caught.value.age_s > RosTopicDeadman.STALE_S
+    assert caught.value.stale_s == RosTopicDeadman.STALE_S
+    assert "refusing policy fallback" in str(caught.value)
 
-    # and a fresh message re-engages immediately
+    # A fresh message makes the source live again; normal state semantics resume.
     _publish(deadman, 1.0, 1.0)
     assert deadman.is_engaged() is True
+
+
+def test_stale_heartbeat_never_forwards_the_policy_action(ros_node):
+    """Fresh release forwards policy; silence cannot impersonate that release."""
+
+    deadman = RosTopicDeadman(ros_node)
+    env = _wrapper(deadman)
+    policy_action = np.linspace(-0.3, 0.3, 7, dtype=np.float32)
+
+    _publish(deadman, 0.0, 1.0)
+    env.step(policy_action)
+    np.testing.assert_array_equal(env.unwrapped.last_action, policy_action)
+
+    env.unwrapped.last_action = None
+    deadman._last_rx = time.monotonic() - 0.6
+    with pytest.raises(DeadmanHeartbeatStaleError):
+        env.step(policy_action)
+
+    assert env.unwrapped.last_action is None
+
+
+def test_topic_deadman_rejects_startup_after_no_first_heartbeat(monkeypatch):
+    """The pre-first-message state remains covered by the existing 15 s guard."""
+
+    from ur_experiments import cube_in_cup as task_mod
+
+    class _NeverReceives:
+        def __init__(self, node):
+            del node
+            self._last_rx = None
+
+    clock = iter((0.0, 16.0))
+    monkeypatch.setattr(task_mod, "RosTopicDeadman", _NeverReceives)
+    monkeypatch.setattr(
+        task_mod,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _: None),
+    )
+
+    env = SimpleNamespace(backend=SimpleNamespace(_node=object()))
+    with pytest.raises(
+        RuntimeError, match=r"no /hil/deadman message after 15 s"
+    ):
+        task_mod.CubeInCupConfig._resolve_deadman("topic", env)
+
+
+def test_deadman_stale_error_exits_actor_and_closes_resources(monkeypatch):
+    """``run_remote_actor`` propagates the stop into the CLI's ``finally``."""
+
+    script = os.path.join(_INFRA, "scripts", "run_remote_rlpd_actor.py")
+    spec = importlib.util.spec_from_file_location(
+        "test_deadman_stale_actor_cleanup", script
+    )
+    assert spec is not None and spec.loader is not None
+    actor_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(actor_module)
+
+    class _ActorEnv:
+        action_space = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=(7,), dtype=np.float32
+        )
+
+        def __init__(self):
+            self.closed = False
+
+        def reset(self):
+            return {}, {"timestamp_ns": 1}
+
+        def step(self, action):
+            del action
+            raise DeadmanHeartbeatStaleError(age_s=0.6, stale_s=0.5)
+
+        def close(self):
+            self.closed = True
+
+    class _Network:
+        def __init__(self):
+            self.closed = False
+
+        def health(self):
+            return True, True, "ok"
+
+        def get_server_info(self):
+            return SimpleNamespace(model_id="test-policy", protocol_version=2)
+
+        def begin_episode(self, observation, **kwargs):
+            del observation, kwargs
+            return SimpleNamespace(
+                action=np.zeros(7, dtype=np.float32), policy_version=0
+            )
+
+        def close(self):
+            self.closed = True
+
+    class _Config:
+        NETWORK = {}
+        CLASSIFIER_SIDECAR = {"enabled": False}
+        max_steps = 1
+        random_steps = 0
+        buffer_period = 0
+
+        def __init__(self):
+            self.robot_config = SimpleNamespace(DRY_RUN=True)
+
+    args = SimpleNamespace(
+        exp_name="task",
+        ur_config_module=None,
+        checkpoint_path=None,
+        save_video=False,
+        fake_env=False,
+        actor_id="test-actor",
+        network_type=None,
+        server_host=None,
+        server_port=None,
+        timeout_s=None,
+        max_response_age_s=None,
+        observation_schema_hash=None,
+        expected_model_id=None,
+        expected_reward_authority=None,
+        expected_reward_model_id=None,
+        deadman="topic",
+        arm=True,
+        no_classifier_sidecar=False,
+        classifier_sidecar_interval=None,
+        classifier_stationary_speed_max=None,
+        classifier_escalate_probability=None,
+        mock_policy_noise=0.0,
+    )
+    env = _ActorEnv()
+    network = _Network()
+    monkeypatch.setattr(actor_module, "_parse_args", lambda: args)
+    monkeypatch.setattr(
+        actor_module, "_load_config_mapping", lambda module: {"task": _Config}
+    )
+    monkeypatch.setattr(actor_module, "_build_actor_environment", lambda *_: env)
+    monkeypatch.setattr(actor_module, "_preflight_command_topics", lambda *_: None)
+    monkeypatch.setattr(actor_module, "create_actor_network", lambda *_, **__: network)
+
+    with pytest.raises(DeadmanHeartbeatStaleError):
+        actor_module.main()
+
+    assert env.closed
+    assert network.closed
 
 
 # =========================================================================== #

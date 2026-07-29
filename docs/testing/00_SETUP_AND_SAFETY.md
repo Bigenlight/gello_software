@@ -407,7 +407,7 @@ Ctrl-C에 대한 정확한 거동: 브리지가 죽으면 컨트롤러는 **마�
 |---|---|---|
 | **RL 데드맨을 놓으면 팔이 선다** | **아니다.** 개입만 해제되고 **정책이 즉시 팔을 계속 움직인다.** `GelloIntervention.action()`은 미개입 시 정책 액션을 그대로 통과시킨다 | `serl_ur_infra/ur_env/envs/wrappers.py:330-343` |
 | **HIL GUI DISENGAGE = 정지** | **아니다.** GUI는 `/hil/deadman`만 발행한다. 로봇도 브리지도 건드리지 않는다. DISENGAGE는 "정책으로 복귀"다 | `gello_hil_gui_node.py:5-10`, `:39-45` |
-| **GUI가 죽으면 팔이 선다** | **아니다.** 0.5 s 하트비트 끊김 워치독은 `engaged=False`로 fail-safe할 뿐 → **정책이 이어받는다** | `wrappers.py:144` (`STALE_S = 0.5`), `:166-177` |
+| **GUI가 죽는 것은 E-STOP과 같다** | **아니다.** 첫 heartbeat 수신 뒤 0.5 s 단절은 이제 `DeadmanHeartbeatStaleError`로 actor를 fail-stop하고 새 정책 액션을 보내지 않아 FPC가 마지막 명령을 홀드한다. 하지만 이는 소프트웨어 정지일 뿐 전원 차단·브레이크 체결이 아니다 | `RosTopicDeadman.is_engaged()` (`STALE_S = 0.5`), actor CLI의 `finally` |
 | **ESC를 누르면 정지한다** | **아니다.** `self.terminate=True` → 그 **에피소드가 끝나고**, 그 다음 `reset()`이 `go_to_reset()`으로 **팔을 RESET_JOINTS로 이동시킨다.** ESC는 "정지"가 아니라 "지금 에피소드 끝내고 리셋 자세로 가"다. **게다가 pynput 전역 리스너라 터미널 포커스가 필요 없다 — 아무 창에서 누른 ESC도 잡힌다.** 반영은 다음 step 경계에서다 | `ur7e_env.py:197-208`(리스너), `:505-512`(reset→go_to_reset), `:520`(`go_to_reset`) |
 | **펜던트 속도 슬라이더를 0%로 내리면 정지** | **아니다.** 속도 스케일일 뿐이며 명령 스트림은 계속 흐른다. 슬라이더를 올리는 순간 밀린 명령이 그대로 실행된다. 정지 수단으로 쓰지 말 것 | (UR PolyScope 동작. 리포 근거 없음 — 조작 원칙) |
 | **`DRY_RUN=True`니까 안전하다** | 조건부로 맞다. `DRY_RUN`은 `URRosBackend(dry_run=...)`로 전달되어 명령 발행을 막지만, **`run_rviz_hil.py`는 `DRY_RUN=False`를 일부러 박아 놨다**(`tests/run_rviz_hil.py:55`). 또 `run_real_hil.py --arm`과 actor의 `--arm`은 **CLI로 `DRY_RUN`을 끈다.** 그 스크립트들을 무심코 실기에 겨누지 말 것 | `config.py:153`, `cube_in_cup.py:227`, `run_rviz_hil.py:34`, `:55` |

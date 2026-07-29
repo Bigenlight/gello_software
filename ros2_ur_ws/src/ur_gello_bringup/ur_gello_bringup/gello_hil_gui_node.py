@@ -20,8 +20,9 @@ FROZEN SHARED CONTRACT (do NOT deviate -- the env agent depends on it):
   data   [engaged, gain]      engaged in {0.0, 1.0}; gain in [0.10, 1.00]
   rate   20 Hz heartbeat      (published continuously, not only on change, so the
                               subscriber's staleness watchdog -- STALE_S=0.5s --
-                              stays satisfied and falls back to policy if the GUI
-                              dies)
+                              stays satisfied; after the first heartbeat, losing
+                              the GUI fail-stops the control loop rather than
+                              falling back to policy)
   QoS    default reliable, depth 10
 
 ARCHITECTURE (forked verbatim from gello_eef_gui, the proven gello_recorder_gui

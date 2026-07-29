@@ -107,7 +107,8 @@ T3 — HIL GUI (데드맨 `/hil/deadman` 발행)
     cd ~/gello_software/ros2_ur_ws && ./run_hil_gui.sh
 
     ENGAGE/DISENGAGE 버튼 + 감도 슬라이더(0.10–1.00). 20 Hz 하트비트를 쏘고,
-    0.5 s 끊기면 러너가 자동으로 개입 해제(정책 복귀)한다.
+    첫 수신 뒤 0.5 s 끊기면 DeadmanHeartbeatStaleError로 러너가 종료된다.
+    단절은 DISENGAGE가 아니며 정책 fallback을 실행하지 않는다.
     **스페이스바(--deadman spacebar)를 기본으로 쓰지 않는 이유**: 워치독이 없어
     프로세스가 멈추거나 키 이벤트를 놓치면 stuck-ON이 될 수 있다. 실기에서는
     하트비트가 있는 topic 데드맨을 쓴다.
@@ -220,7 +221,8 @@ anchor/gain/anchored는 `step()` **직후** 값이다. engage 엣지에서 앵�
 
 추가로 사람 눈으로 확인할 것:
   - DISENGAGE 하면 즉시 정책(zero)으로 돌아가 팔이 멈추는가
-  - GUI를 끄면(하트비트 끊김) 0.5 s 안에 자동 해제되는가
+  - GUI를 끄면 첫 수신 후 0.5 s 안에 stale 예외로 러너가 종료되고,
+    해당 틱에 정책 fallback 명령이 나가지 않는가
   - `--arm`에서 팔이 리더를 따라 "느리지만 매끄럽게" 따라오는가
 
 ================================================================================
@@ -852,7 +854,8 @@ def main(argv=None):
 
         engage_help = (
             "  GUI에서 ENGAGE -> GELLO를 천천히 움직인다 -> DISENGAGE 하면 정책(zero)"
-            " 복귀.\n  GUI를 닫거나 하트비트가 0.5 s 끊기면 자동 해제된다."
+            " 복귀.\n  GUI를 닫거나 하트비트가 0.5 s 끊기면 stale 예외로 종료되며"
+            " 정책 fallback은 없다."
             if args.deadman == "topic"
             else "  이 터미널에 포커스를 준 채 SPACEBAR를 홀드하고 GELLO를 움직인다."
         )

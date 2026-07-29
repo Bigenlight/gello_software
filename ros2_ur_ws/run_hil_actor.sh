@@ -23,13 +23,18 @@
 #     텔레옵 브리지(gello_ur_bridge)가 같은 토픽을 물고 있으면 두 퍼블리셔가
 #     서로 다른 목표로 컨트롤러를 때려 팔이 떨거나 튄다. 이 리그 최대 하자다.
 #     → 사전 점검에서 다른 퍼블리셔가 하나라도 있으면 **거부하고 중단**한다.
-#   * forward_position_controller가 active면 경고한다. active 상태에서 실수로
-#     한 번이라도 발행되면 팔이 즉시 그 자세로 간다.
+#   * --arm은 controller handoff까지 이 래퍼가 소유한다. 정상 입력은 둘뿐이다:
+#       (a) scaled_joint_trajectory_controller active + FPC inactive
+#           -> run_hil_preposition.sh의 짧은 수명 proof marker + 현재 RESET 자세를
+#              다시 확인한 뒤에만 strict switch
+#       (b) FPC active + STJC inactive -> live RESET 자세 확인 후 idempotent, switch 없음
+#     둘 다 아니거나 switch 후 상태가 정확하지 않으면 actor를 exec하지 않는다.
+#   * --arm 없는 actor와 --dry-preflight는 controller를 절대 전환하지 않는다.
 #   * 태스크 config의 DRY_RUN=True가 기본이다(cube_in_cup). DRY_RUN 해제는
-#     이 스크립트가 아니라 config/러너 인자로만 이루어져야 한다. 이 래퍼는
-#     로봇에 아무것도 발행하지 않으며, --dry-preflight면 actor조차 안 띄운다.
-#   * 사전 점검은 전부 읽기 전용이다(ros2 topic hz / topic info /
-#     control list_controllers / TCP connect). 명령 발행은 하지 않는다.
+#     --arm을 actor에게 넘길 때만 일어난다. 이 래퍼는 관절 command를 발행하거나
+#     reset 이동을 호출하지 않는다. 다만 실제 --arm에서는 검증 뒤 controller만 전환한다.
+#   * [1]~[10] 사전 점검은 전부 읽기 전용이다(ros2 topic hz / topic info /
+#     control list_controllers / TCP connect). 실제 switch는 그 뒤 [ARM] 한 곳뿐이다.
 #
 # ── 중단 방법 ────────────────────────────────────────────────────────────────
 #   * 이 터미널에서 Ctrl-C. actor는 exec로 이 셸을 대체하므로 Ctrl-C가 곧바로
@@ -40,16 +45,19 @@
 #   * GELLO 개입 중이면 HIL GUI에서 DISENGAGE.
 #
 # ── 사용법 ───────────────────────────────────────────────────────────────────
-#   ./run_hil_actor.sh --dry-preflight          # 점검만, actor 미기동 (안전)
+#   ./run_hil_actor.sh --dry-preflight          # 점검만, actor 미기동 (읽기 전용)
+#   ./run_hil_actor.sh --dry-preflight --arm    # arm handoff 준비까지 읽기 전용 검증
 #   ./run_hil_actor.sh --fake-env               # Stage A: fake env로 Kanu 왕복
 #   ./run_hil_actor.sh                          # Stage B: 실센서 actor
+#   ./run_hil_actor.sh --arm --deadman topic    # proof 확인 + FPC 전환 + 실제 actor
 #   ./run_hil_actor.sh --save-video --actor-id foo   # 인자는 그대로 통과
 #
 #   환경변수로 기본값 덮어쓰기:
 #     ACTOR_VENV, SERVER_HOST, SERVER_PORT, EXP_NAME, UR_CONFIG_MODULE,
 #     TIMEOUT_S, MAX_RESPONSE_AGE_S, OBS_SCHEMA_HASH, EXPECTED_MODEL_ID,
 #     EXPECTED_REWARD_AUTHORITY, EXPECTED_REWARD_MODEL_ID, ROS_SETUP,
-#     HZ_TIMEOUT_S, SKIP_ROS_CHECKS=1
+#     HZ_TIMEOUT_S, HIL_PREPOSITION_MARKER, HIL_PREPOSITION_MARKER_MAX_AGE_S
+#   SKIP_ROS_CHECKS=1은 fake/no-arm 진단 전용이며 --arm과 함께 쓰면 거부한다.
 #
 # NOTE: `set -e`만 쓴다. `set -u`는 쓰지 않는다 — ROS의 setup.bash가 -u에서
 #       죽는다(이 저장소에서 이미 두 스크립트가 같은 버그로 깨졌다가 고쳐졌다).
@@ -58,6 +66,14 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HANDOFF_LIB="$SCRIPT_DIR/_hil_controller_handoff.sh"
+POSE_CHECKER="$SCRIPT_DIR/_hil_joint_pose_check.py"
+if [ ! -f "$HANDOFF_LIB" ]; then
+    echo "FATAL: controller handoff library missing: $HANDOFF_LIB" >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+source "$HANDOFF_LIB"
 
 # ---------------------------------------------------------------------------
 # 설정 (환경변수로 덮어쓸 수 있음)
@@ -103,13 +119,31 @@ CAM2_TOPIC="/cam2/cam2/color/image_raw/compressed"
 GRIPPER_STATE_TOPIC="/robotiq_gripper/position_percent"
 COMMAND_TOPIC="/forward_position_controller/commands"
 ARM_CONTROLLER="forward_position_controller"
+SOURCE_ARM_CONTROLLER="scaled_joint_trajectory_controller"
 HZ_TIMEOUT_S="${HZ_TIMEOUT_S:-6}"
+# Must match CubeInCupEnvConfig.RESET_JOINTS exactly.  This is checked against
+# the marker and against a fresh /joint_states sample before an automatic switch.
+RESET_JOINTS_CSV="3.1382,-1.5276,1.7168,-1.7592,-1.5216,-3.1331"
+ARM_POSE_TOL_RAD="${HIL_ARM_POSE_TOL_RAD:-0.10}"
+PREPOSITION_MARKER_MAX_AGE_S="${HIL_PREPOSITION_MARKER_MAX_AGE_S:-900}"
+PREPOSITION_MARKER="${HIL_PREPOSITION_MARKER:-$(hil_default_preposition_marker)}"
+if ! awk -v value="$ARM_POSE_TOL_RAD" \
+    'BEGIN { exit !(value > 0 && value <= 0.10) }'; then
+    echo "FATAL: HIL_ARM_POSE_TOL_RAD=$ARM_POSE_TOL_RAD must be in (0, 0.10]" >&2
+    exit 1
+fi
+if [[ ! "$PREPOSITION_MARKER_MAX_AGE_S" =~ ^[1-9][0-9]*$ ]] || \
+   (( PREPOSITION_MARKER_MAX_AGE_S > 3600 )); then
+    echo "FATAL: HIL_PREPOSITION_MARKER_MAX_AGE_S must be an integer in [1, 3600]" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 인자 파싱: --dry-preflight / --help 만 소비하고 나머지는 전부 통과시킨다
 # ---------------------------------------------------------------------------
 DRY_PREFLIGHT=0
 FAKE_ENV=0
+ARM_REQUESTED=0
 PASSTHRU=()
 for arg in "$@"; do
     case "$arg" in
@@ -124,6 +158,10 @@ for arg in "$@"; do
             ;;
         --fake-env)
             FAKE_ENV=1
+            PASSTHRU+=("$arg")
+            ;;
+        --arm)
+            ARM_REQUESTED=1
             PASSTHRU+=("$arg")
             ;;
         *)
@@ -168,7 +206,25 @@ if [ "$FAKE_ENV" -eq 1 ]; then
 else
     _say "   mode      : REAL (실센서 + 실기 배선)"
 fi
+if [ "$ARM_REQUESTED" -eq 1 ]; then
+    if [ "$DRY_PREFLIGHT" -eq 1 ]; then
+        _say "   arm       : READ-ONLY READINESS CHECK (--dry-preflight; switch 금지)"
+    else
+        _say "   arm       : REQUESTED (preflight 후 proof 기반 handoff)"
+    fi
+else
+    _say "   arm       : off (controller switch 금지)"
+fi
 _say "============================================================"
+
+if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 1 ]; then
+    p_fail "--fake-env와 --arm을 함께 쓸 수 없다" \
+           "fake 계약 점검에는 --arm을 빼고, 실기는 --fake-env를 빼라"
+fi
+if [ "$ARM_REQUESTED" -eq 1 ] && [ "${SKIP_ROS_CHECKS:-0}" = "1" ]; then
+    p_fail "--arm에서 SKIP_ROS_CHECKS=1은 금지된다" \
+           "controller/topic proof를 건너뛴 채 물리 명령 경로를 열 수 없다"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. venv 존재 / 올바른 인터프리터
@@ -450,40 +506,46 @@ else
 fi
 
 _say ""
-_say "[8] $ARM_CONTROLLER 상태 (active면 경고)"
+_say "[8] arm controller 쌍 상태 (정확한 조합만 허용)"
+CONTROLLER_STATE_OK=0
 if [ "$OVERLAY_OK" -ne 1 ]; then
     p_skip "오버레이를 소스하지 못해 건너뜀"
 elif [ "$SKIP_ROS_CHECKS" = "1" ]; then
     p_skip "SKIP_ROS_CHECKS=1"
 else
-    set +e
-    CTRL_OUT="$(timeout --signal=KILL 15 ros2 control list_controllers 2>&1)"
-    CTRL_RC=$?
-    set -e
-    if [ "$CTRL_RC" -ne 0 ] || [ -z "$CTRL_OUT" ]; then
+    if ! hil_read_controller_states "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER"; then
         if [ "$FAKE_ENV" -eq 1 ]; then
             p_info "controller_manager 응답 없음 (fake-env에서는 무관)"
         else
-            p_fail "controller_manager에서 컨트롤러 목록을 못 읽었다" \
-                   "UR 드라이버(ur_control.launch.py)가 떠 있는지 확인"
+            p_fail "controller_manager에서 두 controller의 정확한 상태를 못 읽었다" \
+                   "UR 드라이버와 controller 이름/상태를 확인"
         fi
     else
-        CTRL_LINE="$(printf '%s\n' "$CTRL_OUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 "^$ARM_CONTROLLER " || true)"
-        CTRL_STATE="$(printf '%s' "$CTRL_LINE" | awk '{print $NF}')"
-        case "$CTRL_STATE" in
-            inactive)
-                p_ok "$ARM_CONTROLLER = inactive (안전한 기본 상태)"
+        case "$HIL_SOURCE_STATE:$HIL_TARGET_STATE" in
+            active:inactive)
+                CONTROLLER_STATE_OK=1
+                if [ "$ARM_REQUESTED" -eq 1 ]; then
+                    p_ok "$SOURCE_ARM_CONTROLLER=active, $ARM_CONTROLLER=inactive — proof 확인 후 전환 가능한 상태"
+                else
+                    p_ok "$SOURCE_ARM_CONTROLLER=active, $ARM_CONTROLLER=inactive — no-arm이므로 전환하지 않음"
+                fi
                 ;;
-            active)
-                p_warn "$ARM_CONTROLLER = ACTIVE" \
-                       "이 상태에서 명령이 한 줄이라도 나가면 팔이 즉시 움직인다. 의도한 것이 아니면: ros2 control switch_controllers --deactivate $ARM_CONTROLLER"
-                ;;
-            "")
-                p_warn "$ARM_CONTROLLER 를 컨트롤러 목록에서 못 찾았다" \
-                       "드라이버 launch 인자를 확인 (initial_joint_controller 등)"
+            inactive:active)
+                CONTROLLER_STATE_OK=1
+                if [ "$ARM_REQUESTED" -eq 1 ]; then
+                    p_ok "$SOURCE_ARM_CONTROLLER=inactive, $ARM_CONTROLLER=active — idempotent 후보([10] live RESET pose 확인 필요)"
+                else
+                    p_warn "$ARM_CONTROLLER=ACTIVE (no-arm은 상태를 바꾸지 않음)" \
+                           "명령 퍼블리셔가 없어야 하며, 의도하지 않은 상태면 controller를 수동 복구"
+                fi
                 ;;
             *)
-                p_warn "$ARM_CONTROLLER = $CTRL_STATE (예상 밖 상태)" ""
+                if [ "$FAKE_ENV" -eq 1 ]; then
+                    p_info "controller 조합이 실기형이 아님: $SOURCE_ARM_CONTROLLER=$HIL_SOURCE_STATE, $ARM_CONTROLLER=$HIL_TARGET_STATE"
+                else
+                    p_fail "예상 밖 controller 조합" \
+                           "$SOURCE_ARM_CONTROLLER=$HIL_SOURCE_STATE, $ARM_CONTROLLER=$HIL_TARGET_STATE — 둘 다 active/inactive인 상태로 actor 금지"
+                fi
                 ;;
         esac
     fi
@@ -516,6 +578,40 @@ else
     fi
 fi
 
+# --dry-preflight --arm is a read-only rehearsal of the exact mutation gate.
+# It validates marker + current reset pose but deliberately exits before the
+# handoff function below.  Plain --dry-preflight/no-arm never needs a marker.
+_say ""
+_say "[10] controller handoff proof"
+if [ "$ARM_REQUESTED" -ne 1 ]; then
+    p_info "--arm 없음 — proof 불필요, controller switch 금지"
+elif [ "$FAKE_ENV" -eq 1 ]; then
+    p_skip "fake-env에서는 controller handoff 없음"
+elif [ "$OVERLAY_OK" -ne 1 ] || [ "$CONTROLLER_STATE_OK" -ne 1 ]; then
+    p_skip "선행 controller/overlay 점검 실패"
+elif [ "$HIL_SOURCE_STATE" = inactive ] && [ "$HIL_TARGET_STATE" = active ]; then
+    if hil_verify_live_reset_pose \
+            "$POSE_CHECKER" "$RESET_JOINTS_CSV" "$ARM_POSE_TOL_RAD" "/joint_states"; then
+        p_ok "$ARM_CONTROLLER가 이미 active — marker 없이 live RESET pose 검증(idempotent)"
+    else
+        p_fail "$ARM_CONTROLLER가 active지만 현재 팔이 RESET 자세가 아니다" \
+               "leftover FPC 상태에서 actor 자동 reset을 허용하지 않는다; driver/preposition 절차로 복구"
+    fi
+elif [ "$DRY_PREFLIGHT" -eq 1 ]; then
+    if hil_validate_preposition_marker \
+            "$PREPOSITION_MARKER" "$RESET_JOINTS_CSV" \
+            "$ARM_POSE_TOL_RAD" "$PREPOSITION_MARKER_MAX_AGE_S" && \
+       hil_verify_live_reset_pose \
+            "$POSE_CHECKER" "$RESET_JOINTS_CSV" "$ARM_POSE_TOL_RAD" "/joint_states"; then
+        p_ok "preposition marker + 현재 RESET 자세 확인 (읽기 전용; switch하지 않음)"
+    else
+        p_fail "arm handoff proof 검증 실패" \
+               "actor를 내린 상태에서 $SCRIPT_DIR/run_hil_preposition.sh를 실행"
+    fi
+else
+    p_info "preflight가 전부 통과한 뒤 marker + live pose를 재검증하고 strict switch 예정"
+fi
+
 # ---------------------------------------------------------------------------
 # 결과 요약
 # ---------------------------------------------------------------------------
@@ -539,6 +635,24 @@ if [ "$DRY_PREFLIGHT" -eq 1 ]; then
     _say "--dry-preflight: actor를 기동하지 않고 종료한다."
     _say "실제 기동은 --dry-preflight 를 빼고 같은 명령을 다시 실행."
     exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 실제 --arm controller handoff.  이 지점은 모든 preflight가 통과한 뒤이고,
+# --dry-preflight는 이미 종료했다.  no-arm/fake는 절대 이 함수를 호출하지 않는다.
+# 함수 자체도 marker + live reset pose + publisher 0을 다시 확인하며 reset 이동은
+# 수행하지 않는다. 실패하면 actor를 exec하지 않는다.
+# ---------------------------------------------------------------------------
+if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 0 ]; then
+    _say ""
+    _say "[ARM] controller handoff (여기서만 상태 변경 가능)"
+    if ! hil_arm_controller_handoff \
+            "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER" "$COMMAND_TOPIC" \
+            "$PREPOSITION_MARKER" "$POSE_CHECKER" "$RESET_JOINTS_CSV" \
+            "$ARM_POSE_TOL_RAD" "$PREPOSITION_MARKER_MAX_AGE_S"; then
+        _say " ✗ controller handoff 실패 — actor를 기동하지 않는다."
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------

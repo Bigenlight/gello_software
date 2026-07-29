@@ -351,19 +351,26 @@ layout assertion과 laptop/server schema hash pin을 계속 유지하고, grippe
 
 ---
 
-## G6 — staleness 시 safe-stop이 아니라 **예외** 🟠
+## G6 — 센서 staleness 시 safe-stop이 아니라 **예외** 🟠
 
 | 위치 | 동작 | 코드가 인정하는 것 |
 |---|---|---|
 | `/joint_states` 0.2 s 초과 | `RuntimeError` | `TODO(together): safe-stop policy (freeze + operator prompt) instead of raise` (`ur7e_env.py:652-655`) |
 | 카메라 0.5 s 초과 / 부재 | `RuntimeError` | `TODO(together): safe-stop policy instead of raise` (`ur7e_env.py:751-757`) |
 | tcp_pose 부재/낡음 | `RuntimeError` | `:660-668` |
+| 첫 `/hil/deadman` 뒤 0.5 s 초과 | `DeadmanHeartbeatStaleError` | **의도된 fail-stop**: silence를 DISENGAGE로 간주하지 않고 정책 액션 전송 전에 액터 종료 |
 
 즉 센서가 끊기면 **러너가 크래시**한다. 결과적으로 팔은 마지막 명령 자세에서 멈추지만
 (G4b의 예외 상황 제외), 이건 **설계된 안전 정지가 아니라 부작용**이다.
 `info`에 `held`/`reject_reason`을 노출하고 staleness 정책을 통일하는 것은
 README TODO에 남아 있다 ("HOLD/reject_reason을 step info로 노출 + staleness safe-stop 정책
 통일 + UR fault recovery").
+
+단, `/hil/deadman` 행은 이 미해결 센서 정책과 구분한다. 정상적인 최신
+`engaged=0`만 정책 복귀를 허용하고, 첫 수신 이후 heartbeat loss는 명시적으로 예외를
+전파해 `run_remote_actor`를 빠져나온다. actor CLI의 `finally`가 network/env를 닫으며,
+단절을 감지한 틱에는 하위 env/FPC로 정책 액션이 전달되지 않는다. 첫 메시지가 전혀 없는
+경우도 `cube_in_cup`의 15 s 시작 가드가 거부한다.
 
 **완화책:** 데이터 수집 세션에서는 크래시 = 에피소드 손실이므로,
 `06_SENSORS.md` §3.1의 topic hz 루프를 **세션 시작 시 반드시** 돌려 사전에 걸러낸다.
@@ -498,6 +505,8 @@ gain이 1.0으로 고정이고(`:126-127`), 하트비트 워치독이 없다.
 
 **완화책:** 새 러너/스크립트를 쓸 때 `deadman=`을 **반드시 명시**한다.
 운영에서는 `--deadman topic` + `run_hil_gui.sh`를 쓴다 (`04_HIL_INTERVENTION.md` §1).
+토픽 소스는 첫 메시지를 15 s 안에 못 받으면 시작을 거부하고, 일단 받은 뒤 0.5 s
+끊기면 정책으로 되돌아가지 않고 액터를 fail-stop한다.
 
 ---
 

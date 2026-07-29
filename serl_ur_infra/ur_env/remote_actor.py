@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import math
 import os
 import pickle
 import time
@@ -13,9 +14,11 @@ import uuid
 import numpy as np
 
 from ur_env.actor_network import (
+    PROTOCOL_VERSION,
     SCHEMA_VERSION,
     ActorNetwork,
     ActorProtocolError,
+    ServerInfo,
     validate_action,
     validate_counter,
     validate_timestamp_ns,
@@ -195,6 +198,152 @@ class ActorRunSummary:
     sidecar_round_trip_ms_max: float = 0.0
     plain_round_trip_ms_mean: float = 0.0
     plain_round_trip_ms_max: float = 0.0
+
+
+@dataclass(frozen=True)
+class ActorProbeSummary:
+    """Evidence returned by the no-submit real-observation probe.
+
+    A probe intentionally stops after ``BeginEpisode``.  It proves that the
+    actor can read one environment observation, pin the server identity/schema,
+    and receive a valid policy action without executing that action or creating
+    a transition.
+    """
+
+    run_id: str
+    session_id: str
+    observation_id: str
+    source_timestamp_ns: int
+    server_info: ServerInfo
+    policy_version: int
+    policy_action: np.ndarray
+    server_inference_ms: float
+    round_trip_ms: float
+
+
+def run_remote_actor_probe(
+    network: ActorNetwork,
+    env: Any,
+    *,
+    actor_id: str,
+    run_id: Optional[str] = None,
+    session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+    deterministic: bool = False,
+) -> ActorProbeSummary:
+    """Validate one real observation and one policy inference, then stop.
+
+    The only actor RPCs issued here are ``GetServerInfo`` and
+    ``BeginEpisode``.  In particular, this function never calls ``env.step``
+    or ``ActorNetwork.step``; therefore it cannot construct, submit, or ACK a
+    replay transition.  This is the safe default used by
+    ``run_remote_rlpd_actor.py`` when ``--arm`` is absent.
+
+    ``BeginEpisode`` is still valuable: the production server validates the
+    canonical observation before policy inference, and the returned action is
+    checked again here for the exact robot action shape and normalized range.
+    """
+
+    if not actor_id:
+        raise ValueError("actor_id is required")
+    action_shape = tuple(int(dim) for dim in env.action_space.shape)
+    if action_shape != (7,):
+        raise ValueError(
+            f"protocol v2 requires action shape (7,), got {action_shape}"
+        )
+
+    # GrpcActorNetwork verifies any expected model/reward/schema pins while
+    # fetching this object.  Repeat the transport-neutral invariants here so a
+    # future ActorNetwork implementation cannot silently weaken probe mode.
+    info = network.get_server_info()
+    if not info.ready:
+        raise ActorProtocolError("remote actor service is not ready")
+    if info.protocol_version != PROTOCOL_VERSION:
+        raise ActorProtocolError(
+            "incompatible server protocol_version "
+            f"{info.protocol_version!r}; expected {PROTOCOL_VERSION!r}"
+        )
+    if info.schema_version != SCHEMA_VERSION:
+        raise ActorProtocolError(
+            f"server schema_version is {info.schema_version}, "
+            f"expected {SCHEMA_VERSION}"
+        )
+    expected_action_dim = int(np.prod(action_shape))
+    if info.action_dim != expected_action_dim:
+        raise ActorProtocolError(
+            f"server action_dim is {info.action_dim}, "
+            f"expected {expected_action_dim}"
+        )
+    for name, value in (
+        ("model_id", info.model_id),
+        ("reward_authority", info.reward_authority),
+        ("observation_schema_hash", info.observation_schema_hash),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ActorProtocolError(f"server {name} is empty")
+
+    observation, reset_info = env.reset()
+    source_timestamp_ns = validate_timestamp_ns(reset_info.get("timestamp_ns"))
+    run_id = run_id or f"probe-{uuid.uuid4().hex}"
+    session_id = session_id_factory()
+    if not session_id:
+        raise ValueError("session_id_factory returned an empty ID")
+    observation_id = f"{session_id}:0"
+
+    action_result = network.begin_episode(
+        observation,
+        run_id=run_id,
+        session_id=session_id,
+        episode_id=0,
+        observation_id=observation_id,
+        timestamp_ns=source_timestamp_ns,
+        deterministic=deterministic,
+    )
+    policy_action = validate_action(
+        action_result.action,
+        action_shape=action_shape,
+        name="probe policy action",
+    )
+    policy_version = validate_counter(
+        action_result.policy_version, name="policy_version"
+    )
+    if action_result.session_id != session_id:
+        raise ActorProtocolError("probe action session_id does not match request")
+    if action_result.request_id != 1:
+        raise ActorProtocolError("probe BeginEpisode reply request_id must be 1")
+    if action_result.observation_id != observation_id:
+        raise ActorProtocolError(
+            "probe action observation_id does not match request"
+        )
+    validate_timestamp_ns(
+        action_result.request_created_monotonic_ns,
+        name="request_created_monotonic_ns",
+    )
+    timings: dict[str, float] = {}
+    for name, value in (
+        ("server_inference_ms", action_result.server_inference_ms),
+        ("round_trip_ms", action_result.round_trip_ms),
+    ):
+        try:
+            timing = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ActorProtocolError(f"probe {name} must be numeric") from exc
+        if not math.isfinite(timing) or timing < 0.0:
+            raise ActorProtocolError(
+                f"probe {name} must be finite and non-negative"
+            )
+        timings[name] = timing
+
+    return ActorProbeSummary(
+        run_id=run_id,
+        session_id=session_id,
+        observation_id=observation_id,
+        source_timestamp_ns=source_timestamp_ns,
+        server_info=info,
+        policy_version=policy_version,
+        policy_action=policy_action,
+        server_inference_ms=timings["server_inference_ms"],
+        round_trip_ms=timings["round_trip_ms"],
+    )
 
 
 class _RoundTripStats:

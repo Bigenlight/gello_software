@@ -84,7 +84,7 @@ cd ~/gello_software/ros2_ur_ws && ./run_hil_gui.sh
 
 - **ENGAGE**(초록, 두 번 클릭 확인) → GELLO를 움직이면 RViz 팔이 추종. **DISENGAGE**(파랑) → 정책 복귀.
 - **감도 슬라이더**(0.10–1.00) = 리더 이동 배율. **다음 ENGAGE 때** 반영(진행 중 재스케일 안 함).
-- GUI는 `/hil/deadman`(`Float32MultiArray [engaged, gain]`, 20 Hz)만 발행한다. 20 Hz 하트비트가 0.5 s 끊기면 env가 안전하게 개입 해제(정책 복귀)한다.
+- GUI는 `/hil/deadman`(`Float32MultiArray [engaged, gain]`, 20 Hz)만 발행한다. 첫 메시지를 받은 뒤 하트비트가 0.5 s 끊기면 env가 `DeadmanHeartbeatStaleError`로 러너를 중단하며 정책으로 복귀하지 않는다.
 
 ### (B) 스페이스바 — 기본
 

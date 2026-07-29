@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Run the robot-laptop actor against a configurable remote transport."""
+"""Run or safely probe the robot-laptop actor against a remote server.
+
+Without ``--arm`` this entrypoint is deliberately *not* a dry execution loop:
+it reads one observation, verifies server identity/schema, requests one policy
+action with ``BeginEpisode``, validates that action, and exits without an
+environment step or transition ``Step`` RPC.  Only ``--arm`` enters the
+production transition loop.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +36,11 @@ from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
     assert_actor_environment_state_layout,
 )
-from ur_env.remote_actor import EnvTimestampAdapter, run_remote_actor  # noqa: E402
+from ur_env.remote_actor import (  # noqa: E402
+    EnvTimestampAdapter,
+    run_remote_actor,
+    run_remote_actor_probe,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -38,7 +49,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ur-config-module")
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--save-video", action="store_true")
-    parser.add_argument("--fake-env", action="store_true")
+    parser.add_argument(
+        "--fake-env",
+        action="store_true",
+        help=(
+            "Build a synthetic local environment for the no-submit probe. "
+            "It is not replay/learner acceptance; use "
+            "scripts/run_fake_e2e_actor.py for that. Cannot be combined with "
+            "--arm."
+        ),
+    )
     parser.add_argument("--actor-id", default=socket.gethostname())
     parser.add_argument("--network-type", choices=("grpc", "agentlace"))
     parser.add_argument("--server-host")
@@ -56,18 +76,22 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Intervention deadman source. 'topic' (default) follows "
             "/hil/deadman from the HIL GUI: 20 Hz heartbeat with a staleness "
-            "watchdog that fails safe to the policy. 'spacebar' is a GLOBAL "
-            "pynput listener with no watchdog -- SPACE in any window engages "
-            "and it can stick ON. Only 'topic' is safe on the real rig."
+            "watchdog; after the first heartbeat, staleness aborts the actor "
+            "before any policy action can reach the robot (there is no policy "
+            "fallback). 'spacebar' is a GLOBAL pynput listener with no "
+            "watchdog -- SPACE in any window engages and it can stick ON. "
+            "Only 'topic' is safe on the real rig."
         ),
     )
     parser.add_argument(
         "--arm",
         action="store_true",
         help=(
-            "Actually publish to the robot (clears the task config's DRY_RUN). "
-            "Default is off, in which case neither the arm nor the gripper "
-            "moves. WARNING: the UR7e moves physically."
+            "Enter the production transition loop and actually publish to the "
+            "robot (clears the task config's DRY_RUN). Default is off: one "
+            "sensor/GetServerInfo/BeginEpisode policy probe runs, no action is "
+            "executed, no Step RPC is sent, and no replay item is inserted. "
+            "WARNING: with --arm the UR7e moves physically."
         ),
     )
     # --- reward classifier sidecar ------------------------------------------
@@ -127,6 +151,8 @@ def _parse_args() -> argparse.Namespace:
             "policy->robot->intervention path before a real policy exists. "
             "The perturbed action is what gets executed AND what gets stored, "
             "so the buffer stays self-consistent. 0 (default) disables it."
+            " Requires --arm; no-submit probe mode always validates the "
+            "unmodified server action."
         ),
     )
     return parser.parse_args()
@@ -383,6 +409,17 @@ def _load_config_mapping(ur_config_module: str | None) -> dict:
 
 def main() -> int:
     args = _parse_args()
+    if args.arm and args.fake_env:
+        raise SystemExit(
+            "--arm cannot be combined with --fake-env: production actor data "
+            "must come from the real environment. Use "
+            "scripts/run_fake_e2e_actor.py for bounded synthetic acceptance."
+        )
+    if not args.arm and args.mock_policy_noise != 0.0:
+        raise SystemExit(
+            "--mock-policy-noise requires --arm; no-arm probe mode validates "
+            "the unmodified server policy action and executes nothing."
+        )
     CONFIG_MAPPING = _load_config_mapping(args.ur_config_module)
 
     if args.exp_name not in CONFIG_MAPPING:
@@ -408,8 +445,10 @@ def main() -> int:
             )
         else:
             print(
-                "[remote-actor] DRY RUN: no command is published (pass --arm "
-                "to move the robot).",
+                "[remote-actor] NO-SUBMIT PROBE: command publication is "
+                "disabled. One observation and one server policy action will "
+                "be validated; env.step and transition Step RPC are forbidden "
+                "(pass --arm to enter the production loop).",
                 flush=True,
             )
 
@@ -429,6 +468,44 @@ def main() -> int:
                 f"remote actor server is not ready: alive={alive}, "
                 f"ready={ready}, detail={detail}"
             )
+        if not args.arm:
+            probe = run_remote_actor_probe(
+                network,
+                env,
+                actor_id=args.actor_id,
+            )
+            info = probe.server_info
+            source = "synthetic --fake-env" if args.fake_env else "live sensors"
+            print(
+                f"[remote-actor] server={network_config['type']}://"
+                f"{network_config.get('host')}:{network_config.get('port')} "
+                f"model={info.model_id} protocol={info.protocol_version} "
+                f"schema_version={info.schema_version} "
+                f"schema_hash={info.observation_schema_hash} "
+                f"reward_authority={info.reward_authority} "
+                f"reward_model={info.reward_model_id}",
+                flush=True,
+            )
+            action_text = np.array2string(
+                probe.policy_action,
+                precision=5,
+                separator=", ",
+                suppress_small=False,
+                max_line_width=200,
+            )
+            print(
+                f"[remote-actor] NO-SUBMIT PROBE PASSED: source={source} "
+                f"run={probe.run_id} policy_version={probe.policy_version} "
+                f"action={action_text} "
+                f"max_abs={float(np.max(np.abs(probe.policy_action))):.5f} "
+                f"inference={probe.server_inference_ms:.2f}ms "
+                f"round_trip={probe.round_trip_ms:.2f}ms. "
+                "Step RPCs=0, executed actions=0, replay inserts from this "
+                "actor=0. Classifier/reward/transition routing was not tested.",
+                flush=True,
+            )
+            return 0
+
         info = network.get_server_info()
         print(
             f"[remote-actor] server={network_config['type']}://"

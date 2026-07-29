@@ -53,7 +53,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | 코드 | `wrappers.py:86` | `wrappers.py:130` |
 | 신호원 | pynput 전역 키보드 리스너 | ROS 토픽 `/hil/deadman` |
 | gain | **1.0 고정** (`wrappers.py:126-127`) | 슬라이더 0.10 ~ 1.00 |
-| 워치독 | **없음** | 0.5 s (`STALE_S`, `wrappers.py:144`) |
+| 워치독 | **없음** | 첫 수신 뒤 0.5 s: 액터 fail-stop (`STALE_S`) |
 | mock 러너 | `python3 tests/run_rviz_hil.py` | `python3 tests/run_rviz_hil.py --deadman topic` |
 | 실기 러너 | `--deadman spacebar` (비권장) | **기본값** (`run_real_hil.py:652`) |
 | actor | `--deadman spacebar` (비권장) | **기본값** (`run_remote_rlpd_actor.py:52-62`) |
@@ -75,8 +75,8 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 2. **pynput 리스너는 전역이다.** 터미널 포커스와 무관하게 X 세션의 스페이스를 잡는다
    (`wrappers.py:100-120`). 다른 창에서 친 스페이스가 **로봇을 engage시킬 수 있다.**
 3. **gain이 1.0으로 고정된다** (`wrappers.py:126-127`). 감도를 낮출 수단이 없다.
-4. **워치독이 없다.** 토픽 데드맨은 하트비트가 0.5 s 끊기면 자동 해제되지만
-   (`wrappers.py:166-177`), 스페이스바는 그런 안전망이 없다.
+4. **워치독이 없다.** 토픽 데드맨은 첫 하트비트를 받은 뒤 0.5 s 끊기면
+   `DeadmanHeartbeatStaleError`로 액터를 중단하지만, 스페이스바는 그런 안전망이 없다.
 
 > ✅ 다만 한 가지 fail-safe는 있다: 디스플레이가 없어 pynput이 죽으면
 > `except Exception`으로 잡아 **"영원히 engage 안 됨"** 상태로 떨어진다
@@ -101,17 +101,20 @@ cd $WT/ros2_ur_ws && ./run_hil_gui.sh
 | `data` | `[engaged, gain]`, `engaged ∈ {0.0, 1.0}`, `gain ∈ [0.10, 1.00]` | `gello_hil_gui_node.py:79-80`, `:118-136` |
 | 주기 | **20 Hz 하트비트** (변화 시가 아니라 **상시** 발행) | `gello_hil_gui_node.py:80-81` |
 | QoS | 기본 reliable, depth 10 | `wrappers.py:120` |
-| 스테일 | 0.5 s 넘으면 `engaged=False` | `wrappers.py:145`, `:158-165` |
+| 스테일 | 첫 수신 뒤 0.5 s 넘으면 `DeadmanHeartbeatStaleError` | `wrappers.py`의 `RosTopicDeadman.is_engaged()` |
 
 - ENGAGE(OFF→ON)는 **두 번 클릭 확인**, DISENGAGE(ON→OFF)는 한 번 클릭
   (`gello_hil_gui_node.py:42-44`).
 - GUI는 **로봇도 GELLO도 브리지도 건드리지 않는다.** 퍼블리셔 하나만 소유한다
   (`gello_hil_gui_node.py:6-10`, `:29-31`).
 
-> ### ⛔ 다시 강조: DISENGAGE는 정지가 아니다
-> 데드맨을 놓으면 **정책이 즉시 이어받아 팔을 계속 움직인다**
-> (`wrappers.py:287-290`). GUI가 죽어서 워치독이 걸려도 결과는 같다 — **정책 복귀**다.
-> 정지는 `00_SETUP_AND_SAFETY.md` §6의 수단으로만 한다.
+> ### ⛔ 명시적 DISENGAGE와 하트비트 단절은 다르다
+> 살아 있는 GUI가 `engaged=0`을 보내면 **정책이 즉시 이어받는다**. 그러나 첫 메시지
+> 수신 뒤 0.5 s 동안 하트비트가 없으면 정책 복귀로 해석하지 않는다.
+> `DeadmanHeartbeatStaleError`가 하위 `env.step()` 전에 발생하고 액터가 종료되며,
+> 해당 틱의 정책 액션은 FPC로 전달되지 않는다. 엔트리포인트의 `finally`가 네트워크와
+> env를 닫는 동안 FPC에는 마지막 명령만 남는다. GUI가 처음부터 없으면 별도 15 s
+> 시작 가드가 액터 구동을 거부한다 (`CubeInCupConfig._resolve_deadman()`).
 
 ---
 
@@ -565,10 +568,15 @@ mock 루프(§3)에서는 **아무것도 확인되지 않았다** — 두 열을
 | 5 | gain 슬라이더를 스트로크 중에 움직여도 진행 중 개입이 안 튄다 (§2) | [x] gain-latch 위반 0 | [ ] |
 | 6 | 저장 액션 == 실행 액션 (§2 불변식) | [x] 1.000 | [ ] |
 | 7 | `held` / `reject_reason`이 폭주하지 않는다 | [x] held-rate 0 % | [ ] |
-| 8 | GUI를 죽였을 때 0.5 s 안에 `intervened`가 0으로 떨어진다 (→ 정책 복귀, **정지 아님**) | [ ] | [ ] |
+| 8 | GUI를 죽이면 첫 수신 후 0.5 s 안에 액터가 `DeadmanHeartbeatStaleError`로 종료되고, 단절 틱의 정책 액션이 전송되지 않으며 env/network가 닫힌다 | [ ] | [ ] |
 | 9 | `info["intervened"]` / `intervene_action` 일관성 테스트 (§7.3) | [x] 오프라인 | — |
 | 10 | **그리퍼 개입** (§6.3): 트리거 0.7↑ → `ia6 = -1.0`, 0.3↓ → `+1.0`, 그 사이 래치 유지 | [ ] `--gripper` 필요 | [ ] |
 | 11 | **핵심 회귀:** 트리거 퍼블리셔를 죽이면 `ia6`가 0.0(HOLD)이 되고 **그리퍼가 저절로 열리지 않는다** | [ ] | [ ] |
 | 12 | `cube_in_cup` config(워크스페이스 박스 활성)로 같은 루프 | [ ] → `08` G1 | — |
 | 13 | **개입 스텝이 미분류로 들어온다** (§7.4): `classifier_evaluated=0`, `rewards=0.0`, `masks/dones`는 로컬 제안 그대로 | [ ] ⚠️ **판독구가 없다** — `09` §4.4 참조 | — |
 | 14 | 정지 상태에서 sidecar가 **실제로 붙는다** (actor 종료 줄의 `sidecar n=`이 0이 아니다) | [ ] → `09` §4.4 | — |
+
+항목 8의 코드 경로(ENGAGE/DISENGAGE 양쪽 stale, 정책 액션 미전달,
+`run_remote_actor` 예외 전파와 CLI `finally` 정리)는
+`tests/test_deadman_wiring.py`의 오프라인 회귀로 고정돼 있다. 위 표의 실기/mock 칸은
+실제 GUI 프로세스를 죽여 본 판정만 기록하므로 아직 비워 둔다.

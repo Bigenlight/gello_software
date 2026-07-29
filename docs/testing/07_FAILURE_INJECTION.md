@@ -91,9 +91,9 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | `pkill -f gello_hil_gui` / `pkill -f realsense2_camera_node` |
-| **기대 (GUI)** | 0.5 s 워치독 → `engaged=False` → **정책 복귀** (`wrappers.py:166-177`). 정지 아님 |
+| **기대 (GUI)** | 첫 heartbeat 수신 뒤 0.5 s 워치독 → `DeadmanHeartbeatStaleError` → 하위 env/FPC에 새 정책 액션을 보내지 않고 actor 종료. CLI `finally`가 network/env를 닫음 |
 | **기대 (카메라)** | 0.5 s(`IMAGE_STALE_S`) 후 `get_im()`이 `RuntimeError: camera 'camX' has no fresh frame` (`ur7e_env.py:750-757`) → 러너 크래시 |
-| **PASS** | 두 경우 모두 팔이 마지막 자세에서 정지하고, 원인 메시지가 정확하다 |
+| **PASS** | 두 경우 모두 팔이 마지막 자세에서 정지하고 원인 메시지가 정확하다. GUI 단절에서는 policy fallback/transition 전송이 없어야 한다 |
 
 ---
 
