@@ -28,7 +28,6 @@ from ur_env.compat import (  # noqa: E402
 
 configure_pure_python_protobuf()
 
-from ur_env.grpc_actor_transport import create_grpc_server  # noqa: E402
 from ur_env.learner import (  # noqa: E402
     CheckpointManager,
     CheckpointRunLock,
@@ -319,6 +318,21 @@ def _emit(event: str, **fields: object) -> None:
 
 def _grpc_bind_address(host: str, port: int) -> str:
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _create_grpc_server_after_jax(*args: object, **kwargs: object) -> object:
+    """Load native gRPC only after this process has initialized JAX.
+
+    Kanu's validated learner environment can segfault while importing JAX if
+    the generated protobuf/native gRPC stack was imported first.  Keeping this
+    import behind the server-construction boundary preserves dependency-light
+    CLI imports and guarantees ``_run_locked`` has already selected the JAX
+    backend before cygrpc is loaded.
+    """
+
+    from ur_env.grpc_actor_transport import create_grpc_server
+
+    return create_grpc_server(*args, **kwargs)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -957,7 +971,7 @@ def _run_locked(
                 logger_closed = True
             return 0
 
-        server, bound_port = create_grpc_server(
+        server, bound_port = _create_grpc_server_after_jax(
             service,
             bind_address=_grpc_bind_address(args.host, args.port),
             max_workers=args.max_workers,

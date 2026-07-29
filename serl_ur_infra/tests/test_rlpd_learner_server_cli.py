@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -45,6 +46,17 @@ def _required_args(tmp_path: Path) -> list[str]:
 _RETIRED_ZERO_RECALL_SHA256 = (
     "e329986b0dc2051bdf1baf4437f47e20448ac4ca81f12e4748932fc860d7a997"
 )
+
+
+def test_entrypoint_does_not_import_native_grpc_before_jax():
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    top_level_imports = {
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+    }
+
+    assert "ur_env.grpc_actor_transport" not in top_level_imports
 
 
 def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
