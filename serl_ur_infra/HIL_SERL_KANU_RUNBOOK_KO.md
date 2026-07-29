@@ -1,10 +1,10 @@
 # HIL-SERL learner Kanu 실행 runbook
 
-> 상태: production-shaped CLI의 dry-run/초기 bounded-run 절차
+> 상태: **실물 로봇 production learning smoke 진입 가능**. 실제 arm 실행은 아직 operator 검증 항목이다.
 >
-> 기준일: **2026-07-29 KST** (하드웨어 브랜치 통합 머지 `3f199d4` + threshold 커밋 `1b02857` 이후 재검증. Kanu 체크아웃 토폴로지는 같은 날 03:20 KST에 ssh로 재확인)
+> 기준일: **2026-07-29 KST**. reward-classifier sidecar `a368455`와 online UTD pacing `e965eff`을 합친 최소 구현 커밋은 **`2f12a48`**이다.
 >
-> 검증 브랜치: `feat/gello-ur7e-humble-22.04` (laptop3/origin tip `75f40a5`)
+> 검증 브랜치: `feat/gello-ur7e-humble-22.04`. `2f12a48`에서 classifier/UTD 통합 188 tests, infra 전체 469 tests, 실제 SAC one-step fake-data checkpoint/resume E2E가 통과했다.
 >
 > **Kanu 실행 checkout: `/home/junhyeong/gello_software_hil`** — 2026-07-29 신설된 영속 worktree. §1.1
 >
@@ -13,6 +13,123 @@
 > reward threshold 근거와 classifier 실측: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)
 >
 > 실기 classifier 뷰어(정본 checkpoint를 실제로 로드하는 유일한 경로): [REWARD_CLASSIFIER_LIVE_KO.md](./REWARD_CLASSIFIER_LIVE_KO.md)
+
+## Claude 전달용: 실물 로봇 학습 smoke 최소 절차
+
+이 절은 다음 한 가지를 확인하기 위한 실행 지시서다.
+
+> **실제 canonical demo + 실제 로봇 online transition이 Kanu learner에 들어가고, gradient step을 만든 뒤 publish된 새 policy가 laptop actor에 action을 돌려주는가?**
+
+상세 배경은 아래 본문에 남아 있지만, 첫 실물 smoke에서는 이 순서만 따른다. 실패하면 코드를 즉석에서 고치거나 옵션을 우회하지 말고 **로봇을 정지한 뒤 명령, 양쪽 HEAD, 마지막 로그를 보고**한다.
+
+### A. 코드와 데이터 고정
+
+1. laptop과 Kanu 모두 `2f12a48`을 포함하는 같은 실행 커밋을 사용한다.
+
+   ```bash
+   # laptop3
+   cd /home/laptop3/gello_software
+   git branch --show-current
+   git rev-parse HEAD
+   git merge-base --is-ancestor 2f12a48 HEAD
+
+   # Kanu
+   ssh kanu 'cd /home/junhyeong/gello_software_hil && git branch --show-current && git rev-parse HEAD'
+   ```
+
+   `git merge-base`가 0이 아니거나 양쪽 실행 HEAD가 다르면 시작하지 않는다. 현재 통합 커밋은 laptop에서 origin보다 앞서 있으므로, **먼저 사용자가 승인한 방식으로 push/sync되어 Kanu가 그 커밋을 실제로 checkout할 수 있어야 한다.** 오래된 Kanu checkout으로 대신 실행하지 않는다.
+
+2. Kanu의 `HIL_REAL_DEMO`는 recorder take를 변환한 **실제** artifact여야 한다. 먼저 §1.1/§1.2에 따라 `HIL_KANU_REPO`와 `HIL_KANU_PYTHON`을 export한다. fake acceptance pickle, `synthetic_acceptance_only=true`, real/fake 혼합은 production server가 의도적으로 거부한다.
+
+   ```bash
+   export HIL_REAL_DEMO=/absolute/persistent/path/to/canonical-robot-demo.pkl
+   test -f "$HIL_REAL_DEMO"
+   sha256sum "$HIL_REAL_DEMO"
+
+   PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra" "$HIL_KANU_PYTHON" - <<'PY'
+   import os
+   from ur_env.learner.demo import (
+       SYNTHETIC_ACCEPTANCE_ONLY_KEY,
+       load_demo_pickles,
+   )
+
+   path = os.environ["HIL_REAL_DEMO"]
+   demos = load_demo_pickles([path])
+   synthetic = [
+       item for item in demos.sidecars
+       if item.metadata.get(SYNTHETIC_ACCEPTANCE_ONLY_KEY) is True
+   ]
+   if not demos.transitions:
+       raise SystemExit("real demo pool is empty")
+   if synthetic:
+       raise SystemExit("synthetic acceptance-only data is not allowed")
+   print({"real_demo_transitions": len(demos.transitions), "synthetic": 0})
+   PY
+   ```
+
+3. 새 production lineage를 쓴다. synthetic checkpoint나 classifier 변경 전 checkpoint를 resume하지 않는다. classifier는 `cube_in_cup_all3/checkpoint_150`, directory SHA `512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d`, reward model ID `cube-in-cup-all3-ckpt150+sidecar-v1`이어야 한다.
+
+### B. Kanu learner 시작
+
+1. §1.0의 port/GPU 확인, §1.2의 Python/JAX 확인, §1.3의 classifier/ResNet SHA 확인, §2의 새 run directory 생성을 수행한다.
+2. §6의 production learner command를 실행한다. 다음 조건은 바꾸지 않는다.
+
+   - `--demo-path "$HIL_REAL_DEMO"`
+   - `--utd-ratio 1`
+   - `--require-jax-backend gpu`
+   - 첫 smoke의 `--success-confirmations 1`. smoothing 구현은 유지하지만 현재 실물 smoke의 승인값은 1이며, 실행 중 튜닝하지 않는다.
+   - `--synthetic-e2e`, `--dry-run`, synthetic actor/run ID는 **사용하지 않는다**.
+
+3. stdout의 `rlpd_learner_server_ready`에서 다음을 확인한 뒤에만 laptop으로 넘어간다.
+
+   - `learner_step=0`, `policy_version=0`인 fresh lineage
+   - `jax_backend=gpu`
+   - `utd_ratio=1`, `critic_to_actor_ratio=2`
+   - 올바른 `reward_model_id`, classifier SHA/input contract, demo count
+
+### C. tunnel과 로봇 actor
+
+1. laptop에서 §7의 SSH tunnel을 연다. 표준 구성은 local `50153` → Kanu `50053`이다.
+2. [actor runbook §4.2](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)의 T1~T5를 순서대로 띄운다: UR driver, gripper, cam1/cam2, GELLO publisher, HIL deadman GUI.
+3. 실제 transition을 보내기 전에는 읽기 전용 preflight만 실행한다.
+
+   ```bash
+   cd /home/laptop3/gello_software/ros2_ur_ws
+   ./run_hil_actor.sh --dry-preflight
+   ```
+
+   `--fake-env` actor나 arm 없는 actor를 production learner에 연결해 시험하지 않는다. 둘 다 실제로 실행되지 않은 action을 online replay에 넣을 수 있다.
+
+4. preflight가 모두 통과하고 operator가 workspace/action scale/controller 상태를 확인한 뒤, deadman을 먼저 ENGAGE하여 첫 action부터 GELLO intervention이 우선하도록 한다. 그다음에만 실제 actor를 시작한다.
+
+   ```bash
+   cd /home/laptop3/gello_software/ros2_ur_ws
+   ./run_hil_actor.sh --arm --deadman topic
+   ```
+
+   실물 학습 데이터에는 `--fake-env`, `--mock-policy-noise`, `--no-classifier-sidecar`를 사용하지 않는다. `--arm`은 UR7e를 실제로 움직인다.
+
+### D. 성공 기준
+
+`--utd-ratio 1`, `training_starts=100`, `cta_ratio=2`, publish period 50 기준이다. learner thread가 따라잡은 뒤 다음 관계가 보여야 한다.
+
+| accepted online transition | learner step | gradient step | policy version | 의미 |
+| ---: | ---: | ---: | ---: | --- |
+| 0~99 | 0 | 0 | 0 | warm-up 중이지만 초기 SAC policy inference는 계속 제공 |
+| 100 | 1 | 2 | 0 | 첫 실제 CTA update 완료 |
+| 149 | 50 | 100 | 1 | 첫 검증 snapshot publish; 이후 RPC가 version 1 policy action 사용 |
+
+최소 learning smoke PASS는 JSONL의 `learner_update`에서 `learner_step=1`, `gradient_step=2`와 finite loss/timing을 확인하는 것이다. **학습된 policy가 다시 로봇으로 전달되는 것까지** 확인하려면 `policy_published`의 `learner_step=50`, `policy_version=1`과 그 이후 actor RPC를 확인한다. classifier sidecar build failure, classifier가 한 번도 평가되지 않은 episode 경고, `rlpd_learner_worker_fault`, `rlpd_learner_actor_service_fault`, non-finite update 중 하나라도 나오면 FAIL이다.
+
+step 5,000 전에는 production checkpoint가 생기지 않는다. 짧은 smoke에서 중단하면 replay RAM과 그때까지의 update를 복구할 수 없다는 뜻이며 정상이다. checkpoint/resume까지 실물로 검증하려면 §6의 bounded target 5,000을 완료해야 한다.
+
+### E. 종료와 보고
+
+1. 먼저 deadman/robot을 안전 상태로 만들고 actor를 중단한다.
+2. Kanu learner에 한 번 `Ctrl-C`를 보내 current update가 끝나도록 기다린다. `SIGKILL`로 바로 끊지 않는다.
+3. 다음만 보고한다: laptop/Kanu HEAD, demo SHA/count, 전체 실행 명령, `rlpd_learner_server_ready`, 첫 `learner_update`, 첫 `policy_published`(도달했다면), classifier/fault 경고, 최종 replay/learner/gradient/policy counters.
+
+이 절의 목표는 실행과 증거 수집이다. 실패 원인이 확인되기 전에는 새 fallback, mock mode, schema 완화 또는 데이터 marker 제거를 구현하지 않는다.
 
 ## 먼저 읽을 요약
 
@@ -444,6 +561,7 @@ export HIL_WANDB_DIR="$HIL_RUN_ROOT/wandb"
 export HIL_JSONL_PATH="$HIL_RUN_ROOT/logs/learner.jsonl"
 export HIL_RESNET_CACHE="$HIL_RUN_ROOT/assets/resnet10_params.pkl"
 export HIL_GRASP_PENALTY=-0.02
+export HIL_SUCCESS_CONFIRMATIONS=1
 
 mkdir -p "$HIL_RUN_ROOT/logs" "$HIL_RUN_ROOT/wandb" "$HIL_RUN_ROOT/assets"
 df -h "$HIL_RUN_ROOT"
@@ -957,6 +1075,7 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
   --expected-classifier-sha256 "$HIL_CLASSIFIER_SHA256" \
   --reward-threshold "$HIL_REWARD_THRESHOLD" \
   --reward-model-id cube-in-cup-all3-ckpt150+sidecar-v1 \
+  --success-confirmations "$HIL_SUCCESS_CONFIRMATIONS" \
   --demo-path "$HIL_REAL_DEMO" \
   --checkpoint-root "$HIL_CHECKPOINT_ROOT" \
   --checkpoint-reserve-gib 2 \
