@@ -169,6 +169,7 @@ class UR7eEnv(gym.Env):
         self.curr_torque = np.zeros(3)
         self.terminate = False
         self.fake_env = fake_env
+        self._hold_next_action_reason = None
 
         if fake_env:
             return
@@ -410,11 +411,22 @@ class UR7eEnv(gym.Env):
         argument). ``self._clip_command_pose`` is the hook — this env still
         owns the box, the controller just asks it per tick.
         """
+        if self._hold_next_action_reason is not None:
+            reason = self._hold_next_action_reason
+            self._hold_next_action_reason = None
+            q_hold = self.backend.request_hold()
+            self.controller.reset(q_hold)
+            return {"held": True, "reject_reason": reason, "clipped": False}
+
         xi = self._action_to_xi(action)
         q_cmd, ctrl_info = self.controller.step(xi)
         self.backend.send_joint_command(q_cmd)
         self._send_gripper_command(action[6] * self.action_scale[2])
         return ctrl_info
+
+    def request_hold(self, reason: str = "EXTERNAL_HOLD") -> None:
+        """Make the next real step brake the command stream and re-anchor it."""
+        self._hold_next_action_reason = str(reason)
 
     def step(self, action: np.ndarray) -> tuple:
         start_time = time.time()
@@ -518,6 +530,7 @@ class UR7eEnv(gym.Env):
             self._save_video_recording()
         self.curr_path_length = 0
         self.terminate = False
+        self._hold_next_action_reason = None
 
         if not self.fake_env:
             self.go_to_reset()
@@ -614,6 +627,11 @@ class UR7eEnv(gym.Env):
         # it would score a full-turn error as arrival.
         deadline = time.time() + self.config.RESET_TIMEOUT_S
         while time.time() < deadline:
+            # The backend deliberately treats a target older than ~3 policy
+            # periods as stale and brakes to HOLD.  Reset is the one command
+            # which legitimately spans seconds, so refresh the same immutable
+            # branch-mapped target while we wait; this changes no path or goal.
+            self.backend.send_joint_command(target)
             q, _, age = self.backend.get_joint_state()
             if age < self.config.JOINT_STATE_STALE_S and np.max(
                 np.abs(q - target)

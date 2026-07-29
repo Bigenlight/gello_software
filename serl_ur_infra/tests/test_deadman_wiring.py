@@ -154,11 +154,13 @@ class _Backend:
     """Leader source: /gello/joint_states + trigger, already merged."""
 
     def __init__(self, q=Q6, age=0.0, trigger=float("nan")):
-        self.q = np.asarray(q, dtype=float)
+        self.q = None if q is None else np.asarray(q, dtype=float)
         self.age = float(age)
         self.trigger = trigger
 
     def get_gello_state(self):
+        if self.q is None:
+            return None, self.age
         return np.concatenate([self.q, [self.trigger]]), self.age
 
 
@@ -176,6 +178,10 @@ class _StubEnv(gym.Env):
             low=-1.0, high=1.0, shape=(7,), dtype=np.float32
         )
         self.last_action = None
+        self.hold_reasons = []
+
+    def request_hold(self, reason):
+        self.hold_reasons.append(reason)
 
     def reset(self, **kwargs):
         return {}, {}
@@ -621,6 +627,73 @@ def test_deadman_stale_error_exits_actor_and_closes_resources(monkeypatch):
     assert network.closed
 
 
+def test_actor_network_construction_failure_still_closes_environment(monkeypatch):
+    """Once the ROS env exists, every later startup failure tears it down."""
+
+    script = os.path.join(_INFRA, "scripts", "run_remote_rlpd_actor.py")
+    spec = importlib.util.spec_from_file_location(
+        "test_actor_network_construction_cleanup", script
+    )
+    assert spec is not None and spec.loader is not None
+    actor_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(actor_module)
+
+    env = SimpleNamespace(
+        action_space=gym.spaces.Box(
+            low=-1.0, high=1.0, shape=(7,), dtype=np.float32
+        ),
+        closed=False,
+    )
+    env.close = lambda: setattr(env, "closed", True)
+
+    class _Config:
+        NETWORK = {}
+
+        def __init__(self):
+            self.robot_config = SimpleNamespace(DRY_RUN=True)
+
+    args = SimpleNamespace(
+        exp_name="task",
+        ur_config_module=None,
+        checkpoint_path=None,
+        save_video=False,
+        fake_env=False,
+        actor_id="test-actor",
+        network_type=None,
+        server_host=None,
+        server_port=None,
+        timeout_s=None,
+        max_response_age_s=None,
+        observation_schema_hash=None,
+        expected_model_id=None,
+        expected_reward_authority=None,
+        expected_reward_model_id=None,
+        deadman="topic",
+        arm=True,
+        no_classifier_sidecar=False,
+        classifier_sidecar_interval=None,
+        classifier_stationary_speed_max=None,
+        classifier_escalate_probability=None,
+        mock_policy_noise=0.0,
+    )
+    monkeypatch.setattr(actor_module, "_parse_args", lambda: args)
+    monkeypatch.setattr(
+        actor_module, "_load_config_mapping", lambda module: {"task": _Config}
+    )
+    monkeypatch.setattr(actor_module, "_build_actor_environment", lambda *_: env)
+    monkeypatch.setattr(actor_module, "_preflight_command_topics", lambda *_: None)
+    monkeypatch.setattr(
+        actor_module,
+        "create_actor_network",
+        lambda *_, **__: (_ for _ in ()).throw(RuntimeError("network failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="network failed"):
+        actor_module.main()
+
+    assert env.closed
+
+
 # =========================================================================== #
 # 4. Intervention bookkeeping (what the server's counter is built on)         #
 # =========================================================================== #
@@ -660,15 +733,69 @@ def test_engaged_deadman_records_the_executed_action():
     assert np.all(np.abs(np.asarray(info["intervene_action"])[:6]) <= 1.0)
 
 
-def test_engaged_deadman_with_a_stale_leader_does_not_intervene():
-    """Deadman ON but the GELLO topic dead: refuse, do not freeze on old joints."""
+@pytest.mark.parametrize("missing", [False, True])
+def test_engaged_deadman_with_unusable_leader_records_zero_hold(missing):
+    """A GELLO signal fault cannot authorize an implicit policy handback."""
 
-    backend = _Backend(q=Q6, age=GelloIntervention.LEADER_STALE_S + 0.1)
-    _, _, _, _, info = _wrapper(_FakeDeadman(engaged=True), backend).step(
-        np.zeros(7, dtype=np.float32)
-    )
-    assert info["intervened"] == 0
+    backend = _Backend(q=Q6)
+    env = _wrapper(_FakeDeadman(engaged=True), backend)
+    policy_action = np.linspace(-0.9, 0.9, 7, dtype=np.float32)
+
+    env.step(policy_action)  # fresh leader: establish an anchor first
+    assert env._anchored is True
+    if missing:
+        backend.q = None
+    else:
+        backend.age = GelloIntervention.LEADER_STALE_S + 0.1
+
+    _, _, _, _, info = env.step(policy_action)
+
+    expected_hold = np.zeros(7, dtype=np.float32)
+    np.testing.assert_array_equal(env.unwrapped.last_action, expected_hold)
+    np.testing.assert_array_equal(info["intervene_action"], expected_hold)
+    np.testing.assert_array_equal(info["policy_action"], policy_action)
+    assert info["intervened"] == 1
+    assert env._anchored is False
+    assert env.unwrapped.hold_reasons == ["GELLO_STALE"]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_explicit_deadman_release_still_hands_policy_back_with_unusable_leader(missing):
+    """Only the operator's release, unlike signal loss, authorizes handback."""
+
+    backend = _Backend(q=None if missing else Q6)
+    if not missing:
+        backend.age = GelloIntervention.LEADER_STALE_S + 0.1
+    env = _wrapper(_FakeDeadman(engaged=False), backend)
+    policy_action = np.linspace(-0.9, 0.9, 7, dtype=np.float32)
+
+    _, _, _, _, info = env.step(policy_action)
+
+    np.testing.assert_array_equal(env.unwrapped.last_action, policy_action)
+    np.testing.assert_array_equal(info["policy_action"], policy_action)
     assert "intervene_action" not in info
+    assert info["intervened"] == 0
+
+
+def test_fresh_leader_after_stale_hold_reanchors_with_zero_delta():
+    backend = _Backend(q=Q6)
+    env = _wrapper(_FakeDeadman(engaged=True), backend)
+    policy_action = np.ones(7, dtype=np.float32)
+
+    env.step(policy_action)
+    backend.age = GelloIntervention.LEADER_STALE_S + 0.1
+    env.step(policy_action)
+    assert env._anchored is False
+
+    backend.age = 0.0
+    backend.q = Q6 + 0.1
+    _, _, _, _, info = env.step(policy_action)
+
+    np.testing.assert_array_equal(
+        info["intervene_action"][:6], np.zeros(6, dtype=np.float32)
+    )
+    assert info["intervened"] == 1
+    assert env._anchored is True
 
 
 def test_gain_is_latched_at_the_engage_edge():

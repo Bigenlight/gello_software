@@ -322,11 +322,15 @@ def test_cli_main_constructs_feature_ingress_from_restored_agent_contract(
         "prepare_learner_state",
         lambda **kwargs: SimpleNamespace(agent=agent),
     )
-    extractor = SimpleNamespace(
-        validate_parameter_invariant=lambda params: None,
-        validate_agent_invariant=lambda candidate: None,
-        repin_target_trunk=lambda candidate: candidate,
-    )
+    class _Extractor:
+        validate_parameter_invariant = staticmethod(lambda params: None)
+        validate_agent_invariant = staticmethod(lambda candidate: None)
+        repin_target_trunk = staticmethod(lambda candidate: candidate)
+
+        def __call__(self, observation):
+            return observation
+
+    extractor = _Extractor()
     monkeypatch.setattr(
         _MODULE,
         "FrozenResNet10TrunkExtractor",

@@ -46,6 +46,16 @@ class LearnerStepResult:
     metrics: Mapping[str, float]
 
 
+@dataclass(frozen=True)
+class LearnerWarmupResult:
+    outer_steps: int
+    gradient_updates: int
+    elapsed_ms: float
+    critic_update_ms: float
+    full_update_ms: float
+    cycle_elapsed_ms: tuple[float, ...]
+
+
 def _flatten_scalars(value: Any, *, prefix: str = "") -> dict[str, float]:
     import jax
 
@@ -203,8 +213,10 @@ class HILSERLLearner:
             )
         return self._set_fault(exc)
 
-    def _update(self, batch: Any, networks: frozenset[str]) -> tuple[Any, Any]:
-        candidate, info = self.agent.update(
+    def _update_agent(
+        self, agent: Any, batch: Any, networks: frozenset[str]
+    ) -> tuple[Any, Any]:
+        candidate, info = agent.update(
             batch,
             networks_to_update=networks,
         )
@@ -215,6 +227,78 @@ class HILSERLLearner:
         self._validate_parameter_invariant(candidate.state.params)
         _flatten_scalars(info)
         return candidate, info
+
+    def _update(self, batch: Any, networks: frozenset[str]) -> tuple[Any, Any]:
+        return self._update_agent(self.agent, batch, networks)
+
+    def warmup_update_paths(
+        self, batch: Any, *, outer_steps: int = 3
+    ) -> LearnerWarmupResult:
+        """Compile CTA update paths on a disposable agent lineage.
+
+        The first two real Kanu learner steps were observed taking 46 s and
+        39 s while JAX compiled/initialized the critic-only and full-network
+        paths.  Because inference shares the process, that made the robot
+        actor's 0.6 s Step RPC expire exactly when replay reached
+        ``training_starts``.  Warm both paths twice before the server advertises
+        ready; some optimizer state is materialized by the first pair, so one
+        pair alone did not cover the steady-state trace on the validated stack.
+
+        A third pair is run as the steady-state confirmation observed in the
+        Kanu trace (steps 1-2 compiled; step 3 was the first stable one).
+
+        ``candidate`` is local.  The production agent, counters, publisher,
+        sampler RNG, checkpoints, and logger are never mutated.  A failure is
+        a startup failure rather than a partially advanced learner.
+        """
+
+        if isinstance(outer_steps, bool) or not isinstance(outer_steps, int):
+            raise ValueError("outer_steps must be an integer")
+        if outer_steps < 2:
+            raise ValueError("outer_steps must be at least 2")
+        if self.fault is not None:
+            raise LearnerFaultError("cannot warm a faulted learner")
+
+        frozen = freeze_for_agent(batch)
+        production_agent = self.agent
+        production_counters = (
+            self.learner_step,
+            self.gradient_step,
+            self.policy_version,
+        )
+        candidate = production_agent
+        started = time.perf_counter()
+        critic_ms = 0.0
+        full_ms = 0.0
+        cycle_ms: list[float] = []
+        for _ in range(outer_steps):
+            cycle_started = time.perf_counter()
+            update_started = time.perf_counter()
+            candidate, _ = self._update_agent(
+                candidate, frozen, CRITIC_NETWORKS
+            )
+            critic_ms += (time.perf_counter() - update_started) * 1000.0
+            update_started = time.perf_counter()
+            candidate, _ = self._update_agent(candidate, frozen, ALL_NETWORKS)
+            full_ms += (time.perf_counter() - update_started) * 1000.0
+            cycle_ms.append((time.perf_counter() - cycle_started) * 1000.0)
+
+        if self.agent is not production_agent:
+            raise RuntimeError("learner warmup replaced the production agent")
+        if (
+            self.learner_step,
+            self.gradient_step,
+            self.policy_version,
+        ) != production_counters:
+            raise RuntimeError("learner warmup changed production counters")
+        return LearnerWarmupResult(
+            outer_steps=outer_steps,
+            gradient_updates=outer_steps * self.config.cta_ratio,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            critic_update_ms=critic_ms,
+            full_update_ms=full_ms,
+            cycle_elapsed_ms=tuple(cycle_ms),
+        )
 
     def train_once(self) -> LearnerStepResult:
         existing_fault = self.fault

@@ -209,6 +209,79 @@ def test_switch_success_without_postcondition_fails_and_attempts_rollback(tmp_pa
     assert "--activate scaled_joint_trajectory_controller" in switches[1]
 
 
+def _run_cleanup(env: dict[str, str]):
+    command = f"""
+set -e
+source "{_LIB}"
+hil_restore_controller_after_actor \
+  scaled_joint_trajectory_controller forward_position_controller \
+  /forward_position_controller/commands
+"""
+    return subprocess.run(
+        ["bash", "-c", command],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_actor_exit_cleanup_restores_trajectory_controller(tmp_path: Path):
+    env, state_file, _, log_file, _ = _rig(
+        tmp_path, source="inactive", target="active", publishers=0
+    )
+
+    result = _run_cleanup(env)
+
+    assert result.returncode == 0, result.stderr
+    assert state_file.read_text() == _state("active", "inactive")
+    switches = [
+        line for line in log_file.read_text().splitlines()
+        if "switch_controllers" in line
+    ]
+    assert len(switches) == 1
+    assert "--activate scaled_joint_trajectory_controller" in switches[0]
+    assert "--deactivate forward_position_controller" in switches[0]
+
+
+def test_actor_exit_cleanup_refuses_while_publisher_remains(tmp_path: Path):
+    env, state_file, _, log_file, _ = _rig(
+        tmp_path, source="inactive", target="active", publishers=1
+    )
+
+    result = _run_cleanup(env)
+
+    assert result.returncode != 0
+    assert state_file.read_text() == _state("inactive", "active")
+    assert "still has 1 publisher" in result.stderr
+    assert "switch_controllers" not in log_file.read_text()
+
+
+def test_actor_exit_cleanup_is_idempotent(tmp_path: Path):
+    env, state_file, _, log_file, _ = _rig(
+        tmp_path, source="active", target="inactive", publishers=0
+    )
+
+    result = _run_cleanup(env)
+
+    assert result.returncode == 0, result.stderr
+    assert state_file.read_text() == _state("active", "inactive")
+    assert "switch_controllers" not in log_file.read_text()
+
+
+def test_actor_exit_cleanup_rejects_unexpected_controller_pair(tmp_path: Path):
+    env, state_file, _, log_file, _ = _rig(
+        tmp_path, source="inactive", target="inactive", publishers=0
+    )
+
+    result = _run_cleanup(env)
+
+    assert result.returncode != 0
+    assert state_file.read_text() == _state("inactive", "inactive")
+    assert "unexpected controller combination" in result.stderr
+    assert "switch_controllers" not in log_file.read_text()
+
+
 def test_shell_entrypoint_keeps_probe_before_mutating_handoff():
     text = _ACTOR.read_text()
     dry_exit = text.index('if [ "$DRY_PREFLIGHT" -eq 1 ]; then', text.index("# 결과 요약"))
@@ -218,6 +291,18 @@ def test_shell_entrypoint_keeps_probe_before_mutating_handoff():
     assert dry_exit < final_deadman < handoff
     assert 'if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 0 ]; then' in text
     assert "SKIP_ROS_CHECKS=1은 금지" in text
+    assert "hil_restore_controller_after_actor" in text
+    assert 'trap \'forward_actor_signal INT\' INT' in text
+    # An asynchronous command inherits SIGINT ignored from non-job-control
+    # bash.  The child must restore default dispositions before exec, and the
+    # parent must re-wait after its trap interrupts wait(1).
+    assert "trap - INT TERM HUP" in text
+    assert 'exec setsid "${ACTOR_CMD[@]}"' in text
+    assert re.search(
+        r'while true; do\s+wait "\$ACTOR_PID".*?kill -0 "\$ACTOR_PID"',
+        text,
+        re.DOTALL,
+    )
 
     # The actor wrapper may tell the operator which tool to run, but must never
     # invoke preposition/reset motion itself.

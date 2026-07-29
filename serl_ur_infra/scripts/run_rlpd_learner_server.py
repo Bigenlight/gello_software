@@ -43,6 +43,7 @@ from ur_env.learner import (  # noqa: E402
     LearnerFingerprint,
     LearnerWorker,
     build_actor_service,
+    canonical_policy_observation,
     compose_learner,
     convert_loaded_demos_to_feature_pool,
     create_frozen_trunk_feature_agent,
@@ -819,6 +820,15 @@ def _run_locked(
         seed=config.seed,
         extraction_batch_size=args.demo_extraction_batch_size,
     )
+    # Demo extraction warms the batched trunk trace.  Live ingress uses the
+    # distinct single-observation trace, so materialize that too before a robot
+    # Step can become its accidental compiler benchmark.
+    single_feature_warmup_started = time.perf_counter()
+    single_feature_warmup = feature_extractor(canonical_policy_observation())
+    single_feature_warmup_ms = (
+        time.perf_counter() - single_feature_warmup_started
+    ) * 1000.0
+    del single_feature_warmup
     if feature_demos.storage_nbytes != demo_memory_estimate.total_bytes:
         raise RuntimeError(
             "converted demo allocation differs from its preflight estimate"
@@ -914,6 +924,28 @@ def _run_locked(
             ),
             candidate_postprocessor=feature_extractor.repin_target_trunk,
             policy_model_id=policy_model_id,
+        )
+        # Compile/initialize both CTA traces on a disposable lineage before
+        # the gRPC port exists.  In the first real robot smoke the lazy JAX
+        # work took 46 s + 39 s and starved a 0.6 s Step RPC at transition 100.
+        # The deterministic demo-only batch has the exact steady-state tensor
+        # contract without consuming online replay or either sampler RNG.
+        warmup = assembly.learner.warmup_update_paths(
+            feature_demos.warmup_batch(config.batch_size), outer_steps=3
+        )
+        logger.log(
+            "learner_update_warmup_complete",
+            learner_step=assembly.learner.learner_step,
+            gradient_step=assembly.learner.gradient_step,
+            policy_version=assembly.policy_runtime.policy_version,
+            warmup_outer_steps=warmup.outer_steps,
+            warmup_gradient_updates=warmup.gradient_updates,
+            warmup_elapsed_ms=warmup.elapsed_ms,
+            warmup_critic_update_ms=warmup.critic_update_ms,
+            warmup_full_update_ms=warmup.full_update_ms,
+            warmup_cycle_ms=list(warmup.cycle_elapsed_ms),
+            production_state_advanced=False,
+            single_feature_warmup_ms=single_feature_warmup_ms,
         )
         service = build_actor_service(
             assembly=assembly,

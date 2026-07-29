@@ -91,10 +91,10 @@ class DefaultUR7eEnvConfig:
 
     # ---- 250 Hz command upsampler ---- #
     # forward_position_controller does not interpolate (bridge docstring), so
-    # the backend streams slew-limited steps toward the latest 10 Hz target.
-    # Same role as the bridge's upsample+slew; EMA deliberately omitted — RL
-    # actions are already governed/step-capped and tremor-free, and EMA lag
-    # would blur action->effect credit assignment.
+    # the backend streams bounded steps toward the latest 10 Hz target. This is
+    # actuator-side trajectory shaping only: EMA/One-Euro remains deliberately
+    # absent, because filtering policy actions would blur action->effect credit
+    # assignment in replay.
     UPSAMPLER: Dict[str, float] = {
         "hz": 250.0,
         # per-tick joint step: 0.0025 rad @ 250 Hz = 0.625 rad/s, the same rate
@@ -106,6 +106,23 @@ class DefaultUR7eEnvConfig:
         # and ur7e_gello.yaml:56-63 pins ~0.00314 rad as the ceiling there.
         # Going faster means raising hz first, not this.
         "max_step_rad": 0.0025,
+        # Finite acceleration replaces the old instantaneous 0 -> 0.625 rad/s
+        # velocity jump. 8 rad/s^2 is the conservative offline replay candidate
+        # already used for the recorded UR sessions
+        # (scripts/ur_command_smoothing.py and analyze_replay.py): it reaches the
+        # existing speed ceiling in ~78 ms and needs ~0.026 rad worst-joint
+        # discrete braking distance at that ceiling. It changes neither the
+        # 0.0025 rad command-step cap nor policy/replay action values.
+        "max_accel_rad_s2": 8.0,
+        # Mirror the real GELLO bridge's proven anti-snap seed ramp
+        # (ur7e_gello.yaml): begin at 15% of the step ceiling and reach full
+        # speed over 0.7 s. The first command itself is still measured q exactly.
+        "soft_start_s": 0.7,
+        "soft_start_fraction": 0.15,
+        # The policy loop is 10 Hz. Permit normal scheduling jitter/two missed
+        # updates, but after roughly three target periods stop chasing the old
+        # goal: acceleration-limit to zero and publish the current stream HOLD.
+        "target_stale_s": 0.30,
     }
 
     # ---- ROS 2 wiring (defaults match ur_gello_bringup / gello_recorder) ---- #

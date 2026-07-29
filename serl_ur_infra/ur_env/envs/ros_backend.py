@@ -137,6 +137,222 @@ def merge_gello_state(
     return np.concatenate([q[:6], [grip]]), age_q
 
 
+class AccelerationLimitedJointStream:
+    """Pure fixed-rate joint command trajectory generator.
+
+    The state is the last published position and its per-tick displacement.
+    Keeping displacement (rather than estimating velocity from wall-clock
+    callback jitter) makes both command limits exact at the configured publish
+    rate::
+
+        abs(q[k] - q[k-1]) <= max_step_rad
+        abs(q[k] - 2*q[k-1] + q[k-2]) * hz**2 <= max_accel_rad_s2
+
+    Tracking is per joint. Before accelerating, ``_safe_step_for_distance``
+    asks how large the next step may be while still leaving enough distance to
+    brake by ``max_accel_rad_s2`` on every later tick. That discrete braking
+    distance is what prevents a fixed target from being crossed at the end of
+    a move. A target which jumps behind a joint that is already moving cannot
+    be obeyed without either overshoot or an acceleration discontinuity; in
+    that case acceleration continuity wins and the joint brakes through the
+    reversal.
+
+    This helper deliberately sees only joint targets. It does not filter policy
+    actions (no EMA/One-Euro), so the action stored in replay remains the action
+    selected by the policy/intervention path; this is the actuator-side command
+    governor already represented by the environment dynamics.
+    """
+
+    UNSEEDED = "UNSEEDED"
+    TRACKING = "TRACKING"
+    BRAKING = "BRAKING"
+    HOLD = "HOLD"
+
+    def __init__(
+        self,
+        hz: float,
+        max_step_rad: float,
+        max_accel_rad_s2: float,
+        soft_start_s: float,
+        target_stale_s: float,
+        soft_start_fraction: float = 0.15,
+    ):
+        self.hz = float(hz)
+        self.max_step_rad = float(max_step_rad)
+        self.max_accel_rad_s2 = float(max_accel_rad_s2)
+        self.soft_start_s = float(soft_start_s)
+        self.target_stale_s = float(target_stale_s)
+        self.soft_start_fraction = float(soft_start_fraction)
+
+        if self.hz <= 0.0:
+            raise ValueError("hz must be positive")
+        if self.max_step_rad <= 0.0:
+            raise ValueError("max_step_rad must be positive")
+        if self.max_accel_rad_s2 <= 0.0:
+            raise ValueError("max_accel_rad_s2 must be positive")
+        if self.soft_start_s < 0.0:
+            raise ValueError("soft_start_s must be non-negative")
+        if self.target_stale_s <= 0.0:
+            raise ValueError("target_stale_s must be positive")
+        if not 0.0 <= self.soft_start_fraction <= 1.0:
+            raise ValueError("soft_start_fraction must be in [0, 1]")
+
+        # A change of this many radians/tick corresponds exactly to a change
+        # of max_accel_rad_s2 in the nominal command velocity.
+        self._max_step_delta = self.max_accel_rad_s2 / (self.hz * self.hz)
+        self._q: Optional[np.ndarray] = None
+        self._step: Optional[np.ndarray] = None
+        self._soft_start_time: Optional[float] = None
+        self.mode = self.UNSEEDED
+
+    @property
+    def seeded(self) -> bool:
+        return self._q is not None
+
+    @property
+    def position(self) -> Optional[np.ndarray]:
+        return None if self._q is None else self._q.copy()
+
+    @property
+    def velocity(self) -> Optional[np.ndarray]:
+        return None if self._step is None else self._step.copy() * self.hz
+
+    def braking_endpoint(self) -> np.ndarray:
+        """Return the position reached by acceleration-limited braking.
+
+        This is a prediction only; it does not mutate the stream.  Giving the
+        returned point back as the target makes an explicit HOLD decelerate to
+        zero without continuing toward an older, lagging policy/GELLO target.
+        """
+        if self._q is None or self._step is None:
+            raise RuntimeError("seed() must be called before braking_endpoint()")
+        q = self._q.copy()
+        step = self._step.copy()
+        while np.any(step != 0.0):
+            step = step + np.clip(
+                -step, -self._max_step_delta, self._max_step_delta
+            )
+            step[np.abs(step) < 1e-15] = 0.0
+            q = q + step
+        return q
+
+    def reset(self):
+        """Forget all trajectory state; the next command must seed measured q."""
+        self._q = None
+        self._step = None
+        self._soft_start_time = None
+        self.mode = self.UNSEEDED
+
+    def seed(self, measured_q: np.ndarray, now: float) -> np.ndarray:
+        """Seed at the measured joints with zero velocity and return them exact."""
+        q = np.asarray(measured_q, dtype=float).ravel()
+        if q.size == 0 or not np.all(np.isfinite(q)):
+            raise ValueError("measured_q must be a non-empty finite vector")
+        if not np.isfinite(now):
+            raise ValueError("now must be finite")
+        self._q = q.copy()
+        self._step = np.zeros_like(q)
+        self._soft_start_time = float(now)
+        self.mode = self.TRACKING
+        return self._q.copy()
+
+    def _soft_step_cap(self, now: float) -> float:
+        if self.soft_start_s == 0.0 or self._soft_start_time is None:
+            return self.max_step_rad
+        fraction = np.clip(
+            (float(now) - self._soft_start_time) / self.soft_start_s,
+            0.0,
+            1.0,
+        )
+        scale = self.soft_start_fraction + (1.0 - self.soft_start_fraction) * fraction
+        return self.max_step_rad * float(scale)
+
+    def _stopping_distance(self, step: float) -> float:
+        """Minimum distance including ``step`` before reaching zero velocity."""
+        if step <= 0.0:
+            return 0.0
+        ticks = int(np.ceil(step / self._max_step_delta))
+        return (
+            ticks * step
+            - self._max_step_delta * ticks * (ticks - 1) / 2.0
+        )
+
+    def _safe_step_for_distance(self, distance: float, step_cap: float) -> float:
+        """Largest next step whose discrete braking distance fits ``distance``."""
+        if distance <= 0.0:
+            return 0.0
+        if self._stopping_distance(step_cap) <= distance:
+            return step_cap
+
+        # Stopping distance is continuous and monotone even where ceil() adds a
+        # braking tick. Bisection avoids a continuous-time sqrt(2*a*d)
+        # approximation, whose half-tick error can overshoot small targets.
+        low, high = 0.0, step_cap
+        for _ in range(48):
+            mid = (low + high) / 2.0
+            if self._stopping_distance(mid) <= distance:
+                low = mid
+            else:
+                high = mid
+        return low
+
+    def _move_step_toward(self, desired: np.ndarray) -> np.ndarray:
+        assert self._step is not None
+        delta = np.clip(
+            desired - self._step,
+            -self._max_step_delta,
+            self._max_step_delta,
+        )
+        return self._step + delta
+
+    def advance(
+        self,
+        target_q: np.ndarray,
+        now: float,
+        target_time: Optional[float],
+    ) -> np.ndarray:
+        """Advance one 1/hz tick, braking to HOLD when ``target_time`` is stale."""
+        if self._q is None or self._step is None:
+            raise RuntimeError("seed() must be called before advance()")
+        target = np.asarray(target_q, dtype=float).ravel()
+        if target.shape != self._q.shape or not np.all(np.isfinite(target)):
+            raise ValueError("target_q must match the seeded finite vector")
+        if not np.isfinite(now):
+            raise ValueError("now must be finite")
+
+        stale = (
+            target_time is None
+            or not np.isfinite(target_time)
+            or float(now) - float(target_time) > self.target_stale_s
+        )
+        if stale:
+            # Ignore the obsolete target. Ramp velocity to zero, continue
+            # publishing the deceleration trajectory, then repeat the final
+            # stream position indefinitely as HOLD.
+            self._step = self._move_step_toward(np.zeros_like(self._step))
+            self._step[np.abs(self._step) < 1e-15] = 0.0
+            self._q = self._q + self._step
+            self.mode = self.HOLD if np.all(self._step == 0.0) else self.BRAKING
+            return self._q.copy()
+
+        # A command stream recovered after reaching stale HOLD starts a fresh
+        # 0.7 s ease-in, but remains anchored at the held command position.
+        if self.mode == self.HOLD:
+            self._soft_start_time = float(now)
+
+        error = target - self._q
+        step_cap = self._soft_step_cap(now)
+        desired = np.empty_like(error)
+        for joint, joint_error in enumerate(error):
+            magnitude = self._safe_step_for_distance(abs(joint_error), step_cap)
+            desired[joint] = np.sign(joint_error) * magnitude
+
+        self._step = self._move_step_toward(desired)
+        self._q = self._q + self._step
+        self.mode = self.TRACKING
+        return self._q.copy()
+
+
 class URRosBackend:
     def __init__(
         self,
@@ -233,12 +449,27 @@ class URRosBackend:
         self._spin_thread = threading.Thread(target=self._spin, daemon=True)
         self._spin_thread.start()
 
-        # ---- command upsampler: 10 Hz targets -> slew-limited 250 Hz stream ---- #
-        ucfg = upsampler_cfg or {"hz": 250.0, "max_step_rad": 0.002}
+        # ---- 10 Hz targets -> velocity/acceleration-limited 250 Hz stream ---- #
+        ucfg = upsampler_cfg or {"hz": 250.0, "max_step_rad": 0.0025}
         self._up_hz = float(ucfg["hz"])
         self._up_step = float(ucfg["max_step_rad"])
+        self._up_accel = float(ucfg.get("max_accel_rad_s2", 8.0))
+        self._up_soft_start_s = float(ucfg.get("soft_start_s", 0.7))
+        self._up_soft_start_fraction = float(
+            ucfg.get("soft_start_fraction", 0.15)
+        )
+        self._target_stale_s = float(ucfg.get("target_stale_s", 0.3))
         self._q_target: Optional[np.ndarray] = None   # latest 10 Hz goal
+        self._q_target_time: Optional[float] = None   # receipt, monotonic clock
         self._q_stream: Optional[np.ndarray] = None   # what we're publishing now
+        self._up_streamer = AccelerationLimitedJointStream(
+            hz=self._up_hz,
+            max_step_rad=self._up_step,
+            max_accel_rad_s2=self._up_accel,
+            soft_start_s=self._up_soft_start_s,
+            target_stale_s=self._target_stale_s,
+            soft_start_fraction=self._up_soft_start_fraction,
+        )
         self._up_thread = threading.Thread(target=self._upsample_loop, daemon=True)
         self._up_thread.start()
 
@@ -391,8 +622,13 @@ class URRosBackend:
             # would silently become the seed for anything that inspected
             # _q_target afterwards.
             return
+        target = np.asarray(q_cmd, dtype=float).reshape(6).copy()
+        if not np.all(np.isfinite(target)):
+            raise ValueError("joint command must contain only finite values")
+        target_time = time.monotonic()
         with self._lock:
-            self._q_target = np.asarray(q_cmd, dtype=float).reshape(6).copy()
+            self._q_target = target
+            self._q_target_time = target_time
 
     def reset_command_stream(self):
         """Drop target/stream so the next target re-seeds from measured joints.
@@ -402,41 +638,63 @@ class URRosBackend:
         """
         with self._lock:
             self._q_target = None
+            self._q_target_time = None
             self._q_stream = None
+            self._up_streamer.reset()
+
+    def request_hold(self) -> np.ndarray:
+        """Replace the current goal with its finite-acceleration stop point.
+
+        The operation is atomic with respect to the 250 Hz worker.  A wrapper
+        can therefore stop chasing an accumulated target while preserving the
+        same acceleration bound; the returned joints are also the exact point
+        to which the task-space command integrator must be re-anchored.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if self._up_streamer.seeded:
+                hold = self._up_streamer.braking_endpoint()
+            elif self._q is not None:
+                hold = np.asarray(self._q[0], dtype=float).reshape(6).copy()
+            else:
+                raise RuntimeError("no measured/streamed joints available for HOLD")
+            self._q_target = hold.copy()
+            self._q_target_time = now
+            return hold.copy()
 
     def _upsample_loop(self):
-        """250 Hz worker: slew the published stream toward the latest target.
+        """250 Hz worker: acceleration-limit the latest timestamped target.
 
         Seeding: the stream starts at the *measured* joints, so the first
-        published command is jump-free by construction. With no target yet (or
-        after reset_command_stream) nothing is published — same "never emit an
-        unearned command" rule as eef_delta's DISENGAGED state.
-
-        Once at the target it keeps publishing the held pose; if the env dies
-        the robot simply holds position. An orderly exit stops this loop —
-        close() joins the thread before destroying the node — but an abrupt one
-        (process killed, thread starved) does not. TODO(together):
-        target-staleness policy (stop publishing after N s without a fresh
-        target?), to be decided with the other safe-stop cases.
+        published command is exactly measured q (zero jump and zero velocity).
+        With no target yet (or after reset_command_stream) nothing is published.
+        Fresh targets retain the existing max_step_rad ceiling and add a finite
+        per-joint acceleration plus braking-distance planning. If target updates
+        stop, the last target is not chased forever: the stream decelerates and
+        keeps publishing its final position as HOLD. There remains exactly one
+        joint-command publisher, owned by this worker.
         """
         period = 1.0 / self._up_hz
         while not self._shutdown:
             t0 = time.monotonic()
+            stream = None
             with self._lock:
                 target = self._q_target
-                stream = self._q_stream
+                target_time = self._q_target_time
                 q_meas = self._q[0] if self._q is not None else None
-            if target is not None:
-                if stream is None:
-                    if q_meas is None:
-                        time.sleep(period)
-                        continue
-                    stream = q_meas.copy()
-                stream = stream + np.clip(
-                    target - stream, -self._up_step, self._up_step
-                )
-                with self._lock:
-                    self._q_stream = stream
+                if target is not None:
+                    if not self._up_streamer.seeded:
+                        if q_meas is not None:
+                            # Seed is itself this tick's output. Advancing here
+                            # would turn the first publish into a one-step jump.
+                            stream = self._up_streamer.seed(q_meas, t0)
+                    else:
+                        stream = self._up_streamer.advance(
+                            target, t0, target_time
+                        )
+                    if stream is not None:
+                        self._q_stream = stream.copy()
+            if stream is not None:
                 # _node_alive, not just dry_run: close() flips _shutdown and
                 # _node_alive together, but this thread may already be inside
                 # the body when that happens. Re-checking immediately before

@@ -37,8 +37,8 @@
 #     control list_controllers / TCP connect). 실제 switch는 그 뒤 [ARM] 한 곳뿐이다.
 #
 # ── 중단 방법 ────────────────────────────────────────────────────────────────
-#   * 이 터미널에서 Ctrl-C. actor는 exec로 이 셸을 대체하므로 Ctrl-C가 곧바로
-#     actor에게 간다(중간 래퍼 프로세스 없음).
+#   * 이 터미널에서 Ctrl-C. 실기 --arm에서는 래퍼가 신호를 actor에게 전달하고,
+#     actor가 publisher를 닫은 뒤 trajectory controller로 자동 복귀한다.
 #   * 팔이 이미 움직이는 중이라면 먼저 펜던트 E-STOP. actor가 죽으면
 #     forward_position_controller는 마지막 명령을 유지하므로 팔은 제자리 홀드
 #     (튀지 않는다).
@@ -688,14 +688,15 @@ fi
 # ---------------------------------------------------------------------------
 # actor 기동 — 항상 venv python 절대경로, 항상 절대경로 스크립트.
 # 우리 기본 인자를 먼저 놓고 사용자 인자를 뒤에 붙인다(argparse는 뒤가 이김).
-# exec 이므로 Ctrl-C가 곧바로 actor에게 간다.
+# no-arm/fake는 종전처럼 exec한다. 실기 --arm만 래퍼가 부모로 남아 actor의
+# 모든 종료 경로(정상/Ctrl-C/RPC 예외) 뒤 controller ownership을 복구한다.
 # ---------------------------------------------------------------------------
 _say ""
 _say "actor 기동 (Ctrl-C로 중단):"
 _say "  $ACTOR_PY $ACTOR_SCRIPT --exp-name $EXP_NAME ... ${PASSTHRU[*]}"
 _say ""
 
-exec "$ACTOR_PY" "$ACTOR_SCRIPT" \
+ACTOR_CMD=("$ACTOR_PY" "$ACTOR_SCRIPT" \
     --exp-name "$EXP_NAME" \
     --ur-config-module "$UR_CONFIG_MODULE" \
     --network-type grpc \
@@ -707,4 +708,56 @@ exec "$ACTOR_PY" "$ACTOR_SCRIPT" \
     --expected-model-id "$EXPECTED_MODEL_ID" \
     --expected-reward-authority "$EXPECTED_REWARD_AUTHORITY" \
     --expected-reward-model-id "$EXPECTED_REWARD_MODEL_ID" \
-    "${PASSTHRU[@]}"
+    "${PASSTHRU[@]}")
+
+if [ "$ARM_REQUESTED" -ne 1 ] || [ "$FAKE_ENV" -eq 1 ]; then
+    exec "${ACTOR_CMD[@]}"
+fi
+
+ACTOR_PID=""
+forward_actor_signal() {
+    local signal_name="$1"
+    if [[ -n "$ACTOR_PID" ]] && kill -0 "$ACTOR_PID" 2>/dev/null; then
+        kill -s "$signal_name" "$ACTOR_PID" 2>/dev/null || true
+    fi
+}
+trap 'forward_actor_signal INT' INT
+trap 'forward_actor_signal TERM' TERM
+trap 'forward_actor_signal HUP' HUP
+
+# Put the actor in its own session so terminal Ctrl-C reaches the parent only;
+# the trap below then forwards exactly one signal.  Without this separation the
+# terminal and the parent both signal Python, and the second KeyboardInterrupt
+# can interrupt env.close().  Non-interactive bash also starts asynchronous
+# commands with SIGINT ignored, so restore the defaults before exec.
+(
+    trap - INT TERM HUP
+    exec setsid "${ACTOR_CMD[@]}"
+) &
+ACTOR_PID=$!
+set +e
+# A trapped signal interrupts bash's wait before the child necessarily exits.
+# Re-wait until it is really gone; controller cleanup must never race a still
+# live command publisher or orphan the armed actor.
+while true; do
+    wait "$ACTOR_PID"
+    ACTOR_RC=$?
+    if ! kill -0 "$ACTOR_PID" 2>/dev/null; then
+        break
+    fi
+done
+set -e
+ACTOR_PID=""
+trap - INT TERM HUP
+
+_say ""
+_say "[ARM] actor 종료(rc=$ACTOR_RC) — controller 자동 복귀"
+if ! hil_restore_controller_after_actor \
+        "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER" "$COMMAND_TOPIC"; then
+    _say " ✗ controller 자동 복귀 실패. 펜던트를 들고 아래 상태를 직접 확인하라:" >&2
+    _say "   ros2 control list_controllers" >&2
+    _say "   ros2 topic info -v $COMMAND_TOPIC" >&2
+    exit 70
+fi
+
+exit "$ACTOR_RC"

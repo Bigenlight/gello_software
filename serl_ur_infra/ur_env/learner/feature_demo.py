@@ -437,6 +437,24 @@ class FrozenTrunkFeatureDemoPool:
             raise ValueError("cannot sample an empty feature demo pool")
         with self._rng_lock:
             indices = self._rng.integers(len(self), size=size)
+        return self._batch(indices)
+
+    def warmup_batch(self, batch_size: int) -> dict[str, Any]:
+        """Return a deterministic compile batch without advancing sample RNG.
+
+        Learner startup uses this to JIT both CTA update paths before accepting
+        a robot actor.  Consuming the production sampler RNG for compilation
+        would make an otherwise identical resume take a different sequence of
+        training batches, so warm-up owns a fixed cyclic index sequence.
+        """
+
+        size = _positive_int(batch_size, name="batch_size")
+        if not len(self):
+            raise ValueError("cannot build a warmup batch from an empty pool")
+        indices = np.arange(size, dtype=np.int64) % len(self)
+        return self._batch(indices)
+
+    def _batch(self, indices: np.ndarray) -> dict[str, Any]:
         return {
             "observations": {
                 key: value[indices]

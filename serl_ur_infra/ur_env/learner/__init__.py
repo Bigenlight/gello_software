@@ -141,6 +141,7 @@ from ur_env.learner.runtime import (
     LearnerFaultError,
     LearnerNotReadyError,
     LearnerStepResult,
+    LearnerWarmupResult,
 )
 
 
@@ -203,6 +204,7 @@ __all__ = [
     "LEARNER_AUGMENTATION",
     "LearnerNotReadyError",
     "LearnerStepResult",
+    "LearnerWarmupResult",
     "LearnerWorker",
     "LearnerWorkerStatus",
     "LoadedDemos",

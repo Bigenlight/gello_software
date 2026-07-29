@@ -104,6 +104,28 @@ hil_assert_no_command_publishers() {
     fi
 }
 
+hil_wait_no_command_publishers() {
+    # DDS graph removal is asynchronous.  After the actor has closed its ROS
+    # node, give discovery a short bounded window to report publisher=0 before
+    # deciding whether it is safe to hand the command interfaces back to the
+    # trajectory controller.
+    local topic="$1" attempts="${2:-30}" delay_s="${3:-0.1}"
+    local index
+    if [[ ! "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: publisher wait attempts must be a positive integer" >&2
+        return 1
+    fi
+    for ((index = 0; index < attempts; index++)); do
+        if hil_read_command_publisher_count "$topic" && \
+           [[ "$HIL_COMMAND_PUBLISHER_COUNT" -eq 0 ]]; then
+            return 0
+        fi
+        sleep "$delay_s"
+    done
+    echo "ERROR: $topic still has ${HIL_COMMAND_PUBLISHER_COUNT:-unknown} publisher(s) after actor exit" >&2
+    return 1
+}
+
 _hil_marker_get() {
     local marker="$1" key="$2"
     awk -F= -v key="$key" '
@@ -311,4 +333,44 @@ hil_arm_controller_handoff() {
 
     hil_invalidate_preposition_marker "$marker" || true
     echo "controller handoff PASS: $source_controller=inactive, $target_controller=active"
+}
+
+hil_restore_controller_after_actor() {
+    # Restore controller ownership only after the actor publisher has vanished.
+    # This does NOT move to RESET: activating the trajectory controller at the
+    # current measured pose merely returns the rig to its normal holding owner.
+    # Refusing the switch while any command publisher remains is deliberate --
+    # a late 250 Hz actor thread and a newly activated controller must never
+    # race over the same hardware interfaces.
+    local source_controller="$1" target_controller="$2" command_topic="$3"
+    local switch_output
+
+    echo "controller cleanup: waiting for actor command publisher to disappear"
+    hil_wait_no_command_publishers "$command_topic" || return 1
+    hil_read_controller_states "$source_controller" "$target_controller" || return 1
+
+    if [[ "$HIL_SOURCE_STATE" == active && "$HIL_TARGET_STATE" == inactive ]]; then
+        echo "controller cleanup: already restored ($source_controller=active)"
+        return 0
+    fi
+    if [[ "$HIL_SOURCE_STATE" != inactive || "$HIL_TARGET_STATE" != active ]]; then
+        echo "ERROR: refusing cleanup from unexpected controller combination" >&2
+        echo "       $source_controller=$HIL_SOURCE_STATE, $target_controller=$HIL_TARGET_STATE" >&2
+        return 1
+    fi
+
+    echo "controller cleanup: strict switch $target_controller -> $source_controller"
+    if ! switch_output="$(timeout --signal=KILL 15 ros2 control switch_controllers --strict \
+        --activate "$source_controller" --deactivate "$target_controller" 2>&1)"; then
+        echo "ERROR: controller cleanup switch failed" >&2
+        printf '%s\n' "$switch_output" >&2
+        return 1
+    fi
+    if ! hil_read_controller_states "$source_controller" "$target_controller" || \
+       [[ "$HIL_SOURCE_STATE" != active || "$HIL_TARGET_STATE" != inactive ]]; then
+        echo "ERROR: controller cleanup postcondition failed" >&2
+        return 1
+    fi
+    hil_assert_no_command_publishers "$command_topic" || return 1
+    echo "controller cleanup PASS: $source_controller=active, $target_controller=inactive"
 }

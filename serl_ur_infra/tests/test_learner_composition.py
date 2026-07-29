@@ -170,6 +170,53 @@ def test_fresh_composition_starts_at_exact_zero_without_publish(tmp_path):
     assert assembly.policy_runtime.snapshot.params is agent.state.params
 
 
+def test_update_warmup_compiles_disposable_lineage_without_advancing_state(
+    tmp_path,
+):
+    assembly = _compose_fresh(tmp_path / "warmup")
+    production_agent = assembly.learner.agent
+    production_snapshot = assembly.policy_runtime.snapshot
+    production_rng = np.asarray(
+        assembly.policy_runtime.inference_rng
+    ).copy()
+    counters = (
+        assembly.learner.learner_step,
+        assembly.learner.gradient_step,
+        assembly.learner.policy_version,
+    )
+    batch = assembly.sampler.offline_demos.sample(
+        assembly.learner.config.batch_size
+    )
+
+    result = assembly.learner.warmup_update_paths(batch, outer_steps=2)
+
+    assert result.outer_steps == 2
+    assert result.gradient_updates == 4
+    assert result.elapsed_ms >= 0.0
+    assert len(result.cycle_elapsed_ms) == 2
+    assert all(value >= 0.0 for value in result.cycle_elapsed_ms)
+    assert assembly.learner.agent is production_agent
+    assert (
+        assembly.learner.learner_step,
+        assembly.learner.gradient_step,
+        assembly.learner.policy_version,
+    ) == counters
+    assert assembly.policy_runtime.snapshot is production_snapshot
+    np.testing.assert_array_equal(
+        np.asarray(assembly.policy_runtime.inference_rng), production_rng
+    )
+
+
+def test_update_warmup_requires_two_outer_cycles(tmp_path):
+    assembly = _compose_fresh(tmp_path / "warmup-count")
+    batch = assembly.sampler.offline_demos.sample(
+        assembly.learner.config.batch_size
+    )
+
+    with pytest.raises(ValueError, match="at least 2"):
+        assembly.learner.warmup_update_paths(batch, outer_steps=1)
+
+
 def test_fresh_composition_rejects_nonzero_agent_and_nonstrict_ingress(
     tmp_path,
 ):

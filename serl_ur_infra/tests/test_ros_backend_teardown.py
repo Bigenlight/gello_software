@@ -167,8 +167,21 @@ def _make_backend(
     b._dq = None
     b._q_stream = None
     b._q_target = Q6 + 0.5 if with_target else None
+    b._q_target_time = time.monotonic() if with_target else None
     b._up_hz = 250.0
     b._up_step = 0.002
+    b._up_accel = 8.0
+    b._up_soft_start_s = 0.7
+    b._up_soft_start_fraction = 0.15
+    b._target_stale_s = 0.3
+    b._up_streamer = rb.AccelerationLimitedJointStream(
+        hz=b._up_hz,
+        max_step_rad=b._up_step,
+        max_accel_rad_s2=b._up_accel,
+        soft_start_s=b._up_soft_start_s,
+        target_stale_s=b._target_stale_s,
+        soft_start_fraction=b._up_soft_start_fraction,
+    )
 
     fake_rclpy = _FakeRclpy()
     monkeypatch.setattr(rb, "rclpy", fake_rclpy, raising=False)
@@ -322,6 +335,17 @@ def test_no_command_published_after_close(monkeypatch):
     assert b._cmd_pub.after_destroy == [], "published onto a destroyed node"
 
 
+def test_first_command_is_exact_measured_joint_seed(monkeypatch):
+    """The first target must not consume one trajectory step before publish."""
+    b = _make_backend(monkeypatch, dry_run=False, with_target=True)
+    try:
+        assert b._cmd_pub.publishes
+        first_payload, _ = b._cmd_pub.publishes[0]
+        np.testing.assert_array_equal(first_payload, Q6)
+    finally:
+        b.close()
+
+
 def test_send_gripper_percent_is_a_noop_after_close(monkeypatch):
     """A late gripper command must not reach a destroyed node's publisher."""
     b = _make_backend(monkeypatch, dry_run=False)
@@ -342,6 +366,25 @@ def test_send_joint_command_is_a_noop_after_close(monkeypatch):
     b.send_joint_command(Q6 + 0.3)
 
     assert b._q_target is None
+
+
+def test_send_joint_command_timestamps_target_and_reset_clears_state(monkeypatch):
+    """Staleness is based on target receipt, and reset drops every old state."""
+    b = _make_backend(monkeypatch, start_threads=False)
+    before = time.monotonic()
+    b.send_joint_command(Q6 + 0.3)
+    after = time.monotonic()
+
+    assert before <= b._q_target_time <= after
+    b._up_streamer.seed(Q6, before)
+    b._q_stream = Q6.copy()
+    b.reset_command_stream()
+
+    assert b._q_target is None
+    assert b._q_target_time is None
+    assert b._q_stream is None
+    assert not b._up_streamer.seeded
+    assert b._up_streamer.mode == rb.AccelerationLimitedJointStream.UNSEEDED
 
 
 # --------------------------------------------------------------------------- #

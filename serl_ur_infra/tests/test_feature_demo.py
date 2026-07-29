@@ -188,6 +188,31 @@ def test_pool_retains_no_raw_images_or_loaded_demo_references():
     )
 
 
+def test_warmup_batch_is_deterministic_and_does_not_advance_sampler_rng():
+    first = FrozenTrunkFeatureDemoPool(
+        _loaded(3, 7), feature_extractor=_FakeBatchedExtractor(), seed=29
+    )
+    second = FrozenTrunkFeatureDemoPool(
+        _loaded(3, 7), feature_extractor=_FakeBatchedExtractor(), seed=29
+    )
+
+    warm = first.warmup_batch(5)
+    np.testing.assert_array_equal(
+        warm["observations"]["state"][:, 0, 0], [3, 7, 3, 7, 3]
+    )
+    _assert_batches_equal(first.sample(12), second.sample(12))
+
+
+def test_empty_pool_cannot_build_warmup_batch():
+    pool = FrozenTrunkFeatureDemoPool(
+        LoadedDemos(transitions=(), sidecars=()),
+        feature_extractor=_FakeBatchedExtractor(),
+    )
+
+    with pytest.raises(ValueError, match="empty"):
+        pool.warmup_batch(4)
+
+
 def test_memory_estimate_matches_the_exact_pool_allocation():
     estimate = estimate_feature_demo_memory(2)
     pool = FrozenTrunkFeatureDemoPool(

@@ -20,6 +20,9 @@ explicit DEADMAN (hold-to-engage), not by output magnitude.
                       per-step env delta:  xi = log(T_cmd^-1 @ T_des),
                       clipped to the action space (clipping = natural chase
                       rate limit; correspondence recovers over a few steps)
+    leader lost   -> invalidate the anchor and execute a zero arm/gripper HOLD;
+                     this remains an intervention, so stale input can never
+                     authorize an implicit handback to the policy
     deadman release-> disengage, policy resumes instantly
 
 For the ROS-topic source, an explicit fresh release is different from losing
@@ -261,6 +264,7 @@ class GelloIntervention(gym.ActionWrapper):
         self.T_r_anchor: Optional[np.ndarray] = None
         self._grip_cmd = 0.0  # last hysteresis output in {-1, 0, +1}
         self._gain = 1.0      # sensitivity gain, latched at each engage edge
+        self._hold_requested = False
 
     # ------------------------------------------------------------------ #
     def _leader_T(self, q_lead: np.ndarray) -> np.ndarray:
@@ -360,12 +364,31 @@ class GelloIntervention(gym.ActionWrapper):
 
     # ------------------------------------------------------------------ #
     def action(self, action: np.ndarray) -> Tuple[np.ndarray, bool]:
+        self._hold_requested = False
         q_lead, grip, age = self.expert.get_leader()
 
-        if not self.expert.is_engaged() or q_lead is None or age > self.LEADER_STALE_S:
+        # A fresh, explicit deadman release authorizes policy handback.
+        if not self.expert.is_engaged():
             if self._anchored:
                 self._disengage()
             return action, False
+
+        # Missing/stale leader joints while the deadman remains engaged are a
+        # signal failure, not an operator release.  Handing the arm to an
+        # unrelated (and potentially saturated) policy action here would turn a
+        # GELLO dropout into motion.  Invalidate the old anchor and execute a
+        # zero 7-D action instead: arm delta = HOLD, gripper command = HOLD.
+        # ``step`` also asks the backend to replace any accumulated lagging
+        # target with its acceleration-limited stop point and re-anchors the
+        # task-space integrator there.  It is deliberately reported as an
+        # intervention so transition.actions is the exact zero action selected;
+        # once fresh joints return, the ordinary engage path below re-anchors
+        # and its first delta is zero.
+        if q_lead is None or age > self.LEADER_STALE_S:
+            if self._anchored:
+                self._disengage()
+            self._hold_requested = True
+            return np.zeros(self.action_space.shape, dtype=np.float32), True
 
         if not self._anchored:
             self._engage(q_lead)
@@ -381,6 +404,8 @@ class GelloIntervention(gym.ActionWrapper):
         # the caller's buffer or the executed human action.
         policy_action = np.asarray(action).copy()
         new_action, replaced = self.action(action)
+        if self._hold_requested:
+            self.env.unwrapped.request_hold("GELLO_STALE")
         obs, rew, done, truncated, info = self.env.step(new_action)
         if replaced:
             info["intervene_action"] = np.asarray(new_action).copy()
@@ -394,6 +419,7 @@ class GelloIntervention(gym.ActionWrapper):
     def reset(self, **kwargs):
         self._disengage()
         self._grip_cmd = 0.0
+        self._hold_requested = False
         return self.env.reset(**kwargs)
 
 

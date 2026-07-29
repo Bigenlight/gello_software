@@ -92,6 +92,10 @@ class _StubEnv(gym.Env):
             low=-1.0, high=1.0, shape=(7,), dtype=np.float32
         )
         self.last_action = None
+        self.hold_reasons = []
+
+    def request_hold(self, reason):
+        self.hold_reasons.append(reason)
 
     def step(self, action):
         self.last_action = np.asarray(action).copy()
@@ -313,7 +317,7 @@ def test_intervention_survives_a_trigger_dropout_without_losing_the_arm():
     assert np.all(np.isfinite(expert_a))  # no NaN leaks into the action
 
 
-def test_stale_leader_joints_still_hand_control_back_to_the_policy():
+def test_stale_leader_joints_hold_arm_and_gripper_instead_of_using_policy():
     backend = _Backend(
         joints=Q6, trigger=0.9,
         joint_age=GelloIntervention.LEADER_STALE_S + 0.1,
@@ -321,5 +325,14 @@ def test_stale_leader_joints_still_hand_control_back_to_the_policy():
     w = _wrapper(backend)
     policy_action = np.linspace(-0.3, 0.3, 7, dtype=np.float32)
     out, replaced = w.action(policy_action)
-    assert not replaced
-    np.testing.assert_array_equal(out, policy_action)
+    assert replaced
+    np.testing.assert_array_equal(out, np.zeros(7, dtype=np.float32))
+
+
+def test_missing_leader_joints_hold_arm_and_gripper_instead_of_using_policy():
+    backend = _Backend(joints=None, trigger=0.9)
+    w = _wrapper(backend)
+    policy_action = np.linspace(-0.3, 0.3, 7, dtype=np.float32)
+    out, replaced = w.action(policy_action)
+    assert replaced
+    np.testing.assert_array_equal(out, np.zeros(7, dtype=np.float32))

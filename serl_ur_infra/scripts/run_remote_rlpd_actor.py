@@ -361,14 +361,14 @@ def _build_actor_environment(config: Any, args: argparse.Namespace) -> Any:
     )
     try:
         assert_actor_environment_state_layout(task_env)
-    except Exception:
+        task_env = wrap_gripper_penalty_from_task_config(
+            task_env,
+            experiment_config=config,
+        )
+        return EnvTimestampAdapter(RecordEpisodeStatistics(task_env))
+    except BaseException:
         task_env.close()
         raise
-    task_env = wrap_gripper_penalty_from_task_config(
-        task_env,
-        experiment_config=config,
-    )
-    return EnvTimestampAdapter(RecordEpisodeStatistics(task_env))
 
 
 def _load_config_mapping(ur_config_module: str | None) -> dict:
@@ -453,15 +453,16 @@ def main() -> int:
             )
 
     env = _build_actor_environment(config, args)
-    if args.arm:
-        _preflight_command_topics(env, robot_config)
-    network_config = _network_config(config, args)
-    network = create_actor_network(
-        network_config,
-        actor_id=args.actor_id,
-        action_shape=tuple(env.action_space.shape),
-    )
+    network = None
     try:
+        if args.arm:
+            _preflight_command_topics(env, robot_config)
+        network_config = _network_config(config, args)
+        network = create_actor_network(
+            network_config,
+            actor_id=args.actor_id,
+            action_shape=tuple(env.action_space.shape),
+        )
         alive, ready, detail = network.health()
         if not alive or not ready:
             raise RuntimeError(
@@ -560,8 +561,15 @@ def main() -> int:
                 flush=True,
             )
     finally:
-        network.close()
-        env.close()
+        # The robot command publisher is the safety-critical resource.  Close
+        # it first, and still close the transport if ROS teardown raises.  The
+        # old network-first ordering could skip env.close() entirely when a
+        # gRPC close failed, leaving the 250 Hz command thread alive.
+        try:
+            env.close()
+        finally:
+            if network is not None:
+                network.close()
     return 0
 
 

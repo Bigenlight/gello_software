@@ -181,6 +181,25 @@ def test_arrival_is_judged_against_the_commanded_target():
     env.close()
 
 
+def test_long_reset_refreshes_the_same_target_until_arrival():
+    class _SlowBackend(_FakeBackend):
+        def send_joint_command(self, q_cmd):
+            target = np.asarray(q_cmd, dtype=float).reshape(6).copy()
+            self.commands.append(target)
+            self.q = self.q + np.clip(target - self.q, -0.01, 0.01)
+
+    q0 = RESET_JOINTS + 0.04
+    backend = _SlowBackend(q0)
+    env = UR7eEnv(fake_env=False, config=_Config(), backend=backend)
+
+    env.go_to_reset()
+
+    assert len(backend.commands) >= 3
+    for command in backend.commands:
+        np.testing.assert_array_equal(command, backend.commands[0])
+    env.close()
+
+
 def test_arrival_timeout_reports_the_branch_safe_remainder():
     env, _ = _env(frozen=True)
     with pytest.raises(RuntimeError, match="did not arrive") as excinfo:
