@@ -163,6 +163,25 @@ def test_policy_snapshot_is_atomic_monotonic_and_rejects_bad_candidates():
     assert runtime.snapshot is before
 
 
+def test_policy_runtime_warms_deterministic_and_stochastic_paths_before_ready():
+    calls = []
+
+    def sample(params, observation, seed, deterministic):
+        del params, observation, seed
+        calls.append(deterministic)
+        return jnp.zeros(7, dtype=jnp.float32)
+
+    runtime = VersionedPolicyRuntime(_agent(), sample_action=sample)
+
+    assert calls == [True, False]
+    # Startup smoke uses fixed local keys and must not consume the RNG that is
+    # checkpointed and used for actual actor requests.
+    np.testing.assert_array_equal(
+        np.asarray(runtime.inference_rng),
+        np.asarray(jax.random.PRNGKey(42)),
+    )
+
+
 def test_policy_runtime_supports_a_distinct_acceptance_model_identity():
     runtime = VersionedPolicyRuntime(
         _agent(),

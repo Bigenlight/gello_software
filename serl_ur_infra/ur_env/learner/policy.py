@@ -215,10 +215,22 @@ class VersionedPolicyRuntime:
         import jax
 
         observation = canonical_policy_observation()
-        action = self._sample_action(
-            params, observation, jax.random.PRNGKey(0), True
-        )
-        self._validated_policy_action(action, name="policy smoke action")
+        # Deterministic (argmax) and stochastic sampling take distinct JAX
+        # traces in the production SAC agent.  Warming only argmax let the
+        # server advertise ready while the first real actor request spent more
+        # than its 0.6 s RPC budget compiling the stochastic path.  Materialize
+        # both here so ready means both wire-level inference modes are usable.
+        for deterministic, seed_value, label in (
+            (True, 0, "deterministic policy smoke action"),
+            (False, 1, "stochastic policy smoke action"),
+        ):
+            action = self._sample_action(
+                params,
+                observation,
+                jax.random.PRNGKey(seed_value),
+                deterministic,
+            )
+            self._validated_policy_action(action, name=label)
 
     def _validate_parameter_invariant(self, params: Any) -> None:
         if self._parameter_validator is None:
