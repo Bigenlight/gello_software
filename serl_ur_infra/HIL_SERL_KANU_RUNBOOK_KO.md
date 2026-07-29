@@ -2,9 +2,13 @@
 
 > 상태: **실물 로봇 production learning smoke 진입 가능**. 실제 arm 실행은 아직 operator 검증 항목이다.
 >
-> 기준일: **2026-07-29 KST**. reward-classifier sidecar `a368455`와 online UTD pacing `e965eff`을 합친 최소 구현 커밋은 **`2f12a48`**이다.
+> 기준일: **2026-07-29 18:53 KST**. 현재 실기 준비 기준 커밋은 **`18e3696`**이다.
+> 이 커밋은 no-arm 무전송 probe, deadman heartbeat fail-stop, proof 기반 controller
+> handoff, JAX-before-gRPC 초기화, deterministic/stochastic policy 사전 warm-up을 모두 포함한다.
 >
-> 검증 브랜치: `feat/gello-ur7e-humble-22.04`. `2f12a48`에서 classifier/UTD 통합 188 tests, infra 전체 469 tests, 실제 SAC one-step fake-data checkpoint/resume E2E가 통과했다.
+> 검증 브랜치: `feat/gello-ur7e-humble-22.04`. laptop3 infra 전체
+> **459 passed, 11 skipped**, controller handoff shell mock **14 passed**. Kanu 실제
+> classifier/demo/SAC production 규모 dry-run과 실제 policy gRPC no-submit probe도 통과했다.
 >
 > **Kanu 실행 checkout: `/home/junhyeong/gello_software_hil`** — 2026-07-29 신설된 영속 worktree. §1.1
 >
@@ -12,7 +16,25 @@
 >
 > reward threshold 근거와 classifier 실측: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)
 >
-> 실기 classifier 뷰어(정본 checkpoint를 실제로 로드하는 유일한 경로): [REWARD_CLASSIFIER_LIVE_KO.md](./REWARD_CLASSIFIER_LIVE_KO.md)
+> 실기 classifier 별도 시각 검증 경로: [REWARD_CLASSIFIER_LIVE_KO.md](./REWARD_CLASSIFIER_LIVE_KO.md)
+
+### 2026-07-29 최종 준비 증거
+
+- laptop3와 Kanu 영속 checkout의 HEAD는 `18e3696`으로 동기화됐다.
+- 실제 23-take/2,037-transition demo, 정본 Orbax classifier, ResNet-10, 실제 hybrid
+  SAC agent, production ring 50k/10k를 사용한 dry-run이 통과했다. fingerprint는
+  `c952dc2e292675dc6aa033d5c470ee34c28c6589430ddba2cd98fadaeadb9cd5`, RAM gate는
+  요구량 **9.584 GiB** 대 당시 가용량 약 **140 GiB**로 승인됐다. 증거 root:
+  `/home/junhyeong/hil-serl-data/dry-runs/production-real-model-c57978f-W6dSAY`.
+- 별도 disposable server에서 laptop3 → SSH tunnel → Kanu **실제 policy의 첫 stochastic
+  inference**가 server `12.08 ms`, round trip `53.03 ms`로 0.6 s budget 안에 통과했다.
+  replay/intervention insert는 전후 모두 0이었다. 증거 root:
+  `/home/junhyeong/hil-serl-data/probes/real-model-no-submit-18e3696-20260729`.
+- 그 probe의 초기 untrained policy action은 `max_abs=0.99894`였다. 범위 위반은 아니지만
+  거의 포화이므로 첫 실기는 **GUI를 먼저 ENGAGE하고 actor를 시작**하며, 사람이 명시적으로
+  policy에 넘길 준비가 될 때까지 DISENGAGE하지 않는다.
+- 검증 후 disposable server와 tunnel은 정상 종료했다. 즉 이 문서를 읽는 시점에 port
+  50053/50153이 떠 있다고 가정하지 말고 아래 명령으로 새 production lineage를 시작한다.
 
 ## Claude 전달용: 실물 로봇 학습 smoke 최소 절차
 
@@ -24,20 +46,22 @@
 
 ### A. 코드와 데이터 고정
 
-1. laptop과 Kanu 모두 `2f12a48`을 포함하는 같은 실행 커밋을 사용한다.
+1. laptop과 Kanu 모두 `18e3696` 이상인 같은 실행 커밋을 사용한다.
 
    ```bash
    # laptop3
    cd /home/laptop3/gello_software
    git branch --show-current
    git rev-parse HEAD
-   git merge-base --is-ancestor 2f12a48 HEAD
+   git merge-base --is-ancestor 18e3696 HEAD
 
    # Kanu
    ssh kanu 'cd /home/junhyeong/gello_software_hil && git branch --show-current && git rev-parse HEAD'
    ```
 
-   `git merge-base`가 0이 아니거나 양쪽 실행 HEAD가 다르면 시작하지 않는다. 현재 통합 커밋은 laptop에서 origin보다 앞서 있으므로, **먼저 사용자가 승인한 방식으로 push/sync되어 Kanu가 그 커밋을 실제로 checkout할 수 있어야 한다.** 오래된 Kanu checkout으로 대신 실행하지 않는다.
+   `git merge-base`가 0이 아니거나 양쪽 실행 HEAD가 다르면 시작하지 않는다. 2026-07-29
+   18:53 KST에는 양쪽과 origin이 `18e3696`으로 동기화돼 있었지만, 다음 세션에서도 위
+   명령으로 다시 확인한다. 오래된 Kanu checkout으로 대신 실행하지 않는다.
 
 2. Kanu의 `HIL_REAL_DEMO`는 recorder take를 변환한 **실제** artifact여야 한다. 먼저 §1.1/§1.2에 따라 `HIL_KANU_REPO`와 `HIL_KANU_PYTHON`을 export한다. fake acceptance pickle, `synthetic_acceptance_only=true`, real/fake 혼합은 production server가 의도적으로 거부한다.
 
@@ -104,11 +128,16 @@
    만든다. 멀면 기존 `GO` 승인 뒤에만 JTC 궤적이 움직인다. `--dry-preflight --arm`은
    marker/current pose/controller를 확인할 뿐 controller를 전환하지 않는다.
 
-   `--fake-env` actor는 production learner에 연결하지 않는다. arm 없는 actor는 이제
-   `BeginEpisode`/첫 inference까지만 확인하고 `env.step`/`Step`/replay insert 없이 종료하는
-   no-submit probe이므로 실제 transition smoke를 대신하지 못한다.
+   `--fake-env` actor는 production **lineage의 acceptance나 학습 데이터 생성에** 사용하지
+   않는다. 별도 disposable server에 대한 no-submit 연결 점검에는 사용할 수 있다. arm 없는
+   actor도 `BeginEpisode`/첫 inference까지만 확인하고 `env.step`/`Step`/replay insert 없이
+   종료하므로 실제 transition smoke를 대신하지 못한다. 같은 server에서 probe한 뒤 깨끗한
+   inference RNG/session으로 시작하려면 learner를 정상 종료하고 새 lineage로 다시 띄운다.
 
-4. preflight가 모두 통과하고 operator가 workspace/action scale/controller 상태를 확인한 뒤, deadman을 먼저 ENGAGE하여 첫 action부터 GELLO intervention이 우선하도록 한다. 그다음에만 실제 actor를 시작한다.
+4. preflight가 모두 통과하고 operator가 workspace/action scale/controller 상태를 확인한 뒤,
+   deadman을 먼저 ENGAGE하여 첫 action부터 GELLO intervention이 우선하도록 한다. 실제
+   untrained policy가 거의 포화된 action을 낼 수 있음이 측정됐으므로 이 순서는 권장이 아니라
+   첫 실기 gate다. 그다음에만 실제 actor를 시작한다.
 
    ```bash
    cd /home/laptop3/gello_software/ros2_ur_ws
@@ -170,8 +199,8 @@ step 5,000 전에는 production checkpoint가 생기지 않는다. 짧은 smoke�
 - external policy/classifier는 raw `uint8 (1,128,128,3)`를 사용하고, learner replay/demo는 frozen ResNet-10 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` current/next map을 저장한다. GAP은 없고 augmentation은 `none`이다.
 - trainable `SpatialLearnedEmbeddings/Dropout/Dense256/LayerNorm/tanh`는 sample time에 적용된다. frozen trunk의 online/target exact invariant와 target repin을 유지한다.
 - 기본 50k/10k ring camera tensor는 `7,864,320,000 B = 7.32421875 GiB`다. `--feature-memory-reserve-gib`를 포함한 startup RAM preflight가 fail-closed한다.
-- Kanu GPU actual classifier/agent production dry-run과 feature CTA smoke는 통과했다. unified schema v2에서 laptop→SSH tunnel→Kanu exact 100 transition, 실제 CTA step 1, publish/checkpoint full-load roundtrip, fresh-process resume와 version 1 inference까지 통과했다. production robot E2E와 continuous learner는 아직 미검증이다.
-- ⚠️ **2026-07-29 기준 Kanu에는 HIL 프로세스가 하나도 떠 있지 않다.** port 50053 미바인딩, GPU 8장 전부 유휴. 이 문서에 "server가 떠 있다"고 읽히는 문장이 있으면 그건 과거 run의 기록이지 현재 상태가 아니다. 매번 1.0절의 확인 명령으로 직접 본다.
+- Kanu GPU actual classifier/agent production 규모 dry-run과 feature CTA smoke는 통과했다. unified schema v2에서 laptop→SSH tunnel→Kanu exact 100 synthetic transition, 실제 CTA step 1, publish/checkpoint full-load roundtrip, fresh-process resume/version 1 inference뿐 아니라 **실제 production policy no-submit gRPC inference**까지 통과했다. production **robot transition** E2E와 continuous learner는 아직 미검증이다.
+- ⚠️ **2026-07-29 18:53 KST 기준 Kanu에는 HIL 프로세스가 하나도 떠 있지 않다.** port 50053 미바인딩. 당시 GPU 0~4는 다른 작업으로 util 100%, GPU 5~7은 유휴였다. 이 값은 바뀌므로 매번 1.0절의 확인 명령으로 직접 본다.
 - ⚠️ **`/home/laptop3/gello_software`는 Kanu에 존재하지 않는다.** 그 경로는 laptop3 전용이다. Kanu 쪽 실제 경로는 1.1절 표에 있다.
 - ✅ **`HIL_KANU_REPO`는 더 이상 "만들어야 하는 값"이 아니다.** 2026-07-29에 영속 checkout `/home/junhyeong/gello_software_hil`을 만들었다(통합 브랜치, submodule 초기화 완료, ResNet asset SHA 일치). 이 문서의 모든 Kanu command는 이 경로를 전제한다. 1.1절.
 - 🔴 **`/tmp`에 있는 것은 전부 잃어버릴 수 있다.** Kanu는 uptime 157일인데 `systemd-tmpfiles-clean.timer`가 **active**이고 규칙은 `D /tmp 1777 root root 30d`다(2026-07-29 확인). 과거 milestone worktree 두 개와 **재현 불가능한 venv 두 개**가 아직 `/tmp`에 있다. worktree는 commit이 origin에 있으니 안전하지만 venv는 git에 없다 — 1.1절과 1.2.1절에 재생성 명령이 있다.
@@ -206,19 +235,19 @@ ssh kanu nvidia-smi
 ssh kanu 'df -h ~/workspace'
 ```
 
-> 📌 **스냅샷 (2026-07-29 03:20 KST, 재실행 필요):** 위 네 명령 모두에서 HIL 관련 활동이 없었다 — port 50053/5594 미바인딩, HIL 프로세스 0개, **RTX A4000 16 GB 8장 전부 유휴**(memory.used 2 MiB, util 0%), driver `550.144.03` / CUDA 12.4, RAM 251 GiB(available 148 GiB), 디스크 **96% 사용(여유 약 86 GB)**, uptime 157일. PID·GPU 번호·포트 점유는 이 문서에 고정값으로 적지 않는다.
+> 📌 **스냅샷 (2026-07-29 18:53 KST, 재실행 필요):** 검증용 learner와 tunnel을 정상 종료한 뒤 port 50053/5594 미바인딩, HIL 프로세스 0개였다. RTX A4000 16 GB 중 GPU 0~4는 다른 작업으로 util 100%, GPU 5~7은 유휴였고, RAM `MemAvailable`은 약 141 GiB였다. 디스크는 **96% 사용** 상태다. PID·GPU 번호·포트 점유는 고정값으로 재사용하지 않는다.
 >
 > 🪤 **디스크가 96%다.** production checkpoint 하나가 약 305 MiB이고 pruning이 없으므로, 5,000-step 주기로 오래 돌릴 계획이면 시작 전에 `--checkpoint-reserve-gib`와 예상 checkpoint 수를 함께 계산한다(2절).
 >
 > 📌 **스냅샷 (2026-07-27, 재실행 필요):** `/home/junhyeong/miniconda3/envs/il/bin/python`에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개. 그날의 GPU dry-run/CTA smoke는 기존 dirty detached repository를 건드리지 않으려고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 만든 일회성 tree에서 수행했다. **그 tree는 `/tmp`이므로 지금 남아 있다고 가정하지 않는다. 그리고 그 우회는 더 이상 필요하지 않다** — 1.1절의 영속 checkout이 그 자리를 대신한다.
 
-### 1.1 Kanu 경로 — 2026-07-29 03:20 KST ssh 재확인
+### 1.1 Kanu 경로 — 2026-07-29 18:53 KST ssh 재확인
 
 `~`는 `/home/junhyeong`이다. 아래는 전부 그 시각에 직접 본 값이다.
 
 | 경로 | 정체 | 상태 |
 | --- | --- | --- |
-| **`~/gello_software_hil`** | **HIL-SERL run용 영속 checkout.** branch `feat/gello-ur7e-humble-22.04`, HEAD `1b02857`, clean. submodule `third_party/hil-serl` @ `c32939b` 초기화 완료 | ✅ **이것을 쓴다** |
+| **`~/gello_software_hil`** | **HIL-SERL run용 영속 checkout.** branch `feat/gello-ur7e-humble-22.04`, HEAD `18e3696`, clean. submodule `third_party/hil-serl` @ `c32939b` 초기화 완료 | ✅ **이것을 쓴다** |
 | `~/workspace/youngwoong/gello_software` | 위 worktree의 **주 저장소**(`.git` 1.1 GB object store를 공유한다). 현재 branch `rescue/kanu-worktree-20260729-014633` @ `7148f54` | ⛔ **동기화하지 않는다** — 아래 설명 |
 | `~/workspace/youngwoong/gello_software_remote_classifier` | ZMQ 뷰어 checkout. `feat/remote-cube-classifier-viewer` @ `a2733ee`, clean. **Jul-24 폐기 checkpoint**도 여기 있다 | 확인됨 |
 | `~/workspace/youngwoong/hil-serl` | classifier 학습처. YWhero/hil-serl fork, branch `agent/cube-in-cup-classifier` @ `d753571` | 확인됨 |
@@ -253,7 +282,9 @@ cd "$HIL_KANU_REPO"
 git submodule update --init --recursive third_party/hil-serl
 ```
 
-**브랜치 tip과의 격차.** 2026-07-29 03:20 기준 이 checkout은 `1b02857`이고 origin tip은 `75f40a5`다(같은 remote `github.com/Bigenlight/gello_software.git`). `1b02857..75f40a5`의 `serl_ur_infra` 변경은 **문서 + `cube_in_cup.py` 주석 한 줄뿐**이므로 learner/actor 동작은 동일하지만, run 기록에 commit을 남길 것이므로 시작 전에 맞춰 둔다.
+**브랜치 tip 동기화.** 2026-07-29 18:53에는 laptop3, origin, 이 checkout이 모두
+`18e3696`이었다. 이 기록을 현재 사실로 간주하지 말고 run 직전에 fetch/fast-forward한 뒤
+양쪽 exact HEAD를 다시 비교한다.
 
 ```bash
 cd "$HIL_KANU_REPO"
@@ -420,10 +451,9 @@ nvidia-smi
 512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d
 ```
 
-> 📌 **이 값은 laptop3의 사본**(`/home/laptop3/gello_software/classifier_ckpt/cube_in_cup_all3/checkpoint_150`,
-> 정규 파일 14개)**에서 직접 계산해 확인한 것**이고, 두 `DEFAULT_*_SHA256` 코드 기본값과 같다.
-> ⚠️ **Kanu 사본이 같은 digest인지는 아직 확인되지 않았다.** 같은 tree를 rsync한 것이라
-> 같아야 하지만, **같다고 가정하지 말고 Kanu에서 직접 재계산해 대조한다.**
+> 📌 Kanu 정본 디렉터리의 정규 파일 14개를 직접 재귀 해시해
+> `512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d`와 일치함을
+> 확인했다. 그래도 새 run마다 아래 명령으로 다시 대조한다.
 
 ```bash
 export HIL_CLASSIFIER=/home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150
@@ -447,12 +477,9 @@ export HIL_CLASSIFIER_SHA256=<위 명령이 출력한 값>
 > `sha256sum: <path>: Is a directory` / `FAILED open or read`로 exit 1이다(2026-07-29 확인).
 > 1.3.2의 `sha256sum --check --strict` 형태는 **단일 파일 artifact에만** 쓴다.
 
-> 🔍 **여전히 확인 안 된 것 하나:** SHA 게이트를 넘긴 뒤 upstream loader가 이 orbax 디렉터리를
-> **실제로** 읽는지는 laptop3에서 확인할 수 없다(이 PC에 JAX/Flax가 없다).
-> `load_classifier_func()`는 `flax.training.checkpoints.restore_checkpoint()`를 부르고,
-> 같은 리포의 ZMQ 뷰어가 같은 함수에 **orbax 디렉터리를 넘겨 이미 쓰고 있다**(그 경로는
-> 2026-07-29 실기 검증됨). 즉 될 가능성이 높지만 **이 CLI 경로에서 통과한 적은 없다** —
-> Kanu에서 서버를 처음 띄울 때 기동 로그로 확인할 것.
+> ✅ Kanu learner CLI에서 이 Orbax 디렉터리를 실제로 restore하고 classifier warm-up까지
+> 통과했다. production 규모 dry-run과 실제 gRPC policy probe가 모두 같은 정본 SHA를 광고했다.
+> 이는 loader/배선을 확인한 것이며, 새 로봇 장면의 분류 품질·가림 문제까지 증명한 것은 아니다.
 
 > ℹ️ 같은 artifact를 쓰는 **다른 경로**가 하나 더 있다. ZMQ 뷰어(`run_remote_reward_classifier_server.sh` → `tcp://127.0.0.1:5594`)는 `classifier_ckpt/cube_in_cup_all3` 디렉터리를 그대로 받아서 이미 정본을 서빙한다. **그건 사람이 눈으로 보는 뷰어이고, gRPC RL 경로(port 50053)와 아무 호출 관계가 없다.** 두 경로를 섞지 않는다.
 >
@@ -683,7 +710,10 @@ sha256sum "$HIL_FAKE_DEMO"
 
 dry-run은 실제 classifier, ResNet, dual raw/cached hybrid SAC agent, raw demo의 one-time frozen-trunk conversion, feature RAM preflight, production composition, fingerprint, JSONL/W&B offline을 준비하지만 gRPC port를 bind하거나 learner update를 실행하지 않는다.
 
-아래 command의 `$HIL_CLASSIFIER`/`$HIL_CLASSIFIER_SHA256`는 1.3.2의 **폐기된 구 checkpoint** 값을 전제한다. 이 절이 검증하는 것은 construction 배선이지 분류 성능이 아니므로 재현 목적에는 그대로 쓸 수 있다. 새 정본으로 dry-run하려면 1.3.1의 orbax 제약을 먼저 해소해야 한다.
+아래 작은 128/32 command는 fake demo를 쓰는 construction 재현 예시다. classifier 변수에는
+1.3.1의 **정본**을 사용한다. 폐기된 1.3.2 checkpoint는 과거 결과를 재현해야 하는 경우 외에는
+넣지 않는다. 실제 demo와 production 50k/10k RAM 배치까지 rehearsal하려면 §6 command의 새
+run root를 사용하고 끝에 `--dry-run`을 붙인다.
 
 ```bash
 cd "$HIL_KANU_REPO"
@@ -723,6 +753,13 @@ PYTHONPATH="$HIL_KANU_REPO/serl_ur_infra:$HIL_KANU_REPO/third_party/hil-serl/ser
 ```
 
 성공 시 stdout에 `rlpd_learner_dry_run_passed`가 있어야 한다. JSONL과 W&B offline directory도 확인한다.
+
+> ✅ **현재 정본 production 규모 기록 (2026-07-29):** 실제 23-take demo 2,037개,
+> Orbax classifier SHA `512b6575…`, ResNet SHA `175745d4…`, 실제 hybrid SAC agent,
+> replay/intervention 50,000/10,000으로 dry-run이 통과했다. 두 RAM gate가 모두 JSONL에
+> 기록됐고 요구량 9.584 GiB보다 약 130 GiB 이상 여유가 있었다. fingerprint는
+> `c952dc2e292675dc6aa033d5c470ee34c28c6589430ddba2cd98fadaeadb9cd5`, 보존 root는
+> `/home/junhyeong/hil-serl-data/dry-runs/production-real-model-c57978f-W6dSAY`다.
 
 > 📌 **기록 (2026-07-27) — 재현용이지 재입력용이 아니다.**
 > Kanu 기존 repository가 dirty detached였기 때문에 그 tree를 수정하지 않고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 일회성 tree를 만들어 수행했다. `CUDA_VISIBLE_DEVICES=0`(그날 비어 있던 GPU일 뿐, 고정값 아님), `il` environment, 128/32 capacity에서 actual classifier + agent production dry-run이 통과했다.
@@ -1151,7 +1188,10 @@ ssh -N -T -o ExitOnForwardFailure=yes \
 
 ## 8. laptop robot actor
 
-> ⚠️ **`run_remote_rlpd_actor.py`는 실기에서 아직 한 번도 실행되지 않았다** (2026-07-29). 지금까지 UR7e를 움직인 것은 전부 `serl_ur_infra/tests/run_real_hil.py`이고 그건 다른 코드 경로다. 아래는 코드에 대해 검증한 command이지 실기 검증된 절차가 아니다.
+> ⚠️ **`run_remote_rlpd_actor.py --arm`은 실기에서 아직 한 번도 실행되지 않았다**
+> (2026-07-29). 실제 모델 + fake env no-submit gRPC probe는 통과했지만 UR7e를 움직인 것은
+> 전부 `serl_ur_infra/tests/run_real_hil.py`의 다른 경로다. 아래는 첫 실기용으로 준비·검증한
+> command이지 이미 실기 통과한 절차는 아니다.
 
 이 절은 **laptop3**에서 실행한다. `/home/laptop3/gello_software`는 laptop3의 canonical checkout이고 Kanu에는 없다.
 
@@ -1211,11 +1251,20 @@ PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
 | `--mock-policy-noise S` | `0.0` | zero-action server 상대로 로봇을 움직여 개입 경로를 실증하는 용도. 6개 pose 채널에만 N(0,S) 노이즈, gripper 채널은 손대지 않는다. 이 run의 모든 전이에 `meta.policy_actions_synthetic=true`가 박힌다 — **demo나 정책 근거로 쓰면 안 된다** |
 | `--fake-env` | off | robot/카메라 없이 wrapper/network 계약만 확인 |
 
-첫 시도에서는 초기 SAC 정책의 action 크기가 확인되지 않았다는 점을 감안해 `--mock-policy-noise`를 작게 주거나 낮은 scale로 시작한다.
+실제 정본 policy의 첫 stochastic no-submit probe에서 action
+`[0.98719, 0.19807, -0.99894, -0.23173, -0.71553, 0.24275, 0.0]`가 관측됐다.
+정규화 범위에는 맞지만 거의 포화다. `--mock-policy-noise`는 실제 모델 검증이 아니므로
+production run에 쓰지 않는다. 첫 `--arm` 전에 HIL GUI를 ENGAGE하고, 사람이 명시적으로
+정책에 넘길 준비가 될 때까지 유지한다. action은 매 inference마다 달라지므로 위 숫자를
+다음 run의 예측값으로 사용하지 않는다.
 
-⚠️ 열려 있는 두 가지 위험:
-- workspace box. `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_LOW/HIGH`는 `zeros((6,))`이고 env가 이를 강제하지 않는다(`tests/run_real_hil.py`의 주석이 같은 사실을 적어 둔다). `CubeInCupEnvConfig`는 실측 박스를 채워 두었지만, 그 값이 실제로 클리핑에 쓰이는지는 arm 전에 확인한다. DRY RUN 300스텝 중 241스텝이 박스 밖이었고 최대 73.9 cm 이탈한 실측이 있다.
-- 전역 ESC 리스너. `ur_env/envs/ur7e_env.py:197-208`이 pynput 전역 리스너를 건다. deadman과 별개로 **아무 창에서나 ESC를 누르면 에피소드가 끝난다.**
+⚠️ 남은 주의사항:
+- workspace box는 이제 `CubeInCupEnvConfig`의 실측 flange 범위
+  (`x/y/z=[0.375,-0.229,0.185]..[0.642,0.272,0.550]`)를
+  `PolicyDeltaController`의 command pose에 적용하고, clamp 여부를 `info["clipped"]`로
+  노출한다. 다만 충돌 회피·힘 제한은 아니므로 작업 공간을 비우고 E-STOP을 유지한다.
+- 전역 ESC 리스너. `ur_env/envs/ur7e_env.py`가 pynput 전역 리스너를 건다. deadman과
+  별개로 **아무 창에서나 ESC를 누르면 에피소드가 끝나고 reset 이동이 시작될 수 있다.**
 
 실제 robot 전에 같은 command에 `--fake-env`를 붙여 wrapper/network contract를 확인한다. 단 task config의 fake environment 구현 여부는 별도로 확인한다.
 

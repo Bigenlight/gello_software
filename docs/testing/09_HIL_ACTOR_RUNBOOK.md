@@ -523,8 +523,8 @@ EXPECTED_MODEL_ID=<서버가 광고하는 값> \
 
 `run_hil_actor.sh`는 `run_hil_preposition.sh`를 대신 실행하지 않는다. 즉 `--arm` 한 줄이
 사전 배치 이동을 몰래 시작하는 일은 없다. proof가 없거나 15분이 지났거나, proof 뒤 팔이
-RESET 자세에서 벗어났으면 전환 전에 실패한다. 현재 검증 상태표의 B3 금지는 controller
-handoff와 별개인 policy/sidecar 갭 때문에 계속 유효하다.
+RESET 자세에서 벗어났으면 전환 전에 실패한다. 첫 B3는 아래 §4.4의 정지·ENGAGE 조건을
+포함한 operator-gated smoke이며, 일반 자율 policy run으로 바로 DISENGAGE하는 절차가 아니다.
 
 ### 4.3 실기 모드 preflight의 통과 기준 (2026-07-27 실측 예시)
 
@@ -543,10 +543,13 @@ handoff와 별개인 policy/sidecar 갭 때문에 계속 유효하다.
 [10] preposition marker + 현재 RESET 자세 확인 (읽기 전용; switch하지 않음)
 ```
 
-### 4.4 🔎 크롭 불일치가 **실제로** 고쳐졌는지 확인 — 팔을 움직이기 전에 한다
+### 4.4 🔎 첫 `--arm`의 정지·ENGAGE 구간에서 classifier sidecar를 확인한다
 
-**이것이 G15 수정의 가장 값싼 증거다.** 로봇을 전혀 움직이지 않고, 정지된 장면 하나면 된다.
-**§4.5 / B3(`--arm`)보다 반드시 먼저 한다** — 여기서 어긋나면 그 뒤 모든 reward가 쓰레기다.
+**이것이 G15 수정의 가장 값싼 실기 증거다.** no-arm actor는 이제 의도적으로
+`BeginEpisode` 뒤 종료하므로 transition/classifier sidecar를 만들지 않는다. 따라서 sidecar의
+실제 gRPC 왕복은 첫 `--arm` smoke 안에서 확인해야 한다. 이때 GUI를 미리 ENGAGE하고 GELLO를
+RESET anchor에서 움직이지 않아 human action이 zero에 가깝게 유지되도록 한다. policy action은
+counterfactual로 기록되지만 로봇에 실행되지 않는다.
 
 **원리.** 라이브 뷰어와 서버는 **같은 전처리 함수**를 돈다 —
 뷰어는 `gello_recorder.reward_classifier_runtime.decode_classifier_image()`,
@@ -564,7 +567,7 @@ handoff와 별개인 policy/sidecar 갭 때문에 계속 유효하다.
 > **판정은 "소수점까지 같은가"가 아니라 "자릿수가 같은가"다.**
 > 뷰어가 0.9인데 서버가 0.02 같은 차이가 나면 **전처리가 아직 갈라져 있다는 뜻**이다.
 
-**절차 (터널 · 카메라만 필요. 팔은 파킹 상태로 둔다):**
+**절차 (터널·카메라·UR driver 필요. 팔은 RESET에 두고 움직이지 않는다):**
 
 1. 카메라 2대를 띄운다(§4.2 T3). **장면을 고정한다** — 손을 넣지 않는다.
    팔은 **정지**해 있어야 한다. sidecar의 정지 게이트가 안 열리면 서버가 채점할 것이 없다.
@@ -572,20 +575,26 @@ handoff와 별개인 policy/sidecar 갭 때문에 계속 유효하다.
    절차 정본은 [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](../../serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md)다
    (랩톱 CPU는 `run_classifier_viewer.sh`, kanu GPU + 터널은 `run_remote_classifier_viewer.sh`).
    두 카메라의 값을 적어 둔다.
-3. **DRY_RUN 상태로** actor를 띄운다. 부착을 매 스텝으로 올려 표본을 빨리 모은다:
+3. HIL GUI를 **먼저 ENGAGE**하고 GELLO를 놓지 말고 RESET anchor에서 정지시킨다. §4.2의
+   preposition과 `--dry-preflight --arm`을 통과한 뒤, 부착을 매 스텝으로 올린 짧은
+   operator-gated `--arm` smoke를 시작한다. 이 명령은 실제 controller를 전환하므로 E-STOP을
+   손에 두고, 확인 표본을 얻으면 Ctrl-C로 종료한다:
 
    ```bash
    cd $WT/ros2_ur_ws
    EXPECTED_MODEL_ID=<서버가 광고하는 값> \
-     ./run_hil_actor.sh --classifier-sidecar-interval 1
+     ./run_hil_actor.sh --arm --deadman topic --classifier-sidecar-interval 1
    ```
+
+   ENGAGE를 풀지 않는다. heartbeat가 끊기면 actor는 policy fallback 없이 fail-stop해야 한다.
 
 4. 서버가 광고한 계약을 기동 로그에서 확인한다 — `rlpd_receive_server_ready` 한 줄에
    전부 들어 있다: `reward_model_id`, `checkpoint_sha256`, `threshold`,
    **`classifier_input_contract`**, **`success_confirmations`**.
    `success_confirmations`가 1이 아니면 **이 비교는 성립하지 않는다**(평활이 켜진 것).
-5. actor를 내리고 종료 줄의 `sidecar n=`이 0이 아닌지 본다 — 0이면 sidecar가 한 번도
-   안 붙은 것이고, 원인은 보통 **정지 게이트**(`--classifier-stationary-speed-max`)다.
+5. actor stdout에 `classifier sidecar not built`가 없어야 하고, server에는 연속 미분류
+   경고나 classifier fault가 없어야 한다. 현재 actor는 Ctrl-C 때 summary를 출력하지 않으므로
+   `sidecar n=`을 짧은 run의 강한 판독구로 쓸 수 없다(짧은 `max_steps` CLI와 함께 후속).
 
 > ### 🪤 그런데 **서버의 확률을 스텝마다 찍어 주는 곳이 지금 없다** (2026-07-29 코드 확인)
 > 정직하게 적는다. `classifier_probability`는
@@ -706,8 +715,8 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A6 | `--arm` controller handoff | **오프라인 PASS / 실기 미검증** | marker 부재·stale·pose 변경·기존 publisher·예상 밖 controller 조합·FPC-active 임의 자세를 거부하고 정상 strict switch·postcondition·live-pose idempotent 경로를 shell mock 14개 테스트로 확인. 실물 controller_manager에서는 아직 실행하지 않음 |
 | B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
-| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **미검증(TODO)** | 코드·단위테스트까지다. sidecar는 **실기에서 한 번도 안 붙어 봤다.** B3보다 먼저 한다 |
-| B3 | actor `--arm` (실제 팔 구동) | **금지** | controller activation 누락은 proof 기반 strict handoff로 코드 해결됐지만 실기 미검증이다(A6). 계속 막는 것은 (a′) sidecar 경로 실기 미검증(B2c), (b) 초기 정책 액션 크기 미확인, (c) B2 미검증, (d) 팔 가림. `08_OPEN_GAPS.md`의 게이트 선언 참조 |
+| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **첫 B3와 결합 / 미검증** | no-arm은 transition을 보내지 않으므로 GUI ENGAGE + 정지 GELLO 상태의 첫 `--arm`에서 확인한다. live 확률 판독구는 아직 없다 |
+| B3 | actor `--arm` (실제 팔 구동) | **OPERATOR GATE / 실기 미검증** | 실제 policy gRPC no-submit은 통과했고 초기 action `max_abs=0.99894`를 확인했다. preposition proof·live pose·strict FPC handoff·publisher 0·deadman fail-stop이 모두 구현됐다. 첫 실행은 GUI를 미리 ENGAGE하고 GELLO를 정지 anchor에 둔 §4.4 smoke로만 시작한다. 팔 가림/force·collision 회피 부재는 남는다 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
 
 ---
