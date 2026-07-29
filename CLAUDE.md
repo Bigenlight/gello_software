@@ -72,6 +72,7 @@ RL reward는 믿으면 안 된다.** 그리고 actor entrypoint(`scripts/run_rem
 
 | 작업 | 시작점 |
 | --- | --- |
+| **분류기를 개입·학습에 연결** | [`serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md`](serl_ur_infra/REWARD_TO_RL_INTEGRATION_KO.md) — reward/termination 계약, 개입 이중 라우팅, RLPD 50:50, 연결 순서. **코드에서 직접 추적해 쓴 문서다.** 아래 두 블로커가 선행 조건 |
 | **크롭 불일치 해소** (최상위 블로커) | `08_OPEN_GAPS.md` G15 → `REWARD_CLASSIFIER_THRESHOLD_KO.md` → `ur_experiments/cube_in_cup.py`. **`IMAGE_CROP`을 지우는 건 해결이 아니다** |
 | **checkpoint 로딩** (2번째 블로커) | `ur_env/rlpd_receive_server.py`의 `checkpoint_sha256()`이 `os.path.isfile()`을 요구해 orbax **디렉터리** 체크포인트를 못 읽는다. `scripts/run_rlpd_learner_server.py:72`의 `DEFAULT_CLASSIFIER_CHECKPOINT_SHA256`은 아직 recall 0%짜리 은퇴 체크포인트를 가리킨다 |
 | actor entrypoint 실기 첫 투입 | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) §7 (팔을 움직인 건 전부 `tests/run_real_hil.py`였다 — 다른 코드 경로다) |

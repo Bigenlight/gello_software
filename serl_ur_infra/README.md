@@ -31,7 +31,8 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | [REWARD_CLASSIFIER_THRESHOLD_KO.md](REWARD_CLASSIFIER_THRESHOLD_KO.md) | reward threshold를 0.85 → 0.2로 내린 근거 + 2026-07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해 인용할 것 |
 | [REMOTE_ACTOR_GRPC.md](REMOTE_ACTOR_GRPC.md) | gRPC 액터 전송 계약 v2 — 같은 전송을 쓰는 **서버 entrypoint 3종의 차이**. 영문, 머지 트리 기준 재검증 |
 | [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
-| `REWARD_CLASSIFIER_LIVE_KO.md` | 라이브 reward classifier 뷰어 런북 — **병행 작성 중이라 아직 파일이 없다.** 그때까지는 `../ros2_ur_ws/run_classifier_viewer.sh`(랩톱 CPU) / `run_remote_classifier_viewer.sh`(kanu GPU) |
+| [REWARD_CLASSIFIER_LIVE_KO.md](REWARD_CLASSIFIER_LIVE_KO.md) | 라이브 reward classifier 뷰어 런북 (랩톱 CPU, 터미널 4개). **2026-07-29 실기 검증됨.** 인터프리터 함정 · 조용한 실패 · 트러블슈팅 |
+| [REWARD_TO_RL_INTEGRATION_KO.md](REWARD_TO_RL_INTEGRATION_KO.md) | **분류기를 개입·학습에 연결하는 사람이 읽을 것.** reward/termination 계약(서버 권위, `next_observations` 기준) · 개입의 **버퍼 이중 기록** · RLPD 50:50 배치 · 연결 순서 6단계 · 감시 지표. 코드에서 직접 추적해 작성 |
 
 ### 🗄️ 기록물 — 사료로만. 여기 적힌 명령을 실행하지 말 것
 

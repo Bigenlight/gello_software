@@ -520,6 +520,12 @@ threshold 기본값은 양쪽 다 0.2로 `DEFAULT_REWARD_THRESHOLD`와 맞춰져
 > 랩톱 CPU에서 라이브로 돌고 절차는 `REWARD_CLASSIFIER_LIVE_KO.md`에 있다(§3, §6-(A)).
 > 그래서 아래 목록은 **그 다음부터** 시작한다.
 
+> 📘 **분류기를 개입·학습에 실제로 연결하는 사람은
+> [`REWARD_TO_RL_INTEGRATION_KO.md`](REWARD_TO_RL_INTEGRATION_KO.md)를 함께 읽어라.**
+> 아래 A·B가 *왜* 선행 조건인지, reward가 누구 권위로 어느 관측에서 만들어지는지,
+> 개입 transition이 **두 버퍼에 이중 기록**된다는 것, RLPD 50:50 배치에서 개입이 오프라인
+> demo를 희석한다는 것이 거기 있다. 이 §7은 "무엇을 할지"이고 그쪽은 "무엇에 연결되는지"다.
+
 ### A. 🔴 classifier 크롭 불일치를 고친다 ← **여기서 시작**
 
 **이것이 최상위 블로커다.** 지금 상태에서 RL 루프를 돌리면 **reward가 틀린다**(§5.1: recall 100% → 33%).
