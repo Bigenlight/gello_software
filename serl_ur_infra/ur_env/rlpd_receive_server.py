@@ -48,14 +48,29 @@ IMAGE_KEYS = ("cam1", "cam2")
 ACTION_SHAPE = (7,)
 DEFAULT_REPLAY_CAPACITY = 50_000
 DEFAULT_INTERVENTION_CAPACITY = 10_000
-# Measured 2026-07-28 on the leakage-free leave-one-take-out folds: no failure
-# frame scored above 0.0086 while success medians sat at 0.99, so the whole
-# 0.01-0.85 band is empty.  Dropping 0.85 -> 0.5 lifted pooled held-out recall
-# 83.9% -> 90.5% (the weak take_03 fold 44.3% -> 65.7%) with the false-positive
-# rate still exactly 0%.  This value feeds the learner fingerprint, so changing
-# it breaks resume of checkpoints trained under the old value.
+# Re-measured 2026-07-29 with code-enforced frame-content-hash leak detection,
+# which invalidated the 07-28 numbers that used to live here.  On the deployed
+# cube_in_cup_all3 checkpoint the genuinely held-out set is 266 success / 470
+# failure frames, and the false-positive rate is exactly 0% at 0.85, 0.5 AND
+# 0.2 alike -- FPR cannot distinguish the three.  Recall can: the worst
+# cross-validation fold on the newer 0724 domain goes 44.3% -> 65.7% between
+# 0.85 and 0.5, an order of magnitude above the 2.8pp retrain seed noise.
+#
+# 0.2 is a deliberate asymmetry call, not a margin-maximising one.  In sparse
+# binary HIL-SERL reward a false positive is unrecoverable (the policy is
+# rewarded for failing) while a false negative merely wastes an episode and can
+# be supplied by the human operator, so recall is bought with margin knowingly.
+# Cost of the buy: the highest-scoring held-out failure frame is 0.0858 on this
+# checkpoint (2.33x headroom) but 0.1428 on the worst checkpoint measured
+# (1.40x).  All six checkpoints peak on the SAME frame -- take_11_20260720_205805
+# frame 195, ~0.2 s before the cube is released -- so the headroom argument
+# rests on a single boundary frame and will need re-checking once the incoming
+# success/failure footage lands.
+#
+# This value feeds the learner fingerprint, so changing it breaks resume of
+# checkpoints trained under the old value.
 # See REWARD_CLASSIFIER_THRESHOLD_KO.md.
-DEFAULT_REWARD_THRESHOLD = 0.5
+DEFAULT_REWARD_THRESHOLD = 0.2
 
 
 class ReceiveRuntimeError(RuntimeError):
