@@ -160,9 +160,12 @@ class DefaultUR7eEnvConfig:
     # nothing and makes the one-euro filter's dt bookkeeping lie.  Substepping
     # slower throws away leader samples the rig already paid for.
     #
-    # ``substep_hz <= HZ`` disables the feature: no substep fits inside the
-    # window, so ``UR7eEnv.step`` degenerates to its pre-change single target +
-    # sleep.  Configs without an ``INTERVENTION`` block behave that way too.
+    # ``substep_hz <= HZ`` disables the feature IN "in_window" MODE: no substep
+    # fits inside the window, so ``UR7eEnv.step`` degenerates to its pre-change
+    # single target + sleep.  Configs without an ``INTERVENTION`` block behave
+    # that way too.  In "background" mode (see ``follow_mode`` below) the tick
+    # rate is not packed into the window at all, so ``substep_hz`` has no such
+    # relationship to ``HZ`` — any positive rate runs.
     #
     # The one_euro_* values are the leader-side anti-tremor filter of the same
     # proven teleop config (ur7e_gello.yaml:43-48).  They are applied to the
@@ -180,8 +183,57 @@ class DefaultUR7eEnvConfig:
     # --scale 1.0``, 120 intervened steps, every check PASS (substeps=2 in every
     # window = 3 target updates per window, dp_ratio median 1.000, held 0%,
     # operator confirmed the hand feel).  Evidence: 04_HIL_INTERVENTION.md §9.
+    #
+    # ---- follow_mode: WHERE the 30 Hz following runs ---- #
+    # "background" (DEFAULT) — a daemon thread inside ``UR7eEnv`` follows the
+    #   leader continuously while the human is engaged.  The RL loop is then a
+    #   pure OBSERVER: it samples a transition every ``env.step`` and never gates
+    #   the arm.  This is the operator's requirement, stated verbatim: "사람에게
+    #   제어권이 넘어올 때는 그냥 원래 eef teleop처럼 팔이 움직이고, RL은 10 Hz로
+    #   정보만 빼간다".
+    #
+    #   WHY IT HAD TO MOVE OUT OF THE WINDOW.  ``_drive_intervention_substeps``
+    #   paces against ``start_time + 1/HZ`` — the NOMINAL window — but the
+    #   production actor loop measures 512 ms per step (1.95 Hz): ~412 ms of it
+    #   is the blocking gRPC Step RPC plus the camera decode, both OUTSIDE
+    #   ``env.step``.  In-window following therefore refreshed the target for
+    #   66.7 ms out of every 512 ms and then went silent, with three consequences
+    #   that compound:
+    #     * top intervention speed = ACTION_SCALE / real period = 12.5 mm /
+    #       512 ms = 2.4 cm/s, against 12.4 cm/s measured on the validation rig;
+    #     * the 445 ms target gap crosses UPSAMPLER.target_stale_s (0.30 s), so
+    #       the upsampler BRAKED to HOLD once per window;
+    #     * every stale brake re-arms ``soft_start_s`` (0.7 s), and no window is
+    #       that long, so the slew ceiling sat pinned at 46%.
+    #   A background thread ticks at ``substep_hz`` regardless of what the RL
+    #   loop is doing, so none of the three can happen.
+    #
+    #   It is also the SAFETY improvement: the follower re-reads the deadman on
+    #   EVERY tick, so a release stops the arm within 1/substep_hz = 33 ms
+    #   instead of at the next window boundary (up to 512 ms of further motion).
+    #
+    #   NO ``InterventionBudget`` ON THIS PATH (operator decision, 2026-07-30).
+    #   The per-window ACTION_SCALE cap was a RECORDING constraint enforced by
+    #   throttling the arm, and at a 512 ms step it pinned the operator's ceiling
+    #   at ACTION_SCALE/T = 2.4 cm/s — not drivable, hence zero demonstrations.
+    #   The remaining bounds are the GOVERNOR above, the workspace box, and the
+    #   250 Hz upsampler, all of them inside ``PolicyDeltaController.step``.
+    #   The price is that a long window's stored action UNDER-reports its motion;
+    #   it is measured and reported per transition as
+    #   ``info["intervention_saturation"]`` rather than assumed away.  Full
+    #   argument, and the two real fixes, on
+    #   ``UR7eEnv._harvest_follow_window`` and ``GelloIntervention.follow_xi``.
+    #
+    # "in_window" — the pre-2026-07-30 path, preserved verbatim: substeps are
+    #   packed into ``UR7eEnv.step``'s sleep and rationed by
+    #   ``InterventionBudget``.  Kept because it is what the 2026-07-30 ARMED
+    #   hardware run validated, and because the substep tests pin it.
+    #
+    # ``substep_hz <= 0`` (no INTERVENTION block) forces "in_window", i.e. the
+    # feature is off entirely — there is no tick rate to run a follower at.
     INTERVENTION: Dict[str, float] = {
         "substep_hz": 30.0,
+        "follow_mode": "background",
         "one_euro_min_cutoff": 1.0,
         "one_euro_beta": 2.0,
         "one_euro_d_cutoff": 1.0,

@@ -389,6 +389,18 @@ COLUMNS = (
      # governor rate cap이 요청을 깎았는지 — 대각 이동은 ACTION_SCALE 헤드룸이
      # 축별로만 성립하기 때문에 상시 걸린다(policy_delta_controller.py 참고).
      "substeps", "governed", "governed_scale",
+     # 백그라운드 추종(follow_mode="background") 계측.
+     #   follow_ticks — 이 transition 창 동안 추종 스레드가 실제로 발행한 타깃
+     #     수. env.step 창 밖(gRPC 왕복)까지 포함한 obs_k -> obs_{k+1} 전 구간이다.
+     #     0이면 추종 경로가 안 돈 것(정책 스텝이거나 in_window 모드).
+     #   saturation — 창 순변위 ÷ ACTION_SCALE, **클립 전** 비율. 1.0이면 딱 한
+     #     스텝, 4.94면 저장된 액션이 실제 이동을 4.94배 과소보고한다는 뜻이다.
+     #     추종 스레드에서 InterventionBudget을 뺀 대가이고(조작자 결정
+     #     2026-07-30), 이 컬럼이 그 대가를 재는 유일한 관측치다.
+     #   saturated — saturation > 1.0.
+     # 이 숫자로 다음 결정을 한다: (a) 포화 transition 서버측 제외(proto 필요)
+     # 인지 (b) 창 주기 단축(08_OPEN_GAPS.md G21)인지.
+     "follow_ticks", "saturated", "saturation",
      "deadman_engaged", "deadman_age_s", "gain_latched", "gain_live",
      "leader_age_s"]
     + [f"lq{i}" for i in range(6)]
@@ -613,6 +625,28 @@ def summarize(rows):
     n_held = sum(1 for r in rows if r["held"])
     print("\n================= 결과 요약 =================")
     print(f"  총 스텝 {n},  개입 스텝 {n_iv},  held {n_held}")
+    # 포화 계측. 추종 스레드에 예산이 없으므로 창이 길면 저장 액션이 실제
+    # 이동을 과소보고한다 — 그 크기를 여기서 처음 숫자로 본다.
+    # 이 요약이 (a) 서버측 포화 제외 / (b) 창 주기 단축 중 무엇을 할지 정한다.
+    follow_rows = [r for r in rows if int(r.get("follow_ticks", 0) or 0) > 0]
+    if follow_rows:
+        ratios = [
+            float(r["saturation"]) for r in follow_rows
+            if str(r.get("saturation", "")) != ""
+        ]
+        # int(), not truthiness: these rows are also read back from the CSV in
+        # post-hoc analysis, where "0" is a non-empty (truthy) string.
+        n_sat = sum(1 for r in follow_rows if int(r.get("saturated", 0) or 0))
+        pct = 100.0 * n_sat / len(follow_rows)
+        worst = max(ratios) if ratios else float("nan")
+        median = sorted(ratios)[len(ratios) // 2] if ratios else float("nan")
+        print(
+            f"  포화 창 {n_sat}/{len(follow_rows)} ({pct:.1f}%) — "
+            f"saturation 중앙값 {median:.2f}, 최대 {worst:.2f} "
+            "(1.0 초과 = 저장 액션이 그 배수만큼 이동을 과소보고)"
+        )
+        out["saturated_windows"] = n_sat
+        out["saturation_max"] = worst
     if n == 0:
         print("  FAIL — 기록된 스텝이 없다")
         return {"pass": False}
@@ -1083,6 +1117,11 @@ def main(argv=None):
                     "substeps": int(info.get("intervention_substeps", 0) or 0),
                     "governed": int(bool(info.get("governed", False))),
                     "governed_scale": info.get("governed_scale", ""),
+                    "follow_ticks": int(
+                        info.get("intervention_follow_ticks", 0) or 0
+                    ),
+                    "saturated": int(bool(info.get("intervention_saturated", False))),
+                    "saturation": info.get("intervention_saturation", ""),
                     "deadman_engaged": dm_engaged,
                     "deadman_age_s": dm_age,
                     "gain_latched": getattr(iv, "_gain", None),

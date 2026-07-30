@@ -38,7 +38,7 @@ Validation status:
 import queue
 import threading
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -47,6 +47,16 @@ from scipy.spatial.transform import Rotation
 from ur_env.envs.config import DefaultUR7eEnvConfig
 from ur_env.envs.leader_stream import NOMINAL_CONTROL_HZ
 from ur_env.envs.policy_delta_controller import PolicyDeltaController
+
+# The background follower's own clock, bound at import time and NEVER reached
+# through the module global ``time``.  The substep tests replace
+# ``ur7e_env.time`` with a virtual clock whose ``sleep`` ADVANCES it; a daemon
+# thread pacing itself through that global would drive somebody else's virtual
+# clock from a second thread and make every timing assertion in the suite a
+# race.  The pacing shell is the only code that uses this name, and
+# ``_follow_tick`` — the part that has behaviour worth testing — takes its clock
+# reading as an ARGUMENT instead of reading one at all.
+_wall_monotonic = time.monotonic
 
 
 class ImageDisplayer(threading.Thread):
@@ -193,7 +203,33 @@ class UR7eEnv(gym.Env):
         self.intervention_substep_hz = float(
             intervention_cfg.get("substep_hz", 0.0)
         )
-        if self.intervention_substep_hz > 0.0:
+        #: "background" (a daemon thread follows the leader independently of the
+        #: RL loop) or "in_window" (the pre-2026-07-30 path, substeps packed into
+        #: ``step``'s sleep).  See ``config.INTERVENTION["follow_mode"]`` for the
+        #: measurement that motivated the move.  Rejected rather than defaulted
+        #: on a typo: silently selecting a control topology is exactly the class
+        #: of "it ran, but not the way you think" failure this stack keeps
+        #: paying for.
+        follow_mode = str(intervention_cfg.get("follow_mode", "background")).lower()
+        if follow_mode not in ("background", "in_window"):
+            raise ValueError(
+                f"INTERVENTION['follow_mode'] must be 'background' or "
+                f"'in_window' (got {follow_mode!r})"
+            )
+        if self.intervention_substep_hz <= 0.0:
+            # No tick rate => no follower to run.  Degenerate to the path that
+            # needs none, which is also the pre-substep behaviour.
+            follow_mode = "in_window"
+        self.intervention_follow_mode = follow_mode
+        #: Tick period of the background follower AND the ``dt`` its commands are
+        #: governed over.  ``None`` when there is no tick rate at all.
+        self._follow_dt: Optional[float] = (
+            1.0 / self.intervention_substep_hz
+            if self.intervention_substep_hz > 0.0
+            else None
+        )
+        self._init_command_mux()
+        if self.intervention_substep_hz > 0.0 and follow_mode == "in_window":
             # 1.5x, not 1x: _drive_intervention_substeps only refreshes while at
             # least HALF a substep period is left in the window
             # (`next_tick < window_end - 0.5 * period`), so the first substep
@@ -256,6 +292,12 @@ class UR7eEnv(gym.Env):
             self.config.GOVERNOR, self.hz, clip_pose=self._clip_command_pose
         )
         self.last_gripper_act = time.time()
+        # AFTER the controller exists: the follower's very first action is a
+        # controller.step(), so a thread started before this line could observe
+        # a half-built env.  It comes up DISARMED and stays blocked on
+        # ``_follow_armed`` until an RL step promotes it, so an env that is never
+        # intervened pays one idle thread and nothing else.
+        self._start_follow_thread()
 
         if self.config.DISPLAY_IMAGE:
             self.img_queue = queue.Queue()
@@ -442,6 +484,667 @@ class UR7eEnv(gym.Env):
         T_c[:3, 3] = xyz_c
         return T_c, True
 
+    # ================================================================== #
+    # COMMAND OWNERSHIP MUX + BACKGROUND INTERVENTION FOLLOWER            #
+    #                                                                    #
+    # WHAT THIS SOLVES.  ``_drive_intervention_substeps`` (below) follows #
+    # the leader only INSIDE ``step``'s nominal 1/HZ window.  On the      #
+    # production actor the real step period is 512 ms — 100 ms of         #
+    # ``env.step`` plus ~412 ms of blocking gRPC and camera decode that   #
+    # happen OUTSIDE it — so the leader was resampled for 13% of each     #
+    # period and ignored for the other 87%.  Measured consequences:       #
+    # 2.4 cm/s top intervention speed (12.4 cm/s on the validation rig),  #
+    # a 445 ms target gap that crosses UPSAMPLER.target_stale_s and       #
+    # brakes the stream to HOLD once per window, and a soft_start re-arm  #
+    # after every one of those brakes that pins the slew ceiling at 46%.  #
+    #                                                                    #
+    # THE FIX, in the operator's words: "사람에게 제어권이 넘어올 때는     #
+    # 그냥 원래 eef teleop처럼 팔이 움직이고, RL은 10 Hz로 정보만 빼간다". #
+    # A daemon thread follows the leader at ``substep_hz`` for as long as #
+    # the human is engaged, and ``env.step`` becomes an OBSERVER that     #
+    # samples one transition per call.  The arm never waits for the RL    #
+    # loop.                                                              #
+    #                                                                    #
+    # WHY A MUX AND NOT JUST A THREAD.  The contended resource is not the #
+    # backend's joint target (last-write-wins, short lock, indifferent).  #
+    # It is ``PolicyDeltaController.T_cmd``/``q_cmd``: the controller     #
+    # integrates its OWN output and seeds IK from its OWN previous        #
+    # solution, so two threads interleaving ``step()`` would seed each    #
+    # other's branch continuity — which comes out of the arm as a wrist   #
+    # flip, not as a log line.  So exactly one owner may command at a     #
+    # time, and ``_emit_arm_command`` is the ONLY door.                   #
+    #                                                                    #
+    # PROMOTION IS ASYMMETRIC, deliberately.  POLICY -> HUMAN happens     #
+    # only on the RL thread at a step boundary (``arm_intervention_       #
+    # follow``); HUMAN -> POLICY may happen on any thread at any tick     #
+    # (``disarm_intervention_follow`` / ``_brake_follow`` /               #
+    # ``_fail_closed``).  Starting is a decision; stopping is a reflex.   #
+    # ================================================================== #
+    OWNER_POLICY = "POLICY"
+    OWNER_HUMAN = "HUMAN"
+    #: How long the idle follower blocks per armed-check.  It bounds the delay
+    #: between an RL-thread promotion and the first following tick, so it is
+    #: deliberately far below one substep period.
+    FOLLOW_IDLE_POLL_S = 0.02
+    #: ``close()`` waits at most this long for the follower to leave its loop,
+    #: and ``reset()`` at most this long for it to acknowledge a disarm.
+    #:
+    #: THE BUDGET IS NOT ARBITRARY.  ``hil_restore_controller_after_actor``
+    #: waits 30 x 0.1 s for our command publisher to disappear before it will
+    #: switch the arm back from forward_position_controller to the scaled joint
+    #: trajectory controller, and ``URRosBackend.close`` SKIPS ``destroy_node()``
+    #: entirely if its own joins time out — so a slow teardown here does not
+    #: merely delay the exit, it leaves the arm on FPC with the controller
+    #: switch refused ("still has N publisher(s)").  The follower exits within
+    #: one tick of ``_follow_stop`` being set (it waits on that event rather
+    #: than sleeping), so 0.5 s is already two orders of magnitude of slack, and
+    #: the two waits together stay well inside the 3 s the restore hook allows.
+    FOLLOW_JOIN_TIMEOUT_S = 0.5
+    FOLLOW_QUIESCE_TIMEOUT_S = 0.5
+
+    def _init_command_mux(self) -> None:
+        """Declare every mux/follower attribute, fake envs included.
+
+        Before the ``fake_env`` early return on purpose: ``close()``,
+        ``reset()`` and the accessors must be safe to call on an env that never
+        builds a controller at all, and a ``hasattr`` dance at each of those
+        sites is exactly how a safety gate ends up silently skipped.
+        """
+
+        self._command_lock = threading.RLock()
+        self._command_owner = self.OWNER_POLICY
+        self._follow_source = None
+        self._follow_armed = threading.Event()
+        self._follow_stop = threading.Event()
+        #: Set by the follower whenever it is parked on ``_follow_armed`` — i.e.
+        #: PROOF that it has observed a disarm and is not between the ownership
+        #: test and a ``send_joint_command``.  ``go_to_reset`` needs the proof
+        #: and not just the request: it republishes its target at 20 Hz while
+        #: the follower publishes at 30 Hz, and the backend is last-write-wins,
+        #: so a follower that is still going WINS.  The reset then never reaches
+        #: ``RESET_TOLERANCE_RAD`` and ends in 10 s of blind motion plus a
+        #: RuntimeError.  Starts set: no thread means nothing to wait for.
+        self._follow_idle = threading.Event()
+        self._follow_idle.set()
+        self._follow_thread: Optional[threading.Thread] = None
+        #: Exception raised on the follower thread and re-raised on the RL
+        #: thread at its next ``step``/``reset``.  See ``_raise_follow_fault``.
+        self._follow_fault: Optional[BaseException] = None
+        #: Reason string of a brake that happened between two RL steps, reported
+        #: once as ``info["intervention_window_braked"]``.
+        self._follow_brake_reason: Optional[str] = None
+        #: Set with it, consumed separately by the wrapper BEFORE its next
+        #: ``action()``; see ``consume_follow_reanchor``.
+        self._follow_needs_reanchor = False
+        self._reset_follow_window_locked()
+
+    def _reset_follow_window_locked(self) -> None:
+        """Open a fresh recording window.  Caller holds ``_command_lock``."""
+
+        #: Task-space displacement the controller has actually COMMITTED under
+        #: HUMAN ownership since the last harvest — see ``_harvest_follow_window``
+        #: for why this replaced ``InterventionBudget`` as the record.
+        self._follow_sum_p = np.zeros(3, dtype=float)
+        self._follow_sum_w = np.zeros(3, dtype=float)
+        self._follow_ticks = 0
+        self._follow_window_had_human = False
+        self._follow_agg: Dict[str, object] = {
+            "held": False,
+            "clipped": False,
+            "governed": False,
+            "governed_scale": 1.0,
+            "reject_reason": None,
+        }
+
+    # ---- the single door to the arm --------------------------------------- #
+    def _emit_arm_command(self, xi: np.ndarray, dt, owner: str):
+        """THE only path from a task-space increment to a joint command.
+
+        Returns ``(q_cmd, ctrl_info)``, or ``(None, ctrl_info)`` when the caller
+        does not own the arm — in which case NOTHING happened: no controller
+        state moved, no target was published.
+
+        The owner test is the FIRST thing inside the lock and it is the whole
+        mux.  Removing it does not produce a race that shows up as a log line;
+        it produces two threads interleaving ``PolicyDeltaController.step`` and
+        seeding each other's IK, i.e. a wrist that turns over.
+
+        ``dt=None`` reproduces the policy path bit for bit
+        (``PolicyDeltaController._resolve_dt`` returns the nominal tick and the
+        unscaled joint gate verbatim for ``None``), so routing the policy path
+        through here costs one lock acquisition and one 4x4 copy and changes no
+        arithmetic.
+
+        The controller's RETURN VALUE is what reaches the backend — never a
+        joint vector computed some other way.  The workspace box, the governor,
+        the branch-continuous IK seed and the joint-step line search all live
+        inside ``controller.step``; a "quick" direct publish would bypass every
+        one of them at once.  ``go_to_reset`` is the single grandfathered
+        exception and it guards itself (POLICY ownership + branch mapping +
+        distance gate).
+        """
+
+        with self._command_lock:
+            if owner != self._command_owner:
+                return None, {
+                    "held": False,
+                    "reject_reason": None,
+                    "clipped": False,
+                    "governed": False,
+                    "governed_scale": 1.0,
+                    #: Present ONLY on a blocked emit, so a consumer can tell
+                    #: "this call issued nothing because somebody else is
+                    #: driving" apart from "this call issued a HOLD".
+                    "arm_command_owner": self._command_owner,
+                }
+            T_before = self.controller.tcp_cmd()
+            q_cmd, ctrl_info = self.controller.step(xi, dt=dt)
+            self.backend.send_joint_command(q_cmd)
+            if owner == self.OWNER_HUMAN:
+                self._record_human_commit(T_before, ctrl_info)
+            return q_cmd, ctrl_info
+
+    def _record_human_commit(self, T_before: np.ndarray, ctrl_info: dict) -> None:
+        """Accumulate what the controller COMMITTED.  Caller holds the lock.
+
+        THE COMMANDED DISPLACEMENT, not the measured TCP.  Every piece of anchor
+        maths in ``GelloIntervention`` is expressed against ``controller.
+        tcp_cmd()``, so measuring the record against the same quantity keeps the
+        report self-consistent with the thing that produced it; measuring the
+        arm instead would fold in tracking lag that no action caused.
+
+        Committed, not requested.  ``T_before -> T_after`` is what survived the
+        governor, the workspace clamp and the joint-step line search, so a tick
+        the controller HELD contributes exactly zero and a tick it shrank
+        contributes exactly what it shrank to.  That closes, for this path, the
+        over-report ``test_a_line_search_shrink_must_not_be_left_out_of_the_
+        recorded_action`` xfails on the in-window path (the budget there charges
+        the REQUEST).
+        """
+
+        T_after = self.controller.tcp_cmd()
+        self._follow_sum_p += T_after[:3, 3] - T_before[:3, 3]
+        self._follow_sum_w += self._kin.so3_log(
+            T_after[:3, :3] @ T_before[:3, :3].T
+        )
+        self._follow_window_had_human = True
+        self._follow_ticks += 1
+        for key in ("held", "clipped", "governed"):
+            if ctrl_info.get(key):
+                self._follow_agg[key] = True
+        scale = ctrl_info.get("governed_scale")
+        if scale is not None:
+            self._follow_agg["governed_scale"] = min(
+                float(scale), float(self._follow_agg["governed_scale"])
+            )
+        if ctrl_info.get("reject_reason"):
+            self._follow_agg["reject_reason"] = ctrl_info["reject_reason"]
+
+    # ---- ownership transitions -------------------------------------------- #
+    def arm_intervention_follow(self, source) -> bool:
+        """POLICY -> HUMAN.  RL thread, at a step boundary, ONLY.
+
+        ``source`` implements the follower protocol:
+
+            source.follow_is_engaged() -> bool
+                The deadman, read fresh.  MAY RAISE (a stale heartbeat is not a
+                release); anything it raises fails the arm closed.
+            source.follow_xi(now) -> (6,) or None
+                The anchored leader delta in real units for the tick at ``now``.
+                UNBUDGETED — the governor and the workspace box inside
+                ``controller.step`` are the only bounds.  ``None`` means the
+                leader is unusable => brake and re-anchor.
+
+        Returns False when this env cannot follow in the background (fake env,
+        or ``follow_mode="in_window"``), so the caller can fall back.
+        """
+
+        if self.fake_env or self._follow_thread is None:
+            return False
+        # Never promote into a latched fault: the operator's state is unknown,
+        # which is the one condition under which the human must NOT be handed
+        # the arm.
+        self._raise_follow_fault()
+        with self._command_lock:
+            self._follow_source = source
+            self._command_owner = self.OWNER_HUMAN
+            self._follow_window_had_human = True
+            self._follow_armed.set()
+        return True
+
+    def disarm_intervention_follow(self) -> None:
+        """HUMAN -> POLICY.  Any thread, any tick, no questions asked.
+
+        Once this returns, no further HUMAN command can reach the backend: a
+        follower tick already inside ``_emit_arm_command`` holds the lock, so
+        this call waits for it, and the next tick re-tests ownership under the
+        same lock and finds POLICY.
+        """
+
+        with self._command_lock:
+            self._follow_armed.clear()
+            self._command_owner = self.OWNER_POLICY
+
+    def await_follower_quiescent(
+        self, timeout: Optional[float] = None
+    ) -> bool:
+        """Disarm AND wait for the follower to acknowledge it. Returns success.
+
+        WHY AN ACK AND NOT JUST A DISARM.  ``disarm_intervention_follow`` is
+        already a hard guarantee that no further HUMAN command reaches the
+        backend (the ownership test is inside the same lock a running tick
+        holds).  This adds the second thing ``go_to_reset`` needs: evidence that
+        the follower is PARKED, not merely locked out.  ``go_to_reset``
+        republishes one target at 20 Hz for up to ``RESET_TIMEOUT_S``; a
+        follower publishing at 30 Hz into a last-write-wins backend simply wins,
+        the arm never converges to ``RESET_TOLERANCE_RAD``, and the operator
+        gets ten seconds of blind motion followed by "reset did not arrive".
+
+        Bounded, and a failure is reported rather than waited out: this is
+        called from ``reset``, which must not become the thing that wedges a
+        session.
+        """
+
+        self.disarm_intervention_follow()
+        thread = self._follow_thread
+        if thread is None or not thread.is_alive():
+            return True
+        return self._follow_idle.wait(
+            self.FOLLOW_QUIESCE_TIMEOUT_S if timeout is None else timeout
+        )
+
+    def suspend_follower(self):
+        """Context manager: no human following inside this block.
+
+        NOT WIRED UP YET — exposed for ``remote_actor``'s operator gates
+        (``WAIT_SCENE_READY`` / ``WAIT_HOME_APPROVAL``), which block the RL
+        thread indefinitely and, in the ``WAIT_HOME_APPROVAL`` case, do not
+        consult the deadman at all.  A follower left armed across one of those
+        would keep driving the arm for as long as the operator takes to answer a
+        prompt.  The gates live in ``ur_env/remote_actor.py``, which this change
+        deliberately does not touch; wiring them is a separate, named follow-up.
+
+        Re-arming is the caller's job on purpose: promotion is only ever allowed
+        from the RL thread at a step boundary, and this context manager cannot
+        know it is at one.
+        """
+
+        env = self
+
+        class _Suspend:
+            def __enter__(self_inner):
+                env.await_follower_quiescent()
+                return env
+
+            def __exit__(self_inner, *exc_info):
+                return False
+
+        return _Suspend()
+
+    def intervention_follow_armed(self) -> bool:
+        """Is the background follower currently allowed to drive the arm?"""
+
+        return self._follow_armed.is_set()
+
+    def command_owner(self) -> str:
+        """``OWNER_POLICY`` or ``OWNER_HUMAN`` — who may command right now."""
+
+        with self._command_lock:
+            return self._command_owner
+
+    def _brake_locked(self, reason: str) -> None:
+        """Stop the command stream and re-anchor.  Caller holds the lock.
+
+        The same two lines ``_apply_action``'s hold branch runs, and for the
+        same reason: ``request_hold()`` replaces the goal with its
+        acceleration-limited stop point, and ``controller.reset()`` re-anchors
+        the task-space integrator there so ``T_cmd`` cannot keep a phantom
+        excursion the arm never made.
+        """
+
+        try:
+            q_hold = self.backend.request_hold()
+            self.controller.reset(q_hold)
+        except Exception as exc:  # pragma: no cover - backend-specific
+            # A failed HOLD must not take the disarm down with it: the arm is
+            # already safest with no further targets (the 250 Hz upsampler
+            # brakes on its own at ``target_stale_s``), and swallowing here is
+            # what keeps that true.
+            print(
+                f"[UR7eEnv] WARNING: HOLD for {reason} failed ({exc}) — the "
+                "upsampler's target_stale_s brake is now the only stop"
+            )
+
+    def _brake_follow(self, reason: str) -> None:
+        """Leader/no-anchor failure: stop, hand back, and ask for a re-anchor.
+
+        NOT a fault.  A GELLO dropout is an ordinary event; the RL thread
+        re-anchors on its next step (which is also where the sensitivity gain is
+        latched, so keeping re-anchoring there keeps that latch in ONE place).
+        """
+
+        with self._command_lock:
+            self._follow_armed.clear()
+            self._command_owner = self.OWNER_POLICY
+            self._brake_locked(reason)
+            self._follow_brake_reason = str(reason)
+            self._follow_needs_reanchor = True
+
+    def consume_follow_reanchor(self) -> bool:
+        """Did a brake invalidate the anchor since this was last asked?
+
+        TWO consumers, two lifetimes, which is why this is not the same flag as
+        the one the harvest reports.  ``info["intervention_window_braked"]``
+        describes the TRANSITION and is read after ``env.step`` returns; this one
+        has to be read BEFORE ``action()`` runs, because ``_brake_locked`` moved
+        the controller's integrator to the braking endpoint and the wrapper's
+        ``T_r_anchor`` no longer describes it.  A wrapper that re-armed on the
+        stale anchor would command the whole braking distance as a step.
+        """
+
+        with self._command_lock:
+            pending = self._follow_needs_reanchor
+            self._follow_needs_reanchor = False
+        return pending
+
+    def _fail_closed(self, exc: BaseException) -> None:
+        """Unknowable operator/leader state: stop, hand back, LATCH the fault.
+
+        The distinction that matters is ``DeadmanHeartbeatStaleError``'s own:
+        ``is_engaged() == False`` is a fresh, explicit release and policy control
+        may resume, while a heartbeat that simply stopped arriving authorizes
+        nothing.  So a raise here is never reinterpreted as a release — it stops
+        the arm and is re-raised on the RL thread, where the existing FAULT
+        reporting path already lives.
+
+        Anything else the follower can raise is treated identically.  Catching
+        only the one class would leave a kinematics error or a backend error
+        running a following loop whose own state is unknown, which is precisely
+        the situation the class exists to refuse.
+        """
+
+        with self._command_lock:
+            self._follow_armed.clear()
+            self._command_owner = self.OWNER_POLICY
+            self._brake_locked("FOLLOW_FAULT")
+            if self._follow_fault is None:
+                self._follow_fault = exc
+
+    def _latch_follow_fault(self, exc: BaseException) -> None:
+        with self._command_lock:
+            if self._follow_fault is None:
+                self._follow_fault = exc
+
+    def _raise_follow_fault(self) -> None:
+        """Re-raise a follower fault on the RL thread.  First line of step/reset.
+
+        Disarms before raising: an exception propagating out of ``step`` must
+        never leave a thread still driving the arm, and a caller that catches it
+        somewhere far above would otherwise inherit exactly that.
+
+        The latch is deliberately PERMANENT — every later ``step``/``reset``
+        raises again — because the fault's own message says what it means
+        ("refusing policy fallback and stopping the actor").  ``clear_follow_
+        fault()`` is the explicit operator escape hatch; nothing clears it
+        implicitly.
+        """
+
+        fault = self._follow_fault
+        if fault is None:
+            return
+        self.disarm_intervention_follow()
+        raise fault
+
+    def clear_follow_fault(self) -> Optional[BaseException]:
+        """Explicitly discharge a latched follower fault. Returns what it was."""
+
+        with self._command_lock:
+            fault, self._follow_fault = self._follow_fault, None
+        return fault
+
+    # ---- the follower itself ---------------------------------------------- #
+    def _start_follow_thread(self) -> None:
+        if self.fake_env or self.intervention_follow_mode != "background":
+            return
+        if self._follow_dt is None:
+            return
+        self._follow_thread = threading.Thread(
+            target=self._follow_loop,
+            name="ur7e-intervention-follow",
+            daemon=True,
+        )
+        self._follow_thread.start()
+
+    def _follow_loop(self) -> None:
+        """Pacing shell.  ALL the clock reading lives here and nowhere else.
+
+        Split this way so ``_follow_tick`` is a pure function of ``(now, world
+        state)`` and can be driven from a virtual clock in tests without a
+        thread at all — the same rule ``AccelerationLimitedJointStream.advance``
+        and ``PolicyDeltaController.step`` already follow (both take their clock
+        as an argument; see the latter's "WHY THE CALLER PASSES dt" note).
+
+        Waits on ``_follow_stop`` rather than sleeping so ``close()`` is prompt
+        rather than up to one period late, and blocks on ``_follow_armed`` while
+        idle so an env that is never intervened costs one parked thread.
+        """
+
+        period = float(self._follow_dt)
+        next_tick = None
+        try:
+            while not self._follow_stop.is_set():
+                # PARKED: set the ack BEFORE blocking, so a disarm that lands
+                # while we are here is acknowledged immediately rather than one
+                # poll later, and clear it the instant we are awake and about to
+                # command again.
+                self._follow_idle.set()
+                if not self._follow_armed.wait(self.FOLLOW_IDLE_POLL_S):
+                    next_tick = None  # a fresh arm starts a fresh phase
+                    continue
+                self._follow_idle.clear()
+                if not self._follow_armed.is_set():
+                    # Disarmed between the wait returning and here: park again
+                    # rather than run a tick nobody authorized.
+                    continue
+                now = _wall_monotonic()
+                if next_tick is None:
+                    next_tick = now
+                self._follow_tick(now)
+                next_tick += period
+                delay = next_tick - _wall_monotonic()
+                if delay <= 0.0:
+                    # Fell behind (a long IK, a scheduling hiccup): re-phase on
+                    # the next reading instead of firing a catch-up burst, which
+                    # would hand the governor several ticks' worth of motion in
+                    # one instant.
+                    next_tick = None
+                elif self._follow_stop.wait(delay):
+                    break
+        except BaseException as exc:  # pragma: no cover - defence in depth
+            self._latch_follow_fault(exc)
+        finally:
+            # A dead follower must not leave HUMAN ownership behind, or the RL
+            # thread would be locked out of the arm forever.  (Missing ticks are
+            # already fail-safe on their own: with no target refresh the 250 Hz
+            # upsampler brakes to HOLD at ``target_stale_s``.  The dangerous
+            # failure is a follower that stays ALIVE and keeps commanding from
+            # stale state, which is what the per-tick gates below address.)
+            self.disarm_intervention_follow()
+            # A thread that is gone is quiescent by definition; leaving the ack
+            # clear would make ``await_follower_quiescent`` block for its whole
+            # timeout on every reset after a follower crash.
+            self._follow_idle.set()
+
+    def _follow_tick(self, now: float) -> dict:
+        """ONE following tick at instant ``now``.  Reads no clock of its own.
+
+        THE SAFETY GATES, in the order they run and why that order:
+
+        1. ARMED.  Re-tested here, under nothing, and again inside
+           ``_emit_arm_command`` under the lock.  The second test is the binding
+           one; this one only avoids the work.
+        2. THE DEADMAN, EVERY TICK.  This is the point of the whole change.
+           Under in-window following a release only took effect at the next
+           window boundary, i.e. after up to one REAL step period — 512 ms of
+           further motion on the production loop.  Read per tick it is 33 ms.
+           ``is_engaged() == False`` disarms (a release is an authorization to
+           resume policy control, so no brake is needed); anything RAISED fails
+           closed instead, because a heartbeat that stopped arriving authorizes
+           nothing.
+           ``gain()`` is deliberately NOT re-read: it is latched at the engage
+           edge so a slider nudged mid-motion cannot discontinuously rescale an
+           in-progress delta, and re-reading it 30 times a second would
+           reintroduce that discontinuity 30 times faster than the bug it
+           replaced.
+        3. THE LEADER.  ``follow_xi`` returns None for a stale/absent/non-finite
+           leader; a non-finite xi is caught here as well, because a NaN reaching
+           ``send_joint_command`` is a raise on the wrong thread. Either brakes
+           and asks the RL thread for a re-anchor.
+        4. THE MUX.  ``_emit_arm_command`` re-checks ownership under the lock and
+           is the only door to the arm.
+
+        Returns a small dict for tests and logging; the caller ignores it.
+        """
+
+        if not self._follow_armed.is_set():
+            return {"issued": False, "reason": "DISARMED"}
+        source = self._follow_source
+        if source is None:
+            self.disarm_intervention_follow()
+            return {"issued": False, "reason": "NO_SOURCE"}
+
+        try:
+            engaged = bool(source.follow_is_engaged())
+        except Exception as exc:
+            self._fail_closed(exc)
+            return {"issued": False, "reason": "DEADMAN_FAULT"}
+        if not engaged:
+            self.disarm_intervention_follow()
+            return {"issued": False, "reason": "DISENGAGED"}
+
+        try:
+            xi = source.follow_xi(now)
+        except Exception as exc:
+            self._fail_closed(exc)
+            return {"issued": False, "reason": "LEADER_FAULT"}
+        if xi is None:
+            self._brake_follow("GELLO_STALE")
+            return {"issued": False, "reason": "GELLO_STALE"}
+        xi = np.asarray(xi, dtype=float).reshape(6)
+        if not np.all(np.isfinite(xi)):
+            self._brake_follow("BAD_INPUT")
+            return {"issued": False, "reason": "BAD_INPUT"}
+
+        try:
+            q_cmd, ctrl_info = self._emit_arm_command(
+                xi, self._follow_dt, self.OWNER_HUMAN
+            )
+        except Exception as exc:
+            self._fail_closed(exc)
+            return {"issued": False, "reason": "COMMAND_FAULT"}
+        if q_cmd is None:
+            return {"issued": False, "reason": "NOT_OWNER", "info": ctrl_info}
+        return {"issued": True, "reason": None, "info": ctrl_info}
+
+    # ---- the record ------------------------------------------------------- #
+    def _harvest_follow_window(self, ctrl_info: dict) -> dict:
+        """Turn what the follower COMMITTED into this transition's action.
+
+        WHAT THE RECORD IS.  The task-space displacement the CONTROLLER
+        COMMITTED under HUMAN ownership during this window, divided by
+        ``ACTION_SCALE``.  Not the budget's charge (which bills the REQUEST, so
+        anything the IK line search shrinks below it is over-reported — the
+        standing xfail on the in-window path), and not the measured TCP (which
+        would fold in tracking lag no action caused).
+
+        THE COST OF THE UNBUDGETED FOLLOWER, stated plainly because it is a
+        KNOWN, ACCEPTED breach of the stored-action invariant and not an
+        oversight.  ``GelloIntervention.follow_xi`` no longer rations the
+        window against ``ACTION_SCALE``, so a long window can commit several
+        ``ACTION_SCALE`` steps of motion while the recorded action can only ever
+        say 1.0.  The transition then tells the learner "action 1.0 moved the arm
+        one ACTION_SCALE step" when it moved N of them, and the critic learns an
+        OPTIMISTIC dynamics model — the exact direction ``config.ACTION_SCALE``'s
+        INVARIANT note and ``README.md``'s 저장 액션 불변식 forbid.
+
+        It was adopted anyway, on 2026-07-30, because the alternative measured
+        worse: with the budget in the loop the operator's ceiling is
+        ``ACTION_SCALE / T`` = 2.4 cm/s at the production 512 ms step, which is
+        not drivable, and an intervention path nobody can drive yields ZERO
+        demonstrations.  A biased sample beats an empty one.  The real fixes are
+        (a) dropping saturated transitions server-side — which needs a new proto
+        field, a ``SCHEMA_VERSION`` bump and both ends upgraded together, because
+        protobuf silently DISCARDS unknown fields and a half-upgraded Kanu would
+        train on the under-reported actions with no symptom at all — or (b)
+        shortening the window itself (08_OPEN_GAPS.md G21).
+
+        ``intervention_saturated`` / ``intervention_saturation`` are how that
+        cost is measured instead of assumed: the ratio BEFORE the clip, so 4.94
+        means this transition under-reports its motion 4.94-fold.  Local
+        instrumentation ONLY — they are deliberately not on the wire (see above),
+        and ``tests/run_real_hil.py`` writes them to its CSV so the decision
+        between (a) and (b) can be made on numbers.
+
+        THE WINDOW IS BOUNDARY-TO-BOUNDARY, not the duration of ``env.step``.
+        The accumulator is reset here, immediately before ``_update_currpos`` /
+        ``_get_obs`` sample ``obs_{k+1}``, so a window covers exactly the
+        interval between the two observations of one transition — INCLUDING the
+        ~412 ms the actor spends in its gRPC round trip, during which the
+        follower is still driving.  That motion belongs to this transition and
+        nowhere else.
+        """
+
+        with self._command_lock:
+            had_human = self._follow_window_had_human
+            sum_p = self._follow_sum_p.copy()
+            sum_w = self._follow_sum_w.copy()
+            ticks = int(self._follow_ticks)
+            agg = dict(self._follow_agg)
+            braked = self._follow_brake_reason
+            self._follow_brake_reason = None
+            self._reset_follow_window_locked()
+
+        if not had_human and braked is None:
+            return ctrl_info
+
+        out = dict(ctrl_info)
+        if had_human:
+            raw = np.concatenate(
+                [sum_p / self.action_scale[0], sum_w / self.action_scale[1]]
+            )
+            out["intervention_committed_action"] = np.clip(
+                raw, -1.0, 1.0
+            ).astype(np.float32)
+            out["intervention_saturation"] = float(np.max(np.abs(raw)))
+            out["intervention_saturated"] = bool(np.any(np.abs(raw) > 1.0))
+            out["intervention_follow_ticks"] = ticks
+            # Namespaced rather than OR-ed into ``held``: ``held`` decides the
+            # operator status line (remote_actor._control_state maps it to HOLD
+            # instead of HUMAN_INTERVENTION), and a single held follower tick in
+            # a 512 ms window is not a held transition.
+            out["intervention_follow_held"] = bool(agg["held"])
+            out["intervention_follow_reject_reason"] = agg["reject_reason"]
+            # ``clipped``/``governed`` ARE merged into the standard keys: both
+            # docstrings argue at length that a silent clamp or a silent rate cut
+            # is the hardest failure to diagnose after the fact, and neither key
+            # gates any behaviour anywhere.
+            if agg["clipped"]:
+                out["clipped"] = True
+            scale = float(agg["governed_scale"])
+            if scale < float(out.get("governed_scale", 1.0)):
+                out["governed_scale"] = scale
+            if agg["governed"]:
+                out["governed"] = True
+        if braked is not None:
+            # Same transport the in-window brake uses, so GelloIntervention's
+            # existing "drop the anchor, re-anchor next step" handling applies
+            # unchanged.
+            out["intervention_window_braked"] = True
+            out["held"] = True
+            out.setdefault("reject_reason", None)
+            out["reject_reason"] = braked
+        return out
+
     # ------------------------------------------------------------------ #
     # step / reset                                                        #
     # ------------------------------------------------------------------ #
@@ -500,19 +1203,33 @@ class UR7eEnv(gym.Env):
         if self._hold_next_action_reason is not None:
             reason = self._hold_next_action_reason
             self._hold_next_action_reason = None
-            q_hold = self.backend.request_hold()
-            self.controller.reset(q_hold)
+            # A HOLD is a STOP, so it revokes HUMAN ownership too — stopping is
+            # allowed from any thread at any instant, and doing it under the
+            # mux lock is what stops ``controller.reset`` racing a follower tick
+            # that is mid-``controller.step``.  No ``_follow_brake_reason`` is
+            # latched: this brake was REQUESTED by the caller, which reports it
+            # itself in the returned info, so latching would double-report it.
+            with self._command_lock:
+                self._follow_armed.clear()
+                self._command_owner = self.OWNER_POLICY
+                self._brake_locked(reason)
             return {"held": True, "reject_reason": reason, "clipped": False}
 
         xi = self._action_to_xi(action)
         if driver is None:
-            # POLICY PATH: bare step(), no dt — bit-identical to before.
-            q_cmd, ctrl_info = self.controller.step(xi)
+            # POLICY PATH: dt=None, i.e. the nominal tick and the unscaled joint
+            # gate, bit-identical to the bare ``controller.step(xi)`` this used
+            # to call.  Blocked (q_cmd is None) exactly when the background
+            # follower owns the arm, which is the whole point: during a
+            # background intervention the RL loop contributes the GRIPPER
+            # channel and nothing else.
+            _q_cmd, ctrl_info = self._emit_arm_command(xi, None, self.OWNER_POLICY)
         else:
-            q_cmd, ctrl_info = self.controller.step(
-                driver.charge(xi), dt=1.0 / self.intervention_substep_hz
+            _q_cmd, ctrl_info = self._emit_arm_command(
+                driver.charge(xi),
+                1.0 / self.intervention_substep_hz,
+                self.OWNER_POLICY,
             )
-        self.backend.send_joint_command(q_cmd)
         self._send_gripper_command(action[6] * self.action_scale[2])
         return ctrl_info
 
@@ -692,6 +1409,12 @@ class UR7eEnv(gym.Env):
         return extra
 
     def step(self, action: np.ndarray) -> tuple:
+        # FIRST LINE, before anything touches the arm: a follower that lost the
+        # deadman heartbeat stopped the arm on its own thread and left the
+        # exception here.  Re-raising it on this thread is what puts it back on
+        # the actor's existing FAULT path (a background thread's traceback
+        # reaches nobody).
+        self._raise_follow_fault()
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
@@ -728,6 +1451,14 @@ class UR7eEnv(gym.Env):
                     float(extra["governed_scale"]), first_scale
                 )
             ctrl_info.update(extra)
+
+        # Close the recording window HERE — after the last command this
+        # transition can contain, immediately before ``obs_{k+1}`` is sampled.
+        # A no-op unless the background follower committed something (or braked)
+        # since the previous step, so the policy path and the in-window path are
+        # untouched.
+        if not self.fake_env:
+            ctrl_info = self._harvest_follow_window(ctrl_info)
 
         self._update_currpos()
         ob = self._get_obs()
@@ -826,6 +1557,29 @@ class UR7eEnv(gym.Env):
         )
 
     def reset(self, **kwargs):
+        # FIRST, before the latch check and before anything moves: an episode
+        # boundary is unconditionally a POLICY-owned move (go_to_reset streams a
+        # multi-second joint target), so the human follower cannot be left
+        # driving into it.  Disarming BEFORE the fault re-raise is deliberate —
+        # if the raise came first, a latched fault would leave a follower armed
+        # on every subsequent reset attempt.
+        #
+        # And a disarm alone is not enough: ``go_to_reset`` republishes its
+        # target at 20 Hz against a follower publishing at 30 Hz into a
+        # last-write-wins backend, so it needs PROOF the follower is parked, not
+        # just a request that it stop.  Refusing here is the correct failure —
+        # the alternative is ten seconds of blind motion that ends in "reset did
+        # not arrive" and blames the arm.
+        quiescent = self.await_follower_quiescent()
+        self._force_policy_ownership()
+        if not quiescent:
+            raise RuntimeError(
+                "intervention follower did not confirm it stopped within "
+                f"{self.FOLLOW_QUIESCE_TIMEOUT_S}s — refusing to reset, because "
+                "go_to_reset() streams its target at 20 Hz and a live follower "
+                "at 30 Hz would win every write"
+            )
+        self._raise_follow_fault()
         if self.save_video:
             self._save_video_recording()
         self.curr_path_length = 0
@@ -863,9 +1617,27 @@ class UR7eEnv(gym.Env):
         so no joint is ever sent the long way round — see the block comment
         below; this is a cable-winding hazard, not a cosmetic detail.
 
+        THE ONE PLACE that publishes a joint command without going through
+        ``_emit_arm_command``, and therefore the one place that has to check
+        command ownership by hand.  It is grandfathered because it is not a
+        delta at all — it is an absolute, branch-mapped, distance-gated joint
+        target streamed over seconds — but a background follower driving the arm
+        at the same time would be two authorities on one stream, so this refuses
+        rather than races.  It is a ``RuntimeError`` and not an ``assert``: an
+        assert disappears under ``python -O``, and this gate must not.
+
         TODO(together): RANDOM_RESET (task-space offset around the init pose),
         UR fault recovery before moving.
         """
+        with self._command_lock:
+            if self._command_owner != self.OWNER_POLICY:
+                raise RuntimeError(
+                    "go_to_reset() requires POLICY command ownership, but the "
+                    f"arm is owned by {self._command_owner} (the background "
+                    "intervention follower is driving) — disarm it first "
+                    "(env.disarm_intervention_follow(), which reset() does "
+                    "automatically)"
+                )
         target = np.asarray(self.config.RESET_JOINTS, dtype=float).reshape(6)
 
         q, _, _ = self.backend.get_joint_state()
@@ -1198,6 +1970,50 @@ class UR7eEnv(gym.Env):
         # TODO: port FrankaEnv.save_video_recording if we want mp4 dumps
         self.recording_frames.clear()
 
+    def _force_policy_ownership(self) -> None:
+        """Disarm, hand the arm back to POLICY and drop the recording window.
+
+        Used at every episode boundary and on the way out.  Idempotent, and safe
+        on a fake env (the mux attributes are declared before the ``fake_env``
+        early return precisely so this needs no guard).
+        """
+
+        with self._command_lock:
+            self._follow_armed.clear()
+            self._command_owner = self.OWNER_POLICY
+            self._follow_source = None
+            self._follow_brake_reason = None
+            self._follow_needs_reanchor = False
+            self._reset_follow_window_locked()
+
     def close(self):
+        """Teardown, in an order the follower thread makes load-bearing.
+
+        ``armed.clear()`` -> ``owner = POLICY`` -> ``stop.set()`` -> ``join`` ->
+        ``backend.close()``.
+
+        The join has to complete BEFORE ``backend.close()``.  The backend's own
+        teardown stops the 250 Hz publisher and then destroys the node, and
+        ``run_hil_actor.sh``'s cleanup waits on that publisher disappearing to
+        decide the arm is quiet; a follower still alive across it would be
+        calling ``send_joint_command`` into a closing backend (a no-op after
+        ``_closed``, but the wait would have proven nothing).  Clearing ``armed``
+        first, rather than relying on the join alone, means a follower stuck
+        anywhere cannot issue one more command while we wait for it.
+        """
+
+        self._force_policy_ownership()
+        self._follow_stop.set()
+        thread = self._follow_thread
+        if thread is not None and thread.is_alive():
+            thread.join(self.FOLLOW_JOIN_TIMEOUT_S)
+            if thread.is_alive():
+                # Not fatal: it is disarmed and owns nothing, so it can no longer
+                # command the arm.  Say so rather than hanging the shutdown.
+                print(
+                    "[UR7eEnv] WARNING: intervention follower did not exit "
+                    f"within {self.FOLLOW_JOIN_TIMEOUT_S}s (it is disarmed and "
+                    "cannot command the arm)"
+                )
         if not self.fake_env:
             self.backend.close()

@@ -239,8 +239,16 @@ def _build(
     if substep_hz is None:
         config.INTERVENTION = {}
     else:
+        # follow_mode="in_window" EXPLICITLY.  The shipped default is
+        # "background" (a daemon thread follows the leader for the whole real
+        # step period instead of only inside step()'s nominal window); this file
+        # is the coverage for the in-window path, so it pins it rather than
+        # inheriting whichever mode ships.  tests/test_intervention_follower.py
+        # is the background path's counterpart.
         config.INTERVENTION = dict(
-            DefaultUR7eEnvConfig.INTERVENTION, substep_hz=float(substep_hz)
+            DefaultUR7eEnvConfig.INTERVENTION,
+            substep_hz=float(substep_hz),
+            follow_mode="in_window",
         )
     if governor is not None:
         config.GOVERNOR = dict(DefaultUR7eEnvConfig.GOVERNOR, **governor)

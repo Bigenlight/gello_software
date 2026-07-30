@@ -45,6 +45,18 @@ into one transition:
     allowance, harvested when the window closes — the executed==reported
     invariant survives even though the total is unknown when ``step`` starts.
 
+BOTH OF THOSE DESCRIBE ``follow_mode="in_window"``, which is no longer the
+default.  Since 2026-07-30 the shipped path is ``follow_mode="background"``: a
+daemon thread inside ``UR7eEnv`` follows the leader for the WHOLE real step
+period (512 ms on the production actor, of which ``env.step`` is 100 ms), the RL
+loop only samples transitions, and there is NO displacement budget at all — the
+governor, the workspace box and the 250 Hz upsampler are the bounds, and the
+recorded action is the displacement the controller actually committed, clipped
+with ``info["intervention_saturation"]`` reporting by how much.  The three
+methods under "UR7eEnv BACKGROUND-FOLLOWER protocol" below are that path;
+``GelloIntervention.follow_xi`` carries the argument for dropping the budget and
+the price of doing so.
+
 THE WHOLE PATH, in call order.  This is the canonical copy of the list; the
 other four files of the mechanism carry a short pointer back here instead of
 repeating it:
@@ -354,6 +366,23 @@ class GelloIntervention(gym.ActionWrapper):
         self.expert = GelloExpert(env.unwrapped.backend, deadman=deadman)
         self.action_scale = env.unwrapped.action_scale
 
+        # ONE re-entrant lock over every piece of state the background follower
+        # touches: the anchor triple, the leader filter and the displacement
+        # budget.  Not a nicety — ``_disengage`` clears ``_anchored`` and then
+        # both anchors, so a follower reading the three fields separately can
+        # see ``_anchored is True`` and ``T_g_anchor is None`` one line apart and
+        # die on ``None[:3, :3]``.  On a daemon thread that TypeError goes
+        # nowhere: the follower disappears, the arm silently stops following,
+        # and nothing in the log says why.  So the follower snapshots all three
+        # under this lock, in one place.
+        #
+        # LOCK ORDER, one way only: this one is always RELEASED before
+        # ``UR7eEnv._emit_arm_command`` asks for the command lock — ``follow_xi``
+        # returns its increment and the env commands it afterwards.  So the
+        # follower never holds this while waiting for the command lock, and the
+        # two cannot form a cycle.
+        self._follow_lock = threading.RLock()
+
         self._anchored = False
         self.T_g_anchor: Optional[np.ndarray] = None
         self.T_r_anchor: Optional[np.ndarray] = None
@@ -371,6 +400,15 @@ class GelloIntervention(gym.ActionWrapper):
         # substepping existed.
         self.substep_hz = float(
             getattr(env.unwrapped, "intervention_substep_hz", 0.0)
+        )
+        #: "background" — the env runs a daemon follower and this wrapper is its
+        #: source of leader maths; "in_window" — the pre-2026-07-30 path, where
+        #: this wrapper is instead a one-shot driver for ``env.step``'s sleep.
+        #: Read from the ENV for the same reason ``substep_hz`` is: one authority
+        #: per knob.  Envs that do not declare it (stub/fake envs in the tests)
+        #: get the conservative pre-change value.
+        self._follow_mode = str(
+            getattr(env.unwrapped, "intervention_follow_mode", "in_window")
         )
         task_config = getattr(env.unwrapped, "config", None)
         intervention_cfg = getattr(task_config, "INTERVENTION", None) or {}
@@ -404,25 +442,43 @@ class GelloIntervention(gym.ActionWrapper):
         return self.env.unwrapped.controller.tcp_cmd()
 
     def _engage(self, q_lead: np.ndarray):
-        self.T_g_anchor = self._leader_T(q_lead)
-        self.T_r_anchor = self._robot_T_cmd()
-        # LATCH the sensitivity gain at the engage edge (not read live per-tick)
-        # so a slider nudged mid-motion cannot discontinuously rescale the
-        # in-progress anchored delta.  The substep loop reuses this latched
-        # value too — it must NOT re-read expert.gain() per 30 Hz tick, which
-        # would reintroduce exactly the discontinuity this latch removes.
-        self._gain = self.expert.gain()
-        self._anchored = True
-        # Drop filter state at the engage edge: the leader could be anywhere
-        # while the policy was driving, and low-passing across that gap would
-        # ramp the arm toward a pose the human never asked for.  Dropping the
-        # receive bookkeeping with it makes the next sample the filter's first.
-        self._reset_leader_filter()
+        with self._follow_lock:
+            self.T_g_anchor = self._leader_T(q_lead)
+            self.T_r_anchor = self._robot_T_cmd()
+            # LATCH the sensitivity gain at the engage edge (not read live
+            # per-tick) so a slider nudged mid-motion cannot discontinuously
+            # rescale the in-progress anchored delta.  The substep loop and the
+            # background follower both reuse this latched value — neither may
+            # re-read expert.gain() per 30 Hz tick, which would reintroduce
+            # exactly the discontinuity this latch removes.  Latched HERE, on
+            # the RL thread, which is why a follower that loses its anchor asks
+            # the RL thread to re-anchor instead of doing it itself.
+            self._gain = self.expert.gain()
+            self._anchored = True
+            # Drop filter state at the engage edge: the leader could be anywhere
+            # while the policy was driving, and low-passing across that gap would
+            # ramp the arm toward a pose the human never asked for.  Dropping the
+            # receive bookkeeping with it makes the next sample the filter's
+            # first.
+            self._reset_leader_filter()
 
     def _disengage(self):
-        self._anchored = False
-        self.T_g_anchor = None
-        self.T_r_anchor = None
+        # Under the lock as ONE transition: the follower must never observe the
+        # intermediate state (anchored, but with a None anchor).
+        with self._follow_lock:
+            self._anchored = False
+            self.T_g_anchor = None
+            self.T_r_anchor = None
+
+    def _anchor_snapshot(self):
+        """``(T_g_anchor, T_r_anchor)`` or ``(None, None)``, read atomically."""
+
+        with self._follow_lock:
+            if not self._anchored:
+                return None, None
+            if self.T_g_anchor is None or self.T_r_anchor is None:
+                return None, None
+            return self.T_g_anchor, self.T_r_anchor
 
     def _expert_delta_xi(self, q_lead: np.ndarray) -> np.ndarray:
         """Anchored leader delta -> task-space increment xi (6,), real units.
@@ -434,21 +490,28 @@ class GelloIntervention(gym.ActionWrapper):
         Split out of ``_expert_delta_action`` so the 30 Hz substep loop can feed
         the controller directly without a normalize/re-scale round trip (which
         is not bit-exact and would make the recorded action drift away from the
-        commanded one).  The maths below is byte-for-byte the previous body.
+        commanded one).  The maths below is byte-for-byte the previous body; only
+        the anchor READ changed, from three separate field reads to one locked
+        snapshot (see ``__init__`` on ``_follow_lock``).
         """
+        T_g_anchor, T_r_anchor = self._anchor_snapshot()
+        if T_g_anchor is None:
+            raise RuntimeError(
+                "_expert_delta_xi called without an anchor — engage first"
+            )
         T_g = self._leader_T(q_lead)
         # world-frame delta (same convention as eef_delta.py: R_g @ R_anchor^T)
-        R_delta = T_g[:3, :3] @ self.T_g_anchor[:3, :3].T
-        p_delta = T_g[:3, 3] - self.T_g_anchor[:3, 3]
+        R_delta = T_g[:3, :3] @ T_g_anchor[:3, :3].T
+        p_delta = T_g[:3, 3] - T_g_anchor[:3, 3]
 
         T_des = np.eye(4)
-        T_des[:3, :3] = R_delta @ self.T_r_anchor[:3, :3]
+        T_des[:3, :3] = R_delta @ T_r_anchor[:3, :3]
         # Apply the LATCHED sensitivity gain to the translation delta only
         # (rotation stays 1:1). This scaling happens BEFORE the /action_scale ->
         # clip below, so the returned `act` is exactly what env.step re-scales
         # and executes: the executed==reported buffer-correctness invariant
         # (README "저장 액션 불변식") is preserved — gain is upstream of the report.
-        T_des[:3, 3] = self.T_r_anchor[:3, 3] + self._gain * p_delta
+        T_des[:3, 3] = T_r_anchor[:3, 3] + self._gain * p_delta
 
         T_cmd = self._robot_T_cmd()
         p_err = T_des[:3, 3] - T_cmd[:3, 3]                 # base-frame
@@ -564,16 +627,27 @@ class GelloIntervention(gym.ActionWrapper):
     # ------------------------------------------------------------------ #
     def _reset_leader_filter(self) -> None:
         """Forget every leader sample seen so far (no-op when substepping is off)."""
-        if self._filter is not None:
-            self._filter.reset()
-        self._leader_rx = None
-        # The output-tick clock is dropped with the state it timed: a reset
-        # filter re-anchors on its next input verbatim, so the interval across
-        # the engage/episode gap describes nothing and must not be measured.
-        self._last_filtered_at = None
+        with self._follow_lock:
+            if self._filter is not None:
+                self._filter.reset()
+            self._leader_rx = None
+            # The output-tick clock is dropped with the state it timed: a reset
+            # filter re-anchors on its next input verbatim, so the interval
+            # across the engage/episode gap describes nothing and must not be
+            # measured.
+            self._last_filtered_at = None
 
-    def _note_leader_sample(self, q_lead: np.ndarray, age: float) -> None:
+    def _note_leader_sample(
+        self, q_lead: np.ndarray, age: float, now: Optional[float] = None
+    ) -> None:
         """Feed the one-euro filter, but ONLY on a genuinely new leader sample.
+
+        ``now`` is the monotonic instant this poll happened at.  ``None`` reads
+        the module clock, which is what the RL-thread callers do and what the
+        virtual-clock tests patch.  The BACKGROUND follower passes its own
+        reading instead, because ``_follow_tick`` is a pure function of ``now``:
+        one clock read per tick, taken by the pacing shell, used for both the
+        sample-identity arithmetic here and the filter's output interval.
 
         The backend caches the leader at its publisher's 30 Hz
         (``URRosBackend._on_gello``, ur_env/envs/ros_backend.py:528-532) while
@@ -594,7 +668,7 @@ class GelloIntervention(gym.ActionWrapper):
         """
         if self._filter is None or not np.all(np.isfinite(q_lead)):
             return
-        rx = time.monotonic() - age
+        rx = (time.monotonic() if now is None else float(now)) - age
         previous = self._leader_rx
         if previous is not None and rx <= previous + _LEADER_RX_EPSILON_S:
             return
@@ -607,6 +681,9 @@ class GelloIntervention(gym.ActionWrapper):
 
     def _paced_request(self, xi: np.ndarray) -> np.ndarray:
         """Shrink ONE substep's request to this window's fair per-substep share.
+
+        IN-WINDOW PATH ONLY.  The background follower deliberately has no budget
+        and therefore no pacing — see ``follow_xi``.
 
         This is pacing policy, not an invariant — ``InterventionBudget`` says so
         itself (``nominal_substep_share``: "advisory, NOT enforced").  It is here
@@ -733,8 +810,14 @@ class GelloIntervention(gym.ActionWrapper):
             return {"issued": False, "stop": "BUDGET_EXHAUSTED", "brake": False}
 
         unwrapped = self.env.unwrapped
-        q_cmd, ctrl_info = unwrapped.controller.step(allowed, dt=dt)
-        unwrapped.backend.send_joint_command(q_cmd)
+        # Through the mux, like every other joint command: the in-window path
+        # has no concurrency of its own, but "every arm command goes through one
+        # door" is only a property if there are no exceptions to point at.
+        q_cmd, ctrl_info = unwrapped._emit_arm_command(
+            allowed, dt, unwrapped.OWNER_POLICY
+        )
+        if q_cmd is None:  # somebody else owns the arm; issue nothing
+            return {"issued": False, "stop": "NOT_COMMAND_OWNER", "brake": False}
         result = dict(ctrl_info)
         result["issued"] = True
         result["stop"] = "BUDGET_EXHAUSTED" if exhausted else None
@@ -761,6 +844,111 @@ class GelloIntervention(gym.ActionWrapper):
         # [-1,1] outright (ur_env/actor_network.py:273).
         return np.clip(executed, -1.0, 1.0)
 
+    # ------------------------------------------------------------------ #
+    # UR7eEnv BACKGROUND-FOLLOWER protocol (follow_mode="background")      #
+    #                                                                     #
+    # Same division of labour as the substep driver above — the anchored   #
+    # leader maths lives here, the pacing/handles/mux live in UR7eEnv —    #
+    # but the caller is now a daemon thread that keeps following while the #
+    # RL loop is off doing its gRPC round trip.  Three rules make that     #
+    # safe, and all three are visible in the three methods below:          #
+    #                                                                     #
+    #   * this thread NEVER re-anchors and NEVER re-latches the gain.  It  #
+    #     reports "I lost my anchor" by returning None and the RL thread   #
+    #     re-engages at its next step, so the gain latch stays in exactly  #
+    #     one place (``_engage``).                                         #
+    #   * every read of the anchor triple is ONE locked snapshot.          #
+    #   * the deadman is re-read on EVERY tick (``UR7eEnv._follow_tick``   #
+    #     calls ``follow_is_engaged`` first), which is what takes a release #
+    #     from "up to one 512 ms step period" down to one 33 ms tick.      #
+    # ------------------------------------------------------------------ #
+    def follow_is_engaged(self) -> bool:
+        """May the background follower drive the arm right now?
+
+        RAISES rather than returning False when the deadman's state is unknowable
+        (``DeadmanHeartbeatStaleError``); ``UR7eEnv._follow_tick`` turns that into
+        a braked, latched fault re-raised on the RL thread.  Returning False there
+        would be reinterpreting "I cannot tell" as "the operator let go", which is
+        the exact confusion that exception class exists to prevent.
+
+        ``gain()`` is deliberately NOT touched: it is latched at the engage edge.
+
+        Unanchored counts as not engaged — with no anchor there is nothing to
+        follow, and this is how a ``_disengage`` on the RL thread stops the
+        follower QUIETLY (a disarm, no brake) instead of provoking a HOLD on a
+        perfectly ordinary policy hand-back.
+        """
+
+        engaged = bool(self.expert.is_engaged())
+        if not engaged:
+            return False
+        return self._anchor_snapshot()[0] is not None
+
+    def follow_xi(self, now: float) -> Optional[np.ndarray]:
+        """One tick's task-space increment, UNBUDGETED, or None if unusable.
+
+        ``None`` means "the leader cannot be used right now" — absent, stale, or
+        non-finite — and the env answers it with a brake plus a re-anchor
+        request.  Same rule as ``action()`` and ``substep()``: a GELLO dropout
+        must never turn into motion, and a target already in flight is motion.
+
+        NO ``InterventionBudget`` AND NO ``_paced_request``.  This is an operator
+        decision, taken 2026-07-30, and it is the single largest difference from
+        the in-window path — read it together with the cost note on
+        ``UR7eEnv._harvest_follow_window``.
+
+        The budget capped a window's displacement at one ``ACTION_SCALE`` step so
+        the stored action could never understate the motion.  That is a RECORDING
+        constraint enforced by throttling the ARM, and at the production 512 ms
+        step period it set the operator's ceiling at 12.5 mm / 512 ms = 2.4 cm/s
+        — against 12.4 cm/s on the validation rig.  Rationing it across the
+        measured window length instead (the intermediate design) fixes the dead
+        time but keeps that same ``ACTION_SCALE / T`` ceiling, and the operator's
+        requirement is explicitly the other thing: "intervention 시는 그냥
+        teleop이 서버 통신 시간과 상관없이 쭉 되는 거고, 정보만 그때그때 주는
+        것".  An intervention path nobody can drive produces no demonstrations at
+        all, so the ceiling had to go.
+
+        WHAT STILL BOUNDS THE ARM, and it is now the whole list:
+
+          * the GOVERNOR, per tick, inside ``controller.step``: ``v_max`` 0.15
+            m/s and ``w_max`` 0.75 rad/s scaled by ``dt = 1/substep_hz``, plus
+            the ``dq_step_max`` joint gate and its line search;
+          * the WORKSPACE BOX, also inside ``controller.step`` (``clip_pose``),
+            written back into the integrator so it is a hard wall and not a
+            windup;
+          * the 250 Hz acceleration-limited upsampler underneath.
+
+        All three live below ``controller.step``, which is exactly why the
+        follower must never compute a joint command any other way.  With the
+        budget gone the governor is the only speed limit, so a 5 s gRPC stall now
+        permits ~75 cm of free travel — 2.8x the measured workspace box's x
+        extent.  The box is what stops that, and it only exists on this path
+        because every tick goes through ``UR7eEnv._emit_arm_command`` ->
+        ``controller.step``.
+        """
+
+        q_lead, _grip, age = self.expert.get_leader()
+        if (
+            q_lead is None
+            or age > self.LEADER_STALE_S
+            or not np.all(np.isfinite(q_lead))
+        ):
+            return None
+
+        with self._follow_lock:
+            if self._anchor_snapshot()[0] is None:
+                return None
+            self._note_leader_sample(q_lead, age, now=now)
+            previous_tick = self._last_filtered_at
+            self._last_filtered_at = now
+            # The wall-clock interval since the previous output tick, for the
+            # same reason substep() measures it: alpha = 1/(1 + tau/dt) is only
+            # a time constant if dt is time.  None on the first tick after an
+            # engage/episode edge, where there is no previous tick to measure.
+            tick_dt = None if previous_tick is None else now - previous_tick
+            return self._expert_delta_xi(self._filter.filtered(q_lead, tick_dt))
+
     def _open_substep_window(self, replaced: bool, new_action) -> None:
         """Arm one window of substepping, or leave the env on its old path.
 
@@ -783,15 +971,55 @@ class GelloIntervention(gym.ActionWrapper):
         self._budget.begin_window()
         begin(self)
 
+    def _update_follow_arming(self, replaced: bool, new_action) -> None:
+        """Promote or demote the background follower.  RL thread, step boundary.
+
+        The ONLY promotion site in the codebase, deliberately: starting to follow
+        is a decision that needs the anchor, the gain latch and the deadman read
+        that ``action()`` has just done, and all three are RL-thread state.
+        Demotion has no such requirement and happens from anywhere.
+
+        ``env.arm_intervention_follow`` returning False (a fake env, an env
+        without the follower, ``follow_mode="in_window"``) leaves the wrapper on
+        whatever path that env does support — the same graceful-degradation rule
+        ``_open_substep_window`` follows for stub envs.
+        """
+
+        unwrapped = self.env.unwrapped
+        arm = getattr(unwrapped, "arm_intervention_follow", None)
+        if arm is None:
+            return
+        if replaced and not self._hold_requested and self._anchored:
+            self._window_gripper = float(np.asarray(new_action).reshape(-1)[6])
+            arm(self)
+        else:
+            unwrapped.disarm_intervention_follow()
+
     def step(self, action):
         # Copy before the wrapped env sees the array: the policy output is a
         # counterfactual record during intervention and must not alias either
         # the caller's buffer or the executed human action.
         policy_action = np.asarray(action).copy()
+        # BEFORE action(): a background brake since the last step re-anchored the
+        # controller's integrator on its braking endpoint, so this wrapper's
+        # T_r_anchor describes a pose the arm is no longer commanded to.  Dropping
+        # it here means action() re-engages with a fresh anchor and its first
+        # delta is exactly zero; learning about it only from the returned info
+        # would arm the follower for one whole window on the stale anchor, whose
+        # first command is the entire braking distance.
+        if self._follow_mode == "background":
+            consume = getattr(
+                self.env.unwrapped, "consume_follow_reanchor", None
+            )
+            if consume is not None and consume():
+                self._disengage()
         new_action, replaced = self.action(action)
         if self._hold_requested:
             self.env.unwrapped.request_hold("GELLO_STALE")
-        self._open_substep_window(replaced, new_action)
+        if self._follow_mode == "background":
+            self._update_follow_arming(replaced, new_action)
+        else:
+            self._open_substep_window(replaced, new_action)
         obs, rew, done, truncated, info = self.env.step(new_action)
 
         # WHY THE EXECUTED ACTION COMES BACK THROUGH info AND NOT FROM action().
@@ -809,18 +1037,44 @@ class GelloIntervention(gym.ActionWrapper):
         # HOLD, or a window with no room), and then the single action passed
         # down IS what ran — the pre-change record, bit-for-bit.
         window_action = info.pop("intervention_window_action", None)
-        if info.pop("intervention_window_braked", False):
+        # The background follower's record: the displacement the controller
+        # actually COMMITTED between obs_k and obs_{k+1}, which is a strictly
+        # better answer than the budget's charge (the charge bills the request,
+        # so an IK line-search shrink is over-reported — the standing xfail on
+        # the in-window path) and than ``new_action`` (which, on this path, the
+        # mux never let reach the arm at all).
+        committed = info.pop("intervention_committed_action", None)
+        if (
+            info.pop("intervention_window_braked", False)
+            and self._follow_mode != "background"
+        ):
             # The window braked and re-anchored the controller's integrator, so
             # this wrapper's T_r_anchor no longer describes the commanded pose.
             # Drop it; the next engaged step re-anchors with a zero first delta,
             # exactly as after an action()-time GELLO_STALE hold.
+            #
+            # In BACKGROUND mode the same brake was already consumed at the top
+            # of this method, before action() re-anchored — disengaging again
+            # here would throw away the anchor that step just built and cost an
+            # extra window of policy control.
             self._disengage()
         if replaced:
-            info["intervene_action"] = (
-                np.asarray(new_action).copy()
-                if window_action is None
-                else np.asarray(window_action, dtype=np.float32)
-            )
+            if committed is not None:
+                executed = np.zeros(7, dtype=np.float32)
+                executed[:6] = np.asarray(
+                    committed, dtype=np.float32
+                ).reshape(-1)[:6]
+                # The gripper is decided ONCE per window by _expert_gripper (the
+                # 0.6 s Robotiq debounce makes a per-tick decision meaningless),
+                # exactly as consumed_window_action does for the other path.
+                executed[6] = self._window_gripper
+                info["intervene_action"] = executed
+            else:
+                info["intervene_action"] = (
+                    np.asarray(new_action).copy()
+                    if window_action is None
+                    else np.asarray(window_action, dtype=np.float32)
+                )
         info["policy_action"] = policy_action
         info["intervened"] = int(replaced)
         # spacemouse-button fields kept for script compatibility

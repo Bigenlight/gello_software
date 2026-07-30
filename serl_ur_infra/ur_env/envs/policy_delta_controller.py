@@ -21,11 +21,16 @@ to know how long the tick they are capping is. ``dt=None`` reproduces the
 10 Hz behaviour bit for bit. See ``step()`` for why the controller never
 measures dt off the wall clock.
 
-Two callers, one gate stack. Policy path: ``UR7eEnv._apply_action``
-(ur7e_env.py:501, ``dt=None``). Intervention path: ``GelloIntervention.substep``
-(wrappers.py:618, ``dt=1/30``), paced by
-``UR7eEnv._drive_intervention_substeps``. The ordered call chain of that second
-path is written out in the ``wrappers.py`` module docstring.
+Three callers, one gate stack, and — since 2026-07-30 — TWO THREADS. Policy
+path: ``UR7eEnv._apply_action`` (``dt=None``). In-window intervention path:
+``GelloIntervention.substep`` (``dt=1/30``), paced by
+``UR7eEnv._drive_intervention_substeps``. Background intervention path:
+``UR7eEnv._follow_tick`` (``dt=1/30``) on a daemon thread that follows the
+leader while the RL loop is off doing gRPC. All three enter through
+``UR7eEnv._emit_arm_command``, which admits one owner at a time; this class
+locks itself as well, for the measured reasons in ``__init__``. The ordered call
+chain of the intervention paths is written out in the ``wrappers.py`` module
+docstring.
 
 TODO(together): replace the simplified internals below with the real
 EefDeltaController machinery (sigma_min throttle with asymmetric escape,
@@ -46,6 +51,7 @@ False in every window of the 07-30 run, so that branch has only ever been
 exercised by tests/test_governor_dt.py.
 """
 
+import threading
 from typing import Callable, Optional, Tuple
 
 import numpy as np
@@ -100,14 +106,60 @@ class PolicyDeltaController:
         self.dt = 1.0 / hz
         self.clip_pose = clip_pose
 
+        # ---- THREAD SAFETY (measured, not defensive) --------------------- #
+        # Two threads reach this object once human intervention is followed in
+        # the background: the RL step thread and the 30 Hz follower.  UR7eEnv's
+        # ownership mux is the primary guarantee that only one of them commands
+        # at a time, but a controller whose invariants depend on a caller's
+        # discipline is a controller that will eventually be driven by two.
+        # Reproduced against this class + the real ur_kin, 2026-07-30:
+        #
+        #  * (T_cmd, q_cmd) DISAGREED on 12,143 of 108,949 samples (11.1%).
+        #    They were two separate stores and ``_integrate`` re-read
+        #    ``self.T_cmd`` three times, so IK could be seeded with one tick's
+        #    q against another tick's T.  Branch continuity is exactly what that
+        #    seed provides; losing it puts a wrist a full turn away, and the
+        #    250 Hz upsampler rate-limits but does not veto — it executes it as a
+        #    ~10 s blind sweep, i.e. the cable-winding hazard H3.
+        #  * 25 of 130,028 HOLD ticks PUBLISHED MOTION, up to 0.2047 rad
+        #    (3.3x dq_step_max), because ``_hold`` returned ``self.q_cmd`` — a
+        #    field the other thread had meanwhile overwritten.  The operator's
+        #    display says HOLD while the arm moves.
+        #  * The ``dq_step_max`` gate leaked on 6.08% of ticks for the same
+        #    reason: it is measured against ``self.q_cmd``.
+        #
+        # The fix is structural, not a re-order: one re-entrant lock covers each
+        # public entry point end to end, ``T_cmd``/``q_cmd`` are only ever
+        # replaced together by ``_commit``, and ``_hold`` returns the command
+        # this controller last actually PUBLISHED rather than re-reading a field.
+        self._lock = threading.RLock()
+
         self.T_cmd: Optional[np.ndarray] = None
         self.q_cmd: Optional[np.ndarray] = None
+        #: The joint vector this controller last handed a caller. Held apart from
+        #: ``q_cmd`` so a HOLD re-issues what was really published, and cannot be
+        #: turned into motion by whatever last wrote ``q_cmd``.
+        self._last_issued: Optional[np.ndarray] = None
+
+    def _commit(self, T_cmd: np.ndarray, q_cmd: np.ndarray) -> np.ndarray:
+        """Replace the command state ATOMICALLY. Caller holds ``self._lock``.
+
+        The single writer of ``T_cmd``/``q_cmd``/``_last_issued``. Keeping it to
+        one place is what makes "the pair is always from the same tick" a
+        property of the class rather than a property of every call site
+        remembering to assign both.
+        """
+
+        self.T_cmd = T_cmd
+        self.q_cmd = q_cmd
+        self._last_issued = q_cmd.copy()
+        return self._last_issued.copy()
 
     def reset(self, q_now: np.ndarray):
         """Latch the command state to the robot's actual pose (call on env.reset)."""
         q_now = np.asarray(q_now, dtype=float).reshape(6)
-        self.q_cmd = q_now.copy()
-        self.T_cmd = fk(q_now)
+        with self._lock:
+            self._commit(fk(q_now), q_now.copy())
 
     def _govern(self, v: np.ndarray, w: np.ndarray, dt: float):
         """Per-tick rate cap in task space. Returns (v, w, scale).
@@ -168,16 +220,26 @@ class PolicyDeltaController:
         NOT T_cmd @ exp(xi): right-multiplication would mean tool-frame
         deltas, and the hil-serl stack (RelativeFrame wrapper) already
         assumes the raw env takes base-frame actions.
+
+        ONE read of ``self.T_cmd``, into a local. The three separate reads this
+        used to do could each land on a different tick's matrix if another
+        thread committed in between — a base pose assembled from two ticks, and
+        the resulting IK seed mismatch is the wrist-flip hazard documented in
+        ``__init__``. ``step`` holds the lock across the whole call, so this is
+        belt-and-braces; it is written this way so it stays correct if that ever
+        stops being true.
         """
-        T = self.T_cmd.copy()
-        T[:3, 3] = self.T_cmd[:3, 3] + v
-        T[:3, :3] = so3_exp(w) @ self.T_cmd[:3, :3]
+        base = self.T_cmd
+        T = base.copy()
+        T[:3, 3] = base[:3, 3] + v
+        T[:3, :3] = so3_exp(w) @ base[:3, :3]
         return T
 
     def _net(self, T_des: np.ndarray):
         """The (v, w) that takes T_cmd to T_des — inverse of _integrate."""
-        dp = T_des[:3, 3] - self.T_cmd[:3, 3]
-        dw = so3_log(T_des[:3, :3] @ self.T_cmd[:3, :3].T)
+        base = self.T_cmd
+        dp = T_des[:3, 3] - base[:3, 3]
+        dw = so3_log(T_des[:3, :3] @ base[:3, :3].T)
         return dp, dw
 
     def step(
@@ -207,7 +269,20 @@ class PolicyDeltaController:
 
         Explicit dt keeps the cap a property of the control schedule the caller
         actually implements, and keeps it reproducible in replay.
+
+        ATOMIC. The whole body runs under ``self._lock``, so no other thread can
+        observe — or seed IK from — a half-updated command state, and the
+        ``dq_step_max`` gate below is measured against a ``q_cmd`` nobody can
+        replace while it is being measured (see ``__init__`` for the 11.1% /
+        6.08% / 25-moving-HOLDs reproduction that made this mandatory). Re-entrant
+        so ``_hold`` and ``_commit`` can be called from inside it.
         """
+        with self._lock:
+            return self._step_locked(xi, dt)
+
+    def _step_locked(
+        self, xi: np.ndarray, dt: Optional[float]
+    ) -> Tuple[np.ndarray, dict]:
         assert self.T_cmd is not None, "call reset() before step()"
         # governed/governed_scale: the governor used to shrink actions with no
         # trace at all — `scale` was computed and dropped on the floor, and
@@ -342,9 +417,7 @@ class PolicyDeltaController:
             # Jacobian): HOLD is the correct, rare fallback the gate is for.
             return self._hold(info, "STEP_LIMIT")
 
-        self.T_cmd = T_des
-        self.q_cmd = q_sol
-        return q_sol.copy(), info
+        return self._commit(T_des, q_sol), info
 
     def _hold(self, info: dict, reason: str):
         """HOLD: re-issue the previous command, unchanged.
@@ -353,11 +426,27 @@ class PolicyDeltaController:
         cap did to the REQUEST, which is still the truth even though the tick
         ended in a HOLD. Consumers read `held` first — it means no new command
         was issued at all.
+
+        Returns ``_last_issued`` and NOT ``self.q_cmd``. The docstring above has
+        always claimed "unchanged", and with one caller the two were the same
+        vector; with two threads they are not. Reproduced 2026-07-30: 25 of
+        130,028 HOLD ticks published a command up to 0.2047 rad (3.3x
+        dq_step_max) away from the previous one, because ``q_cmd`` had been
+        rewritten by the other caller in between. A HOLD that moves the arm
+        while the GUI shows HOLD is the worst failure this class can have, so it
+        re-issues a value nothing else writes.
         """
         info["held"] = True
         info["reject_reason"] = reason
-        return self.q_cmd.copy(), info
+        with self._lock:
+            return self._last_issued.copy(), info
 
     # convenience for wrappers that need the commanded TCP pose
     def tcp_cmd(self) -> np.ndarray:
-        return self.T_cmd.copy()
+        with self._lock:
+            return self.T_cmd.copy()
+
+    def joint_cmd(self) -> np.ndarray:
+        """The joint vector last published, i.e. what a HOLD would re-issue."""
+        with self._lock:
+            return self._last_issued.copy()
