@@ -353,6 +353,11 @@ class GelloIntervention(gym.ActionWrapper):
             self._filter = LeaderFilter(self.substep_hz, **one_euro)
             self._budget = InterventionBudget(self.action_scale, self.substep_hz)
         self._leader_rx: Optional[float] = None
+        # Monotonic instant of the previous ``LeaderFilter.filtered`` tick.  The
+        # filter needs the interval that REALLY elapsed, not the nominal substep
+        # period — see substep() and leader_stream's "THE OUTPUT TICK IS NOT
+        # PERIODIC".  None => the next tick is the filter's first.
+        self._last_filtered_at: Optional[float] = None
         self._window_gripper = 0.0
 
     # ------------------------------------------------------------------ #
@@ -527,6 +532,10 @@ class GelloIntervention(gym.ActionWrapper):
         if self._filter is not None:
             self._filter.reset()
         self._leader_rx = None
+        # The output-tick clock is dropped with the state it timed: a reset
+        # filter re-anchors on its next input verbatim, so the interval across
+        # the engage/episode gap describes nothing and must not be measured.
+        self._last_filtered_at = None
 
     def _note_leader_sample(self, q_lead: np.ndarray, age: float) -> None:
         """Feed the one-euro filter, but ONLY on a genuinely new leader sample.
@@ -637,7 +646,44 @@ class GelloIntervention(gym.ActionWrapper):
             return {"issued": False, "stop": "GELLO_STALE", "brake": True}
 
         self._note_leader_sample(q_lead, age)
-        xi = self._expert_delta_xi(self._filter.filtered(q_lead))
+        # THE FILTER'S CLOCK IS THE WALL CLOCK, not the substep counter.  ``dt``
+        # here is the ``1/substep_hz`` the env PLANS to pace at; the interval
+        # between two ``filtered()`` calls is not that number and is not even
+        # constant.  ``_drive_intervention_substeps`` paces against the NOMINAL
+        # window end (``start_time + 1/HZ``), so it always runs the same two
+        # ticks 1/30 s apart and everything the step overruns its nominal window
+        # by — the actor's gRPC round trip, the camera read — lands in ONE lump
+        # before the next window's first tick.  The spacing therefore alternates
+        # ``1/30 s, T - 1/30 s`` where T is the REAL step period: 33 ms then
+        # 469 ms at the measured mean T = 0.502 s, 33 ms then 1087 ms at the
+        # contended T = 1.12 s.  "33, then 67, then 33" holds only for
+        # T == 1/HZ exactly, which is what the virtual-clock tests construct and
+        # what the rig never does.  Feeding the filter the nominal period instead
+        # made its time constant scale WITH the window, so a contended learner
+        # turned a 0.159 s filter into a 2.95 s one — sluggish exactly when the
+        # operator is most likely to be taking over.  Measure the real interval
+        # instead.  (It is necessary, not sufficient: leader_stream's "WHAT THE
+        # dt FIX DOES NOT FIX" has what a long window still costs.)
+        #
+        # ``time`` is read through the module global on purpose: the substep
+        # tests replace ``wrappers.time`` with a virtual clock, and this
+        # measurement has to move with the same clock that paces the window.
+        # ``monotonic`` and not ``time()``: the env paces the window with the
+        # WALL clock, but a wall-clock jump (NTP step, DST) between two ticks
+        # would be handed to a filter as a real interval — or as a negative one.
+        # Only differences of monotonic readings are ever taken here, and
+        # ``OneEuro._output_dt`` refuses a non-positive dt, so the two clocks
+        # disagreeing costs nothing.
+        now = time.monotonic()
+        previous_tick = self._last_filtered_at
+        self._last_filtered_at = now
+        # None on the first tick after an engage/episode edge: there is no
+        # previous tick to measure from, so LeaderFilter falls back to
+        # ``output_dt``.  Harmless in practice — the filter was just reset, so
+        # that tick returns the leader verbatim and ignores dt entirely — but
+        # stated explicitly rather than left to that coincidence.
+        tick_dt = None if previous_tick is None else now - previous_tick
+        xi = self._expert_delta_xi(self._filter.filtered(q_lead, tick_dt))
         allowed, exhausted = self._budget.take(self._paced_request(xi))
         if exhausted and not np.any(allowed):
             # Budget spent: stop refreshing the target so the 250 Hz upsampler

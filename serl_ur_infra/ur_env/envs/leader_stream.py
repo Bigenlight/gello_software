@@ -81,6 +81,95 @@ caller's memory: :meth:`LeaderFilter.note_sample` is the only entry point that
 advances the speed estimate, :meth:`LeaderFilter.filtered` is the only one that
 advances the output.  Mixing them is then a visible mistake at the call site.
 
+THE OUTPUT TICK IS NOT PERIODIC (why ``filtered`` takes a ``dt``)
+-----------------------------------------------------------------
+The bridge calls ``OneEuro.__call__`` from a **250 Hz fixed timer**, so there
+``dt = 1/250`` is a fact and hard-coding it at construction is correct.  On this
+path it is not: the "output tick" is an intervention SUBSTEP, and substeps are
+paced inside a control window whose length is whatever the actor's RPC and the
+learner's GPU contention make it.
+
+The substep loop (``UR7eEnv._drive_intervention_substeps``) is paced against the
+**nominal** window end — ``UR7eEnv.step`` hands it ``start_time + 1.0/self.hz``,
+not the step's real duration — with two consequences that have to be read
+together:
+
+* the substep count does **not** vary with the real step period.  At HZ=10 and
+  30 Hz substeps it is exactly **2**, every window, whether the step took 100 ms
+  or 1.12 s.
+* everything by which the step overruns that nominal window — the actor's gRPC
+  round trip, the camera read in ``_get_obs`` — therefore lands OUTSIDE the
+  loop, in one lump between the last substep of a window and the first substep
+  of the next.
+
+So the ``filtered`` tick spacing is neither the constructed 1/30 s nor uniform.
+It ALTERNATES::
+
+    1/30 s ,  T - 1/30 s ,  1/30 s ,  T - 1/30 s , ...
+
+where **T is the REAL step period**.  ``T - 1/30`` and NOT ``1/HZ - 1/30``:
+those two coincide only when a step lands exactly on its nominal period, which
+is the one case this rig does not run.  Measured on the production actor loop:
+mean **1.99 Hz, i.e. T = 502 ms**, worst step 854 ms; at the 1.12 s
+learner-contended step the long interval is **1.087 s**, not the 66.7 ms a
+nominal window would suggest — a 16x difference in exactly the quantity the
+filter divides by.
+
+Carrying the construction period into that call made the filter's time constant
+be counted in WINDOWS instead of seconds, so a heavier system smoothed harder
+(measured, at rest, ``alpha = 0.1732``):
+
+    window T | MEAN ``filtered`` spacing | dt the filter believed | over-smooth
+    0.100 s  | 50.0 ms                   | 33.3 ms                | 1.5x
+    0.250 s  | 125.0 ms                  | 33.3 ms                | 3.8x
+    1.120 s  | 560.0 ms                  | 33.3 ms                | 16.8x
+
+The middle column is the MEAN of the alternating pair above (``T/2``); no tick is
+ever actually spaced that way, and the real pattern is the harsher of the two —
+see "WHAT THE dt FIX DOES NOT FIX".  Driven through the real pattern, the last
+row is a **2.95 s** effective at-rest time constant on a filter tuned for
+0.159 s (18.5x): exactly when the operator most needs the arm to answer (the
+machine is already struggling) it answers slowest.  So ``dt`` is now the time
+that ACTUALLY elapsed since the previous output tick, measured by the caller
+(``GelloIntervention.substep``), and ``alpha = 1/(1 + tau/dt)`` recovers its
+wall-clock meaning.  ``dt=None`` keeps the fixed-period behaviour bit for bit,
+which is what the bridge-parity tests assert and what any fixed-rate caller
+should keep passing.
+
+WHAT THE ``dt`` FIX DOES NOT FIX (it is necessary, not sufficient)
+-----------------------------------------------------------------
+Passing the honest interval removes the WINDOW-COUNTING error.  It does not make
+a 1.12 s window feel like a 0.1 s one, and nothing in this module can.  Do not
+read the section above as "the 1.12 s window is fixed":
+
+* **The tick rate is itself below the filter's Nyquist rate.**  Two output ticks
+  per window is 1.79 Hz at T = 1.12 s, against a ``min_cutoff`` of 1.0 Hz, which
+  needs 2 Hz to be resolved at all.  Driving the real alternating pattern, the
+  at-rest effective time constant is 0.185 s at T = 0.100 s, 0.321 s at the
+  measured T = 0.502 s and still **0.498 s (3.13x the 0.159 s the gains ask
+  for)** at T = 1.12 s — against 0.263 s / 1.32 s / 2.95 s (1.65x / 8.29x /
+  18.5x) on those same three windows with the bug.  That residual is a
+  DISCRETISATION FLOOR, not a
+  defect: it grows like ``T/ln T`` instead of like ``T`` (8.6x at T = 5 s), so
+  the fix turns an error proportional to the window into a sublinear one and
+  stops there.  ``tests/test_leader_stream.py``
+  ``::test_the_time_constant_is_wall_clock_not_a_window_count`` drives that
+  alternating pattern and pins both ends.
+* **The backend brakes between windows no matter how good the estimate is.**
+  A window's last target is issued at ``start + 2/30`` and the next at
+  ``start + T``, so the target-update gap is ``T - 0.0667``.  That crosses the
+  upsampler's ``target_stale_s = 0.30`` (``config.py`` ``UPSAMPLER``) as soon as
+  ``T > 0.367 s``, i.e. on EVERY window at the measured T = 0.502 s (27.7% of
+  the time spent in HOLD, and the soft-start re-arm that follows each stale
+  brake pins the upsampler's slew ceiling at 46%); at T = 1.12 s roughly 0.75 s
+  of every 1.12 s window is a HOLD.  A smoother leader estimate cannot refresh a
+  target the loop is not there to send.
+* So the honest ``dt`` is a NECESSARY condition for good hand feel at a long
+  window, not a sufficient one.  The root fix is to shorten T itself, or to take
+  intervention following off the RL window altogether —
+  ``docs/testing/04_HIL_INTERVENTION.md`` §9.5 and ``docs/testing/08_OPEN_GAPS.md``
+  G21.
+
 NO DEADBAND — ON PURPOSE
 ------------------------
 ``ur7e_gello.yaml:71`` carries ``deadband_rad: 0.004`` and it is tempting to
@@ -102,8 +191,9 @@ alone would break the stored-action invariant.  The recorded action is a
 ``action * ACTION_SCALE`` = at most 0.0125 m / 0.0625 rad
 (``ur_env/envs/config.py:55-73``); ``serl_ur_infra/README.md:197-205`` requires
 the action written to the replay buffer to be *the action that executed*.  But
-the real step period is not the nominal 100 ms — it is 158 ms in the good case
-and up to 1.12 s when the learner contends for the GPU.  A human tracking
+the real step period is not the nominal 100 ms — it is 158 ms in the good case,
+a measured mean of 502 ms on the production actor loop (worst step 854 ms), and
+up to 1.12 s when the learner contends for the GPU.  A human tracking
 continuously through a 1 s window travels many ACTION_SCALE steps, while the
 stored action can only ever say ``1.0``: the transition would then
 systematically **understate** the motion that actually happened, which is the
@@ -180,7 +270,7 @@ _BUDGET_REL_TOL: float = 1e-9
 
 
 class OneEuro:
-    """Scalar 1-Euro filter (Casiez, Roussel & Vogel 2012) at a FIXED period.
+    """Scalar 1-Euro filter (Casiez, Roussel & Vogel 2012) at a DEFAULT period.
 
     Behaviour-preserving port of ``bridge_stages.py:42-106``.  Adaptive
     low-pass: the cutoff RISES with the low-passed signal speed, so a nearly
@@ -192,14 +282,19 @@ class OneEuro:
     snappier on fast moves).  ``d_cutoff`` low-passes the internal speed
     estimate so jitter does not inflate the cutoff.
 
-    ``dt`` is the OUTPUT period (the tick rate of :meth:`__call__`), which is
-    generally NOT the leader sample period: leader samples arrive at ~30 Hz
-    while the command stream ticks faster, so the speed estimate is advanced by
-    :meth:`update_input` at the sample cadence and the output by
-    :meth:`__call__` at the tick cadence.  Calling ``update_input`` per output
-    tick makes each sample step look like a much faster jump and the filter
-    "opens up in visible pulses" (original docstring, ``bridge_stages.py:56-59``;
-    quantified in ``tests/test_leader_stream.py``).
+    The constructor ``dt`` is the DEFAULT output period (the nominal tick rate
+    of :meth:`__call__`), which is generally NOT the leader sample period:
+    leader samples arrive at ~30 Hz while the command stream ticks faster, so
+    the speed estimate is advanced by :meth:`update_input` at the sample cadence
+    and the output by :meth:`__call__` at the tick cadence.  Calling
+    ``update_input`` per output tick makes each sample step look like a much
+    faster jump and the filter "opens up in visible pulses" (original docstring,
+    ``bridge_stages.py:56-59``; quantified in ``tests/test_leader_stream.py``).
+
+    :meth:`__call__` accepts a per-tick ``dt`` because on the intervention path
+    the output tick is NOT periodic; ``None`` selects the constructor value and
+    is bit-identical to the original.  See the module docstring, "THE OUTPUT
+    TICK IS NOT PERIODIC".
 
     The arithmetic — including operation order — is copied verbatim so the two
     implementations agree bit for bit; a test asserts exactly that against the
@@ -243,14 +338,70 @@ class OneEuro:
         self._dx_prev = a_d * dx + (1.0 - a_d) * self._dx_prev
         self._raw_prev = x
 
-    def __call__(self, x: float) -> float:
-        """Advance the OUTPUT by one tick.  Stateful: exactly once per tick."""
+    def _output_dt(self, dt: Optional[float]) -> float:
+        """Resolve one output tick's interval.  Never returns a poisonous value.
+
+        ``None`` -> the constructor period.  That is the fixed-rate contract of
+        ``bridge_stages.OneEuro`` and the ONLY path the bit-identity tests
+        exercise, so it is deliberately a plain passthrough with no arithmetic
+        of its own.
+
+        REJECTED (falls back to the constructor period, loudly in the sense that
+        the fallback is deterministic and testable, never a crash):
+
+        * ``dt <= 0``.  ``alpha = 1/(1 + tau/dt)`` is not merely wrong there, it
+          is *unstable*: ``dt == 0`` divides by zero, ``dt == -tau`` divides by
+          zero one level up, ``-tau < dt < 0`` gives ``alpha > 1`` (the filter
+          EXTRAPOLATES past the leader) and ``dt < -tau`` gives ``alpha < 0``
+          (it runs away from the leader).  Both of the latter compound, because
+          ``x_hat`` feeds back into itself.
+        * ``NaN``/``inf``.  A single NaN reaching ``_x_prev`` freezes that joint
+          for the rest of the session — the same argument
+          ``_as_joint_vector`` already makes about a bad Dynamixel read.  ``inf``
+          is arithmetically harmless (``alpha`` -> 1, i.e. "track the leader")
+          but it can only come from a broken clock, and one predictable rule for
+          "the clock lied" is worth more than a special case.
+
+        ACCEPTED, and deliberately not clamped:
+
+        * A tiny positive ``dt``.  For any finite ``dt > 0``, ``alpha`` stays in
+          ``[0, 1]``, so it cannot poison anything, and "almost no time passed,
+          so barely advance" IS the correct wall-clock answer.  ``dt`` has to be
+          absurdly small before anything special happens: ``tau/dt`` only
+          overflows to ``inf`` (giving ``alpha == 0.0`` = "hold this tick") below
+          ``dt = tau/DBL_MAX`` ~ 8.9e-310, i.e. deep in the subnormals.  At
+          ``dt = 1e-300`` — already a nonsense clock reading — ``alpha`` is
+          6.3e-300: finite, normal, and behaving exactly as the formula says.
+        * A huge ``dt``.  There is NO upper cap.  As ``dt`` grows ``alpha`` rises
+          monotonically toward 1 and the output becomes ``x`` — the leader
+          itself, never an overshoot, since ``alpha <= 1`` always.  A 5 s window
+          therefore effectively disables the smoothing, which is the SAFE
+          direction: after 5 s of wall clock a 0.16 s-time-constant filter
+          genuinely should have converged, and pretending otherwise is precisely
+          the window-counting bug this parameter exists to remove.  Nothing
+          downstream depends on the filter for bounding motion either — the
+          per-window ``InterventionBudget``, ``_paced_request``, the governor and
+          the 250 Hz acceleration limiter each bound it independently — so an
+          open filter costs smoothness, not safety.
+        """
+        if dt is None or not math.isfinite(dt) or dt <= 0.0:
+            return self._dt
+        return float(dt)
+
+    def __call__(self, x: float, dt: Optional[float] = None) -> float:
+        """Advance the OUTPUT by one tick.  Stateful: exactly once per tick.
+
+        ``dt`` is the time that actually elapsed since the previous output tick.
+        ``None`` (the default, and what a fixed-rate caller such as the 250 Hz
+        bridge timer passes) uses the constructor period and reproduces
+        ``bridge_stages.OneEuro.__call__`` bit for bit.
+        """
         if self._x_prev is None:
             self.seed(x)
             return x
         # Speed-adaptive cutoff: faster motion -> higher cutoff -> less lag.
         cutoff = self._min_cutoff + self._beta * abs(self._dx_prev)
-        a = self._alpha(cutoff, self._dt)
+        a = self._alpha(cutoff, self._output_dt(dt))
         x_hat = a * x + (1.0 - a) * self._x_prev
         self._x_prev = x_hat
         return x_hat
@@ -268,8 +419,9 @@ class LeaderFilter:
 
     * :meth:`note_sample` — call ONLY when a new leader sample arrives (~30 Hz).
       Advances the speed estimate; does not produce output.
-    * :meth:`filtered` — call on EVERY output tick, exactly once.  Advances the
-      output state and returns it.
+    * :meth:`filtered` — call on EVERY output tick, exactly once, with the time
+      that really elapsed since the previous one.  Advances the output state and
+      returns it.
 
     See the module docstring ("ONE FILTER, TWO CADENCES") for why conflating
     them makes the filter pulse instead of smooth.
@@ -344,7 +496,8 @@ class LeaderFilter:
         for i in range(self.n_joints):
             self._euro[i].update_input(float(q[i]), dt)
 
-    def filtered(self, q_lead: np.ndarray) -> np.ndarray:
+    def filtered(self, q_lead: np.ndarray,
+                 dt: Optional[float] = None) -> np.ndarray:
         """One OUTPUT tick: smoothed joint vector, shape ``(n_joints,)``.
 
         Stateful — each joint's filter advances exactly once per call, matching
@@ -352,11 +505,22 @@ class LeaderFilter:
         (``bridge_stages.py:122-125``).  Feed it the most recent leader sample
         (zero-order hold between samples); the held input is precisely what the
         speed estimate must NOT be differentiated from.
+
+        ``dt`` is the interval since the previous output tick — the WALL CLOCK
+        one, not the nominal period, because on this path the tick is a substep
+        of a variable-length control window (module docstring, "THE OUTPUT TICK
+        IS NOT PERIODIC").  ``None`` means "use ``output_dt``" and is the right
+        value for the first tick after construction/:meth:`reset`, which has no
+        previous tick to measure from; it is also what a genuinely fixed-rate
+        caller should keep passing.  All six joints share one ``dt``: they are
+        ticked by the same loop, so their intervals cannot differ.  Degenerate
+        values are handled per joint by :meth:`OneEuro._output_dt` — a filter
+        state that feeds back into itself must never see a NaN.
         """
         q = self._as_joint_vector(q_lead, "q_lead")
         out = np.empty(self.n_joints, dtype=float)
         for i in range(self.n_joints):
-            out[i] = self._euro[i](float(q[i]))
+            out[i] = self._euro[i](float(q[i]), dt)
         return out
 
     # -- helpers ----------------------------------------------------------- #
@@ -381,9 +545,13 @@ class InterventionBudget:
 
     The budget is ONE ``ACTION_SCALE`` step per window — 0.0125 m of translation
     and 0.0625 rad of rotation for cube_in_cup (``config.py:73``) — rationed
-    across however many 30 Hz substeps the (variable, 0.158-1.12 s) window turns
-    out to contain.  Position and rotation have independent budgets, exactly as
-    they have independent scales.
+    across the 30 Hz substeps of one window.  That count is fixed by the NOMINAL
+    window (exactly 2 at HZ=10), NOT by how long the step really took, so a step
+    that overruns to the measured 0.502 s (or to 1.12 s under learner
+    contention) still gets one ACTION_SCALE step spread over the same two
+    substeps: the operator's ceiling in m/s falls as the window grows.  See "THE
+    OUTPUT TICK IS NOT PERIODIC" above and G21.  Position and rotation have
+    independent budgets, exactly as they have independent scales.
 
     Accounting is on **path length** (the sum of substep magnitudes), not on the
     net displacement.  Path length is monotone, so ``exhausted`` latches for the

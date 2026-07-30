@@ -16,6 +16,13 @@ Three of these tests are load-bearing; the rest are guard rails.
   keeps ``InterventionBudget.take`` a proportional (norm) clamp.  A per-axis
   clip bends a saturated diagonal, which the operator feels as the arm going
   somewhere they did not point (``ur_env/envs/wrappers.py:316-324``).
+* ``test_the_time_constant_is_wall_clock_not_a_window_count`` — the filter's
+  smoothing must be measured in SECONDS.  Hard-coding the construction period
+  made it count output ticks instead, so a slower control loop smoothed harder
+  (measured at-rest time constant 2.95 s = 18.5x the shipped gains, at the
+  1.12 s window).  This is the regression test for that fix; it drives the real
+  ``1/30, T - 1/30`` tick spacing rather than a uniform idealisation, and the
+  others in its section pin the edges.
 
 Pure numpy/stdlib: no rclpy, no ROS runtime.  The bridge reference module is
 stdlib-only, so it imports from the overlay source tree directly.
@@ -94,11 +101,24 @@ def _leader_trajectory(kind: str, n: int, dt: float, seed: int = 0):
     return out
 
 
-def _run_two_cadence(filt, samples, output_hz: float, leader_hz: float):
+#: ``_run_two_cadence(tick_dt=...)`` default meaning "call ``filt(x)`` with no
+#: ``dt`` argument at all".  ``None`` is NOT usable as the sentinel: ``None`` is
+#: itself a meaningful argument value (it selects the construction period), and
+#: the whole point of some of these tests is that passing it explicitly and
+#: omitting it are the same call.  The reference ``bridge_stages.OneEuro`` also
+#: accepts only one argument, so omission has to stay reachable.
+_OMIT = object()
+
+
+def _run_two_cadence(filt, samples, output_hz: float, leader_hz: float,
+                     tick_dt=_OMIT):
     """Drive ``filt`` the way the real loop does: samples < ticks.
 
     ``update_input`` fires only when a new leader sample lands; ``__call__``
     fires on every output tick with the most recent (held) sample.
+
+    ``tick_dt`` is passed to ``__call__`` when given; omitted by default so this
+    helper also drives ``bridge_stages.OneEuro``, whose ``__call__`` takes none.
     """
     out_dt = 1.0 / output_hz
     samp_dt = 1.0 / leader_hz
@@ -114,7 +134,7 @@ def _run_two_cadence(filt, samples, output_hz: float, leader_hz: float):
             filt.update_input(held, None if last_t is None else s_t - last_t)
             last_t = s_t
             idx += 1
-        ys.append(filt(held))
+        ys.append(filt(held) if tick_dt is _OMIT else filt(held, tick_dt))
     return np.array(ys)
 
 
@@ -188,6 +208,273 @@ def test_ported_defaults_match_the_operational_yaml():
     # "ema" this assertion fires and the "One-Euro alone" claim in the module
     # docstring has to be revisited.
     assert re.search(r'^\s*filter_type\s*:\s*"one_euro"\s*$', text, re.MULTILINE)
+
+
+# --------------------------------------------------------------------------- #
+# (1b) the output tick is not periodic: dt is wall clock, not a tick counter    #
+# --------------------------------------------------------------------------- #
+#: ``1/(2*pi*min_cutoff)``: the low-pass time constant the shipped gains ask for
+#: while the leader is at rest (``dx_prev == 0`` => ``cutoff == min_cutoff``).
+#: 0.159 s.  Every number in this section is measured against it.
+TAU_AT_REST = 1.0 / (2.0 * math.pi * ONE_EURO_DEFAULTS["min_cutoff"])
+
+
+def _window_ticks(step_period_s: float):
+    """The ``filtered`` intervals of ONE control window, in call order.
+
+    NOT ``[T/2, T/2]``.  ``UR7eEnv._drive_intervention_substeps`` paces against
+    the NOMINAL window end (``start_time + 1/HZ``), so it always fires the same
+    two ticks 1/30 s apart and everything the step overruns its nominal window by
+    (gRPC, cameras) lands in ONE lump before the next window's first tick.  The
+    spacing therefore alternates ``1/30, T - 1/30`` — the long interval is set by
+    the REAL step period T, never by ``1/HZ``.  Ordered "long first" because a
+    window's first tick is the one that follows the gap.
+
+    ``tests/test_intervention_substeps.py`` (section 7b/7c) proves this IS the
+    pattern the shipped loop produces, by spying the dt on a virtual clock; here
+    it is replayed to measure what the pattern does to the filter.
+    """
+    substep = 1.0 / SUBSTEP_HZ
+    assert step_period_s > 2.0 * substep
+    return [step_period_s - substep, substep]
+
+
+def _step_response_tau(tick_dts, honest: bool = True, windows: int = 6) -> float:
+    """Effective WALL-CLOCK time constant of a leader step, in seconds.
+
+    Seed at 0, step the leader to 1, tick ``filtered`` with ``tick_dts`` (one
+    window's intervals) repeated ``windows`` times, and read the time constant
+    off the residual: ``r = exp(-t/tau_eff)``.  The decay is geometric per
+    window, so the answer does not depend on ``windows`` — which is why
+    ``windows`` is small: at a 1.12 s window the residual falls by 9.5x per
+    window, and once it drops under a float epsilon of the leader the state
+    saturates at exactly 1.0 and there is nothing left to take a log of.
+
+    ``honest=False`` reproduces THE BUG: the same real spacing, but the filter is
+    told the constructed ``1/SUBSTEP_HZ`` on every tick.  Elapsed time is counted
+    from the real spacing either way — that is the whole point.
+
+    ``note_sample`` is deliberately never called, so the speed estimate stays 0
+    and the cutoff is exactly ``min_cutoff`` — the at-rest case the bug report
+    measured (``alpha = 0.1732`` at 1/30 s).
+    """
+    lf = LeaderFilter(output_hz=SUBSTEP_HZ)
+    lf.seed(np.zeros(6))
+    q_step = np.ones(6)
+    y = np.zeros(6)
+    elapsed = 0.0
+    for _ in range(windows):
+        for dt in tick_dts:
+            y = lf.filtered(q_step, dt if honest else 1.0 / SUBSTEP_HZ)
+            elapsed += dt
+    residual = float(1.0 - y[0])
+    assert 0.0 < residual < 1.0
+    return -elapsed / math.log(residual)
+
+
+def test_the_time_constant_is_wall_clock_not_a_window_count():
+    """THE REGRESSION.  Slower control loop must not mean a slower filter.
+
+    ``filtered`` is called exactly twice per control window and the second
+    interval is ``T - 1/30`` for the REAL step period T, so the filter's
+    interval is set by how slow the machine is: 0.100 s nominal, a measured mean
+    of 0.502 s on the production actor loop, 1.12 s under learner contention.
+    With the interval hard-coded at ``1/output_hz`` the filter advanced by a
+    fixed fraction PER CALL, so its effective at-rest time constant scaled with
+    the window.  Driven through the REAL alternating spacing (not a ``T/2``
+    idealisation, which measures ~25% kinder at the long end):
+
+        window T   tau_eff with the bug          tau_eff honest
+        0.100 s    0.263 s  ( 1.65x TAU)         0.185 s  (1.16x)
+        0.502 s    1.320 s  ( 8.29x TAU)         0.321 s  (2.02x)
+        1.120 s    2.945 s  (18.50x TAU)         0.498 s  (3.13x)
+        ratio      11.2 = exactly the window ratio     2.69
+
+    So the fix does NOT make the filter window-independent — it makes the error
+    SUBLINEAR instead of proportional.  The residual 3.13x at 1.12 s is a
+    discretisation floor with a physical cause: two ticks per 1.12 s window is a
+    1.79 Hz output rate against a 1.0 Hz ``min_cutoff``, i.e. below its Nyquist
+    rate.  It keeps growing (8.6x at T = 5 s), just like ``T/ln T`` rather than
+    like ``T``.  ``leader_stream``'s "WHAT THE dt FIX DOES NOT FIX" says what
+    that costs the operator.
+
+    Gates: 3.5x absolute over the MEASURED window range (0.1 - 1.12 s), against
+    8.29x/18.50x for the bug at the two slow rows; and a fast/slow ratio under
+    4.0 against the 11.2 the bug produces by construction.  Both are stated as
+    the honest numbers they are, not as a claim that the filter got its 0.159 s
+    back.
+    """
+    measured = {T: _step_response_tau(_window_ticks(T))
+                for T in (0.100, 0.502, 1.120)}
+    buggy = {T: _step_response_tau(_window_ticks(T), honest=False)
+             for T in (0.100, 0.502, 1.120)}
+
+    # The numbers in the table above, pinned so a "harmless" retune shows up.
+    assert measured[0.100] == pytest.approx(0.185, abs=0.002)
+    assert measured[0.502] == pytest.approx(0.321, abs=0.002)
+    assert measured[1.120] == pytest.approx(0.498, abs=0.002)
+
+    for tau_eff in measured.values():
+        assert 0.9 * TAU_AT_REST <= tau_eff <= 3.5 * TAU_AT_REST
+    assert measured[1.120] / measured[0.100] < 4.0
+
+    # NOT VACUOUS: the same gates fail on the bug, and fail because the bug's
+    # ratio IS the window ratio (the defect's signature, not an accident).
+    assert buggy[1.120] == pytest.approx(2.945, abs=0.005)
+    assert buggy[1.120] > 3.5 * TAU_AT_REST
+    assert buggy[0.502] > 3.5 * TAU_AT_REST
+    assert buggy[1.120] / buggy[0.100] == pytest.approx(1.120 / 0.100, rel=1e-9)
+
+    # And the fix is monotone in the right direction at every window length.
+    for T in measured:
+        assert measured[T] <= buggy[T]
+
+
+def test_a_longer_real_interval_converges_faster_for_the_same_call_count():
+    """Same inputs, same number of calls — only the wall clock differs.
+
+    Before the fix these two runs were bit-identical (the dt argument did not
+    exist and could not), which is the whole defect: 10x more real time between
+    two ticks bought exactly the same amount of convergence.
+    """
+
+    def run(tick_dt, n=5):
+        filt = OneEuro(1.0 / SUBSTEP_HZ, **ONE_EURO_DEFAULTS)
+        filt.seed(0.0)
+        return [filt(1.0, tick_dt) for _ in range(n)]
+
+    nominal = run(1.0 / SUBSTEP_HZ)         # 33.3 ms, the constructed period
+    stretched = run(10.0 / SUBSTEP_HZ)      # 333 ms of real time per tick
+
+    assert nominal != stretched
+    for slow, fast in zip(nominal, stretched):
+        assert fast > slow                   # nearer the leader at every tick
+    # Neither ever overshoots the leader: alpha stays in [0, 1].
+    assert all(0.0 < y <= 1.0 for y in nominal + stretched)
+    assert stretched[-1] > 0.99              # 1.67 s of wall clock: converged
+    assert nominal[-1] < 0.65                # 0.167 s: about one time constant
+
+
+def test_passing_the_construction_period_explicitly_changes_nothing():
+    """``filt(x)``, ``filt(x, None)`` and ``filt(x, 1/output_hz)`` are one call.
+
+    The bit-identity guarantee is what lets a fixed-rate caller (the 250 Hz
+    bridge timer) keep its behaviour while a variable-rate one measures its own
+    interval, so it is asserted with ``==`` and no tolerance.
+    """
+    for kind in ("still", "ramp", "tremor", "reversal", "burst", "noisy_ramp"):
+        samples = _leader_trajectory(kind, 60, 1.0 / LEADER_HZ, seed=5)
+        omitted = _run_two_cadence(
+            OneEuro(1.0 / OUTPUT_HZ, **ONE_EURO_DEFAULTS),
+            samples, OUTPUT_HZ, LEADER_HZ,
+        )
+        as_none = _run_two_cadence(
+            OneEuro(1.0 / OUTPUT_HZ, **ONE_EURO_DEFAULTS),
+            samples, OUTPUT_HZ, LEADER_HZ, tick_dt=None,
+        )
+        explicit = _run_two_cadence(
+            OneEuro(1.0 / OUTPUT_HZ, **ONE_EURO_DEFAULTS),
+            samples, OUTPUT_HZ, LEADER_HZ, tick_dt=1.0 / OUTPUT_HZ,
+        )
+        assert omitted.size > 100
+        assert list(as_none) == list(omitted), kind
+        assert list(explicit) == list(omitted), kind
+
+
+@pytest.mark.parametrize(
+    "bad_dt",
+    [
+        0.0,                        # divides by zero
+        -1e-12,                     # alpha < 0: runs AWAY from the leader
+        -0.05,                      # -tau < dt < 0: alpha > 1, extrapolates
+        -1.0 / (2.0 * math.pi),     # dt == -tau exactly: 1 + tau/dt == 0
+        -10.0,
+        float("nan"),               # permanent: x_hat feeds back into itself
+        float("inf"),
+        float("-inf"),
+    ],
+)
+def test_an_invalid_dt_falls_back_to_the_construction_period(bad_dt):
+    """A broken clock degrades to the nominal period; it never poisons state.
+
+    ``alpha = 1/(1 + tau/dt)`` is unstable for ``dt <= 0`` (division by zero at
+    0 and at ``-tau``, ``alpha > 1`` between them, ``alpha < 0`` below), and a
+    single NaN in a low-pass is permanent — the argument
+    ``LeaderFilter._as_joint_vector`` already makes for the joint values.  So
+    these are refused rather than propagated, and the fallback is the value the
+    filter was built with.
+    """
+    tested = OneEuro(1.0 / SUBSTEP_HZ, **ONE_EURO_DEFAULTS)
+    reference = OneEuro(1.0 / SUBSTEP_HZ, **ONE_EURO_DEFAULTS)
+    tested.seed(0.0)
+    reference.seed(0.0)
+
+    for k in range(6):
+        x = 0.1 * (k + 1)
+        got = tested(x, bad_dt)
+        assert got == reference(x)          # bit-identical to the dt=None path
+        assert math.isfinite(got)
+
+    # ... and a good dt afterwards still behaves: nothing was latched.
+    assert math.isfinite(tested(1.0, 1.0 / SUBSTEP_HZ))
+
+
+def test_a_nan_dt_never_reaches_the_low_pass_state():
+    """Bundle-level twin: one bad tick must not freeze a joint for the session."""
+    lf = LeaderFilter(output_hz=SUBSTEP_HZ)
+    lf.seed(np.zeros(6))
+    out = lf.filtered(np.ones(6), float("nan"))
+    assert np.all(np.isfinite(out)) and np.all(out > 0.0)
+
+    for _ in range(50):
+        out = lf.filtered(np.ones(6), 1.0 / SUBSTEP_HZ)
+    assert np.all(np.isfinite(out)) and np.all(out > 0.99)
+
+
+def test_the_first_output_tick_has_no_interval_and_returns_the_input():
+    """No previous tick => nothing to measure, and nothing to filter.
+
+    ``filtered`` self-seeds on its first call and returns the input verbatim, so
+    ``dt`` is structurally irrelevant there — asserted for the ``None`` the
+    caller passes at an engage edge AND for a nonsense value, because the
+    caller must not have to reason about which one it sends.
+    """
+    for dt in (None, 7.5, 0.0, float("nan")):
+        lf = LeaderFilter(output_hz=SUBSTEP_HZ)
+        q = np.full(6, 0.42)
+        assert np.array_equal(lf.filtered(q, dt), q)
+
+
+def test_an_absurdly_long_gap_opens_the_filter_instead_of_being_capped():
+    """DECISION: no upper cap on dt.  ``alpha -> 1`` is "track the leader".
+
+    A 5 s window makes ``alpha = 0.969``: the filter essentially stops smoothing
+    and follows the leader.  That is the SAFE direction and it is also the
+    arithmetically honest one — after 5 s a 0.16 s-time-constant filter really
+    has converged — so capping ``dt`` would just reinstate the window-counting
+    bug for long windows.  It cannot overshoot either: ``alpha <= 1`` for every
+    finite ``dt > 0``, so the output is bounded by the leader itself, and motion
+    is bounded downstream by ``InterventionBudget``/``_paced_request``/the
+    governor/the 250 Hz acceleration limiter regardless of the filter.
+    """
+    filt = OneEuro(1.0 / SUBSTEP_HZ, **ONE_EURO_DEFAULTS)
+    filt.seed(0.0)
+    assert filt(1.0, 5.0) == pytest.approx(1.0, abs=0.05)
+
+    # Never an extrapolation past the leader, at any magnitude of gap.
+    for gap in (5.0, 60.0, 1e6, 1e300):
+        one = OneEuro(1.0 / SUBSTEP_HZ, **ONE_EURO_DEFAULTS)
+        one.seed(0.0)
+        y = one(1.0, gap)
+        assert 0.0 < y <= 1.0
+
+    # Monotone in the gap: more real time can only mean more convergence.
+    ys = []
+    for gap in (0.01, 0.05, 0.2, 1.0, 5.0):
+        one = OneEuro(1.0 / SUBSTEP_HZ, **ONE_EURO_DEFAULTS)
+        one.seed(0.0)
+        ys.append(one(1.0, gap))
+    assert ys == sorted(ys)
 
 
 # --------------------------------------------------------------------------- #

@@ -591,6 +591,256 @@ def test_the_filter_is_dropped_at_every_engage_edge(clock):
 
 
 # =========================================================================== #
+# 7b. the filter's output tick is timed by the WALL CLOCK, not by the counter   #
+# =========================================================================== #
+def _record_filtered_dt(wrapper):
+    """Spy the ``dt`` ``substep()`` hands ``LeaderFilter.filtered``.
+
+    The interval between two output ticks is the quantity the one-euro alpha is
+    computed from, so it is the thing that has to be measured rather than
+    assumed.  Recording it here (virtual clock) is the only deterministic way to
+    ask "did the caller time it, or did it just re-send the nominal period?".
+    """
+
+    dts = []
+    real = wrapper._filter.filtered
+
+    def spy(q_lead, dt=None):
+        dts.append(dt)
+        return real(q_lead, dt)
+
+    wrapper._filter.filtered = spy
+    return dts
+
+
+def test_substep_hands_the_filter_the_time_that_really_elapsed(clock):
+    """The ticks are NOT evenly spaced, and the filter must be told so.
+
+    ``_drive_intervention_substeps`` runs its two nominal substeps and sleeps out
+    the remainder, so a step that lands exactly on its nominal period puts the
+    output ticks at 33 ms, then 67 ms across the window boundary, then 33 ms
+    again.  Passing the nominal 33.3 ms on every one of them is what made the
+    filter's time constant scale with the window (leader_stream: "THE OUTPUT TICK
+    IS NOT PERIODIC").
+
+    ``67 ms`` is ``T - 1/30`` for ``T == 1/HZ``, and this test is the ONE case
+    where those coincide: nothing here overruns the nominal window, so the
+    virtual step period is exactly 1/HZ.  The rig's T is 0.502 s (measured mean)
+    and the same interval is then 469 ms — section 7c drives that.
+    """
+
+    wrapper, env, _ = _build(clock, hz=10.0, substep_hz=30.0, leader_step=0.002)
+    dts = _record_filtered_dt(wrapper)
+
+    wrapper.step(_zeros_action())          # engage window
+    wrapper.step(_zeros_action())          # steady-state window
+
+    period = 1.0 / 30.0
+    assert len(dts) == 4
+    assert dts[0] is None                  # engage edge: no previous tick
+    assert dts[1] == pytest.approx(period, rel=1e-6)
+    # The window boundary: the tail of window 1 plus the head of window 2.
+    assert dts[2] == pytest.approx(1.0 / 10.0 - period, rel=1e-6)
+    assert dts[3] == pytest.approx(period, rel=1e-6)
+    # The load-bearing consequence: a constant would be wrong for half of them.
+    assert dts[2] > 1.9 * dts[3]
+
+
+@pytest.mark.parametrize("hz", [10.0, 8.0, 5.0])
+def test_the_dt_the_filter_sees_sums_to_the_wall_clock_it_covers(clock, hz):
+    """Whatever the window length, the intervals ADD UP to the elapsed time.
+
+    This is the property that makes the time constant wall-clock: no real time
+    is unaccounted for and none is counted twice.  Before the fix the sum was
+    ``n_ticks / substep_hz``, which under-counts by the whole inter-window gap —
+    at HZ=5 that is 0.033 s reported for every 0.200 s that passed, a 6x
+    over-smoothing.
+
+    Lowering ``hz`` lengthens the NOMINAL window, which is a different lever from
+    the one the rig pulls: production runs a 10 Hz nominal window and OVERRUNS
+    it.  Both produce a long inter-window interval, and this test covers the
+    first; section 7c covers the second, at the measured periods.
+    """
+
+    wrapper, env, _ = _build(clock, hz=hz, substep_hz=30.0, leader_step=0.001)
+    dts = _record_filtered_dt(wrapper)
+
+    wrapper.step(_zeros_action())          # engage window: dts[0] is None
+    after_engage = len(dts)
+    assert after_engage >= 2
+
+    started = clock.now
+    for _ in range(3):
+        wrapper.step(_zeros_action())
+    elapsed = clock.now - started
+
+    assert elapsed == pytest.approx(3.0 / hz, rel=1e-6)
+    measured = dts[after_engage:]
+    assert all(dt is not None for dt in measured)
+    # Ticks are periodic WITHIN a window, so the last tick of each window sits at
+    # the same offset and three windows of intervals cover exactly three windows.
+    assert sum(measured) == pytest.approx(elapsed, rel=1e-6)
+    # Not vacuous: the nominal period sums to strictly less, because exactly one
+    # interval per window straddles the boundary and is longer than a substep.
+    assert sum(measured) > len(measured) / 30.0
+    assert max(measured) > 1.5 / 30.0
+
+
+# =========================================================================== #
+# 7c. THE REAL FAILURE REGION: the step overruns its NOMINAL window            #
+# =========================================================================== #
+def _overrun_the_step(env, clock, seconds):
+    """Make every ``env.step`` take ``seconds`` longer than its nominal window.
+
+    THIS is the shape of the production defect, and no other test in this file
+    reaches it.  ``_drive_intervention_substeps`` is paced against
+    ``start_time + 1/HZ`` — the NOMINAL window — and sleeps out whatever is left
+    of it, so lowering ``hz`` only lengthens the *nominal* window: the virtual
+    step period then still equals ``1/hz`` exactly and every tick lands where a
+    nominal clock says it should.  What the rig actually does is overrun a 10 Hz
+    nominal window: the gRPC round trip to the learner and the camera read in
+    ``_get_obs`` sit OUTSIDE the substep loop, so they push the real step period
+    T to a measured mean of 0.502 s (worst step 0.854 s, 1.12 s under learner
+    contention) while the loop keeps running its two nominal ticks.
+
+    Injected in ``_get_obs`` because that is where the in-``step`` half of the
+    cost genuinely lives (camera read), and it runs after the window has closed
+    and before ``step`` returns — the same side of the loop as the RPC.
+    """
+
+    real_get_obs = env._get_obs
+
+    def slow_get_obs():
+        clock.sleep(seconds)
+        return real_get_obs()
+
+    env._get_obs = slow_get_obs
+
+
+@pytest.mark.parametrize("step_period", [0.502, 1.120])
+def test_an_overrunning_step_hands_the_filter_the_time_that_really_elapsed(
+    clock, step_period
+):
+    """THE REGRESSION for the dt fix, at the window lengths that motivated it.
+
+    0.502 s is the measured mean production step period (1.99 Hz); 1.120 s is the
+    learner-contended one.  At those periods the tick spacing alternates
+    ``1/30 s`` and ``T - 1/30 s`` = 469 ms / 1087 ms — NOT the ``1/HZ - 1/30`` =
+    66.7 ms that a nominal window suggests, and not the constructed 33.3 ms.
+    Passing the nominal period here is what made the filter's time constant
+    scale with the machine's load (2.95 s at T = 1.12 s, against the 0.159 s the
+    gains ask for): if this test passes while ``substep()`` sends
+    ``1/substep_hz``, it is not testing the fix.
+    """
+
+    wrapper, env, _ = _build(clock, hz=10.0, substep_hz=30.0, leader_step=0.001)
+    _overrun_the_step(env, clock, step_period - 1.0 / 10.0)
+    dts = _record_filtered_dt(wrapper)
+
+    wrapper.step(_zeros_action())          # engage window: dts[0] is None
+    after_engage = len(dts)
+
+    started = clock.now
+    for _ in range(3):
+        _, _, _, _, info = wrapper.step(_zeros_action())
+        # The loop is paced against the NOMINAL window, so the substep count is
+        # NOT a function of T: it is 2 at 0.1 s and still 2 at 1.12 s.  A loop
+        # that scaled with the real period would hide the long interval below.
+        assert info["intervention_substeps"] == 2
+    elapsed = clock.now - started
+
+    substep = 1.0 / 30.0
+    assert elapsed == pytest.approx(3.0 * step_period, rel=1e-6)
+
+    measured = dts[after_engage:]
+    assert len(measured) == 6
+    for index, dt in enumerate(measured):
+        # A window's FIRST tick follows the out-of-window gap; its second is a
+        # plain substep period.
+        expected = step_period - substep if index % 2 == 0 else substep
+        assert dt == pytest.approx(expected, rel=1e-6), (index, measured)
+
+    # No wall clock is lost and none is double counted.
+    assert sum(measured) == pytest.approx(elapsed, rel=1e-6)
+    # The load-bearing magnitude: the boundary interval is 14x (T=0.502) to 33x
+    # (T=1.120) the substep period, so a filter told the nominal 33.3 ms is
+    # wrong by that factor exactly when the operator most needs the arm to
+    # answer.  It is also nowhere near ``1/HZ - 1/30`` (66.7 ms).
+    assert measured[0] / measured[1] > 13.0
+    assert measured[0] > 5.0 * (1.0 / 10.0 - substep)
+
+
+@pytest.mark.parametrize("step_period", [0.100, 0.502, 0.854, 1.120])
+def test_the_substep_count_does_not_depend_on_how_long_the_step_really_took(
+    clock, step_period
+):
+    """The window is nominal, so its substep count is a constant.
+
+    Worth pinning on its own: it is the reason the long interval exists at all
+    (the overrun cannot be absorbed by running more substeps), and the reason
+    ``InterventionBudget`` rations one ACTION_SCALE step across two substeps no
+    matter how long the step took — i.e. why a slow loop lowers the operator's
+    speed ceiling instead of its resolution (G21).
+    """
+
+    wrapper, env, _ = _build(clock, hz=10.0, substep_hz=30.0, leader_step=0.001)
+    _overrun_the_step(env, clock, step_period - 1.0 / 10.0)
+    dts = _record_filtered_dt(wrapper)
+
+    wrapper.step(_zeros_action())          # engage window
+    ticks_after_engage = len(dts)
+    for _ in range(2):
+        _, _, _, _, info = wrapper.step(_zeros_action())
+        assert info["intervention_substeps"] == 2
+
+    assert len(dts) - ticks_after_engage == 4
+
+
+def test_a_fresh_engage_edge_makes_the_next_tick_the_filters_first(clock):
+    """Re-anchoring drops the output-tick clock with the filter state.
+
+    The interval across a policy interlude describes nothing — the filter was
+    reset, so there is no previous output to measure from — and handing it over
+    as a dt would be a number invented from an unrelated gap.
+    """
+
+    deadman = _FakeDeadman(engaged=True)
+    wrapper, _, _ = _build(
+        clock, hz=10.0, substep_hz=30.0, leader_step=0.002, deadman=deadman
+    )
+    wrapper.step(_zeros_action())
+    assert wrapper._last_filtered_at is not None
+
+    deadman.engaged = False
+    wrapper.step(_zeros_action())          # policy drives; the anchor is dropped
+    assert wrapper._anchored is False
+    # The RELEASE does not clear the clock — the next ENGAGE does, together with
+    # the filter state it timed.  That is the only edge at which "there is no
+    # previous output tick" becomes true, and it happens inside ``action()``,
+    # before any substep of the new window can read it.
+    assert wrapper._last_filtered_at is not None
+
+    deadman.engaged = True
+    dts = _record_filtered_dt(wrapper)
+    wrapper.step(_zeros_action())          # fresh engage edge
+
+    assert wrapper._anchored is True
+    assert dts[0] is None, "the engage edge must make the next tick the first"
+    assert dts[1] == pytest.approx(1.0 / 30.0, rel=1e-6)
+
+
+def test_a_reset_drops_the_output_tick_clock_too(clock):
+    """Episode boundary: same rule as the engage edge."""
+
+    wrapper, _, _ = _build(clock, hz=10.0, substep_hz=30.0, leader_step=0.002)
+    wrapper.step(_zeros_action())
+    assert wrapper._last_filtered_at is not None
+
+    wrapper.reset()
+    assert wrapper._last_filtered_at is None
+
+
+# =========================================================================== #
 # 8. substepping is off unless a config asks for it                            #
 # =========================================================================== #
 def test_a_config_without_an_intervention_block_disables_substepping(clock):
