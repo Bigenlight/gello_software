@@ -320,7 +320,32 @@ actor는 ENGAGED 상태(사람 hold)로 시작하며, policy를 움직이려면 
 DISENGAGE를 명시적으로 눌러야 한다. 다시 ENGAGE하면 GELLO 개입으로 돌아간다.
 EOF
 echo ""
-read -r -p "ENGAGED + GELLO 고정 + E-STOP 준비를 확인했으면 Enter: "
+# 예전에는 여기서 Enter를 받았다. 그 프롬프트는 안전장치가 아니라 알림이었다 —
+# 실제 강제는 preflight [11]과 [ARM] 직전 재검증(각각 fresh ENGAGED heartbeat
+# 3개, run_hil_actor.sh)이고 그 둘은 그대로다. 매 세션 키를 치는 대신 ENGAGED가
+# 될 때까지 폴링한다: 이미 눌러 뒀으면 즉시 지나가고, 안 눌렀으면 여기서 기다린다
+# (예전에는 preflight [11]에서 FAIL 나고 세션을 다시 시작해야 했다).
+ENGAGE_WAIT_S="${ENGAGE_WAIT_S:-120}"
+if [[ -x "$(command -v python3)" && -f "$SCRIPT_DIR/_hil_deadman_check.py" ]]; then
+    _deadline=$(( SECONDS + ENGAGE_WAIT_S ))
+    _notified=0
+    until python3 "$SCRIPT_DIR/_hil_deadman_check.py" \
+              --topic /hil/deadman --samples 3 --timeout 2.0 >/dev/null 2>&1; do
+        if (( SECONDS >= _deadline )); then
+            echo "  !! ${ENGAGE_WAIT_S}s 안에 ENGAGED가 되지 않았다 — 그대로 진행한다."
+            echo "     preflight [11]이 같은 조건을 다시 검사하고 실패시킨다."
+            break
+        fi
+        if (( _notified == 0 )); then
+            echo "  .. GUI에서 ENGAGE를 누르면 자동으로 진행한다 (대기 최대 ${ENGAGE_WAIT_S}s, Ctrl-C로 중단)"
+            _notified=1
+        fi
+        sleep 1
+    done
+    (( _notified == 1 )) && echo "  ENGAGED 확인 — 계속한다."
+else
+    echo "  (deadman checker 없음 — 확인 없이 진행한다)"
+fi
 
 echo ""
 echo "[4/5] actor armed-readiness preflight (읽기 전용)"

@@ -305,10 +305,42 @@ cat <<'EOF'
 ★ 이동이 시작된 뒤에는 Ctrl-C 로 멈출 수 없다. 오직 E-STOP 이다. ★
 EOF
 echo ""
-read -r -p "위를 모두 확인했으면 GO 를 입력하고 Enter (그 외는 취소): " CONFIRM
-if [[ "$CONFIRM" != "GO" ]]; then
-    echo "취소됨. 로봇에 아무 명령도 보내지 않았다."
-    exit 0
+# 예전에는 여기서 대문자 GO 타이핑을 요구했다. 매 세션 반복이 불편하다는 조작자
+# 요청으로 카운트다운으로 바꿨다. 확인 자체를 없애지는 않았다 — 이 게이트가 막는
+# 것은 "알림"이 아니라 **충돌 회피 없는 자율 관절 이동**이고, 이동이 시작되면
+# Ctrl-C가 듣지 않아 E-STOP밖에 없기 때문이다. 카운트다운 동안에는 아직 로봇에
+# 아무 명령도 나가지 않았으므로 Ctrl-C가 정상 동작한다 — 즉 "타이핑 없는 중단 창"이다.
+#
+#   PREPOSITION_CONFIRM=1  -> 예전처럼 GO 타이핑을 요구한다
+#   PREPOSITION_DELAY_S=N  -> 카운트다운 길이 (기본 5)
+#
+# 이 게이트는 애초에 매번 뜨지 않는다. 현재 자세가 PASS 범위(위 [2/6]) 안이면
+# 이동 자체가 생략되므로 여기까지 오지 않는다.
+if [[ "${PREPOSITION_CONFIRM:-0}" == "1" ]]; then
+    read -r -p "위를 모두 확인했으면 GO 를 입력하고 Enter (그 외는 취소): " CONFIRM
+    if [[ "$CONFIRM" != "GO" ]]; then
+        echo "취소됨. 로봇에 아무 명령도 보내지 않았다."
+        exit 0
+    fi
+elif (( $(printf '%.0f' "${PREPOSITION_DELAY_S:-0}") > 0 )); then
+    echo "위 항목을 확인하라. ${PREPOSITION_DELAY_S}초 뒤 이동을 시작한다 — 지금은 Ctrl-C로 중단된다."
+    for (( _i = PREPOSITION_DELAY_S; _i > 0; _i-- )); do
+        printf '\r  이동까지 %2ds  (Ctrl-C = 취소, PREPOSITION_CONFIRM=1 = 예전 GO 프롬프트)  ' "$_i"
+        sleep 1
+    done
+    printf '\r  이동 시작.%-60s\n' ""
+else
+    # 기본값: 확인 없이 즉시 이동. 조작자 요청(2026-07-30)이며 근거가 있다 —
+    # 이 이동은 개입 경로가 아니라 JTC 궤적이고, TRAJ_DUR=8s에 걸쳐 최대
+    # RESET_MAX_DIST_RAD=0.9 rad만 움직인다(그 이상이면 [2/6]에서 거부된다).
+    # 즉 "느리고 짧은" 이동이다.
+    #
+    # 그래도 남는 것: 관절 공간 직선 보간이라 충돌 회피가 없고, 일단 시작되면
+    # Ctrl-C가 듣지 않아 정지 수단은 E-STOP뿐이다. 위 체크리스트는 그대로 출력된다.
+    #   PREPOSITION_DELAY_S=5  -> 취소 가능한 카운트다운
+    #   PREPOSITION_CONFIRM=1  -> 예전 GO 타이핑 프롬프트
+    echo "이동을 시작한다 (확인 생략). 정지는 E-STOP."
+    echo "  되돌리려면: PREPOSITION_DELAY_S=5 (카운트다운) 또는 PREPOSITION_CONFIRM=1 (GO 프롬프트)"
 fi
 
 # =============================================================================
