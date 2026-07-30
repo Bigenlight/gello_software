@@ -267,6 +267,11 @@ SCALE_HARD_MAX = 3.0
 COLUMNS = (
     ["t_wall", "t_mono", "episode", "step",
      "intervened", "anchored", "held", "reject_reason",
+     # 30 Hz 개입 서브스텝 계측. substeps=0 이면 서브스텝 경로가 아예 돌지
+     # 않았다는 뜻이다(정책 스텝이거나 held). governed/governed_scale은
+     # governor rate cap이 요청을 깎았는지 — 대각 이동은 ACTION_SCALE 헤드룸이
+     # 축별로만 성립하기 때문에 상시 걸린다(policy_delta_controller.py 참고).
+     "substeps", "governed", "governed_scale",
      "deadman_engaged", "deadman_age_s", "gain_latched", "gain_live",
      "leader_age_s"]
     + [f"lq{i}" for i in range(6)]
@@ -533,10 +538,27 @@ def summarize(rows):
         print("  SKIP gain-latch    : 개입 구간 없음")
 
     # ---- (c) 좌표계 3x3 매핑 ---- #
+    # 포화(rate-limited) 표본은 이 검정에서 제외한다. 아래 alpha는 래그의
+    # **크기**를 흡수하지만 **방향 발산**은 흡수하지 못한다: 예산이 소진된
+    # 창에서는 명령이 리더의 순간 델타 방향이 아니라 누적 오차 방향으로 가고,
+    # 사람이 나갔다 되돌아오면 L(리더 누적)-R(로봇 누적) 관계가 직선이 아니라
+    # 히스테리시스 루프가 된다. 그러면 멀쩡한 시스템이 FAIL로 오판된다 —
+    # 2026-07-30 실측: 전체 144표본 alpha=0.227/잔차 0.776 FAIL 인데 비포화
+    # 58표본만 보면 alpha=0.992/잔차 0.058 PASS 였다(리더가 앵커에서 74.7 cm
+    # 나갔고 예산은 6.25 cm/s, 표본 59.7%가 포화).
+    #
+    # 07-28 기록의 "잔차 0.093 PASS"도 포화 표본을 제외한 값이다. 당시엔 포화가
+    # reject_reason에 남지 않아 러너가 걸러낼 수 없었다 — 30 Hz 서브스텝이
+    # 도입되며 BUDGET_EXHAUSTED가 기록되기 시작해 처음으로 가능해졌다.
+    SATURATED_REASONS = {"BUDGET_EXHAUSTED"}
     L, R = [], []
+    n_sat_skipped = 0
     for seg in segs:
         for i in seg:
             r = rows[i]
+            if (r["reject_reason"] or "") in SATURATED_REASONS:
+                n_sat_skipped += 1
+                continue
             try:
                 gain = float(r["gain_latched"])
                 ld = np.array([float(r[f"leader_tcp_{c}"]) - float(r[f"g_anchor_{c}"])
@@ -573,7 +595,8 @@ def summarize(rows):
         out["frame_map"] = ok_c
         print(f"  {'PASS' if ok_c else 'FAIL'} frame-map     : 단위행렬 가설 상대잔차 "
               f"{resid:.3f} (기준 <0.15), 추종이득 alpha={alpha:.3f} "
-              f"(1.0=래그 없음), 표본 {len(L)}")
+              f"(1.0=래그 없음), 표본 {len(L)}"
+              + (f" (포화 {n_sat_skipped}개 제외)" if n_sat_skipped else ""))
         print("      최소자승 M (참고) =\n" + "\n".join(
             "        [" + "  ".join(f"{v:+.3f}" for v in row) + "]" for row in M))
         if not ok_c:
@@ -585,6 +608,23 @@ def summarize(rows):
               f"x/y/z = {excitation[0] * 100:.1f}/{excitation[1] * 100:.1f}/"
               f"{excitation[2] * 100:.1f} cm, 각 축 2 cm 초과 필요)")
         print("      -> ENGAGE 상태에서 GELLO를 X, Y, Z 각각 5 cm 이상 움직여라.")
+        # 게이트 미달이어도 진단값은 찍는다. SKIP은 "판정 불가"이지 "정보 없음"이
+        # 아니다 — 잔차/alpha가 이미 좋다면 다음 run에서 무엇을 늘려야 하는지가
+        # 축 여기(excitation)뿐임을 바로 알 수 있다. 이 값으로 PASS를 주지는
+        # 않는다(표본이 편향됐을 수 있다).
+        if len(L) >= 4:
+            Lm, Rm = np.array(L), np.array(R)
+            denom = float(np.sum(Lm * Lm))
+            if denom > 1e-18:
+                a_d = float(np.sum(Lm * Rm) / denom)
+                r_d = float(
+                    np.linalg.norm(Rm - a_d * Lm) / max(np.linalg.norm(Rm), 1e-12)
+                )
+                print(f"      (참고, 판정 아님) alpha={a_d:.3f} 잔차={r_d:.3f}")
+        if n_sat_skipped:
+            print(f"      -> 포화(BUDGET_EXHAUSTED) {n_sat_skipped}개를 제외했다. "
+                  f"리더를 ACTION_SCALE*HZ 안쪽(현재 상한 참고)에서 **천천히** "
+                  f"움직이면 비포화 표본이 늘어난다.")
 
     # ---- (d) 저장 액션 == 실행 액션 ---- #
     ratios = [
@@ -923,6 +963,9 @@ def main(argv=None):
                     "anchored": int(bool(getattr(iv, "_anchored", False))),
                     "held": int(bool(info.get("held", False))),
                     "reject_reason": info.get("reject_reason") or "",
+                    "substeps": int(info.get("intervention_substeps", 0) or 0),
+                    "governed": int(bool(info.get("governed", False))),
+                    "governed_scale": info.get("governed_scale", ""),
                     "deadman_engaged": dm_engaged,
                     "deadman_age_s": dm_age,
                     "gain_latched": getattr(iv, "_gain", None),

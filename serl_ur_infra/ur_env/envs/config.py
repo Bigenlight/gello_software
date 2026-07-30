@@ -125,6 +125,42 @@ class DefaultUR7eEnvConfig:
         "target_stale_s": 0.30,
     }
 
+    # ---- human intervention: in-window leader resampling ---- #
+    # WHY THIS EXISTS.  ``UR7eEnv.step`` used to set the joint target exactly
+    # ONCE per 100 ms window and then sleep, never re-reading the leader.  The
+    # 250 Hz upsampler therefore replayed "accelerate -> arrive -> brake ->
+    # sit still" every single window: measured at a 0.15 rad/s leader, the
+    # joints were fully stopped 16% of a nominal window and 40% of a real
+    # (0.197 s) one, with 2.27 units of ripple.  Refreshing the target at 30 Hz
+    # instead measured 0% stopped time and 0.85 ripple.  The operator feels the
+    # difference as "stiff/notchy" vs "continuous".
+    #
+    # 30.0 is NOT a free parameter.  It is (a) exactly the leader publish rate
+    # of the PROVEN teleop stack -- ``gello_publisher.publish_rate_hz: 30.0``
+    # in ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml:26 -- and
+    # (b) exactly the rate at which the backend's leader cache actually turns
+    # over (``URRosBackend._on_gello``, ur_env/envs/ros_backend.py:528-532, is
+    # driven by that same publisher).  Substepping faster than 30 Hz would
+    # re-issue the SAME cached leader sample under a different name, which buys
+    # nothing and makes the one-euro filter's dt bookkeeping lie.  Substepping
+    # slower throws away leader samples the rig already paid for.
+    #
+    # ``substep_hz <= HZ`` disables the feature: no substep fits inside the
+    # window, so ``UR7eEnv.step`` degenerates to its pre-change single target +
+    # sleep.  Configs without an ``INTERVENTION`` block behave that way too.
+    #
+    # The one_euro_* values are the leader-side anti-tremor filter of the same
+    # proven teleop config (ur7e_gello.yaml:43-48).  They are applied to the
+    # LEADER joints only -- never to a policy action; filtering policy actions
+    # would blur action->effect credit assignment in replay, which is why
+    # UPSAMPLER above still refuses to carry any filter.
+    INTERVENTION: Dict[str, float] = {
+        "substep_hz": 30.0,
+        "one_euro_min_cutoff": 1.0,
+        "one_euro_beta": 2.0,
+        "one_euro_d_cutoff": 1.0,
+    }
+
     # ---- ROS 2 wiring (defaults match ur_gello_bringup / gello_recorder) ---- #
     ROS: Dict[str, str] = {
         "joint_states_topic": "/joint_states",

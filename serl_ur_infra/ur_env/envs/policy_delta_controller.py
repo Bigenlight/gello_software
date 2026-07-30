@@ -14,6 +14,13 @@ anchor.
     T_des   = (p_cmd + dpos,  exp(drot) @ R_cmd)
     q_cmd   = branch-continuous IK(T_des), gated; on any doubt -> HOLD
 
+The tick length is a per-call argument (``step(xi, dt=...)``), not a fixed
+``1/hz``: the policy path runs at 10 Hz but GELLO intervention sub-steps the
+same gate stack at 30 Hz, and the governor's caps are rate caps, so they have
+to know how long the tick they are capping is. ``dt=None`` reproduces the
+10 Hz behaviour bit for bit. See ``step()`` for why the controller never
+measures dt off the wall clock.
+
 TODO(together): replace the simplified internals below with the real
 EefDeltaController machinery (sigma_min throttle with asymmetric escape,
 analytic branch-lock, keepout, line search). Cleanest path is probably
@@ -72,6 +79,9 @@ class PolicyDeltaController:
         self.v_max = float(governor_cfg["v_max"])
         self.w_max = float(governor_cfg["w_max"])
         self.dq_step_max = float(governor_cfg["dq_step_max"])
+        # NOMINAL tick length. It is the default for step(dt=None) and the
+        # reference the per-call dt is scaled against; it is NOT a measurement.
+        # See step() for why nothing here ever samples the wall clock.
         self.dt = 1.0 / hz
         self.clip_pose = clip_pose
 
@@ -84,16 +94,56 @@ class PolicyDeltaController:
         self.q_cmd = q_now.copy()
         self.T_cmd = fk(q_now)
 
-    def _govern(self, v: np.ndarray, w: np.ndarray):
-        """Per-tick rate cap in task space. Returns (v, w, scale)."""
+    def _govern(self, v: np.ndarray, w: np.ndarray, dt: float):
+        """Per-tick rate cap in task space. Returns (v, w, scale).
+
+        ``dt`` is the length of the tick this (v, w) is meant to cover, in
+        seconds. It is an argument rather than ``self.dt`` because the caller
+        decides the tick rate: the policy path runs at ``1/hz`` while the
+        intervention sub-step driver runs the same controller at 30 Hz, and a
+        cap of ``v_max * self.dt`` applied to a 1/30 s tick would let three
+        sub-steps travel 3x the 10 Hz budget (0.045 m instead of 0.015 m).
+        """
         nv, nw = float(np.linalg.norm(v)), float(np.linalg.norm(w))
         scale = 1.0
         if nv > 1e-12:
-            scale = min(scale, self.v_max * self.dt / nv)
+            scale = min(scale, self.v_max * dt / nv)
         if nw > 1e-12:
-            scale = min(scale, self.w_max * self.dt / nw)
+            scale = min(scale, self.w_max * dt / nw)
         scale = min(scale, 1.0)
         return v * scale, w * scale, scale
+
+    def _resolve_dt(self, dt: Optional[float]) -> Tuple[float, float]:
+        """(dt, dq_step_max) for one call. ``None`` -> the nominal tick, verbatim.
+
+        WHY dq_step_max SCALES WITH dt.  ``GOVERNOR["dq_step_max"]`` is written
+        per tick but is specified as a RATE: config.py:98-101 pins 0.0625 rad at
+        10 Hz as "the same rate ceiling" as the 250 Hz upsampler's 0.0025
+        rad/tick, i.e. 0.625 rad/s, and config.py:66-72 requires the three speed
+        layers (ACTION_SCALE / GOVERNOR / UPSAMPLER) to stay in a fixed ratio
+        because "raise one alone and the next silently truncates it". Holding
+        0.0625 rad fixed while the tick shrinks to 1/30 s would raise the joint
+        rate to 1.875 rad/s — 3x past the ceiling the UPSAMPLER can actually
+        emit (ros_backend streams max_step_rad per 250 Hz tick), so the extra
+        would not reach the arm as motion; it would accumulate as command-vs-
+        measured lag, which is the exact stiffness the 30 Hz sub-stepping exists
+        to remove. Scaling the gate by dt/self.dt keeps the rate invariant, so
+        the line search below still means "one tick's worth of joint motion".
+
+        ``dt is None`` returns ``self.dq_step_max`` unmultiplied so the policy
+        path is bit-identical to the pre-sub-step controller, not merely equal
+        to within a float multiply by 1.0.
+        """
+        if dt is None:
+            return self.dt, self.dq_step_max
+        dt = float(dt)
+        # Reject non-finite/non-positive rather than clamping: dt drives a
+        # SAFETY cap, and a silently-substituted default would be a cap the
+        # caller never asked for. dt<=0 collapses the cap to zero (arm frozen),
+        # NaN makes every comparison False (cap effectively removed).
+        if not np.isfinite(dt) or dt <= 0.0:
+            raise ValueError(f"dt must be finite and positive, got {dt!r}")
+        return dt, self.dq_step_max * (dt / self.dt)
 
     def _integrate(self, v: np.ndarray, w: np.ndarray) -> np.ndarray:
         """T_cmd + (v, w) in WORLD/base frame, FrankaEnv semantics.
@@ -115,17 +165,62 @@ class PolicyDeltaController:
         dw = so3_log(T_des[:3, :3] @ self.T_cmd[:3, :3].T)
         return dp, dw
 
-    def step(self, xi: np.ndarray) -> Tuple[np.ndarray, dict]:
-        """One control tick. Returns (q_cmd, info); HOLDs on any doubt."""
+    def step(
+        self, xi: np.ndarray, dt: Optional[float] = None
+    ) -> Tuple[np.ndarray, dict]:
+        """One control tick. Returns (q_cmd, info); HOLDs on any doubt.
+
+        ``dt`` — length of THIS tick in seconds, for the governor's rate cap
+        and the joint-step gate. ``None`` (the default, and what UR7eEnv.step
+        passes at ur7e_env.py:494) means the nominal ``1/hz``, handled so the
+        policy path stays bit-identical to before this parameter existed.
+        The 30 Hz intervention sub-step driver passes ``dt=1/30``.
+
+        WHY THE CALLER PASSES dt INSTEAD OF THE CONTROLLER MEASURING IT.
+        A ``time.monotonic()`` diff inside step() looks strictly better and is
+        wrong here, because the governor is a hardware safety net (config.py:79-90)
+        and wall-clock dt makes that net a function of unrelated load:
+
+        * Real steps have been measured stretching to ~1.12 s under learner
+          contention (CLAUDE.md; the 0.6 s Step-RPC deadline blew past). A
+          measured dt of 1.12 s would hand that tick a 0.168 m / 0.84 rad cap —
+          11x the intended budget — precisely when the system is least healthy.
+        * Jitter the other way silently CUTS policy actions that used to pass,
+          so identical (obs, action) pairs would produce different motion run to
+          run and the stored-action invariant (config.py:55-63) would break in a
+          way no log could explain.
+
+        Explicit dt keeps the cap a property of the control schedule the caller
+        actually implements, and keeps it reproducible in replay.
+        """
         assert self.T_cmd is not None, "call reset() before step()"
-        info = {"held": False, "reject_reason": None, "clipped": False}
+        # governed/governed_scale: the governor used to shrink actions with no
+        # trace at all — `scale` was computed and dropped on the floor, and
+        # info["clipped"] covers only the workspace box, a DIFFERENT gate. A
+        # silently rate-capped action is the same undiagnosable failure as a
+        # silently clamped one (ur7e_env.py:452-456): big action, little motion,
+        # nothing in the reward to explain it. It is also the only observable
+        # for the ACTION_SCALE*HZ < v_max/w_max headroom invariant
+        # (config.py:55-63) being violated at run time, i.e. for the stored
+        # transitions overstating the motion that actually happened.
+        # These are ADDITIVE: held/reject_reason/clipped keep their exact
+        # meaning, and ur7e_env.step's info.update(ctrl_info) forwards the new
+        # keys unchanged.
+        info = {
+            "held": False,
+            "reject_reason": None,
+            "clipped": False,
+            "governed": False,
+            "governed_scale": 1.0,
+        }
+        dt, dq_step_max = self._resolve_dt(dt)
 
         xi = np.asarray(xi, dtype=float).reshape(6)
         if not np.all(np.isfinite(xi)):
             return self._hold(info, "BAD_INPUT")
 
         # ---- governor: per-tick rate cap in task space ---- #
-        v, w, _ = self._govern(xi[:3].copy(), xi[3:].copy())
+        v, w, scale_req = self._govern(xi[:3].copy(), xi[3:].copy(), dt)
 
         # ---- WORLD-frame increment, FrankaEnv semantics ---- #
         T_des = self._integrate(v, w)
@@ -172,9 +267,18 @@ class PolicyDeltaController:
         # the return into a rate-limited approach at v_max/w_max instead of one
         # unbounded lunge.
         v, w = self._net(T_des)
-        v, w, scale = self._govern(v, w)
-        if scale < 1.0:
+        v, w, scale_net = self._govern(v, w, dt)
+        if scale_net < 1.0:
             T_des = self._integrate(v, w)
+
+        # Report the TIGHTER of the two governor passes. Both are the same rate
+        # cap: the first bounds what the policy/leader asked for, the second
+        # bounds the post-clamp net step (only ever binds when T_cmd starts
+        # outside the box, see above). The line search below is deliberately NOT
+        # folded in — that is the joint-step gate, a different limit, whose
+        # terminal case already reports reject_reason="STEP_LIMIT".
+        info["governed_scale"] = float(min(scale_req, scale_net))
+        info["governed"] = info["governed_scale"] < 1.0
 
         # ---- IK, seeded at previous command (branch continuity via seed) ---- #
         q_sol = ik_numeric(T_des, self.q_cmd)
@@ -202,10 +306,14 @@ class PolicyDeltaController:
         # never converge — the arm would freeze at the wall instead of sliding
         # along it. Shrinking the net step interpolates toward T_cmd, which is
         # inside the box, so no re-clip is needed inside the loop.
+        #
+        # dq_step_max here is the dt-SCALED budget from _resolve_dt (identical
+        # to self.dq_step_max on the dt=None policy path); see that docstring
+        # for why a shorter tick must get a proportionally smaller joint step.
         for _ in range(3):
-            if float(np.max(np.abs(q_sol - self.q_cmd))) <= self.dq_step_max:
+            if float(np.max(np.abs(q_sol - self.q_cmd))) <= dq_step_max:
                 break
-            s = 0.9 * self.dq_step_max / float(np.max(np.abs(q_sol - self.q_cmd)))
+            s = 0.9 * dq_step_max / float(np.max(np.abs(q_sol - self.q_cmd)))
             v, w = v * s, w * s
             T_des = self._integrate(v, w)
             q_sol = ik_numeric(T_des, self.q_cmd)
@@ -221,6 +329,13 @@ class PolicyDeltaController:
         return q_sol.copy(), info
 
     def _hold(self, info: dict, reason: str):
+        """HOLD: re-issue the previous command, unchanged.
+
+        Leaves governed/governed_scale as recorded: they describe what the rate
+        cap did to the REQUEST, which is still the truth even though the tick
+        ended in a HOLD. Consumers read `held` first — it means no new command
+        was issued at all.
+        """
         info["held"] = True
         info["reject_reason"] = reason
         return self.q_cmd.copy(), info

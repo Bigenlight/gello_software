@@ -38,6 +38,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from ur_env.envs.config import DefaultUR7eEnvConfig
+from ur_env.envs.leader_stream import NOMINAL_CONTROL_HZ
 from ur_env.envs.policy_delta_controller import PolicyDeltaController
 
 
@@ -170,6 +171,45 @@ class UR7eEnv(gym.Env):
         self.terminate = False
         self.fake_env = fake_env
         self._hold_next_action_reason = None
+
+        # ---- human-intervention substepping (see step / config.INTERVENTION) --
+        # A ONE-SHOT driver object installed by GelloIntervention immediately
+        # before each intervened step and consumed by that step.  ``None`` is
+        # the POLICY path and must stay byte-for-byte the pre-change behaviour:
+        # one target per window plus one sleep.  Declared before the fake_env
+        # early return so the attribute always exists.
+        self._intervention_driver = None
+        intervention_cfg = getattr(self.config, "INTERVENTION", None) or {}
+        #: Public because GelloIntervention reads it as the single authority on
+        #: the substep rate (its leader filter's output period and its budget are
+        #: both defined by it).  0.0 = feature off, i.e. the pre-substep path.
+        self.intervention_substep_hz = float(
+            intervention_cfg.get("substep_hz", 0.0)
+        )
+        if self.intervention_substep_hz > 0.0:
+            if self.intervention_substep_hz <= self.hz:
+                print(
+                    f"[UR7eEnv] NOTE: INTERVENTION substep_hz "
+                    f"({self.intervention_substep_hz}) does not exceed HZ "
+                    f"({self.hz}) — no substep fits inside a step window, so "
+                    "in-window leader resampling is effectively DISABLED"
+                )
+            elif abs(self.hz - NOMINAL_CONTROL_HZ) > 1e-9:
+                # GelloIntervention rations each substep's request with
+                # InterventionBudget.nominal_substep_share, which divides the
+                # window budget by substep_hz/NOMINAL_CONTROL_HZ.  Off-nominal HZ
+                # makes that share describe a window length this env does not
+                # have: too small a share under-delivers the window budget (the
+                # arm lags the leader), too large a one exhausts it early (the
+                # window goes quiet).  Warn rather than silently adjust — which
+                # of the two rates is wrong is a task decision.
+                print(
+                    f"[UR7eEnv] WARNING: HZ ({self.hz}) differs from the "
+                    f"nominal control rate ({NOMINAL_CONTROL_HZ}) that the "
+                    "intervention budget's per-substep share is defined against "
+                    "— in-window leader resampling will mis-ration this task's "
+                    "window budget"
+                )
 
         if fake_env:
             return
@@ -399,7 +439,7 @@ class UR7eEnv(gym.Env):
             ]
         )
 
-    def _apply_action(self, action: np.ndarray) -> dict:
+    def _apply_action(self, action: np.ndarray, driver=None) -> dict:
         """Action post-processing + dispatch: scale -> governor/box/IK gates ->
         publish arm and gripper commands. Returns the controller info dict
         (held / reject_reason / clipped).
@@ -410,6 +450,36 @@ class UR7eEnv(gym.Env):
         integrator state (see PolicyDeltaController.step for the anti-windup
         argument). ``self._clip_command_pose`` is the hook — this env still
         owns the box, the controller just asks it per tick.
+
+        ``driver`` is the human-intervention substep driver, or None on the
+        policy path.  Two things change when one is present, and only then:
+
+        * the first target is CHARGED against the window's displacement budget;
+        * it is governed over ONE SUBSTEP (``dt = 1/substep_hz``) instead of the
+          whole window.
+
+        INVARIANT 1 (buffer correctness — why the charge is not optional).  A
+        stored intervention action must stay inside [-1,1]^7 and must describe
+        the motion that actually ran (serl_ur_infra/README.md:197-205,
+        config.ACTION_SCALE:55-73).  The substeps after this one keep commanding
+        motion inside the SAME env step, so without a single shared budget the
+        window's total displacement would exceed one ACTION_SCALE step and the
+        recorded action would saturate at 1.0 while the arm kept moving — i.e.
+        storage would silently UNDER-report the executed motion.  The first
+        target is part of that total, so it draws from the same budget.
+
+        INVARIANT 2 (the three-layer speed ratio, config.py:65-72 — why ``dt``).
+        The governor caps per-tick motion at ``v_max * dt``.  Passing the full
+        ``1/HZ`` here and ``1/substep_hz`` to the substeps would let one window
+        through 0.0150 + 2*0.0050 = 0.0250 m of governor headroom instead of
+        0.0150 m: a 1.67x widening of the intervention path's rate ceiling.
+        Today the budget (0.0125 m) binds first so nothing visibly breaks, but
+        that would quietly promote the budget from "buffer correctness" to "the
+        only thing holding the three-layer contract together" — and the contract
+        has to survive the budget being relaxed.  One consistent rate accounting
+        for the whole window is the fix.  ``dt`` also scales ``dq_step_max``
+        proportionally inside the controller, so the joint-step gate tightens
+        with it rather than being left at a full-window budget.
         """
         if self._hold_next_action_reason is not None:
             reason = self._hold_next_action_reason
@@ -419,7 +489,13 @@ class UR7eEnv(gym.Env):
             return {"held": True, "reject_reason": reason, "clipped": False}
 
         xi = self._action_to_xi(action)
-        q_cmd, ctrl_info = self.controller.step(xi)
+        if driver is None:
+            # POLICY PATH: bare step(), no dt — bit-identical to before.
+            q_cmd, ctrl_info = self.controller.step(xi)
+        else:
+            q_cmd, ctrl_info = self.controller.step(
+                driver.charge(xi), dt=1.0 / self.intervention_substep_hz
+            )
         self.backend.send_joint_command(q_cmd)
         self._send_gripper_command(action[6] * self.action_scale[2])
         return ctrl_info
@@ -428,17 +504,159 @@ class UR7eEnv(gym.Env):
         """Make the next real step brake the command stream and re-anchor it."""
         self._hold_next_action_reason = str(reason)
 
+    # ------------------------------------------------------------------ #
+    # human intervention: 30 Hz leader resampling inside the step window  #
+    # ------------------------------------------------------------------ #
+    def begin_intervention_window(self, driver) -> None:
+        """Install a ONE-SHOT substep driver for the NEXT ``step`` call.
+
+        ``GelloIntervention`` calls this just before ``env.step`` whenever it is
+        executing a human action (see ur_env/envs/wrappers.py).  The driver is
+        consumed and cleared at the top of ``step``, so it can never survive
+        into a policy step even if the caller forgets — the policy path has to
+        stay bit-identical, and "a leftover driver" would be an invisible way to
+        break that.
+
+        The driver protocol (implemented by GelloIntervention, which owns the
+        anchored-leader maths this env deliberately knows nothing about):
+
+            driver.charge(xi) -> xi
+                Draw this window's FIRST target from the displacement budget.
+            driver.substep(dt) -> dict
+                Re-read the leader, recompute the anchored delta, draw from the
+                budget and issue the joint command.  Returns the substep's
+                controller info plus the keys ``issued`` (bool: was a target
+                actually refreshed), ``stop`` (None or a reason string ending
+                the window) and ``brake`` (bool: the command stream must be
+                braked and re-anchored right now).
+            driver.consumed_window_action() -> (7,)
+                The normalized action the whole window actually executed.
+        """
+        self._intervention_driver = driver
+
+    def _drive_intervention_substeps(self, driver, window_end: float) -> dict:
+        """Replace the step window's single sleep with paced leader resampling.
+
+        WHY INSIDE THE WINDOW, rather than as more env steps.  The 100 ms sleep
+        is dead time by construction: the target has already been set and the
+        backend's 250 Hz upsampler (ur_env/envs/ros_backend.py:665-706) is the
+        only thing still working.  Its slew/acceleration limits mean it reaches
+        a single 100 ms-old target early and then publishes a HOLD for the rest
+        of the window — measured 16% (nominal) to 40% (real 0.197 s period)
+        fully-stopped time at a 0.15 rad/s leader.  Shortening the env step
+        instead is not an option: the step period is what ACTION_SCALE, the
+        governor caps and the whole stored-transition contract are calibrated
+        against, and the actor's RPC sits in the same loop.  So the fix is to
+        keep one env step == one transition and simply stop wasting the sleep.
+        Nothing in ``ros_backend`` needed changing for this:
+        ``send_joint_command`` is a short-lock last-write-wins target update
+        (ros_backend.py:617-631) and ``_upsample_loop`` is indifferent to how
+        often the target moves.
+
+        Returns the extra ctrl_info this window produced.  Booleans are OR-ed
+        across substeps because they are operator/log signals ("did anything
+        get clamped/held in this window at all"), not per-tick state.
+        """
+        period = 1.0 / self.intervention_substep_hz
+        extra: Dict[str, object] = {"intervention_substeps": 0}
+        # window_end - 1/hz is the step's start instant; the first substep sits
+        # one period after the target _apply_action already issued.
+        next_tick = window_end - (1.0 / self.hz) + period
+
+        # Only refresh the target while at least half a substep period is left:
+        # a refresh microseconds before the window closes cannot change what the
+        # upsampler does, and float accumulation of `period` makes an exact
+        # `< window_end` test emit exactly such a degenerate tick.
+        while next_tick < window_end - 0.5 * period:
+            now = time.time()
+            if now < next_tick:
+                time.sleep(next_tick - now)
+            result = driver.substep(period)
+
+            if result.get("issued"):
+                extra["intervention_substeps"] = (
+                    int(extra["intervention_substeps"]) + 1
+                )
+            for key in ("held", "clipped"):
+                if result.get(key):
+                    extra[key] = True
+            if result.get("reject_reason"):
+                extra["reject_reason"] = result["reject_reason"]
+
+            stop = result.get("stop")
+            if stop:
+                extra.setdefault("reject_reason", stop)
+                if result.get("brake"):
+                    # The leader died mid-window.  Same two lines as the
+                    # _hold_next_action_reason branch of _apply_action, and for
+                    # the same reason: request_hold() replaces the goal with its
+                    # acceleration-limited stop point, and controller.reset()
+                    # re-anchors the task-space integrator there so T_cmd cannot
+                    # keep a phantom excursion the arm never made.
+                    q_hold = self.backend.request_hold()
+                    self.controller.reset(q_hold)
+                    extra["held"] = True
+                    extra["intervention_window_braked"] = True
+                break
+            next_tick += period
+
+        # Sleep out whatever is left, so the env step period is unchanged.
+        time.sleep(max(0.0, window_end - time.time()))
+
+        # HARVEST, and only if a substep really refreshed the target.  With zero
+        # substeps the window executed exactly the one action _apply_action was
+        # given, so reporting nothing here makes the wrapper fall back to that
+        # action and the record stays bit-identical to the pre-change code.
+        #
+        # This is harvested HERE — after the window closes, before
+        # _update_currpos/_get_obs below — because the total displacement of an
+        # intervened window is only known once the window ends.  That is exactly
+        # why the executed action cannot be produced by the gym ActionWrapper
+        # convention (``action()`` returning the final action before step runs);
+        # see the note in GelloIntervention.step.  Harvesting at this point
+        # keeps (obs_k, action_k, obs_{k+1}) aligned: obs_{k+1} is read next.
+        if extra.get("intervention_window_braked"):
+            # A window whose leader died is a HOLD window, recorded as the exact
+            # zero action — the same rule GelloIntervention.action applies when
+            # the leader is already unusable when the window opens.  Reporting
+            # the fraction that escaped before the brake would instead teach the
+            # learner a human command that no human issued, and the brake has
+            # already cut whatever motion was in flight.  The escaped motion is
+            # bounded by this window's budget either way.
+            extra["intervention_window_action"] = np.zeros(7, dtype=np.float32)
+        elif int(extra["intervention_substeps"]) >= 1:
+            extra["intervention_window_action"] = driver.consumed_window_action()
+        return extra
+
     def step(self, action: np.ndarray) -> tuple:
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
+        # Consume the one-shot intervention driver (None on the policy path).
+        driver = self._intervention_driver
+        self._intervention_driver = None
+
         ctrl_info = {}
         if not self.fake_env:
-            ctrl_info = self._apply_action(action)
+            ctrl_info = self._apply_action(action, driver=driver)
 
         self.curr_path_length += 1
-        dt = time.time() - start_time
-        time.sleep(max(0, (1.0 / self.hz) - dt))
+        # POLICY PATH — unchanged, and required to stay unchanged: one target,
+        # one sleep, one ``controller.step(xi)`` without ``dt``.  A held first
+        # tick also comes here, so an EXTERNAL_HOLD / NO_IK / STEP_LIMIT window
+        # stays held for its whole duration instead of being un-held by a
+        # substep (and controller.reset() has just moved T_cmd out from under
+        # the wrapper's anchor, which a substep must not chase).
+        if driver is None or self.fake_env or ctrl_info.get("held"):
+            dt = time.time() - start_time
+            time.sleep(max(0, (1.0 / self.hz) - dt))
+        else:
+            ctrl_info = dict(ctrl_info)
+            ctrl_info.update(
+                self._drive_intervention_substeps(
+                    driver, start_time + (1.0 / self.hz)
+                )
+            )
 
         self._update_currpos()
         ob = self._get_obs()
