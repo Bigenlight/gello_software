@@ -88,9 +88,9 @@ def test_cli_defaults_pin_the_reward_contract_without_smoothing(tmp_path):
         args.expected_classifier_sha256
         == _MODULE.DEFAULT_CLASSIFIER_CHECKPOINT_SHA256
     )
-    # The 0.2 threshold was chosen on FP/FN cost asymmetry and is out of scope
-    # for the sidecar change; a silent move here would change every reward.
-    assert args.reward_threshold == pytest.approx(0.2)
+    # This is part of the reward definition; a silent move changes every reward
+    # and intentionally breaks the learner fingerprint.
+    assert args.reward_threshold == pytest.approx(0.5)
     _MODULE._validate_args(args)
 
 

@@ -121,9 +121,9 @@ def test_cli_defaults_pin_the_reward_contract_without_smoothing(monkeypatch):
     assert args.success_confirmations == 1
     assert args.expected_checkpoint_sha256 == _MODULE.DEFAULT_CHECKPOINT_SHA256
     assert args.reward_model_id == _MODULE.DEFAULT_REWARD_MODEL_ID
-    # The threshold decision (FP/FN cost asymmetry) is independent of this
-    # change and must not have moved.
-    assert args.threshold == pytest.approx(0.2)
+    # The production threshold is part of the reward definition and must not
+    # drift independently of the learner entrypoint.
+    assert args.threshold == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])

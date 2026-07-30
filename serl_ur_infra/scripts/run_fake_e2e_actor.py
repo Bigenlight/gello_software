@@ -138,6 +138,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 timestamp_ns=timestamp,
                 policy_version=action.policy_version,
                 policy_action=action.action,
+                # This headless acceptance tool exercises the legacy
+                # classifier-authoritative path explicitly; the real GUI actor
+                # starts in MANUAL and selects this value per transition.
+                auto_success=True,
                 episode_id=index,
                 step_id=0,
                 observation_id=observation_id,

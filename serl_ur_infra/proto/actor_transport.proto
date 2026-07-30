@@ -99,6 +99,11 @@ message Meta {
   uint64 policy_version = 8;
   repeated float policy_action = 9;
   bool intervened = 10;
+  // Reward-mode snapshot selected by the operator for this transition.
+  // auto_success=false is MANUAL; true enables classifier success authority.
+  bool auto_success = 11;
+  // One-shot GUI success assertion.  It is invalid while auto_success=true.
+  bool operator_success = 12;
 }
 
 message Transition {

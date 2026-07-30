@@ -78,8 +78,9 @@ class _ServerSuccessThenLocalDoneEnv:
 
 
 class _InProcessNetwork:
-    def __init__(self, service):
+    def __init__(self, service, *, auto_success=False):
         self._service = service
+        self._auto_success = bool(auto_success)
         self._run_id = ""
         self._session_id = ""
         self._request_id = 1
@@ -125,6 +126,11 @@ class _InProcessNetwork:
         deterministic=False,
     ):
         self._clock += 1
+        # This test double can explicitly emulate the GUI's AUTO mode.  The
+        # real actor obtains the same per-transition value from its operator
+        # session; MANUAL remains the production default.
+        if self._auto_success:
+            data["meta"]["auto_success"] = True
         result = self._service.step(
             StepCommand(
                 PROTOCOL_VERSION,
@@ -184,7 +190,7 @@ def test_actor_resets_on_server_classifier_success_and_keeps_final_values(
     env = _ServerSuccessThenLocalDoneEnv()
 
     summary = run_remote_actor(
-        _InProcessNetwork(service),
+        _InProcessNetwork(service, auto_success=True),
         env,
         config=SimpleNamespace(max_steps=2, random_steps=0, buffer_period=1),
         actor_id="actor",

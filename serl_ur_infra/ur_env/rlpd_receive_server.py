@@ -58,21 +58,15 @@ DEFAULT_INTERVENTION_CAPACITY = 10_000
 # cross-validation fold on the newer 0724 domain goes 44.3% -> 65.7% between
 # 0.85 and 0.5, an order of magnitude above the 2.8pp retrain seed noise.
 #
-# 0.2 is a deliberate asymmetry call, not a margin-maximising one.  In sparse
-# binary HIL-SERL reward a false positive is unrecoverable (the policy is
-# rewarded for failing) while a false negative merely wastes an episode and can
-# be supplied by the human operator, so recall is bought with margin knowingly.
-# Cost of the buy: the highest-scoring held-out failure frame is 0.0858 on this
-# checkpoint (2.33x headroom) but 0.1428 on the worst checkpoint measured
-# (1.40x).  All six checkpoints peak on the SAME frame -- take_11_20260720_205805
-# frame 195, ~0.2 s before the cube is released -- so the headroom argument
-# rests on a single boundary frame and will need re-checking once the incoming
-# success/failure footage lands.
+# 0.5 is the current conservative deployment point.  It preserves the measured
+# 0% held-out false-positive rate while restoring more margin above the hardest
+# known negative than the previous 0.2 setting.  The full measurements and the
+# decision history remain in REWARD_CLASSIFIER_THRESHOLD_KO.md.
 #
 # This value feeds the learner fingerprint, so changing it breaks resume of
 # checkpoints trained under the old value.
 # See REWARD_CLASSIFIER_THRESHOLD_KO.md.
-DEFAULT_REWARD_THRESHOLD = 0.2
+DEFAULT_REWARD_THRESHOLD = 0.5
 
 
 class ReceiveRuntimeError(RuntimeError):
@@ -113,6 +107,14 @@ def _finite_float(value: Any, *, name: str) -> float:
     if not math.isfinite(result):
         raise ActorProtocolError(f"{name} must be finite")
     return result
+
+
+def _binary_flag(value: Any, *, name: str) -> bool:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value not in (False, True, 0, 1):
+        raise ActorProtocolError(f"{name} must be 0 or 1")
+    return bool(value)
 
 
 def _required_text(value: Any, *, name: str) -> str:
@@ -659,11 +661,9 @@ class RewardTransitionFinalizer:
 
     THE UNCLASSIFIED TRANSITION, FIELD BY FIELD
     -------------------------------------------
-    ``rewards``      forced to 0.0.  This is the conservative extension of
-                     "reward authority lives on the server": with no
-                     classification there is no evidence of success, so there is
-                     no positive reward.  The locally proposed reward is
-                     discarded exactly as it already is on classified steps.
+    ``rewards``      forced to 0.0 unless MANUAL carries an explicit one-shot
+                     operator success.  No classifier result means AUTO has no
+                     evidence of success; local proposed reward is discarded.
     ``masks``        the local proposal is preserved, which is what keeps the
                      mask/done consistency check in ``ReplayIngress._convert``
                      (masks == 0.0 iff dones) satisfied without special-casing.
@@ -680,10 +680,9 @@ class RewardTransitionFinalizer:
                      unevaluated (``actor_network._validate_finalized_``
                      ``transition``, ``grpc_actor_transport.outcome_from_proto``).
 
-    Net effect on learning: an unclassified transition is an ordinary
-    zero-reward, non-terminal sample.  The only thing it cannot do is END an
-    episode with a positive reward, which is precisely the authority we want to
-    withhold from a step nobody classified.
+    Net effect on learning: an unclassified AUTO transition is an ordinary
+    zero-reward sample.  In MANUAL, an operator success may still end it with a
+    positive reward; classifier telemetry remains explicitly unevaluated.
     """
 
     def __init__(
@@ -740,6 +739,17 @@ class RewardTransitionFinalizer:
         transition_id = _required_text(
             meta.get("transition_id"), name="meta.transition_id"
         )
+        auto_success = _binary_flag(
+            meta.get("auto_success", False), name="meta.auto_success"
+        )
+        operator_success = _binary_flag(
+            meta.get("operator_success", False),
+            name="meta.operator_success",
+        )
+        if auto_success and operator_success:
+            raise ActorProtocolError(
+                "meta.operator_success is forbidden while auto_success is enabled"
+            )
         if "next_observations" not in transition:
             # Still required, even though it is no longer what gets classified:
             # ActorSessionService attaches it and ReplayIngress needs it, so its
@@ -755,7 +765,7 @@ class RewardTransitionFinalizer:
         if classifier_sidecar is None:
             probability = 0.0
             threshold = 0.0
-            success = False
+            classifier_success = False
             evaluated = False
             reward_model_id = ""
         else:
@@ -775,21 +785,23 @@ class RewardTransitionFinalizer:
                     f"classifier sidecar decode failed: {exc}"
                 ) from exc
             result = self.classifier.classify(frames)
-            probability, success = self._confirm(result)
+            probability, classifier_success = self._confirm(result)
             threshold = float(result.threshold)
             evaluated = True
             reward_model_id = _required_text(
                 result.reward_model_id, name="classifier.reward_model_id"
             )
 
-        # Reward is server-authoritative in both directions.  Local may propose
-        # episode terminal/truncation semantics, but it cannot inject a positive
-        # reward — neither past a negative classifier verdict nor past the
-        # absence of one.
-        transition["rewards"] = 1.0 if success else 0.0
-        if success:
-            # Classifier success wins if the local time limit happened on this
-            # same observation, matching basic HIL-SERL one-positive behavior.
+        # Reward remains server-authoritative.  The server accepts only the
+        # protected one-shot operator assertion in MANUAL or its own classifier
+        # verdict in AUTO; arbitrary locally proposed reward is discarded.
+        effective_success = operator_success or (
+            auto_success and classifier_success
+        )
+        transition["rewards"] = 1.0 if effective_success else 0.0
+        if effective_success:
+            # An effective success wins if the local time limit happened on
+            # this same observation, matching one-positive HIL-SERL behavior.
             transition["masks"] = 0.0
             transition["dones"] = True
             transition["truncated"] = False
@@ -804,7 +816,8 @@ class RewardTransitionFinalizer:
         transition["classifier_evaluated"] = np.uint8(evaluated)
         transition["classifier_probability"] = float(probability)
         transition["classifier_threshold"] = float(threshold)
-        transition["classifier_success"] = np.uint8(success)
+        transition["classifier_success"] = np.uint8(classifier_success)
+        transition["success"] = np.uint8(effective_success)
         transition["reward_model_id"] = reward_model_id
 
         self._end_transition(
@@ -817,7 +830,7 @@ class RewardTransitionFinalizer:
             mask=mask,
             done=done,
             truncated=truncated,
-            success=success,
+            success=effective_success,
             classifier_evaluated=evaluated,
             classifier_probability=probability,
             classifier_threshold=threshold,
@@ -960,6 +973,9 @@ class IngressRecord:
     observation_id: str
     next_observation_id: str
     reward_model_id: str
+    auto_success: bool
+    operator_success: bool
+    success: bool
     env_step: int
     episode_id: int
     step_id: int
@@ -1057,6 +1073,9 @@ class ReplayIngress:
         "classifier_probability": ((), np.float32),
         "classifier_threshold": ((), np.float32),
         "classifier_success": ((), np.uint8),
+        "auto_success": ((), np.uint8),
+        "operator_success": ((), np.uint8),
+        "success": ((), np.uint8),
         "has_grasp_penalty": ((), np.uint8),
         "grasp_penalty": ((), np.float32),
     }
@@ -1455,6 +1474,9 @@ class ReplayIngress:
                     "observation_id": record.observation_id,
                     "next_observation_id": record.next_observation_id,
                     "reward_model_id": record.reward_model_id,
+                    "auto_success": record.auto_success,
+                    "operator_success": record.operator_success,
+                    "success": record.success,
                     "env_step": record.env_step,
                     "episode_id": record.episode_id,
                     "step_id": record.step_id,
@@ -1538,6 +1560,17 @@ class ReplayIngress:
             raise ActorProtocolError(
                 "intervention route does not match meta.intervened"
             )
+        auto_success = _binary_flag(
+            meta.get("auto_success", False), name="meta.auto_success"
+        )
+        operator_success = _binary_flag(
+            meta.get("operator_success", False),
+            name="meta.operator_success",
+        )
+        if auto_success and operator_success:
+            raise ActorProtocolError(
+                "meta.operator_success is forbidden while auto_success is enabled"
+            )
 
         observation = validate_canonical_observation(
             source.get("observations"), copy=True
@@ -1579,6 +1612,9 @@ class ReplayIngress:
             name="transition.classifier_threshold",
         )
         classifier_success = bool(source.get("classifier_success", False))
+        success = _binary_flag(
+            source.get("success"), name="transition.success"
+        )
         reward_model_id = source.get("reward_model_id", "")
         if not isinstance(reward_model_id, str):
             raise ActorProtocolError("transition.reward_model_id must be a string")
@@ -1606,6 +1642,24 @@ class ReplayIngress:
         elif classifier_success or probability != 0.0 or threshold != 0.0:
             raise ActorProtocolError(
                 "unevaluated transition cannot carry classifier results"
+            )
+
+        effective_success = operator_success or (
+            auto_success and classifier_success
+        )
+        if success != effective_success:
+            raise ActorProtocolError(
+                "transition.success does not match operator_success OR "
+                "(auto_success AND classifier_success)"
+            )
+        expected_reward = 1.0 if success else 0.0
+        if reward != expected_reward:
+            raise ActorProtocolError(
+                f"transition.rewards must be {expected_reward} for success={success}"
+            )
+        if success and (not done or truncated or mask != 0.0):
+            raise ActorProtocolError(
+                "successful transition must be done, not truncated, with mask 0"
             )
 
         has_grasp_penalty = "grasp_penalty" in source
@@ -1655,6 +1709,9 @@ class ReplayIngress:
                 name="transition.next_observation_id",
             ),
             reward_model_id=reward_model_id,
+            auto_success=auto_success,
+            operator_success=operator_success,
+            success=success,
             env_step=env_step,
             episode_id=episode_id,
             step_id=step_id,
@@ -1689,6 +1746,9 @@ class ReplayIngress:
             "classifier_probability": np.float32(probability),
             "classifier_threshold": np.float32(threshold),
             "classifier_success": np.uint8(classifier_success),
+            "auto_success": np.uint8(auto_success),
+            "operator_success": np.uint8(operator_success),
+            "success": np.uint8(success),
             "has_grasp_penalty": np.uint8(has_grasp_penalty),
             "grasp_penalty": np.float32(grasp_penalty),
         }

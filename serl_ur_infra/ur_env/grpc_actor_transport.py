@@ -137,6 +137,8 @@ def data_to_proto(data: Mapping[str, Any]) -> pb.Data:
             ),
             policy_action=[float(value) for value in np.asarray(meta.get("policy_action")).flat],
             intervened=bool(meta.get("intervened")),
+            auto_success=bool(meta.get("auto_success", False)),
+            operator_success=bool(meta.get("operator_success", False)),
         ),
         transition=pb.Transition(
             episode_id=validate_counter(
@@ -169,6 +171,8 @@ def data_from_proto(message: pb.Data) -> dict[str, Any]:
             "policy_version": int(message.meta.policy_version),
             "policy_action": np.asarray(message.meta.policy_action, dtype=np.float32),
             "intervened": int(message.meta.intervened),
+            "auto_success": bool(message.meta.auto_success),
+            "operator_success": bool(message.meta.operator_success),
         },
         "transition": {
             "episode_id": int(message.transition.episode_id),
@@ -283,11 +287,7 @@ def _validate_transition_outcome(
             raise ActorProtocolError(
                 "outcome.reward_model_id is required after classifier evaluation"
             )
-        if success != (probability > threshold):
-            raise ActorProtocolError(
-                "outcome.success must use strict probability > threshold"
-            )
-    elif success or probability != 0.0 or threshold != 0.0 or outcome.reward_model_id:
+    elif probability != 0.0 or threshold != 0.0 or outcome.reward_model_id:
         raise ActorProtocolError(
             "unevaluated classifier outcome must not carry classifier results"
         )
@@ -726,6 +726,25 @@ class GrpcActorNetwork:
                 reply.outcome,
                 expected_transition_id=expected_ack[0],
             )
+            auto_success = bool(request.data.meta.auto_success)
+            operator_success = bool(request.data.meta.operator_success)
+            if auto_success and operator_success:
+                raise ActorProtocolError(
+                    "operator_success is forbidden while auto_success is enabled"
+                )
+            classifier_success = bool(
+                outcome.classifier_evaluated
+                and outcome.classifier_probability
+                > outcome.classifier_threshold
+            )
+            expected_success = operator_success or (
+                auto_success and classifier_success
+            )
+            if outcome.success != expected_success:
+                raise ActorProtocolError(
+                    "outcome.success does not match operator_success OR "
+                    "(auto_success AND classifier_success)"
+                )
             if (
                 outcome.classifier_evaluated
                 and self._server_info is not None
