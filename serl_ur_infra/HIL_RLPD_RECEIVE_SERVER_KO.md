@@ -219,8 +219,14 @@ classifier의 **분류 성능(recall·FPR)은 검증하지 않았다.** load 성
 - 검증 batch image shape: `(8, 2, 128, 128, 3)`
 - 검증 batch state shape: `(8, 1, 19)`
 - 로컬 전체 test suite: 74 passed — **이 milestone 시점의 개수다.** 통합 브랜치의
-  현재 기준선은 `serl_ur_infra/tests` 전체에서 **333 passed / 11 skipped**다
-  (2026-07-29 laptop3 실행 확인). 74와 비교해 회귀 여부를 판단하지 않는다.
+  현재 기준선은 `serl_ur_infra/tests` 전체에서 **429 passed / 11 skipped**다
+  (2026-07-30 laptop3 실행 확인, actor venv 기준). 74와 비교해 회귀 여부를 판단하지 않는다.
+  이력: `333`(07-29) → `337`(`40b99f8`) → **`429`**(분류기 사이드카). 옛 판에 적힌 333을
+  현재 기준선으로 인용하지 말 것.
+  **🪤 인터프리터에 따라 수가 달라진다** — `/home/laptop3/venvs/hilserl/bin/python`으로
+  돌리면 jax가 있어 **464 passed / 4 skipped**다(35개가 더 실행된다). 위 429는
+  `gello-hil-actor` venv 기준이고, 어느 쪽이든 **skipped 수가 기준선과 다르면
+  PYTHONPATH를 잘못 준 것**이다.
 
 검증 후 server와 SSH tunnel은 정상 종료해 그날 쓰던 GPU와 port 50053을 반환했다.
 당시 전용 worktree와 overlay를 재실행용으로 남겨두었지만 둘 다 `/tmp`이므로
