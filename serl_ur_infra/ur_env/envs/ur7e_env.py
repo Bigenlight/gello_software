@@ -1112,11 +1112,37 @@ class UR7eEnv(gym.Env):
             raw = np.concatenate(
                 [sum_p / self.action_scale[0], sum_w / self.action_scale[1]]
             )
-            out["intervention_committed_action"] = np.clip(
-                raw, -1.0, 1.0
-            ).astype(np.float32)
-            out["intervention_saturation"] = float(np.max(np.abs(raw)))
-            out["intervention_saturated"] = bool(np.any(np.abs(raw) > 1.0))
+            # PROPORTIONAL (norm) shrink, NOT a per-axis np.clip.  Two reasons,
+            # and the second one is a crash we actually hit on the real rig:
+            #
+            #  1. Direction.  An axis-wise clip of a saturated diagonal bends
+            #     the recorded path ([2.0, 0.5] -> [1.0, 0.5]), which is the
+            #     same argument _expert_delta_xi makes for its own clamp.
+            #
+            #  2. RelativeFrame ROTATES this vector.  ``transform_action_inv``
+            #     applies blockdiag(R, R), which preserves each 3-vector's NORM
+            #     but not its per-component maximum.  A per-axis clip leaves a
+            #     norm of up to sqrt(3) = 1.73, so [1.0, 1.0, 0] can come out of
+            #     the rotation as [1.41, 0, 0] — outside [-1, 1].  That is
+            #     exactly the 2026-07-30 real-rig failure:
+            #     ``ActorProtocolError: executed_action must be within [-1, 1]``
+            #     raised by validate_action in remote_actor.build_data.
+            #     Shrinking by norm keeps norm <= 1, and a rotation of a
+            #     norm <= 1 vector still has every component in [-1, 1].
+            #
+            # The old budget path was safe for this reason too: its clamp was on
+            # the norm, so the invariant survived the frame change for free.
+            committed = raw.copy()
+            n_p = float(np.linalg.norm(committed[:3]))
+            n_w = float(np.linalg.norm(committed[3:]))
+            if n_p > 1.0:
+                committed[:3] = committed[:3] / n_p
+            if n_w > 1.0:
+                committed[3:] = committed[3:] / n_w
+            out["intervention_committed_action"] = committed.astype(np.float32)
+            # Saturation is reported on the NORMS, matching what was shrunk.
+            out["intervention_saturation"] = float(max(n_p, n_w))
+            out["intervention_saturated"] = bool(n_p > 1.0 or n_w > 1.0)
             out["intervention_follow_ticks"] = ticks
             # Namespaced rather than OR-ed into ``held``: ``held`` decides the
             # operator status line (remote_actor._control_state maps it to HOLD

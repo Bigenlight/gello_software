@@ -1293,3 +1293,60 @@ def test_two_threads_stepping_the_controller_keep_the_joint_gate(clock):
         for i in range(len(published) - 1)
     ]
     assert max(steps) <= budget * (1.0 + 1e-6), max(steps)
+
+
+# --------------------------------------------------------------------------- #
+# 12. the recorded action must survive RelativeFrame's rotation                #
+# --------------------------------------------------------------------------- #
+def test_the_committed_action_is_shrunk_by_norm_not_per_axis(clock):
+    """A per-axis clip leaves a norm of up to sqrt(3) — RelativeFrame breaks it.
+
+    ``RelativeFrame.transform_action_inv`` multiplies the 6-vector by a rotation
+    (``blockdiag(R, R)``).  A rotation preserves each 3-vector's NORM but not its
+    per-component maximum, so a per-axis ``np.clip`` to [-1, 1] can leave
+    ``[1.0, 1.0, 0]`` (norm 1.41) which the rotation turns into ``[1.41, 0, 0]``
+    — outside the action space.
+
+    That is not hypothetical: it crashed the real rig on 2026-07-30 with
+    ``ActorProtocolError: executed_action must be within [-1, 1]`` from
+    ``validate_action`` in ``remote_actor.build_data``.
+
+    Shrinking by norm keeps norm <= 1, and every rotation of a norm <= 1 vector
+    has all components inside [-1, 1] — so this property is what makes the
+    recorded action legal in EVERY frame, not just the one it was measured in.
+    """
+
+    _wrapper, env, _backend = _build(clock)
+    scale = env.action_scale
+
+    # A saturated diagonal: 1.6x budget on x and y, nothing on z.
+    with env._command_lock:
+        env._follow_window_had_human = True
+        env._follow_sum_p = np.array([1.6, 1.6, 0.0]) * scale[0]
+        env._follow_sum_w = np.array([1.6, 1.6, 0.0]) * scale[1]
+        env._follow_ticks = 3
+
+    info = env._harvest_follow_window({})
+    action = np.asarray(info["intervention_committed_action"], dtype=float)
+
+    # Per-axis clip would give [1.0, 1.0, 0]; a norm shrink gives ~[0.707, 0.707, 0].
+    assert np.linalg.norm(action[:3]) <= 1.0 + 1e-6, action
+    assert np.linalg.norm(action[3:]) <= 1.0 + 1e-6, action
+    assert info["intervention_saturated"] is True
+
+    # Direction is preserved (the other half of "never per-axis").
+    assert action[0] == pytest.approx(action[1], rel=1e-6)
+    assert action[2] == pytest.approx(0.0, abs=1e-12)
+
+    # THE REGRESSION: every rotation of this vector stays inside the action
+    # space. A per-axis clip fails this for the 45-degree rotation below.
+    for angle in (np.pi / 4, np.pi / 3, 1.0, 2.0):
+        c, s = np.cos(angle), np.sin(angle)
+        rot = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        block = np.zeros((6, 6))
+        block[:3, :3] = rot
+        block[3:, 3:] = rot
+        rotated = block @ action
+        assert np.max(np.abs(rotated)) <= 1.0 + 1e-6, (angle, rotated)
+
+    env.close()
