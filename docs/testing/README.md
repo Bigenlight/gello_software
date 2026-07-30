@@ -17,6 +17,15 @@ export WT=/home/laptop3/gello_software
 > terminal 뒤에는 `WAIT_HOME_APPROVAL` → GUI HOME 승인 → `WAIT_SCENE_READY` → 사람이 장면
 > 재배치 → START/NEXT 순서다. startup의 예전 GO/Enter 타이핑은 기본 경로에서 제거됐지만
 > pose/controller proof와 fresh ENGAGED heartbeat는 남아 있다.
+>
+> **개입 제어 경로가 2026-07-30 저녁에 바뀌었다 (`edbb3f5`).** `UR7eEnv`의 **배경 데몬 추종
+> 스레드**가 ENGAGED 동안 30 Hz로 리더를 따라가고 `env.step`은 관찰자다
+> (`INTERVENTION["follow_mode"]="background"`). `InterventionBudget`은 개입 **제어** 경로에서
+> 제거됐다 — 팔의 상한은 governor + 워크스페이스 박스 + 250 Hz 업샘플러뿐이다. 이 표의
+> 9d/9d′ 행은 옛 `in_window` 경로의 실측이며 **새 기본 경로의 증거가 아니다.**
+> 🛑 두 대기 상태(`WAIT_HOME_APPROVAL` / `WAIT_SCENE_READY`)에서는 `suspend_follower()`가
+> 아직 배선되지 않았고 후자 경로는 데드맨을 보지 않는다 — **그 화면에서는 GELLO에서 손을
+> 떼라.** → 표 9d″
 
 > ### 🔧 정정 (2026-07-29) — `WT`가 통합 checkout으로 되돌아왔다
 > 2026-07-27 판은 `WT=/home/laptop3/gello_worktrees/hil-hardware-comms`를 가리켰다.
@@ -117,14 +126,17 @@ export WT=/home/laptop3/gello_software
 | 5 | GELLO 발행 안정성 | **PASS** | 30.004 Hz (std 0.15 ms), 30초 901샘플, 드롭 0, `comm failed` 0회, 트리거 0.000~1.000 전 구간 |
 | 6 | EEF 텔레옵 (실기) | **PASS** (사용자 직접 검증) | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef` + `./run_eef_gui.sh` |
 | 7 | 오프라인 단위 테스트 `ur_gello_bringup` | **PASS** | **436 passed in 7.09s** (2026-07-29 통합 checkout에서 재실행). §4에 재현 명령 |
-| 7b | 오프라인 단위 테스트 `serl_ur_infra` | **PASS** | 📌 2026-07-30 `4197f5b`에서 **`579 passed, 11 skipped in 8.98s`** (actor venv `/home/laptop3/venvs/gello-hil-actor/bin/python`). 계보: `333`(07-29 오전) → `337`(`40b99f8`) → `429`(classifier sidecar) → `497`(07-30 오전) → **`579`**(신규 82 = leader_stream 28 / governor_dt 38 / intervention_substeps 16). ⚠️ **인터프리터를 안 적은 passed 수는 무의미하다** — `venvs/hilserl`(jax 0.5.3, numpy 1.26.4)은 jax skip들이 실제로 돌아 passed가 늘고 skipped가 11 → 4로 줄어든다. ✅ 한때 여기서 났던 `1 failed`(`test_governor_dt.py::test_env_step_surfaces_governed_in_info`)는 **해소됐다** — numpy 승격 차이가 아니라 허용범위가 float32 산술보다 타이트했던 것(`rel=1e-9` → `1e-6`), 근거는 `00` §4.2. 불변인 것: **actor venv에서 skipped는 정확히 11**, **passed가 *내려가면*** PYTHONPATH에서 `serl_launcher`가 빠진 것이고 그때 **skip 사유가 거짓말을 한다** → `00` §4.2. 🪤 `tests/test_env_fake_backend.py`는 **0개 수집**되어 이 총계에 흔적이 없다 → `08` G25 |
+| 7b | 오프라인 단위 테스트 `serl_ur_infra` | **PASS** | 📌 2026-07-30 `d6965a9`에서 **`701 passed, 11 skipped, 1 xfailed in 14.46s`** (actor venv `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6). 계보: `333`(07-29 오전) → `337`(`40b99f8`) → `429`(classifier sidecar) → `497`(07-30 오전) → `579`(`4197f5b`) → `595`(`ee8af5e`) → **`701`**(`d6965a9`; 배경 추종 스레드 · 컨트롤러 스레드 안전화 · norm 축소 회귀 = `test_intervention_follower`). 🛑 **`1 xfailed`를 빼고 인용하지 말 것** — 알려진 결함의 못이다(저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수 있다; strict xfail이라 고치면 XPASS로 터진다). ⚠️ **인터프리터를 안 적은 passed 수는 무의미하다** — `venvs/hilserl`(jax 0.5.3, numpy 1.26.4)은 jax skip들이 실제로 돌아 **`741 / 4 / 1`**이 된다. ✅ 한때 여기서 났던 `1 failed`(`test_governor_dt.py::test_env_step_surfaces_governed_in_info`)는 **해소됐다** — numpy 승격 차이가 아니라 허용범위가 float32 산술보다 타이트했던 것(`rel=1e-9` → `1e-6`), 근거는 `00` §4.2. 불변인 것: **actor venv에서 skipped는 정확히 11**, **passed가 *내려가면*** PYTHONPATH에서 `serl_launcher`가 빠진 것이고 그때 **skip 사유가 거짓말을 한다** → `00` §4.2. 🪤 `tests/test_env_fake_backend.py`는 **0개 수집**되어 이 총계에 흔적이 없다 → `08` G25 |
 | 8 | 타이밍 baseline | **매 실행 재측정** | `test_ur_kin.py`(k)가 매 실행마다 찍는다. 📌 2026-07-29 실측 `worst-case tick = 0.836 ms (generic pose)`, 2026-07-27은 `1.314 ms (near-singular)`. **값도 pose 종류도 실행마다 바뀐다 — 고정값으로 인용하지 말 것.** 판정은 "예산 4.0 ms @250 Hz 미만"이다 |
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
 | 9b | HIL 개입 루프 (**실기, 팔 구동**) | **PASS (2026-07-28, `run_real_hil.py` 경로에 한함)** | `--arm --scale 0.25`, 100스텝 중 개입 64, `held=0`. 개입 불변식 4종(anchor-latch 0 / gain-latch 0 / 저장==실행 1.000 / held-rate 0%) 통과. **frame-map = 단위행렬**(포화 제외 잔차 0.093, 기준 0.15). → `04` §4.5 |
 | 9b′ | 같은 루프를 **actor entrypoint**로 | **핵심 E2E PASS** | 실제 policy/GELLO 전환, replay 201, intervention 153, learner update를 관측. 정상 832.3 ms reply를 거부하던 옛 0.6/0.8 s 경계는 bounded 1.5/2.0 s로 완화. 장시간 tail 계측은 남음 |
 | 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py`의 `GELLO_TRIGGER_TOPIC`·`GELLO_TRIGGER_STALE_S`·`_on_gello_trigger`, `wrappers.py::GelloIntervention._expert_gripper`, `tests/test_gello_gripper_wiring.py`(📌 2026-07-30 재측정 **24 passed**); commit `6a0b127`. 07-28 실기도 이 채널은 껐다. *(줄 번호 제거 2026-07-30: 옛 판의 `ros_backend.py:81-155` / `wrappers.py:301-328`은 `4197f5b`로 크게 밀렸고 `wrappers.py`는 아직 동시 편집 중이다 — **심볼로 찾을 것.**)* |
-| 9d | 개입 **손맛**(빳빳함/덜덜거림) — 창 안 30 Hz 리더 재샘플링 + One-Euro + 변위 예산 | **PASS (2026-07-30, 실제 UR7e, `4197f5b`)** | `run_real_hil.py` **3 run**(DRY `--scale 0.5` / DRY `--scale 1.0` / ARMED `--scale 1.0`) 중 뒤 두 run PASS, 첫 run은 고친 판정으로 **SKIP**(포화 제외 후 축별 여기 2 cm 미달). **DRY RUN `--scale 1.0`** 300스텝(개입 272): frame-map 잔차 0.016 / alpha 1.005 / 표본 141(포화 131 제외) · action-exec dp_ratio 중앙값 1.000 · held 0 %. **ARMED `--scale 1.0 --max-steps 150`**(개입 120): 잔차 0.130 / alpha 0.983 / 표본 51(포화 69 제외) · dp_ratio 1.000 · held 0 % · **조작자 손맛 확인 양호**. 모든 개입 스텝 `substeps=2`(창당 타깃 3회 갱신), `governed=0`(예산이 governor보다 타이트해 먼저 묶는 설계대로) → `04` §9 |
-| 9d′ | 같은 손맛 수정의 **연속 운용**(창이 늘어질 때) | **미검증 — 코드로는 못 고친다** | 창 0.700 s에서 HOLD 51.5 %, 리더속도 추종 66 %. 예산 소진 후 남는 HOLD는 필터·rate·외삽 어느 것도 못 없앤다 → `08` G21, `04` §9.5 |
+| 9d | 개입 **손맛** 1차 — `follow_mode="in_window"` (창 안 30 Hz 재샘플링 + One-Euro + 변위 예산) | **PASS (2026-07-30 오전, 실제 UR7e, `4197f5b`)** · 🗄️ **이 경로는 더 이상 기본값이 아니다** | `run_real_hil.py` **3 run**(DRY `--scale 0.5` / DRY `--scale 1.0` / ARMED `--scale 1.0`) 중 뒤 두 run PASS, 첫 run은 고친 판정으로 **SKIP**(포화 제외 후 축별 여기 2 cm 미달). **DRY RUN `--scale 1.0`** 300스텝(개입 272): frame-map 잔차 0.016 / alpha 1.005 / 표본 141(포화 131 제외) · action-exec dp_ratio 중앙값 1.000 · held 0 %. **ARMED `--scale 1.0 --max-steps 150`**(개입 120): 잔차 0.130 / alpha 0.983 / 표본 51(포화 69 제외) · dp_ratio 1.000 · held 0 % · **조작자 손맛 확인 양호**. 모든 개입 스텝 `substeps=2`(창당 타깃 3회 갱신), `governed=0`(예산이 governor보다 타이트해 먼저 묶는 설계대로) → `04` §9 |
+| 9d′ | 같은 손맛 수정의 **연속 운용**(창이 늘어질 때) | 🗄️ **이전 판(보존) — `background`가 이 결론을 뒤집었다** | 옛 판정: *"미검증 — 코드로는 못 고친다. 창 0.700 s에서 HOLD 51.5 %, 리더속도 추종 66 %. 예산 소진 후 남는 HOLD는 필터·rate·외삽 어느 것도 못 없앤다."* 그 판정은 `in_window` + `InterventionBudget` 전제였다. `edbb3f5`에서 추종이 RL 창 밖으로 나가고 예산이 제거되어 **창 길이가 개입 속도를 더 이상 묶지 않는다.** G21은 여전히 열려 있지만 이제 **transition 밀도**·policy 반응성 문제이지 손맛 문제가 아니다 → `08` G21, `04` §9.5 |
+| 9d″ | 개입 손맛 2차 — `follow_mode="background"` (배경 데몬 추종 스레드, **shipped 기본값**) | 🟡 **조작자 확인만 — 체계적 실기 검증 미완** | 조작자 실기 코멘트 "개입 속도는 좀 고쳐졌어"(📌 2026-07-30, `edbb3f5`). 9d처럼 **CSV 불변식 전수(frame-map 잔차 / alpha / dp_ratio / held-rate)를 돌리지 않았다** → PASS로 승격하지 말 것. 설계 실측(오프라인·커밋 근거): 개입 최고속 2.4 → **15 cm/s**(⚠️ 커밋 요약의 "12.5 cm/s"는 `ACTION_SCALE[0]×HZ` 유래라 틀렸다. `follow_xi`에는 예산도 `_paced_request`도 없으므로 실제 상한은 governor `v_max` 0.15 m/s이고, 코드 4곳이 인용하는 검증 리그 EEF teleop 실측은 12.4 cm/s다 → `04` §9 말미 📌), 창 밖 HOLD 27.7 % → 없음, 업샘플러 slew 상한 46 % → 100 %, **데드맨 release 512 ms → 33 ms**(추종 틱마다 재읽기 — 손맛이 아니라 안전 이득). 함께 고쳐진 것: `PolicyDeltaController` 스레드 안전화(찢어진 `(T_cmd,q_cmd)` 11.1 % / HOLD 틱이 움직임 발행 25건 최대 0.2047 rad / `dq_step_max` 누출 6.08 %), One-Euro 시정수 창 개수 → 벽시계(`6ca35ac`, 실효 tau 2.945 → 0.498 s). 🛑 **실기에서 한 번 터졌다**(`d6965a9`): 기록 액션을 축별 `np.clip`으로 자르면 `RelativeFrame` 회전 뒤 `[-1,1]`을 벗어나 `ActorProtocolError`로 actor가 즉사한다 — **norm 비례 축소만** → 루트 `CLAUDE.md` "반드시 지킬 것", `04` §9 |
+| 9d‴ (G32) | 배경 추종 중 **operator 대기 상태**(`WAIT_HOME_APPROVAL` / `WAIT_SCENE_READY`) | 🛑 **알려진 갭 — 미배선** | `UR7eEnv.suspend_follower()`는 구현돼 있으나 **production 호출부가 0개**다(📌 2026-07-30 `rg suspend_follower` → `tests/test_intervention_follower.py`만). 두 대기 상태는 RL 스레드를 무한 블록하고 `WAIT_HOME_APPROVAL` 경로는 데드맨을 보지 않는다 → **그 화면에서 GELLO를 잡으면 팔이 따라온다.** 현재 완화책은 조작자 안내뿐 |
+| 9f | 그리퍼 열기 — 세션 시작 + 매 에피소드 경계 | **코드 통합, 실기 미검증** | `run_hil_preposition.sh` `[5b/6]`(`OPEN_GRIPPER=0`으로 끔, `GRIPPER_OPEN_WAIT_S` 대기)와 `UR7eEnv.open_gripper_for_reset`. 근거: 모든 offline demo가 열린 그리퍼에서 시작하고 `gripper_position`은 `state[0]`이라, 닫힌 채 시작하면 첫 스텝부터 OOD다 |
 | 9e | 개입 서브스텝의 **mock RViz** 확인 | **미검증** | `04` §3 루프는 이번에도 건너뛰었다. 실기 PASS가 mock PASS를 대체하지 않는다(G24 검증 순서 ②) |
 | 10 | gRPC actor 루프백 스모크 | **PASS (오프라인)** | `test_actor_grpc_transport/identity_pinning/smoke/rlpd_receive_smoke` = **35 passed** (venv python). 같은 4개 파일이 **시스템 python3에서는 무한 hang** → §0-1 |
 | 10b | **Kanu 왕복 (Stage A, fake-env)** | 📌 **PASS (2026-07-27 기록)** | 100스텝 acceptance 통과. 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버였다. 절차·수치 정본은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) |
@@ -134,7 +146,7 @@ export WT=/home/laptop3/gello_software
 | 11b | RealSense QoS 호환성 | **PASS (해소됨)** | 퍼블리셔가 RELIABLE/TRANSIENT_LOCAL → 백엔드의 기본 reliable 구독과 호환. 이전의 "best-effort면 콜백이 안 뜬다" 우려는 **이 리그에서는 해소**. 단 TRANSIENT_LOCAL 부작용 있음 → `06` §3 |
 | 11c | cam1/cam2 역할 | **정정됨 / 손목 배정은 미확정** | cam1 = 삼각대 SCENE, cam2 = 손목(wrist). 다만 **연결된 두 개체 중 어느 쪽이 손목인지는 모델 클래스 추론**이고 육안 미확인이다 → `06` §1.1 |
 | 11d | 카메라 시리얼 | **하드코딩 폐기 — 자동 해석 (`43ba314`, `fb48100`)** | 이 리그에 D435 쌍이 **두 벌** 있고 어느 쪽이 열거되는지가 두 번 뒤집혔다. `ros2_ur_ws/_resolve_camera_serials.sh`가 live USB 버스와 대조해 모델 클래스로 배정한다(plain D435→cam1, D435IF→cam2). **문서·명령줄에 특정 시리얼을 적지 말 것** → `06` §1.1 |
-| 12 | `clip_safety_box` (워크스페이스 박스) | **구현·단위검증, 실기 경로에서는 비활성** | `tests/test_clip_safety_box.py` **26 passed**. 실측 박스는 `cube_in_cup`에만 있고, 팔을 구동한 `run_real_hil.py`는 `DefaultUR7eEnvConfig`(0벡터)를 써서 박스가 꺼진 채 돌았다 → `08` G1 |
+| 12 | `clip_safety_box` (워크스페이스 박스) | **구현·단위검증, 실기 경로에서는 비활성** | `tests/test_clip_safety_box.py` **26 passed**. 실측 박스는 `cube_in_cup`에만 있고, 팔을 구동한 `run_real_hil.py`는 `DefaultUR7eEnvConfig`(0벡터)를 써서 박스가 꺼진 채 돌았다 → `08` G1. 🛑 **2026-07-30부터 이게 더 위험해졌다** — 개입 변위 예산이 제거되면서 박스가 **유일한 위치 상한**이 됐다. 즉 `run_real_hil.py --arm`은 production 3-CLI 경로보다 **덜 안전하다** |
 | 12b | `go_to_reset` branch-cut | **실기 경로 PASS** | preposition과 실제 actor의 100-step episode reset 경로를 통과. 기존 단위검증도 유지 → `08` G13 |
 | 13 | 장애 주입 매트릭스 | **미검증 (E13 제외)** | → `07_FAILURE_INJECTION.md` |
 | 14 | **RL 정책** 경로로 실기 팔 구동 | **원형 PASS** | policy가 실제 action을 소유하고 ENGAGE로 GELLO 개입, 해제 뒤 policy 복귀를 관측. 장시간 latency는 `08` G21 |
@@ -204,7 +216,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 [A] 오프라인 (로봇 불필요, 위험 0)
  A1  ROS2 워크스페이스 빌드             -> 00 §2
  A2  ur_gello_bringup 단위테스트 436개  -> 00 §4.1  [PASS 2026-07-29]
- A3  serl_ur_infra 단위테스트 (개수 변동) -> 00 §4.2  [PASS 2026-07-30, 579p/11s, actor venv]
+ A3  serl_ur_infra 단위테스트 (개수 변동) -> 00 §4.2  [PASS 2026-07-30, 701p/11s/1xf, actor venv]
  A4  gRPC 루프백 스모크 (mock 서버)     -> 05 §2    [PASS 오프라인]
         ↓
 [B] 하드웨어 단독 (팔 미동작)
@@ -226,8 +238,11 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 [D'] 실기 HIL 개입 (팔 움직임, zero-policy)  ** run_real_hil.py **
  D'1 DRY_RUN 300스텝 + CSV 검토          -> 04 §4.5 [PASS 2026-07-28]
  D'2 --arm --scale 0.25, 개입 불변식 4종 -> 04 §4.5 [PASS 2026-07-28]
- D'3 손맛 수정(30 Hz 재샘플링) 검증       -> 04 §9   [PASS 2026-07-30]
+ D'3 손맛 1차 in_window(30 Hz 재샘플링)   -> 04 §9   [PASS 2026-07-30 오전]
        DRY_RUN --scale 1.0 300스텝 -> --arm --scale 1.0 150스텝, 둘 다 전체 PASS
+       (🗄️ 이 경로는 더 이상 shipped 기본값이 아니다)
+ D'4 손맛 2차 background(추종 스레드)     -> 04 §9   [🟡 조작자 확인만 — CSV 전수 미실시]
+       ** 같은 CSV 불변식(frame-map 잔차/alpha/dp_ratio/held)을 이 경로로 다시 돌릴 것 **
         ↓
 [E] 장애 주입 (팔 움직임 포함)
  E1  통신/프로세스 계열 (E1~E5)         -> 07      [미검증]
@@ -250,9 +265,12 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 
 **현재 위치: 실물 HIL-SERL 원형과 operator episode GUI [G1~G4]까지 도달했다. 다음 확인은
 [G5], 장시간 latency, classifier 재학습, G27/G28 데이터 정합성이다.**
-2026-07-30에 [D′3](개입 손맛)이 추가로 PASS했다 — **[G3]와 독립**이다(learner·gRPC 서버를
-쓰지 않는 zero-policy 경로). 다만 손맛의 **나머지 절반**은 [G3]/G21이 열려 있는 동안
-회수되지 않는다 → 표 9d′.
+2026-07-30 오전에 [D′3](개입 손맛 1차, `in_window`)이 PASS했다 — **[G3]와 독립**이다
+(learner·gRPC 서버를 쓰지 않는 zero-policy 경로). 같은 날 저녁 [D′4](`background` 추종
+스레드)가 그 경로를 대체했고 **조작자 실기 코멘트만 있고 CSV 전수 검증은 없다** → 표 9d″.
+**다음 실기의 개입 항목은 [D′4]의 CSV 전수 재실행이다.**
+> **이전 판(보존):** *"손맛의 나머지 절반은 [G3]/G21이 열려 있는 동안 회수되지 않는다."*
+> 그 문장은 예산이 창당 변위를 묶던 `in_window` 전제였다 → 표 9d′.
 
 > - [F]가 [C]/[E]보다 먼저 끝난 것은 순서를 어긴 게 아니라, [F]가 **로봇을 전혀 움직이지 않는
 >   fake-env 경로**이기 때문이다.

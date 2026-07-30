@@ -14,9 +14,11 @@ laptop3                                        kanu (GPU 서버)
 ```
 
 laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 kanu에서** 돌리고 gRPC로 실시간
-통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz다. 2026-07-30 startup에서 정상
-reply가 832.3 ms에 도착해 옛 0.6/0.8 s 경계를 넘었으므로 현재 RPC timeout/response-age는
-bounded `1.5/2.0 s`로 완화했다.
+통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz지만 **production actor 실측은
+1.95 Hz**(주기 512 ms, 최대 854 ms)다 — `env.step`은 100 ms로 자체 페이싱하고 나머지 ~412 ms는
+블로킹 gRPC Step RPC + 카메라 디코드로 `env.step` **밖**에 있다. 이 격차가 2026-07-30 개입
+손맛 문제의 뿌리다(아래). 2026-07-30 startup에서 정상 reply가 832.3 ms에 도착해 옛 0.6/0.8 s
+경계를 넘었으므로 현재 RPC timeout/response-age는 bounded `1.5/2.0 s`로 완화했다.
 분류기는 정책 관측이 아니라 **자기 전용 무크롭 이미지(sidecar)를 약 2 Hz로** 따로 받는다.
 
 **branch `feat/gello-ur7e-humble-22.04`**. 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
@@ -60,7 +62,63 @@ learner step 158은
 checkpoint가 없고 의미 없는 시험값이라는 사용자 판단에 따라 폐기했다. offline demo pickle은
 그대로 보존했다. PID와 run root는 스냅샷이므로 매번 `./run_hil_server.sh --check`로 읽는다.
 
-**2026-07-30 개입 손맛 수정이 실기에서 PASS (`4197f5b`).** 개입 중 팔이 "빳빳"했던 원인은
+**2026-07-30 저녁 — 개입은 이제 `env.step` 창이 아니라 배경 추종 스레드가 몬다 (`edbb3f5`).**
+같은 날 오전의 창 안(`in_window`) 수정으로는 부족했다. 30 Hz 재샘플링이 `env.step`의 **명목
+100 ms 창 안에서만** 돌았는데 실제 루프는 512 ms라 나머지 ~412 ms는 타깃 갱신이 없었고,
+`InterventionBudget`이 창당 1× `ACTION_SCALE`로 제어를 묶어 개입 최고속이
+`ACTION_SCALE/T` = **2.4 cm/s**였다. 이제 `UR7eEnv`가 **데몬 추종 스레드**(`_follow_loop` /
+`_follow_tick`)를 돌린다 — ENGAGED 동안 팔이 30 Hz로 리더를 따라가고 `env.step`은 관찰자가
+되어 transition만 뽑는다. **예산은 개입 제어 경로에서 완전히 제거**했다. 남은 상한은
+governor(`v_max` 0.15 m/s) + 워크스페이스 박스 + 250 Hz 업샘플러뿐이고 셋 다
+`PolicyDeltaController.step` 안에 있다. 기존 경로는 `follow_mode="in_window"`로 보존했다.
+
+| | 이전(`in_window`) | 이후(`background`) |
+| --- | --- | --- |
+| 개입 최고속 | 2.4 cm/s | **15 cm/s** (governor `v_max` 0.15 m/s 유래. ⚠️ `edbb3f5` 커밋 요약의 "12.5 cm/s"는 `ACTION_SCALE[0]×HZ`에서 나온 **틀린 값**이다 — `follow_xi`에는 예산도 `_paced_request`도 없다. 코드가 인용하는 검증 리그 EEF teleop 실측은 12.4 cm/s → `04_HIL_INTERVENTION.md` §9 말미 📌) |
+| 창 밖 HOLD | 27.7% | 없음 (타깃이 계속 흘러 `target_stale_s` 미도달) |
+| 업샘플러 slew 상한 | 46% (soft-start 재무장) | 100% |
+| 데드맨 release 지연 | 512 ms | **33 ms** (추종 틱마다 재읽기) |
+
+설계 근거 전문은 [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md)
+**§10**(§9는 오전 `in_window` 경로다), 갭은 `08_OPEN_GAPS.md` G24/G32/G33/G34.
+
+마지막 줄은 손맛이 아니라 **안전 이득**이다. 🟡 **검증 수준**: 조작자가 실기에서 "개입 속도는
+좀 고쳐졌어"라고 확인했을 뿐이고(2026-07-30), 오전 `4197f5b` 때처럼 **CSV 불변식 전수를 돌린
+체계적 실기 검증은 아직 없다 — 미검증으로 취급한다.**
+
+같이 들어간 것:
+
+- **`PolicyDeltaController` 스레드 안전화**(`edbb3f5`). 적대적 검수가 실제 컨트롤러 + `ur_kin`으로
+  재현해 확증한 결함 3건: (a) `(T_cmd, q_cmd)`가 **11.1%** 확률로 서로 다른 틱의 것
+  (108,949 중 12,143) → IK가 남의 해를 seed로 풀어 브랜치 연속성이 깨지고 **10초짜리 눈먼 한 바퀴
+  스윕**으로 실행된다, (b) `_hold()`가 `self.q_cmd`를 반환해 **HOLD 틱이 움직임을 발행**
+  (130,028 중 25건, 최대 0.2047 rad = `dq_step_max`의 3.3배), (c) `dq_step_max` 게이트가
+  **6.08%** 누출. 수정: 자체 `RLock`, `_commit()` 한 곳에서 원자적 갱신, `_hold()`는
+  `_last_issued` 반환.
+- **One-Euro 시정수를 창 개수 → 벽시계로**(`6ca35ac`). `dt`가 생성 시 `1/substep_hz`로 고정인데
+  `filtered()`는 창당 2번만 불려, T=1.12 s면 실제 간격 560 ms를 33.3 ms로 착각해 **16.8배 과다
+  평활**했다. 실효 시정수 2.945 s → **0.498 s**.
+- **그리퍼를 세션 시작(`run_hil_preposition.sh` `[5b/6]`)과 매 에피소드 경계
+  (`UR7eEnv.open_gripper_for_reset`)에서 연다.** 모든 offline demo가 열린 그리퍼에서 시작하고
+  `gripper_position`은 `state[0]`이다.
+- **실기에서 한 번 터진 것**(`d6965a9`): 예산을 빼면서 harvest가 기록 액션을 축별
+  `np.clip(raw, -1, 1)`로 잘랐는데, 그러면 norm이 √3까지 허용된다. production 체인의
+  `RelativeFrame.transform_action_inv`가 `blockdiag(R, R)`을 곱하고 **회전은 norm은 보존하지만
+  축별 최댓값은 보존하지 않는다** → `[1.0, 1.0, 0]`(norm 1.41)이 `[1.41, 0, 0]`으로 나와
+  `ActorProtocolError: executed_action must be within [-1, 1]`로 actor가 즉시 죽었다.
+  **norm 비례 축소**로 고쳤다(아래 "반드시 지킬 것" 참조).
+- **프롬프트 2개 제거**(`e86edd5`, 아래 "시작 조작 간소화" 항목이 이것이다). 되돌리기:
+  `PREPOSITION_DELAY_S=5` / `PREPOSITION_CONFIRM=1` / `ENGAGE_WAIT_S`.
+
+> **이전 판 문구(보존):** *"연속 운용에서 창이 늘어지면 **예산이 소진되고 남은 시간은
+> HOLD**이며, 그건 필터·rate·외삽으로 못 고친다 — G21(RPC 지연) 종속이다."* 이 문장은
+> `in_window` + `InterventionBudget` 기준이다. `background`에는 예산이 없고 추종 스레드가 RL
+> 루프와 무관하게 틱하므로 **창 길이가 개입 속도를 더 이상 묶지 않는다.** G21은 여전히
+> 열려 있지만 이제 **transition 밀도**와 policy 반응성의 문제이지 사람 손맛의 문제가 아니다.
+
+**2026-07-30 오전 — 창 안(`in_window`) 1차 수정이 실기에서 PASS (`4197f5b`).**
+아래 표는 **`in_window` 경로의 실측**이며 shipped 기본값(`background`)의 증거가 **아니다** —
+다만 원인 규명과 "되돌리면 안 되는 것" 3건은 그대로 유효하다. 개입 중 팔이 "빳빳"했던 원인은
 10 Hz 자체가 아니라 **타깃 갱신 방식**이었다 — `env.step`이 100 ms 창에서 관절 타깃을 한 번만
 세우고 그 사이 리더를 다시 읽지 않아, 250 Hz 업샘플러가 매 창마다 가속→도달→제동→**정지**를
 반복했다(gRPC 왕복이 `env.step` 밖이라 실효 갱신은 6~10 Hz). 해결은 검증된 EEF teleop과 같은
@@ -107,10 +165,22 @@ RPC tail latency가 어떻게 변하는지는 계속 계측해야 한다. classi
 진행 중이며, MANUAL `MARK SUCCESS` 버튼으로 끝낸 episode의 one-shot provenance만 별도로
 한 번 확인하면 된다.
 
-**개입 쪽에서 남은 것 하나** — 위 2 run은 zero-policy + 사람 개입이라 창 주기가 짧았다.
-연속 운용에서 창이 늘어져(첫 publish 5.47 s, learner step 중앙 1.12 s) **예산이 소진되면 남은
-시간은 HOLD**이고, 그건 필터·rate·외삽으로 못 고친다 — **G21(RPC 지연) 종속**이다
-(`08_OPEN_GAPS.md` G21, `04_HIL_INTERVENTION.md` §9.5).
+**개입 쪽에서 남은 것 3개** (실기 차단은 아니지만 알고 있어야 한다 — 차례로
+`08_OPEN_GAPS.md` **G32 / G33 / G34**):
+
+1. **`suspend_follower()` 호출부가 아직 배선되지 않았다.** 구현은 `UR7eEnv.suspend_follower`에
+   있고 부르는 곳은 테스트뿐이다(2026-07-30 `rg suspend_follower` 확인 —
+   `tests/test_intervention_follower.py` 외 production 호출부 0). `remote_actor.py`의
+   `WAIT_SCENE_READY`/`WAIT_HOME_APPROVAL`은 RL 스레드를 무한 블록하고 **후자는 데드맨을 아예
+   보지 않는다** → **그 대기 화면에서 GELLO를 잡으면 팔이 따라온다.** 현재 완화책은 조작자에게
+   "그 화면에서는 손을 떼라"고 안내하는 것뿐이다.
+2. **포화 transition의 서버측 제외가 미구현.** 예산이 빠졌으므로 사람이 빠르게 움직인 창은
+   기록 액션이 실제 이동을 **과소** 진술한다(측정은 `info["intervention_saturation"]`로 된다).
+   서버가 그런 전이를 버리려면 proto 신규 필드 + pb2 재생성 + `SCHEMA_VERSION` bump가 필요하고,
+   **protobuf가 unknown field를 조용히 버리므로 반쪽 업그레이드는 무증상 오염**이다.
+3. **`tests/run_real_hil.py`는 여전히 `DefaultUR7eEnvConfig`를 쓴다 → 워크스페이스 박스가 꺼져
+   있다(G1).** 예산이 빠진 지금 박스가 **유일한 위치 상한**이므로, 그 러너로 `--arm` 하는 것이
+   production 3-CLI 경로보다 **덜 안전하다.** 손맛 확인용으로 쓰되 이 사실을 알고 쓴다.
 
 ## 읽는 순서 — 이 셋만 읽고 멈춰라
 
@@ -199,11 +269,24 @@ RPC tail latency가 어떻게 변하는지는 계속 계측해야 한다. classi
 ```
 serl_ur_infra/
   ur_env/envs/ur7e_env.py          get_im, clip_safety_box, go_to_reset, 관측 조립
-  ur_env/envs/config.py            속도 3층(ACTION_SCALE/GOVERNOR/UPSAMPLER), 카메라 토픽
-  ur_env/envs/wrappers.py          GelloIntervention, 데드맨, 그리퍼 페널티
+                                   + **개입 배경 추종 스레드**: _start_follow_thread /
+                                   _follow_loop / _follow_tick(30 Hz), 소유권 mux
+                                   _emit_arm_command(유일한 관절 명령 출구),
+                                   arm_/disarm_intervention_follow,
+                                   await_follower_quiescent, suspend_follower(미배선),
+                                   _harvest_follow_window(창 순변위 -> 기록 액션, norm 축소),
+                                   open_gripper_for_reset
+  ur_env/envs/config.py            속도 3층(ACTION_SCALE/GOVERNOR/UPSAMPLER), 카메라 토픽,
+                                   INTERVENTION["follow_mode"]="background"|"in_window"
+                                   (**왜 창 밖으로 나가야 했는지 주석에 실측과 함께 있다**)
+  ur_env/envs/wrappers.py          GelloIntervention, 데드맨, 그리퍼 페널티,
+                                   follow_xi(배경 추종 프로토콜)
+  ur_env/envs/policy_delta_controller.py  스레드 안전 컨트롤러 — RLock, _commit()이 유일한
+                                   (T_cmd, q_cmd, _last_issued) writer, _hold()는 _last_issued 반환
   ur_env/envs/leader_stream.py     개입용 리더 30 Hz 재샘플링 — One-Euro 이식(bridge_stages.py
-                                   비트 동일) + InterventionBudget(창당 변위 예산). **설계 근거가
-                                   모듈 docstring에 전부 있다**
+                                   비트 동일, dt는 **벽시계**) + InterventionBudget(창당 변위
+                                   예산 — **`in_window` 전용, 기본 경로에는 없다**).
+                                   **설계 근거가 모듈 docstring에 전부 있다**
   ur_env/envs/frame_wrappers.py    RelativeFrame, Quat2EulerWrapper
   ur_env/envs/ros_backend.py       rclpy 백엔드, 250 Hz 업샘플러
   ur_env/remote_actor.py           actor 루프, 전이 생성·전송, sidecar 부착 계측
@@ -247,17 +330,42 @@ ros2_ur_ws/
   stop-and-go를 **완화하고 있던 것**이다. 근거(창 조건·메커니즘 포함)는
   [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §9(특히 §9.3),
   요약은 `08_OPEN_GAPS.md` G24.
+- **개입 액션을 축별 `np.clip`으로 자르지 말 것 — norm 비례 축소만.** 근거 2개다:
+  (1) **방향 왜곡** — 포화된 대각을 축별로 자르면 기록 경로가 꺾인다(`[2.0, 0.5]` →
+  `[1.0, 0.5]`). 이건 `GelloIntervention._expert_delta_xi`에 이미 주석으로 박혀 있던 규칙이다.
+  (2) **`RelativeFrame`이 이 벡터를 회전시킨다** — `transform_action_inv`가 `blockdiag(R, R)`을
+  곱하는데 회전은 각 3-벡터의 **norm은 보존하지만 축별 최댓값은 보존하지 않는다.** 축별 clip은
+  norm을 √3 = 1.73까지 남겨 두므로 `[1.0, 1.0, 0]`이 회전 뒤 `[1.41, 0, 0]`으로 나온다.
+  **2026-07-30 실기에서 이것으로 actor가 즉시 죽었다** (`ActorProtocolError: executed_action must
+  be within [-1, 1]`, `remote_actor.build_data` → `validate_action`; 수정 `d6965a9`).
+  norm ≤ 1이면 **어떤 프레임에서도** 모든 성분이 `[-1, 1]` 안이다. 옛 예산 경로가 이 문제를 안
+  겪은 이유도 같다 — 그쪽 clamp가 norm 기준이라 프레임 변환을 공짜로 통과했고, **예산을
+  제거하면서 그 보장이 같이 사라졌다.** 회귀 테스트가
+  `tests/test_intervention_follower.py`에 있다(축별 clip으로 되돌리면 FAIL).
 - **`ACTION_SCALE`을 "개입이 느리다"는 이유로 올리지 말 것.** 그건 안전 한계가 아니라
-  **정책의 액션 의미 자체**다 — 0.0125 m/step × 10 Hz = **12.5 cm/s가 정책의 최고속**이고,
-  개입 변위 예산도 여기서 직접 파생된다(`ur_env/envs/config.py`의 `ACTION_SCALE` INVARIANT 주석).
+  **정책의 액션 의미 자체**다 — 0.0125 m/step × 10 Hz = **12.5 cm/s가 정책의 최고속**이다.
   올리면 사람이 **정책이 실행할 수 없는 시범**을 보이게 되고, canonical demo 2,037 transition과
   액션의 의미가 갈리는데 learner fingerprint에 `ACTION_SCALE`이 **없어서**(G18) 조용히 통과한다.
+  **개입 경로에서 `ACTION_SCALE`은 이제 "기록 스케일"일 뿐이다** — 창 순변위를 `ACTION_SCALE`로
+  나눈 뒤 norm으로 축소해 저장할 때만 쓰인다. 팔의 실제 상한은 **governor(`v_max` 0.15 m/s) +
+  워크스페이스 박스 + 250 Hz 업샘플러** 셋뿐이다.
+  ⚠️ **그래서 지금은 개입이 `ACTION_SCALE`을 넘을 수 있다** — 넘으면 포화로 기록되어
+  **저장이 실제 움직임을 과소기록**한다(`info["intervention_saturation"]`). 이것이 "올리지 말
+  것"의 새 맥락이다: 예전엔 예산이 초과를 **막았고 지금은 막지 않는다.** 상세는
+  [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §10.2와
+  `08_OPEN_GAPS.md` G33.
   손맛 확인용으로는 `serl_ur_infra/tests/run_real_hil.py --scale`을 쓴다 — 3층
   (`ACTION_SCALE`/`GOVERNOR`/`UPSAMPLER`)을 **함께** 곱하고 그 배율을 CSV 헤더에 남긴다.
+  **이전 판(보존):** *"개입 변위 예산도 여기서 직접 파생된다"* — `edbb3f5`가
+  `InterventionBudget`을 개입 **제어** 경로에서 제거했으므로 더 이상 사실이 아니다.
+  `follow_mode="in_window"`에서는 여전히 맞다.
 - **테스트는 passed 수를 볼 것 — 그리고 어느 인터프리터인지 같이 적을 것.** PYTHONPATH에서
-  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-30 `4197f5b`
-  기준선은 **579 passed / 11 skipped** (8.98 s,
-  `/home/laptop3/venvs/gello-hil-actor/bin/python`). 재현 명령 정본은
+  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-30 `d6965a9`
+  기준선은 **701 passed / 11 skipped / 1 xfailed** (14.46 s 실측,
+  `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6).
+  **`xfailed 1`을 빼고 인용하지 말 것** — 그건 통계 잡음이 아니라 **알려진 결함의 표식**이다
+  (`ee8af5e`가 박은 strict xfail: 저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수
+  있다. 고치면 XPASS로 터진다). 재현 명령 정본은
   `serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md:254-264`:
 
   ```bash
@@ -270,13 +378,14 @@ ros2_ur_ws/
     -p no:cacheprovider serl_ur_infra/tests
   ```
 
-  계보: 333 → 337(`40b99f8`) → 429(classifier sidecar) → **497**(07-30 오전, `4197f5b` 이전)
-  → **579**(`4197f5b`; 신규 82 = `test_leader_stream` 28 / `test_governor_dt` 38 /
-  `test_intervention_substeps` 16). 옛 문서에 남은 333·337·429·497은 전부 이전 값이다.
+  계보: 333 → 337(`40b99f8`) → 429(classifier sidecar) → 497(07-30 오전, `4197f5b` 이전)
+  → 579(`4197f5b`) → 595(`ee8af5e`) → **701**(`d6965a9`; 배경 추종 스레드 + 컨트롤러
+  스레드 안전화 + norm 축소 회귀 — `test_intervention_follower` 신규).
+  옛 문서에 남은 333·337·429·497·579·595는 전부 이전 값이다.
   🪤 **인터프리터를 안 적은 "passed 개수"는 무의미하다.** 같은 명령을
   `/home/laptop3/venvs/hilserl/bin/python`(jax 0.5.3 있음, numpy 1.26.4)으로 돌리면
-  jax 테스트가 더 돌아 passed가 늘고 skipped가 11 → 4로 줄어든다. gRPC·actor 경로의
-  정본 인터프리터는 actor venv이므로 **기준선은 actor venv 값**이다.
+  jax 테스트가 더 돌아 **741 passed / 4 skipped / 1 xfailed**가 된다(skipped 11 → 4).
+  gRPC·actor 경로의 정본 인터프리터는 actor venv이므로 **기준선은 actor venv 값**이다.
 
   ✅ **해소됨** — 한때 hilserl에서 `test_governor_dt.py::test_env_step_surfaces_governed_in_info`
   1건이 떨어졌다(`0.8485281248` vs `0.8485281374 ± 8.5e-10`). 원인은 numpy 승격 차이가
