@@ -29,12 +29,62 @@
 #              다시 확인한 뒤에만 strict switch
 #       (b) FPC active + STJC inactive -> live RESET 자세 확인 후 idempotent, switch 없음
 #     둘 다 아니거나 switch 후 상태가 정확하지 않으면 actor를 exec하지 않는다.
+#   * deadman gate는 **채널 생존 증명**이다 — GUI가 살아서 /hil/deadman을 실제로
+#     퍼블리시하고 있다는 것을 팔을 프로그램에 넘기기 전에 확인한다. 기본 요구 상태는
+#     **DISENGAGED**다: 세션은 policy 제어로 시작하므로 handoff 시점에 ENGAGED일
+#     이유가 없고, DISENGAGED로 시작하면 handoff 직후 GELLO를 잡아도 팔이 따라오지
+#     않는다(더 안전하다). ENGAGE는 개입할 때만 누른다.
+#     옛 동작(ENGAGED 요구)은 HIL_STARTUP_DEADMAN=engaged로 되돌린다.
+#     연속 fresh heartbeat 3개 요구는 두 모드 모두 동일하다.
 #   * --arm 없는 actor와 --dry-preflight는 controller를 절대 전환하지 않는다.
 #   * 태스크 config의 DRY_RUN=True가 기본이다(cube_in_cup). DRY_RUN 해제는
 #     --arm을 actor에게 넘길 때만 일어난다. 이 래퍼는 관절 command를 발행하거나
 #     reset 이동을 호출하지 않는다. 다만 실제 --arm에서는 검증 뒤 controller만 전환한다.
 #   * [1]~[11] 사전 점검은 전부 읽기 전용이다(topic liveness / topic info /
 #     control list_controllers / TCP connect). 실제 switch는 그 뒤 [ARM] 한 곳뿐이다.
+#
+# ── 종료 코드 계약 (run_hil_session.sh의 재시도 루프가 이것만 보고 판단한다) ──
+#   0   정상 종료. 재시도하지 않는다.
+#   1   preflight FAIL 또는 handoff 거부/실패 — **arming 자체가 일어나지 않았다**.
+#       사람이 봐야 한다. 재시도하지 않는다.
+#   2   래퍼 사용법/설정 오류. 재시도하지 않는다.
+#   70  actor 종료 뒤 **controller 자동 복귀 실패** — controller 소유권이 불명이다.
+#       펜던트를 들고 직접 확인해야 하므로 기본적으로 재시도하지 않는다.
+#   75  **RECOVERABLE**: actor가 실제로 떴다가 죽었고(0<rc<128), 그 뒤
+#       controller 복귀는 PASS했으며, **actor가 transition 루프까지 실제로
+#       도달했다는 양성 증거**가 있다. 팔은 trajectory controller가 잡고 있고
+#       command publisher는 0이다. 충돌/protective stop 뒤의 정상적인 모습이다.
+#       run_hil_session.sh는 **이 코드에서만** 재시도를 고려한다(그것도 하드웨어
+#       번들이 실제로 재기동된 것을 확인한 뒤에만).
+#       ⚠️ 양성 증거가 없으면 **75로 승격하지 않고 actor의 raw rc를 그대로 낸다.**
+#       근거: 0<rc<128 전체를 승격하면 run_remote_rlpd_actor.py의 모든
+#       `raise SystemExit(...)`(인자 검증), 핸드셰이크/schema-hash 거부,
+#       첫 transition의 ActorProtocolError(`d6965a9`가 고친 그 실패), exec 실패
+#       126/127까지 "재시도 가능"이 된다. 그것들은 **결정론적**이라 재시도해도
+#       같은 지점에서 같이 죽고, 시도마다 8초짜리 충돌회피 없는 RESET 이동만
+#       한 번씩 더 실행된다. 증거는 아래 "진행 증거" 항목 참조.
+#   >=128  신호로 죽음(130=Ctrl-C 등). 그대로 전파하고 재시도하지 않는다.
+#   재mapping 끄기: HIL_ACTOR_EXIT_MAP=0 (그러면 actor의 raw rc를 그대로 낸다).
+#
+# ── 진행 증거 (75 승격의 전제) ───────────────────────────────────────────────
+#   실기 --arm 동안 이 래퍼는 `/hil/actor_status`(std_msgs/String, JSON)를
+#   구독하는 작은 읽기 전용 감시자를 함께 띄운다. `env_step >= 0`인 status를
+#   한 번이라도 보면 마커 파일을 남기고 즉시 종료한다.
+#   왜 이 신호인가 (`ur_env/remote_actor.py` 확인):
+#     * `_OperatorReporter`는 env_step을 **-1**로 시작하고(`self.env_step = -1`),
+#       `position()`은 **transition 루프 안에서만** 호출된다.
+#     * 따라서 HOME / WAIT_SCENE_READY / 핸드셰이크 구간의 status는 전부
+#       env_step=-1이고, env_step>=0은 "actor가 transition 루프 안으로
+#       들어갔다"는 뜻이다. 그 값을 세우는 곳은 두 군데뿐인데 하나는 Step RPC
+#       ack 직후(정상 경로), 다른 하나는 조작자가 step 직전에 누른 abort다 —
+#       후자도 actor가 살아서 GUI 서비스에 응답하고 있었다는 증거다.
+#     * 첫 transition의 ActorProtocolError는 `build_data`->`validate_action`,
+#       즉 그 publish **이전**에 터지므로 마커가 생기지 않는다 → 재시도 안 함.
+#   감시자를 띄울 수 없거나(rclpy 없음 등) 마커가 없으면 **fail-closed**:
+#   승격하지 않는다. 증거가 없으면 자동 재arming도 없다.
+#   75는 "안전하다"는 뜻이 **아니다**. "이 wrapper가 아는 한 팔은 controller가
+#   붙잡은 정지 상태이고, 다시 arming하려면 모든 proof를 처음부터 다시 통과해야
+#   한다"는 뜻이다. 재시도는 resume이 아니라 **새로운 arming**이다.
 #
 # ── 중단 방법 ────────────────────────────────────────────────────────────────
 #   * 이 터미널에서 Ctrl-C. 실기 --arm에서는 래퍼가 신호를 actor에게 전달하고,
@@ -56,7 +106,9 @@
 #     ACTOR_VENV, SERVER_HOST, SERVER_PORT, EXP_NAME, UR_CONFIG_MODULE,
 #     TIMEOUT_S, MAX_RESPONSE_AGE_S, OBS_SCHEMA_HASH, EXPECTED_MODEL_ID,
 #     EXPECTED_REWARD_AUTHORITY, EXPECTED_REWARD_MODEL_ID, ROS_SETUP,
-#     HZ_TIMEOUT_S, HIL_PREPOSITION_MARKER, HIL_PREPOSITION_MARKER_MAX_AGE_S
+#     HZ_TIMEOUT_S, HIL_PREPOSITION_MARKER, HIL_PREPOSITION_MARKER_MAX_AGE_S,
+#     HIL_STARTUP_DEADMAN (disengaged|engaged — 아래 deadman gate 항목),
+#     HIL_ACTOR_EXIT_MAP (1|0 — 위 종료 코드 계약의 75 재mapping)
 #   SKIP_ROS_CHECKS=1은 fake/no-arm 진단 전용이며 --arm과 함께 쓰면 거부한다.
 #
 # NOTE: `set -e`만 쓴다. `set -u`는 쓰지 않는다 — ROS의 setup.bash가 -u에서
@@ -150,6 +202,29 @@ if [[ ! "$PREPOSITION_MARKER_MAX_AGE_S" =~ ^[1-9][0-9]*$ ]] || \
     exit 1
 fi
 
+# deadman gate가 요구하는 상태.  기본은 DISENGAGED (policy-first 시작).
+# 오타를 조용히 "gate 없음"으로 해석하지 않도록 값 검사는 fail-closed다.
+STARTUP_DEADMAN="${HIL_STARTUP_DEADMAN:-disengaged}"
+case "$STARTUP_DEADMAN" in
+    disengaged|engaged) ;;
+    *)
+        echo "FATAL: HIL_STARTUP_DEADMAN must be 'disengaged' or 'engaged' (got '$STARTUP_DEADMAN')" >&2
+        exit 1
+        ;;
+esac
+STARTUP_DEADMAN_LABEL="$(printf '%s' "$STARTUP_DEADMAN" | tr '[:lower:]' '[:upper:]')"
+
+# 종료 코드 재mapping (파일 상단 "종료 코드 계약" 참조).  0으로 두면 actor의 raw rc.
+ACTOR_EXIT_MAP="${HIL_ACTOR_EXIT_MAP:-1}"
+case "$ACTOR_EXIT_MAP" in
+    0|1) ;;
+    *)
+        echo "FATAL: HIL_ACTOR_EXIT_MAP must be 0 or 1 (got '$ACTOR_EXIT_MAP')" >&2
+        exit 2
+        ;;
+esac
+RECOVERABLE_EXIT_CODE=75
+
 # ---------------------------------------------------------------------------
 # 인자 파싱: --dry-preflight / --help 만 소비하고 나머지는 전부 통과시킨다
 # ---------------------------------------------------------------------------
@@ -205,6 +280,123 @@ p_fail() {
     [ -n "$2" ] && printf '         → %s\n' "$2"
     FAILURES+=("$1")
     FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+# ---------------------------------------------------------------------------
+# Qt 폰트 경고 억제 (actor는 DISPLAY_IMAGE=True라 cv2 창을 연다)
+# ---------------------------------------------------------------------------
+# 무엇을 지우나: pip cv2(opencv-python 4.13.0)가 번들한 Qt 플러그인이 창을 열 때마다
+# 내는 두 줄, 매 프로세스 5회:
+#     QFontDatabase: Cannot find font directory .../cv2/qt/fonts.
+#     Note that Qt no longer ships fonts. Deploy some (...) or switch to fontconfig.
+#
+# 왜 환경변수가 아닌가 (측정, 2026-07-30): cv2/config-3.py 가 **import 시점에**
+#     os.environ["QT_QPA_FONTDIR"] = <cv2>/qt/fonts
+# 로 **덮어쓴다**. 그래서 쉘에서 QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu 를
+# 줘도 경고는 그대로다(직접 확인함). 그리고 이 메시지는 카테고리 없는 qWarning이라
+# QT_LOGGING_RULES='qt.qpa.fonts.warning=false' / 'qt.qpa.*.warning=false' 로는
+# 안 지워지고, 지워지는 유일한 규칙은 'default.warning=false' — 그건 **모든** Qt
+# 경고를 죽이므로 쓰지 않는다(진짜 Qt 오류를 숨긴다). site-packages 안에 폰트
+# 디렉터리를 만드는 것도 하지 않는다(pip가 덮어쓰고 다른 체크아웃과 공유된다).
+# 남는 정확한 방법이 이것이다: 알려진 두 줄만 stderr에서 지운다. 다른 Qt 메시지
+# (qt.qpa.plugin 오류 등)는 그대로 통과한다.
+# 되돌리려면: 아래 두 launch 지점의 `2> >(...)` 리다이렉션을 지운다.
+#
+# 패턴은 **양 끝을 고정한다**. 두 번째 줄을 `Deploy some ` 까지만 맞추면 그 줄에
+# 무엇이 덧붙어도 통째로 삼킨다. 문구가 바뀌면 걸러지지 않고 그대로 보이는 쪽이
+# 맞는 실패 방향이다(안 보이는 것보다 낫다).
+hil_filter_qt_font_noise() {
+    grep --line-buffered -v -E \
+        -e '^QFontDatabase: Cannot find font directory .*/cv2/qt/fonts\.$' \
+        -e '^Note that Qt no longer ships fonts\. Deploy some \(.*\) or switch to fontconfig\.$' || true
+}
+
+# ---------------------------------------------------------------------------
+# actor 진행 증거 감시자 (파일 상단 "진행 증거" 항목이 근거 전부)
+# ---------------------------------------------------------------------------
+# 읽기 전용이다: /hil/actor_status 를 구독만 하고 아무것도 발행/호출하지 않는다.
+# env_step >= 0 인 status를 한 번 보면 마커를 쓰고 **즉시 종료**한다 (DDS reader
+# 수명을 최소로 유지). 부모(이 래퍼)가 사라지면 스스로 빠져나온다.
+ACTOR_STATUS_TOPIC="/hil/actor_status"
+PROGRESS_DIR=""
+PROGRESS_MARKER=""
+PROGRESS_WATCH_PID=""
+
+hil_stop_progress_watch() {
+    if [ -n "$PROGRESS_WATCH_PID" ]; then
+        kill "$PROGRESS_WATCH_PID" 2>/dev/null || true
+        wait "$PROGRESS_WATCH_PID" 2>/dev/null || true
+        PROGRESS_WATCH_PID=""
+    fi
+}
+
+hil_cleanup_progress_watch() {
+    hil_stop_progress_watch
+    if [ -n "$PROGRESS_DIR" ]; then
+        rm -rf "$PROGRESS_DIR" 2>/dev/null || true
+        PROGRESS_DIR=""
+    fi
+}
+
+hil_start_progress_watch() {
+    PROGRESS_DIR="$(mktemp -d /tmp/hil_actor_progress_XXXXXX)" || {
+        PROGRESS_DIR=""
+        return 1
+    }
+    PROGRESS_MARKER="$PROGRESS_DIR/first_transition"
+    trap hil_cleanup_progress_watch EXIT
+    python3 - "$PROGRESS_MARKER" "$$" "$ACTOR_STATUS_TOPIC" \
+        >"$PROGRESS_DIR/watch.log" 2>&1 <<'PYEOF' &
+import json
+import os
+import sys
+
+marker, parent_pid, topic = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+
+try:
+    import rclpy
+    from rclpy.node import Node
+    from std_msgs.msg import String
+except Exception as exc:  # noqa: BLE001 - any import failure is equivalent
+    print(f"actor progress watch unavailable: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+class Watch(Node):
+    def __init__(self) -> None:
+        super().__init__("hil_actor_progress_watch")
+        self.seen = False
+        self.create_subscription(String, topic, self._callback, 10)
+
+    def _callback(self, message) -> None:
+        if self.seen:
+            return
+        try:
+            env_step = int(json.loads(message.data)["env_step"])
+        except Exception:  # noqa: BLE001 - a malformed status proves nothing
+            return
+        # env_step is -1 for HOME / WAIT_SCENE_READY / handshake statuses and is
+        # first set >= 0 inside the transition loop.  See the "진행 증거" block
+        # at the top of run_hil_actor.sh.
+        if env_step >= 0:
+            self.seen = True
+
+
+rclpy.init()
+node = Watch()
+try:
+    while rclpy.ok() and not node.seen and os.getppid() == parent_pid:
+        rclpy.spin_once(node, timeout_sec=0.2)
+finally:
+    node.destroy_node()
+    rclpy.shutdown()
+
+if not node.seen:
+    raise SystemExit(1)
+with open(marker, "w", encoding="utf-8") as handle:
+    handle.write(f"env_step>=0 observed on {topic}\n")
+PYEOF
+    PROGRESS_WATCH_PID=$!
 }
 
 _say "============================================================"
@@ -636,15 +828,19 @@ else
 fi
 
 _say ""
-_say "[11] deadman ENGAGED heartbeat gate"
+_say "[11] deadman $STARTUP_DEADMAN_LABEL heartbeat gate (채널 생존 증명)"
 if [ "$ARM_REQUESTED" -ne 1 ]; then
-    p_info "--arm 없음 — ENGAGED gate 불필요"
+    p_info "--arm 없음 — deadman gate 불필요"
 elif [ "$FAKE_ENV" -eq 1 ]; then
     p_skip "fake-env에서는 deadman gate 없음"
 elif [ "$OVERLAY_OK" -ne 1 ]; then
     p_skip "ROS overlay 점검 실패"
-elif python3 "$DEADMAN_CHECKER" --topic /hil/deadman --samples 3 --timeout 2.0; then
-    p_ok "연속 ENGAGED heartbeat 확인"
+elif python3 "$DEADMAN_CHECKER" --topic /hil/deadman --samples 3 --timeout 2.0 \
+        --require "$STARTUP_DEADMAN"; then
+    p_ok "연속 $STARTUP_DEADMAN_LABEL heartbeat 3개 확인 (GUI가 살아 있다)"
+elif [ "$STARTUP_DEADMAN" = "disengaged" ]; then
+    p_fail "deadman이 fresh DISENGAGED 상태가 아니다" \
+           "HIL GUI가 떠서 20 Hz heartbeat를 내고 있어야 하고, 시작 시점에는 DISENGAGED여야 한다 (세션은 policy 제어로 시작한다 — ENGAGE는 개입할 때만). 옛 동작은 HIL_STARTUP_DEADMAN=engaged"
 else
     p_fail "deadman이 fresh ENGAGED 상태가 아니다" \
            "HIL GUI에서 ENGAGE한 뒤 GELLO를 RESET anchor에 고정하고 다시 실행"
@@ -684,9 +880,11 @@ fi
 if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 0 ]; then
     _say ""
     _say "[ARM] controller handoff (여기서만 상태 변경 가능)"
+    # 채널 생존 재검증. [11] 이후 GUI가 죽었거나 조작자가 상태를 바꿨을 수 있다.
     if ! python3 "$DEADMAN_CHECKER" \
-            --topic /hil/deadman --samples 3 --timeout 2.0; then
-        _say " ✗ deadman ENGAGED 재검증 실패 — controller를 전환하지 않는다."
+            --topic /hil/deadman --samples 3 --timeout 2.0 \
+            --require "$STARTUP_DEADMAN"; then
+        _say " ✗ deadman $STARTUP_DEADMAN_LABEL 재검증 실패 — controller를 전환하지 않는다."
         exit 1
     fi
     if ! hil_arm_controller_handoff \
@@ -724,7 +922,18 @@ ACTOR_CMD=("$ACTOR_PY" "$ACTOR_SCRIPT" \
     "${PASSTHRU[@]}")
 
 if [ "$ARM_REQUESTED" -ne 1 ] || [ "$FAKE_ENV" -eq 1 ]; then
-    exec "${ACTOR_CMD[@]}"
+    # stderr는 알려진 cv2/Qt 폰트 경고 두 줄만 걸러 내보낸다(위 함수 주석 참조).
+    # 프로세스 치환은 exec 전에 fork되므로 exec 뒤에도 살아 있다.
+    # `trap '' INT TERM`은 필터에만 적용된다 — 아래 실기 경로와 같은 이유다.
+    exec "${ACTOR_CMD[@]}" 2> >(trap '' INT TERM; hil_filter_qt_font_noise >&2)
+fi
+
+# 이 아래는 실기 --arm 경로뿐이다.  75 승격의 전제가 되는 진행 증거 감시자를
+# actor보다 **먼저** 띄운다(첫 transition status를 놓치지 않기 위해).
+if [ "$ACTOR_EXIT_MAP" = "1" ]; then
+    if ! hil_start_progress_watch; then
+        _say "[ARM] 경고: 진행 증거 감시자를 띄우지 못했다 — rc는 75로 승격되지 않는다."
+    fi
 fi
 
 ACTOR_PID=""
@@ -743,10 +952,23 @@ trap 'forward_actor_signal HUP' HUP
 # terminal and the parent both signal Python, and the second KeyboardInterrupt
 # can interrupt env.close().  Non-interactive bash also starts asynchronous
 # commands with SIGINT ignored, so restore the defaults before exec.
+#
+# stderr 필터는 subshell 바깥에 붙는다. $! 는 여전히 이 subshell의 PID이므로
+# 신호 전달/wait/controller 복귀 로직은 영향이 없다(bash 5.1.16에서 확인).
+#
+# 진짜 함정은 $! 가 아니라 **필터에 신호가 전달되는 것**이었다: 프로세스 치환의
+# grep은 이 래퍼의 **foreground process group**에 남는데 actor는 일부러
+# setsid로 그 group 밖으로 내보냈다. 그래서 터미널 Ctrl-C가 group을 때리면
+# grep이 **먼저** 죽고, 그 뒤 actor가 `finally: env.close()` / `network.close()`
+# 로 풀리며 쓰는 stderr는 닫힌 파이프로 들어간다 → KeyboardInterrupt traceback과
+# publisher/gRPC teardown 진단이 **통째로 사라지고** actor는 BrokenPipeError(32)를
+# 본다. 즉 하필 Ctrl-C 종료 경로의 로그만 잃는다.
+# `trap '' INT TERM`은 필터 자신에게만 적용되므로(actor에는 영향 없음) 필터가
+# actor보다 오래 살아 마지막 stderr까지 흘려보낸다. 필터는 stdin EOF로 끝난다.
 (
     trap - INT TERM HUP
     exec setsid "${ACTOR_CMD[@]}"
-) &
+) 2> >(trap '' INT TERM; hil_filter_qt_font_noise >&2) &
 ACTOR_PID=$!
 set +e
 # A trapped signal interrupts bash's wait before the child necessarily exits.
@@ -763,6 +985,16 @@ set -e
 ACTOR_PID=""
 trap - INT TERM HUP
 
+# 감시자는 증거를 잡는 즉시 스스로 끝난다. 아직 살아 있다면 증거가 없다는 뜻이다.
+ACTOR_PROGRESS_SEEN=0
+ACTOR_PROGRESS_DETAIL=""
+hil_stop_progress_watch
+if [ -n "$PROGRESS_MARKER" ] && [ -f "$PROGRESS_MARKER" ]; then
+    ACTOR_PROGRESS_SEEN=1
+elif [ -n "$PROGRESS_DIR" ] && [ -s "$PROGRESS_DIR/watch.log" ]; then
+    ACTOR_PROGRESS_DETAIL="$(tail -n 2 "$PROGRESS_DIR/watch.log" | tr '\n' ' ')"
+fi
+
 _say ""
 _say "[ARM] actor 종료(rc=$ACTOR_RC) — controller 자동 복귀"
 if ! hil_restore_controller_after_actor \
@@ -770,7 +1002,41 @@ if ! hil_restore_controller_after_actor \
     _say " ✗ controller 자동 복귀 실패. 펜던트를 들고 아래 상태를 직접 확인하라:" >&2
     _say "   ros2 control list_controllers" >&2
     _say "   ros2 topic info -v $COMMAND_TOPIC" >&2
+    _say "   (종료 코드 70 = 재시도 금지. 파일 상단 '종료 코드 계약' 참조)" >&2
     exit 70
+fi
+
+# ---------------------------------------------------------------------------
+# 종료 코드 계약 (파일 상단 참조).  여기까지 왔다는 것은:
+#   * actor가 실제로 기동됐고(모든 preflight + handoff PASS),
+#   * 어떤 이유로든 종료했으며,
+#   * controller 복귀가 PASS했다 = trajectory controller가 팔을 잡고 있고
+#     $COMMAND_TOPIC publisher는 0이다.
+#   * 그리고 actor가 **transition 루프까지 실제로 도달했다**(진행 증거).
+# 이 조합만 "재시도를 고려해도 되는 상태"로 승격한다(75).  신호로 죽은 경우
+# (>=128, Ctrl-C 포함)는 사람의 의도이므로 그대로 전파한다.
+# 진행 증거가 없으면 결정론적 startup 실패로 보고 raw rc를 그대로 낸다 — 파일
+# 상단 "진행 증거" 항목이 근거다. (그 rc가 1이면 preflight FAIL과 값이 겹치지만
+# 두 경우의 처방은 같다: 자동 재시도 금지, 사람이 로그를 본다.)
+# ---------------------------------------------------------------------------
+if [ "$ACTOR_EXIT_MAP" = "1" ] && [ "$ACTOR_RC" -gt 0 ] && [ "$ACTOR_RC" -lt 128 ]; then
+    if [ "$ACTOR_PROGRESS_SEEN" -eq 1 ]; then
+        _say "[ARM] actor rc=$ACTOR_RC + controller 복귀 PASS + transition 진행 증거 확인"
+        _say "      ($ACTOR_STATUS_TOPIC 에서 env_step>=0 status를 관측했다)"
+        _say "      -> 종료 코드 $RECOVERABLE_EXIT_CODE (RECOVERABLE 후보)."
+        _say "      재시도는 하드웨어 번들 재기동이 확인된 뒤에만, 모든 proof를 처음부터"
+        _say "      다시 통과해야 일어난다. 재시도 판단은 run_hil_session.sh가 한다."
+        exit "$RECOVERABLE_EXIT_CODE"
+    fi
+    _say "[ARM] actor rc=$ACTOR_RC + controller 복귀 PASS, 그러나 **transition 진행 증거가 없다**."
+    _say "      $ACTOR_STATUS_TOPIC 에서 env_step>=0 status를 한 번도 보지 못했다"
+    _say "      = actor가 첫 transition을 ack받기 전에 죽었다(인자/핸드셰이크/schema"
+    _say "      /첫 transition 검증 등). 이런 실패는 결정론적이라 재시도하면 같은"
+    _say "      지점에서 다시 죽고 RESET 이동만 한 번 더 실행된다."
+    if [ -n "$ACTOR_PROGRESS_DETAIL" ]; then
+        _say "      (감시자 진단: $ACTOR_PROGRESS_DETAIL)"
+    fi
+    _say "      -> 75로 승격하지 않고 rc=$ACTOR_RC 를 그대로 낸다 (자동 재시도 없음)."
 fi
 
 exit "$ACTOR_RC"

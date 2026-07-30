@@ -44,14 +44,18 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 전환하면 strict `p(success) > 0.5`가 성공 권한을 가진다. 성공 또는 episode limit 뒤에는
 `WAIT_HOME_APPROVAL`에서 로봇을 hold하고, GUI `APPROVE HOME` 뒤 HOME, 장면을 사람이
 재배치한 뒤 `START / NEXT ITERATION`을 눌러 다음 policy episode를 연다. classifier headline은
-16 pt의 compact GUI로 표시된다.
+16 pt의 compact GUI로 표시된다. **2026-07-30 저녁부터 세 번째 버튼 `END EPISODE`가 있다** —
+망친 episode를 지금 끝내는 truncation이다(아래 별도 항목, **데이터는 지워지지 않는다**).
 
 **시작 조작 간소화:** `run_hil_preposition.sh`의 예전 대문자 `GO` 입력은 기본 경로에서
 없어졌다. RESET 0.10 rad 밖이면 체크리스트를 출력한 뒤 기본값은 곧바로 JTC 이동을 시작한다
 (`PREPOSITION_DELAY_S=N`으로 취소 가능한 카운트다운, `PREPOSITION_CONFIRM=1`로 옛 GO
-프롬프트를 opt-in할 수 있다). `run_hil_session.sh`의 별도 Enter 프롬프트도 없어졌고 GUI가
-ENGAGED가 될 때까지 폴링한다. 이것은 **타이핑 제거**이지 controller/pose proof나 fresh
-ENGAGED heartbeat 검사를 없앤 것이 아니다.
+프롬프트를 opt-in할 수 있다). `run_hil_session.sh`의 별도 Enter 프롬프트도 없어졌고 deadman
+heartbeat가 요구 상태가 될 때까지 폴링한다. 이것은 **타이핑 제거**이지 controller/pose proof나
+fresh heartbeat 검사를 없앤 것이 아니다.
+> **이전 판(보존):** *"GUI가 **ENGAGED**가 될 때까지 폴링한다 (…) fresh **ENGAGED** heartbeat
+> 검사를 없앤 것이 아니다."* 2026-07-30 저녁부터 요구 상태는 **DISENGAGED**다 — 아래
+> "세션은 이제 DISENGAGED로 시작한다" 항목.
 
 **Kanu 현재 계약:** actor transport는 protocol 2 / schema 3, reward threshold는 0.5다.
 2026-07-30 새 learner는 GPU 5에서 canonical offline demo 2,037개를 로드해 health-ready가
@@ -61,6 +65,116 @@ gradient 602 / policy version 6으로 schema-3 실물 전이가 다시 유입되
 learner step 158은
 checkpoint가 없고 의미 없는 시험값이라는 사용자 판단에 따라 폐기했다. offline demo pickle은
 그대로 보존했다. PID와 run root는 스냅샷이므로 매번 `./run_hil_server.sh --check`로 읽는다.
+
+## 2026-07-30 저녁 — 조작자 경로 4건 (**실기 미검증**)
+
+아래 넷은 **아직 커밋 전**이고 **실기에서 한 번도 돌지 않았다.** 오프라인 단위 테스트만
+있다(맨 아래 테스트 기준선 참조). 실기 검증 항목표는
+[`docs/testing/README.md`](docs/testing/README.md) §1의 17~20행.
+
+### 1) 세션은 이제 **DISENGAGED**로 시작한다 (ENGAGE 불필요)
+
+세 gate 전부 — `run_hil_session.sh`의 폴링 루프, `run_hil_actor.sh` preflight `[11]`,
+그리고 `[ARM]` 직전 재검증 — 이 **연속 fresh DISENGAGED heartbeat 3개**를 요구한다.
+`_hil_deadman_check.py`에 `--require engaged|disengaged`가 생겼고, `HIL_STARTUP_DEADMAN`이
+그 값을 고른다. 오타는 **fail-closed**다(두 스크립트 모두 `case` 검사 후 즉시 종료 — "gate
+없음"으로 조용히 해석되지 않는다). `ENGAGE_WAIT_S`는 `DEADMAN_WAIT_S`로 이름이 바뀌었고
+**옛 이름은 alias로 남아 있다**(`${DEADMAN_WAIT_S:-${ENGAGE_WAIT_S:-120}}`).
+
+**gate의 의미는 처음부터 의도(intent)가 아니라 데드맨 채널의 생존 증명(LIVENESS PROOF)이었다** —
+"GUI가 살아서 `/hil/deadman`에 20 Hz로 퍼블리시하고 있다". fresh heartbeat 3개는 요구 상태가
+무엇이든 그것을 똑같이 증명한다. DISENGAGED로 시작하는 것이 조작자의 요구였고, 무의미한
+`ENGAGE → START → 자동 DISENGAGE` 왕복을 없앤다 — `RosOperatorSession._on_scene_ready`는
+`WAIT_SCENE_READY`에서 **원래부터** engaged면 START를 거부했다
+("DISENGAGE the deadman before resuming policy"). 되돌리기: `HIL_STARTUP_DEADMAN=engaged`.
+
+🟡 **알면서 받아들인 trade-off(사용자 명시 거절: "굳이 불필요한 안전장치는 만들지 않아도 돼").**
+이제 **policy가 팔을 몰기 전에 ENGAGE 전이가 한 번도 실행되지 않는다.** GUI의
+`engage_button_enabled`는 actor status의 state가 `ACTIVE_CONTROL_STATES`
+(`POLICY_RUNNING`/`HUMAN_INTERVENTION`/`HOLD`)일 때만 ENGAGE를 허용하므로,
+`HOMING`/`WAIT_SCENE_READY`/`WAIT_HOME_APPROVAL` 구간에서는 버튼이 죽어 있다. 즉 **ENGAGE
+경로가 깨져 있으면 조작자가 실제로 개입해야 하는 순간에 발견된다.**
+정확히 하자면: status가 아직 하나도 없으면(actor 기동 전) `engage_button_enabled`는 legacy로
+`True`를 반환하므로 버튼 자체는 눌린다 — 다만 그러면 DISENGAGED gate가 막혀 세션이 진행되지
+않는다. 그리고 옛 ENGAGED gate가 증명하던 것도 "GUI 버튼 → 토픽에 `engaged=1`"까지였지
+env 쪽 follower arming은 아니었다(그 시점엔 env가 없다).
+**탈출구는 `HIL_STARTUP_DEADMAN=engaged`** — 옛 gate가 그대로 돌아오고 세 gate가 다시
+ENGAGED를 요구한다.
+
+⚠️ **"START 전에는 팔이 안 움직인다"는 두 모드 모두에서 거짓이다.** actor는 첫
+`WAIT_SCENE_READY` **전에** `env.reset()`을 부르고, 그것이 `go_to_reset()`(수 초짜리 20 Hz
+스트리밍 이동)과 `open_gripper_for_reset()`을 실행한다(`remote_actor` 기동 시퀀스:
+`publish(HOMING)` → `env.reset()` → `wait_for_scene_ready`). 이번 작업이 만든 것도 바꾼 것도
+아니고 `RESET_MAX_DIST_RAD`로 bounded지만, **문서가 "아무것도 안 움직인다"로 읽히게 두지 말 것.**
+
+### 2) 새 조작자 버튼 `END EPISODE` (구현 중 이름은 ABORT였다)
+
+`/hil/abort_episode` (`std_srvs/Trigger`). `(run_id, episode_id)`에 묶인 **one-shot 토큰**이고,
+`ACTIVE_CONTROL_STATES`에서만 합법이며 `terminal_reason`이 이미 세워졌으면 거부한다
+(그 창에서 수락하면 다음 publish의 non-active-state 규칙에 조용히 버려지기 때문 —
+`_on_abort_episode` docstring). MANUAL/AUTO **양쪽에서** 받는다(망친 episode를 버리는 것은
+성공 주장이 아니다). episode를 즉시 `done=False, truncated=True, masks=1.0, success=False`로
+끝내고 평소와 같은 `WAIT_HOME_APPROVAL` → HOME → `WAIT_SCENE_READY` 경로를 탄다.
+`terminal_reason`은 `OPERATOR_ABORT`이며 이것이 `_terminal_reason`에서 SUCCESS·TRUNCATED보다
+우선한다.
+
+🛑 **정직성 항목 — 이 버튼을 언급하는 곳마다 같이 적어야 한다: 아무것도 버려지지 않는다.**
+proto에 cancel/retract RPC가 **없다**(`Health` / `GetServerInfo` / `GetBufferStatus` /
+`BeginEpisode` / `Step` 5개뿐). 그리고 서버는 Ack를 만들기 **전에** Step 핸들러 안에서
+동기적으로 replay store에 insert한다(`GrpcActorServicer.Step` → `self._service.step()` →
+`_insert_route(self.replay_store, …)`). 즉 **클릭 시점까지의 모든 전이는 — 잘못된 것까지 포함해 —
+이미 learner 버퍼에 있고 정상적으로 학습된다.** 게다가 그 순간 조작자는 대개 GELLO를 잡고
+있으므로 그 행들은 `intervened=1`이라 **두 버퍼 모두에** 들어가고 RLPD 50:50 분할이
+**가중치를 올려 준다.** 버튼이 사주는 것은 딱 둘이다: **(a)** step limit이 아니라 지금 끝내는 것,
+**(b)** 조작된 terminal 대신 **정직한 bootstrap-safe truncation**.
+
+⏱️ **즉시가 아니다.** actor는 토큰을 **iteration당 두 번** 읽는다 — `env.step` **직전**(그러면
+대기 중이던 policy action이 실행되지 않고 폐기된다)과 **직후**(그러면 방금 실행된 전이가
+truncated로 기록된다). 최악은 **루프 한 주기**(실측 평균 512 ms, 최대 854 ms)다. GUI는 Trigger
+**전에** 데드맨을 먼저 놓아 GELLO 추종을 **~33 ms**에 멈춘다(`_do_abort_episode`, 100 ms 뒤
+Trigger 발사). 🛑 **그러나 데드맨은 policy 경로를 전혀 게이팅하지 않는다** — 배경 follower와
+`GelloIntervention.action()`만 본다. **policy가 몰고 있을 때 데드맨을 놓는 것은 아무것도 멈추지
+않는다.** GUI 문구가 이것을 말하도록 되어 있다(`_ABORT_RELEASE_TEXT`).
+
+### 3) 충돌 복구 — 하드웨어 번들 재기동에서 세션이 살아남는다
+
+카메라와 GUI는 그대로 살아 있고 **3~5단계(preposition → preflight → actor)만** 재시도 루프를
+돈다. `run_hil_actor.sh`에 **종료 코드 계약**이 생겼다: **75 = recoverable** — 단 감시자가
+`/hil/actor_status`에서 `env_step >= 0`을 실제로 본 경우에만(= actor가 transition 루프까지
+갔다. `_OperatorReporter`는 `env_step`을 −1로 시작한다), **1 = arming 자체가 없었음**,
+**70 = controller 복귀 실패**, **>=128 = 신호**. 승격을 끄려면 `HIL_ACTOR_EXIT_MAP=0`.
+
+재시도는 추가로 이 셋을 **전부** 요구한다: 조작자가 번들을 정말 재기동했다는 증거(세
+entrypoint `ur_control.launch.py` / `robotiq_gripper_modbus` / `gello_publisher`가 모두 있고
+**PID 집합이 이전 세대와 하나도 겹치지 않음**), 세 토픽이 `run_hil_hardware.sh` 자신의 READY
+기준을 만족, 그리고 **dashboard 서비스로 읽은 robot mode `RUNNING` + safety mode `NORMAL`**.
+마지막 것이 핵심이다 — 토픽 probe 셋은 전부 RTDE **읽기**라 `PROTECTIVE_STOP` 중에도 계속
+흐르므로, 그것만 보고 재arming하면 움직이지 않는 로봇에 명령을 흘리게 된다.
+한계는 `HIL_ACTOR_RETRY`(0/1) / `HIL_ACTOR_RETRY_MAX`(기본 3, 상한 10) /
+`HIL_HARDWARE_RECYCLE_WAIT_S`(기본 900) / `HIL_RETRY_RESUME_DELAY_S`(기본 5).
+**모든 안전 proof가 매 시도마다 처음부터 다시 돈다 — 캐시되는 것은 없다.** resume이 아니라
+**새 arming**이다.
+
+🛑 **재시도 경로에서 RESET 복귀는 shell의 `run_hil_preposition.sh`가 한다 — GUI의
+`APPROVE HOME`이 아니다.** 그 버튼의 서비스는 actor 프로세스 안에서 만들어지므로
+(`RosOperatorSession`이 actor의 backend node에 서비스를 연다) **actor가 죽어 있는 동안에는
+존재하지 않는다.**
+
+### 4) Qt 폰트 경고 억제
+
+`launch_cameras.sh`(뷰어)와 `run_hil_actor.sh`(actor의 `DISPLAY_IMAGE` 창)에서 **정확히 두
+줄**만 stderr에서 걸러 낸다(`QFontDatabase: Cannot find font directory …/cv2/qt/fonts.` 와 그
+다음 `Note that Qt no longer ships fonts. …`). **뻔한 해법 둘이 왜 안 되는지 기록해 둔다 —
+다시 시도하지 말 것:** `cv2/config-3.py`가 **import 시점에** `QT_QPA_FONTDIR`을
+`<cv2>/qt/fonts`로 **덮어쓰므로** 환경변수는 무효고(2026-07-30 측정), 이 메시지는 **카테고리
+없는 qWarning**이라 `qt.qpa.fonts.warning=false` 같은 scoped `QT_LOGGING_RULES`도 무효다.
+듣는 규칙은 `default.warning=false` 하나뿐인데 그건 **진짜 Qt 오류까지 숨기므로 쓰지 않는다.**
+패턴은 양 끝을 고정했다 — 문구가 바뀌면 필터가 안 걸리고 그대로 보이는 쪽이 옳은 실패 방향이다.
+필터는 `trap '' INT TERM` 아래에서 돈다: 그게 없으면 터미널 Ctrl-C가 (setsid로 빠져나간 actor
+대신) foreground process group의 `grep`을 **먼저** 죽여 **actor의 종료 경로 stderr가 통째로
+사라진다**(KeyboardInterrupt traceback + publisher/gRPC teardown 진단, 그리고 actor는
+BrokenPipeError를 본다). `run_hil_gui.sh`에는 필터가 **없고 그게 맞다** — 그 GUI는 시스템
+Qt5(fontconfig)를 쓰고 cv2를 import하지 않는다.
 
 **2026-07-30 저녁 — 개입은 이제 `env.step` 창이 아니라 배경 추종 스레드가 몬다 (`edbb3f5`).**
 같은 날 오전의 창 안(`in_window`) 수정으로는 부족했다. 30 Hz 재샘플링이 `env.step`의 **명목
@@ -165,15 +279,35 @@ RPC tail latency가 어떻게 변하는지는 계속 계측해야 한다. classi
 진행 중이며, MANUAL `MARK SUCCESS` 버튼으로 끝낸 episode의 one-shot provenance만 별도로
 한 번 확인하면 된다.
 
+🔴 **그리고 시간 초과가 진짜 종료로 학습되고 있다 — `08_OPEN_GAPS.md` G35.**
+`UR7eEnv.step`이 `truncated`를 **리터럴 `False`**로 반환하고 `MAX_EPISODE_LENGTH` 도달을
+`done=True`에 섞어 넣는다 → `build_data`가 `masks=0.0`을 저장하고 critic이 "100스텝에서 세상이
+끝난다"고 배운다. episode마다 정확히 한 줄이다. **기존 결함이고 이번 작업과 무관**하지만,
+`END EPISODE`가 이 스택에서 `truncated=True`를 내는 **최초의 코드 경로**라 거기서 드러났다
+(그래서 지금은 `truncated`가 우연히 ABORT의 고유 표식이다 — 고치면 그 성질이 사라진다).
+⚠️ **고치면 `masks` 의미가 바뀌므로 새 lineage가 필요하다** — learner fingerprint에
+`MAX_EPISODE_LENGTH`가 **없어서**(G18, `ACTION_SCALE`과 같은 이유) 그 불일치는 조용히 통과한다.
+canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
+
 **개입 쪽에서 남은 것 3개** (실기 차단은 아니지만 알고 있어야 한다 — 차례로
 `08_OPEN_GAPS.md` **G32 / G33 / G34**):
 
-1. **`suspend_follower()` 호출부가 아직 배선되지 않았다.** 구현은 `UR7eEnv.suspend_follower`에
-   있고 부르는 곳은 테스트뿐이다(2026-07-30 `rg suspend_follower` 확인 —
-   `tests/test_intervention_follower.py` 외 production 호출부 0). `remote_actor.py`의
-   `WAIT_SCENE_READY`/`WAIT_HOME_APPROVAL`은 RL 스레드를 무한 블록하고 **후자는 데드맨을 아예
-   보지 않는다** → **그 대기 화면에서 GELLO를 잡으면 팔이 따라온다.** 현재 완화책은 조작자에게
-   "그 화면에서는 손을 떼라"고 안내하는 것뿐이다.
+1. **`suspend_follower()` 호출부는 여전히 배선되지 않았다 — 그러나 G32의 위험 자체는
+   2026-07-30 저녁 `END EPISODE` 작업에서 다른 수단으로 닫혔다.** `UR7eEnv.suspend_follower`는
+   아직 production 호출부 0(`rg suspend_follower` → `tests/test_intervention_follower.py`뿐)이고
+   docstring도 "NOT WIRED UP YET"인 채다. 대신 `remote_actor._park_follower`가 새로 생겨
+   **모든 blocking operator wait 앞에서** `await_follower_quiescent()`(내부적으로
+   `disarm_intervention_follow`)를 부른다 — 공유 terminal 경로 `_close_episode`가
+   `wait_for_home_approval` **전에**, 기동 시퀀스는 첫 `wait_for_scene_ready` **전에**
+   `env.reset()`으로. 대기 중 재arming도 불가능하다: **승격 지점은 코드 전체에서
+   `GelloIntervention._update_follow_arming` 하나뿐이고 그것은 RL 스레드의 step 경계에서만
+   도는데, 대기 중에는 바로 그 스레드가 블록돼 있다.**
+   ⚠️ 그래도 **실기 미검증**이고 `WAIT_HOME_APPROVAL`이 데드맨을 안 보는 것 자체는 그대로다.
+   G35 표기와 마찬가지로 `08_OPEN_GAPS.md`는 다른 세션이 소유한다 — 그 파일의 G32 문구가
+   이 문단보다 낡았을 수 있다.
+   > **이전 판(보존):** *"`remote_actor.py`의 `WAIT_SCENE_READY`/`WAIT_HOME_APPROVAL`은 RL
+   > 스레드를 무한 블록하고 **후자는 데드맨을 아예 보지 않는다** → 그 대기 화면에서 GELLO를
+   > 잡으면 팔이 따라온다. 현재 완화책은 조작자 안내뿐이다."*
 2. **포화 transition의 서버측 제외가 미구현.** 예산이 빠졌으므로 사람이 빠르게 움직인 창은
    기록 액션이 실제 이동을 **과소** 진술한다(측정은 `info["intervention_saturation"]`로 된다).
    서버가 그런 전이를 버리려면 proto 신규 필드 + pb2 재생성 + `SCHEMA_VERSION` bump가 필요하고,
@@ -290,7 +424,15 @@ serl_ur_infra/
   ur_env/envs/frame_wrappers.py    RelativeFrame, Quat2EulerWrapper
   ur_env/envs/ros_backend.py       rclpy 백엔드, 250 Hz 업샘플러
   ur_env/remote_actor.py           actor 루프, 전이 생성·전송, sidecar 부착 계측
+                                   + END EPISODE: _consume_operator_abort(iteration당 pre/post
+                                   step 2회), _terminal_reason(aborted=True -> OPERATOR_ABORT),
+                                   _park_follower(모든 blocking wait 앞 — G32 완화),
+                                   _close_episode / _open_episode(공유 terminal 경계),
+                                   _OperatorReporter.clear_terminal
   ur_env/operator_session.py       GUI 상태/서비스, MANUAL/AUTO·HOME/scene-ready operator gate
+                                   + ABORT_EPISODE_SERVICE(/hil/abort_episode), _on_abort_episode,
+                                   consume_operator_abort(one-shot, (run_id, episode_id) scope),
+                                   resolve_follow_controls
   ur_env/classifier_sidecar.py     분류기 sidecar 계약 — build/validate/decode, 정지·2 Hz 게이트,
                                    directory_sha256. **설계 근거가 모듈 docstring에 전부 있다**
   ur_env/rlpd_receive_server.py    서버 ingress + RewardClassifierRuntime + checkpoint_sha256
@@ -302,10 +444,20 @@ ros2_ur_ws/
   run_hil_server.sh                Terminal 1: Kanu learner 검증/재사용·기동 + SSH tunnel
   run_hil_hardware.sh              Terminal 2: UR7e + Robotiq + passive GELLO supervisor
   run_hil_session.sh               Terminal 3: cameras + GUI + preposition/preflight + actor
+                                   + 하드웨어 재기동 복구 루프: hil_hardware_owner_lines /
+                                   hil_wait_for_hardware_recycle / hil_hardware_topics_ready /
+                                   hil_robot_state_ready(dashboard RUNNING+NORMAL)
   run_hil_actor.sh                 actor 실행 래퍼 (11단계 preflight + controller cleanup)
+                                   + 종료 코드 계약(75/1/70/>=128, HIL_ACTOR_EXIT_MAP),
+                                   hil_start_progress_watch(env_step>=0 증거),
+                                   hil_filter_qt_font_noise
   run_hil_preposition.sh           RESET pose 이동 + controller handoff proof 생성
-  run_hil_gui.sh                   데드맨/개입 GUI
-  launch_cameras.sh                RealSense 2대 (시리얼 자동 해석)
+                                   (재시도 경로의 HOME 복귀는 GUI가 아니라 **여기**가 한다)
+  run_hil_gui.sh                   데드맨/개입 GUI (**Qt 폰트 필터 없음 — 시스템 Qt5라 불필요**)
+  _hil_deadman_check.py            deadman 채널 생존 증명 — --require engaged|disengaged
+  launch_cameras.sh                RealSense 2대 (시리얼 자동 해석) + Qt 폰트 필터
+  src/ur_gello_bringup/.../gello_hil_gui_node.py   END EPISODE 버튼(2-click, 데드맨 먼저 release)
+  src/ur_gello_bringup/.../hil_actor_status.py     abort_episode_enabled(MANUAL/AUTO 공통)
   run_classifier_viewer.sh         라이브 분류기 뷰어 (랩톱 CPU)
   run_remote_classifier_viewer.sh  라이브 분류기 뷰어 (kanu GPU + SSH 터널)
 ```
@@ -360,9 +512,13 @@ ros2_ur_ws/
   `InterventionBudget`을 개입 **제어** 경로에서 제거했으므로 더 이상 사실이 아니다.
   `follow_mode="in_window"`에서는 여전히 맞다.
 - **테스트는 passed 수를 볼 것 — 그리고 어느 인터프리터인지 같이 적을 것.** PYTHONPATH에서
-  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-30 `d6965a9`
-  기준선은 **701 passed / 11 skipped / 1 xfailed** (14.46 s 실측,
-  `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6).
+  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-30 저녁
+  (조작자 경로 4건) 기준선은 **768 passed / 11 skipped / 1 xfailed** (13.86 s
+  실측, `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6).
+  `ur_gello_bringup` 패키지 suite는 **별도로 489 passed**(시스템 `python3` + ROS overlay,
+  7.48 s 실측 — 두 숫자를 합치지 말 것. 인터프리터도 PYTHONPATH도 다르다).
+  > **이전 판(보존):** *"2026-07-30 `d6965a9` 기준선은 **701 passed / 11 skipped / 1 xfailed**
+  > (14.46 s 실측 …)"*, `ur_gello_bringup`은 436.
   **`xfailed 1`을 빼고 인용하지 말 것** — 그건 통계 잡음이 아니라 **알려진 결함의 표식**이다
   (`ee8af5e`가 박은 strict xfail: 저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수
   있다. 고치면 XPASS로 터진다). 재현 명령 정본은
@@ -379,9 +535,11 @@ ros2_ur_ws/
   ```
 
   계보: 333 → 337(`40b99f8`) → 429(classifier sidecar) → 497(07-30 오전, `4197f5b` 이전)
-  → 579(`4197f5b`) → 595(`ee8af5e`) → **701**(`d6965a9`; 배경 추종 스레드 + 컨트롤러
-  스레드 안전화 + norm 축소 회귀 — `test_intervention_follower` 신규).
-  옛 문서에 남은 333·337·429·497·579·595는 전부 이전 값이다.
+  → 579(`4197f5b`) → 595(`ee8af5e`) → 701(`d6965a9`; 배경 추종 스레드 + 컨트롤러
+  스레드 안전화 + norm 축소 회귀 — `test_intervention_follower` 신규)
+  → **768**(07-30 저녁; END EPISODE + DISENGAGED gate + 재기동 복구 —
+  `tests/test_operator_abort.py`(26) · `tests/test_actor_abort_lifecycle.py`(23) 신규).
+  옛 문서에 남은 333·337·429·497·579·595·701은 전부 이전 값이다.
   🪤 **인터프리터를 안 적은 "passed 개수"는 무의미하다.** 같은 명령을
   `/home/laptop3/venvs/hilserl/bin/python`(jax 0.5.3 있음, numpy 1.26.4)으로 돌리면
   jax 테스트가 더 돌아 **741 passed / 4 skipped / 1 xfailed**가 된다(skipped 11 → 4).

@@ -21,6 +21,20 @@
 #   Actor reward/classifier/episode status arrives on /hil/actor_status. At
 #   WAIT_SCENE_READY, START/NEXT releases the deadman and calls
 #   /hil/scene_ready; it does not command the robot directly.
+#
+# A HIL session now STARTS DISENGAGED (policy control). Do not press ENGAGE to
+# get the session going -- run_hil_actor.sh's deadman gate wants three fresh
+# DISENGAGED heartbeats, which this GUI publishes as soon as it is up. ENGAGE is
+# only for taking over with GELLO mid-episode. (Old behaviour:
+# HIL_STARTUP_DEADMAN=engaged.)
+#
+# NO Qt font-warning filter here, on purpose: this GUI is PyQt5 against the
+# SYSTEM Qt5 (fontconfig) and never imports cv2, so it does not emit the
+# "QFontDatabase: Cannot find font directory .../cv2/qt/fonts" spam -- verified
+# 2026-07-30 by running a QApplication+QLabel with QT_QPA_PLATFORM=offscreen.
+# That message comes from the Qt plugin bundled in pip's opencv-python, so the
+# filter lives where cv2 windows are actually opened: launch_cameras.sh (viewer)
+# and run_hil_actor.sh (the actor's DISPLAY_IMAGE window).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

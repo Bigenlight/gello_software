@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(_HERE, ".."))
 
 from ur_env import operator_session as operator_session_module  # noqa: E402
 from ur_env.operator_session import (  # noqa: E402
+    ABORT_EPISODE_SERVICE,
     ACTOR_STATUS_TOPIC,
     AUTO_SUCCESS_SERVICE,
     MANUAL_SUCCESS_SERVICE,
@@ -192,6 +193,7 @@ def test_trigger_is_edge_gated_and_requires_fresh_disengaged(
         SCENE_READY_SERVICE,
         AUTO_SUCCESS_SERVICE,
         MANUAL_SUCCESS_SERVICE,
+        ABORT_EPISODE_SERVICE,
     }
 
     early = _call(node)

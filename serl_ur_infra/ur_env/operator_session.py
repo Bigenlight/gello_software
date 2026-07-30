@@ -21,6 +21,7 @@ ACTOR_STATUS_TOPIC = "/hil/actor_status"
 SCENE_READY_SERVICE = "/hil/scene_ready"
 AUTO_SUCCESS_SERVICE = "/hil/set_auto_success"
 MANUAL_SUCCESS_SERVICE = "/hil/manual_success"
+ABORT_EPISODE_SERVICE = "/hil/abort_episode"
 WAIT_STATUS_REPUBLISH_S = 0.5
 WAIT_STATUS_MAX_CONSECUTIVE_FAILURES = 3
 
@@ -214,6 +215,34 @@ def resolve_backend_node(env: Any) -> Any:
     return node
 
 
+def resolve_follow_controls(env: Any) -> Any:
+    """Return the base env whose background GELLO follower can be stopped.
+
+    ``UR7eEnv`` drives the arm from the leader on a daemon thread at 30 Hz for
+    as long as the follower is armed, entirely outside ``env.step``.  An abort
+    is by definition the "something went wrong and the operator is holding
+    GELLO" case, so whoever consumes an abort token must be able to disarm that
+    thread immediately rather than inherit the G32 behaviour where an operator
+    keeps driving the arm through a blocking wait
+    (``docs/testing/08_OPEN_GAPS.md`` G32).
+
+    Resolution is deliberately not a wrapper walk: the follower lives on the
+    base env, which every wrapper exposes as ``unwrapped``.  Callers that also
+    need proof the follower has parked (rather than only been locked out)
+    should prefer ``await_follower_quiescent`` on the returned object when it
+    is available; ``disarm_intervention_follow`` is the guarantee that no
+    further human command reaches the backend and is the minimum this resolver
+    insists on.
+    """
+
+    base = getattr(env, "unwrapped", env)
+    if not callable(getattr(base, "disarm_intervention_follow", None)):
+        raise RuntimeError(
+            "armed topic actor has no reachable intervention follow controls"
+        )
+    return base
+
+
 class RosOperatorSession:
     """ROS operator gates plus episode-scoped success controls.
 
@@ -222,6 +251,15 @@ class RosOperatorSession:
     token exactly once with :meth:`consume_operator_success`.  The token is
     cleared on mode changes and actor run/episode/terminal boundaries so an
     operator click cannot leak into a later episode.
+
+    ``/hil/abort_episode`` uses the same one-shot, episode-scoped token
+    discipline via :meth:`consume_operator_abort`, with two deliberate
+    differences: it is accepted in AUTO as well as MANUAL (discarding a ruined
+    episode is not an assertion about task success), and it survives a
+    MANUAL/AUTO mode edge (a mode toggle says nothing about whether the episode
+    is ruined).  It is refused once the episode has a ``terminal_reason``, so
+    the service never acknowledges an abort that :meth:`publish` is about to
+    drop on the following boundary.
     """
 
     def __init__(
@@ -250,6 +288,7 @@ class RosOperatorSession:
         self._waiting_state: Optional[str] = None
         self._auto_success = False
         self._operator_success_pending: Optional[tuple[str, int]] = None
+        self._operator_abort_pending: Optional[tuple[str, int]] = None
         self._latest_status: Optional[ActorStatus] = None
         self._status_failures = 0
         self._publisher = None
@@ -278,6 +317,9 @@ class RosOperatorSession:
         )
         self._manual_success_service = node.create_service(
             Trigger, MANUAL_SUCCESS_SERVICE, self._on_manual_success
+        )
+        self._abort_episode_service = node.create_service(
+            Trigger, ABORT_EPISODE_SERVICE, self._on_abort_episode
         )
 
     @classmethod
@@ -328,6 +370,30 @@ class RosOperatorSession:
             self._operator_success_pending = None
             return True
 
+    def consume_operator_abort(self, run_id: str, episode_id: int) -> bool:
+        """Consume the matching ABORT token exactly once.
+
+        Same matching discipline as :meth:`consume_operator_success`: a token
+        latched against one ``(run_id, episode_id)`` can never be spent on a
+        different episode, and a mismatched call does not steal the token
+        belonging to the active one.
+        """
+
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id is required")
+        if (
+            not isinstance(episode_id, int)
+            or isinstance(episode_id, bool)
+            or episode_id < 0
+        ):
+            raise ValueError("episode_id must be a non-negative int")
+        target = (run_id, episode_id)
+        with self._lock:
+            if self._operator_abort_pending != target:
+                return False
+            self._operator_abort_pending = None
+            return True
+
     def publish(self, status: ActorStatus) -> bool:
         """Publish one complete JSON status and report whether it succeeded."""
 
@@ -346,6 +412,7 @@ class RosOperatorSession:
             )
             if crossed_boundary or status.state not in ACTIVE_CONTROL_STATES:
                 self._operator_success_pending = None
+                self._operator_abort_pending = None
             status = replace(status, auto_success=self._auto_success)
             self._latest_status = status
         try:
@@ -368,7 +435,21 @@ class RosOperatorSession:
             return False
 
     def _on_set_auto_success(self, request: Any, response: Any) -> Any:
-        """Set MANUAL/AUTO mode; every mode edge cancels a queued click."""
+        """Set MANUAL/AUTO mode; every mode edge cancels a queued success click.
+
+        Only the SUCCESS token is cancelled, and deliberately so.  A success
+        token is an assertion about *who owns the success verdict*, so it may
+        not survive a change of that owner -- and abort's own correctness in
+        AUTO depends on it: ``_on_manual_success`` refuses while AUTO is set,
+        and clearing on both edges is what stops a MANUAL-queued token from
+        being spent by an episode the classifier now owns.
+
+        The ABORT token is intentionally NOT cleared here.  A mode toggle says
+        nothing about whether the episode is ruined; the collision or the
+        wandering policy that made the operator hit ABORT is just as true after
+        the toggle.  Do not "fix" this asymmetry by pattern-matching against
+        the line below -- ``test_operator_abort.py`` pins it.
+        """
 
         requested = bool(request.data)
         with self._lock:
@@ -419,6 +500,73 @@ class RosOperatorSession:
         response.success = True
         response.message = (
             "operator success queued for next transition: "
+            f"run={target[0]} episode={target[1]}"
+        )
+        return response
+
+    def _on_abort_episode(self, _request: Any, response: Any) -> Any:
+        """Queue one abort token for the latest active episode.
+
+        Unlike ``/hil/manual_success`` this is accepted regardless of the
+        MANUAL/AUTO toggle.  Abort is not a success assertion -- it says
+        "discard this episode and go back to the start pose" -- and the
+        operator needs it precisely in the situations where the classifier is
+        the thing being distrusted.  Gating it on MANUAL would take the button
+        away in AUTO, which is exactly when a wandering policy has to be
+        stopped.
+
+        The ``terminal_reason`` check below closes a window where this service
+        would ACCEPT an abort that is then guaranteed to be dropped.  The actor
+        publishes its terminal transition while still in an *active* control
+        state (``_control_state`` returns POLICY_RUNNING / HUMAN_INTERVENTION /
+        HOLD from the action that physically ran) and only marks it terminal
+        through ``terminal_reason``; the very next publish is
+        ``WAIT_HOME_APPROVAL``, which clears the token on the non-active-state
+        rule in :meth:`publish`.  Without this check the operator gets
+        "ABORT queued; episode will be discarded" and the episode is kept
+        anyway -- which is exactly the click used to reject a false classifier
+        SUCCESS, so the silent drop would relabel a rejected episode a win.
+        The window is small (terminal publish -> ``_park_follower`` ->
+        ``wait_for_home_approval``, typically ~33 ms but up to
+        ``FOLLOW_QUIESCE_TIMEOUT_S`` = 0.5 s) and precisely the one an operator
+        reacting to the terminal banner clicks in.  A rejection the operator
+        can see is strictly better than a false acknowledgement.
+
+        This does not disarm ABORT in a healthy episode: the actor clears
+        ``terminal_reason`` back to "" on the first status of the next episode,
+        so a running episode always presents an empty reason.
+        """
+
+        with self._lock:
+            status = self._latest_status
+            if status is None:
+                response.success = False
+                response.message = "actor status has not been published"
+                return response
+            if status.state not in ACTIVE_CONTROL_STATES:
+                response.success = False
+                response.message = (
+                    f"actor is not in an active episode ({status.state})"
+                )
+                return response
+            if status.terminal_reason:
+                response.success = False
+                response.message = (
+                    f"episode {status.episode_id} has already ended "
+                    f"({status.terminal_reason}); it is too late to abort it. "
+                    "Press APPROVE HOME, then abort the next episode."
+                )
+                return response
+            if self._operator_abort_pending is not None:
+                response.success = False
+                response.message = "operator abort is already queued"
+                return response
+            target = (status.run_id, status.episode_id)
+            self._operator_abort_pending = target
+
+        response.success = True
+        response.message = (
+            "operator abort queued for next transition: "
             f"run={target[0]} episode={target[1]}"
         )
         return response

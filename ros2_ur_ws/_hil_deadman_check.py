@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""Require consecutive, valid ENGAGED HIL deadman heartbeats.
+"""Require consecutive, valid HIL deadman heartbeats in a demanded state.
 
-Exit 0 only after ``--samples`` consecutive messages contain
-``[engaged=1, gain in 0.10..1.00]``.  Exit 1 for a malformed or disengaged
-message and 2 when ROS or the topic is unavailable.
+This is a LIVENESS PROOF of the deadman channel, not a request that the
+operator hold a button: exit 0 only after ``--samples`` consecutive freshly
+received messages are well formed (``[engaged in {0,1}, gain in 0.10..1.00]``)
+AND carry the state named by ``--require``.
+
+``--require engaged``     the historical mode (the human is driving).
+``--require disengaged``  the default for session startup: the GUI is alive and
+                          publishing, and the arm is NOT in a state where
+                          grabbing GELLO moves it.  A HIL session begins under
+                          policy control, so this is the strictly safer proof.
+
+Exit 1 for a malformed heartbeat or the wrong state, 2 when ROS or the topic is
+unavailable (including "not enough heartbeats before the timeout").
 """
 
 from __future__ import annotations
@@ -34,6 +44,15 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--topic", default="/hil/deadman")
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--require",
+        choices=("engaged", "disengaged"),
+        default="engaged",
+        help=(
+            "state every accepted heartbeat must carry "
+            "(default: engaged, the historical behaviour)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.samples < 1:
         parser.error("--samples must be positive")
@@ -42,7 +61,12 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _wait_for_engaged(topic: str, sample_count: int, timeout_s: float):
+def _wait_for_state(
+    topic: str,
+    sample_count: int,
+    timeout_s: float,
+    want_engaged: bool = True,
+):
     try:
         import rclpy
         from rclpy.node import Node
@@ -50,6 +74,8 @@ def _wait_for_engaged(topic: str, sample_count: int, timeout_s: float):
     except ImportError as exc:
         print(f"ERROR: ROS Python overlay unavailable: {exc}", file=sys.stderr)
         return 2, None
+
+    wanted_label = "ENGAGED" if want_engaged else "DISENGAGED"
 
     class Check(Node):
         def __init__(self):
@@ -67,8 +93,17 @@ def _wait_for_engaged(topic: str, sample_count: int, timeout_s: float):
             except ValueError as exc:
                 self.error = str(exc)
                 return
-            if not engaged:
-                self.error = "deadman is DISENGAGED; ENGAGE in the HIL GUI first"
+            if engaged != want_engaged:
+                if want_engaged:
+                    self.error = (
+                        "deadman is DISENGAGED; ENGAGE in the HIL GUI first"
+                    )
+                else:
+                    self.error = (
+                        "deadman is ENGAGED; DISENGAGE in the HIL GUI first "
+                        "(the session starts under policy control; ENGAGE is "
+                        "only for intervention)"
+                    )
                 return
             self.gain = gain
             self.received += 1
@@ -91,8 +126,9 @@ def _wait_for_engaged(topic: str, sample_count: int, timeout_s: float):
             return 1, None
         if node.received < sample_count:
             print(
-                f"ERROR: received {node.received}/{sample_count} valid ENGAGED "
-                f"heartbeats from {topic} within {timeout_s:.1f}s",
+                f"ERROR: received {node.received}/{sample_count} valid "
+                f"{wanted_label} heartbeats from {topic} within "
+                f"{timeout_s:.1f}s",
                 file=sys.stderr,
             )
             return 2, None
@@ -105,11 +141,15 @@ def _wait_for_engaged(topic: str, sample_count: int, timeout_s: float):
 
 def main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
-    result, gain = _wait_for_engaged(args.topic, args.samples, args.timeout)
+    want_engaged = args.require == "engaged"
+    result, gain = _wait_for_state(
+        args.topic, args.samples, args.timeout, want_engaged
+    )
     if result == 0:
+        wanted_label = "ENGAGED" if want_engaged else "DISENGAGED"
         print(
-            f"deadman ENGAGED: {args.samples} consecutive heartbeats, "
-            f"gain={gain:.2f}"
+            f"deadman {wanted_label} (channel alive): {args.samples} "
+            f"consecutive heartbeats, gain={gain:.2f}"
         )
     return result
 

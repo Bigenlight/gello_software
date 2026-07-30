@@ -6,8 +6,9 @@ heartbeat on the ROS topic ``/hil/deadman`` -- it is the GUI ALTERNATIVE to the
 terminal-focus spacebar deadman. It runs WITHOUT the teleop bridge and WITHOUT
 ``control_mode:=eef``: it never calls a single bridge service, never talks to the
 robot or GELLO. Its only direct robot-motion signal is the deadman publisher;
-separate operator services select success mode, mark MANUAL success, approve
-HOME, and start the next scene. The RL env (the ``RosTopicDeadman``
+separate operator services select success mode, mark MANUAL success, end the
+current episode early, approve HOME, and start the next scene. The RL env (the
+``RosTopicDeadman``
 DeadmanSource in ``serl_ur_infra/ur_env/envs/wrappers.py``) subscribes and reads
 the engage/gain signal off the topic.
 
@@ -67,11 +68,13 @@ from std_msgs.msg import Float32MultiArray, String
 from std_srvs.srv import SetBool, Trigger
 
 from ur_gello_bringup.hil_actor_status import (
+    ABORT_EPISODE_SERVICE,
     ACTOR_STATUS_TOPIC,
     AUTO_SUCCESS_SERVICE,
     MANUAL_SUCCESS_SERVICE,
     SCENE_READY_SERVICE,
     SCENE_REQUEST_IDLE,
+    abort_episode_enabled,
     actor_run_changed,
     actor_banner,
     classifier_verdict_summary,
@@ -120,6 +123,45 @@ _SCENE_RELEASE_DELAY_MS = 100
 _SCENE_CALL_TIMEOUT_S = 5.0
 _OPERATOR_CALL_TIMEOUT_S = 5.0
 
+# The terminal_reason the actor writes when it consumes an operator abort. No
+# status-schema change: abort reuses the existing terminal_reason field.
+_ABORT_TERMINAL_REASON = "OPERATOR_ABORT"
+
+# ------------------------------------------------------------------ END EPISODE
+# THE OPERATOR ACTS ON WHAT THESE SAY, so they live here as named constants
+# rather than inline literals: an earlier revision kept one copy of the caption
+# in the builder and another in ``_refresh`` and only one of them got corrected.
+#
+# What this control does NOT do: discard anything.  ``actor_transport.proto``
+# has exactly five RPCs (Health, GetServerInfo, GetBufferStatus, BeginEpisode,
+# Step) -- no cancel, retract or delete -- and the server inserts each
+# transition into ``replay_store`` (and ``intervention_store`` when intervened)
+# inside the Step handler BEFORE the Ack is built.  By the time the actor's
+# ``network.step()`` returns, the row is already in the buffer the learner draws
+# gradient batches from.  The transitions that led to the collision are
+# precisely the intervened ones, so they land in BOTH buffers and the RLPD 50:50
+# split up-weights them.
+#
+# What it DOES buy: the episode ends now instead of at the step limit, and it
+# ends as an honest bootstrap-safe truncation (done=False, truncated=True,
+# masks=1.0, success=False) rather than a fabricated success or a false Bellman
+# terminal.  Say that; do not overclaim.
+_ABORT_BUTTON_TEXT = "END EPISODE (truncate & re-home)"
+_ABORT_ARMED_TEXT = "Click AGAIN to END EPISODE — no success, data stays"
+_ABORT_CONFIRM_WARN = (
+    "END EPISODE — ends this episode now with NO success; transitions already "
+    "collected (including the ones that led here) STAY in the learner's replay "
+    "buffer and cannot be withdrawn; the robot returns to the start pose"
+)
+# Releasing the deadman does NOT stop the arm when the policy is driving: the
+# deadman gates only the background follower and ``GelloIntervention.action()``,
+# and nothing on the policy path reads it.  ~0.5 s is the measured mean actor
+# loop period (512 ms); 854 ms is the measured worst case.
+_ABORT_RELEASE_TEXT = (
+    "Deadman released — GELLO following stopped; the policy stops within one "
+    "step (~0.5 s, 0.9 s worst). Sending END EPISODE in 100 ms..."
+)
+
 
 # Button chrome: a filled, bordered, rounded, hover-reactive control that reads
 # unmistakably as "clickable" -- so it is NOT confused with the flat, square,
@@ -146,6 +188,18 @@ def _btn_css(bg, border, big=False):
 _PRIMARY_ENGAGE = _btn_css("#2e7d32", "#1b5e20", big=True)      # green = go (ENGAGE)
 _PRIMARY_DISENGAGE = _btn_css("#1565c0", "#0d47a1", big=True)   # blue = hand back
 _PRIMARY_ARMED = _btn_css("#ef6c00", "#e65100", big=True)       # orange = "click again"
+
+# END EPISODE is the only IRREVERSIBLE control in this window: it ends the
+# running episode with no success and cannot be taken back.  It does NOT delete
+# data -- the transport has no cancel/retract RPC (Health, GetServerInfo,
+# GetBufferStatus, BeginEpisode, Step) and the server inserts each transition
+# into replay inside the Step handler BEFORE the Ack, so everything already sent
+# is already in the learner's buffer.  Deep red separates it from every "go"
+# action -- MARK SUCCESS green, START / NEXT ITERATION blue -- and its armed
+# state stays inside the red family (brighter, not the orange used by ENGAGE) so
+# an armed END EPISODE can never be mistaken for an armed ENGAGE.
+_ABORT_IDLE = _btn_css("#b71c1c", "#7f0000")
+_ABORT_ARMED = _btn_css("#e53935", "#b71c1c")
 
 
 # --------------------------------------------------------------------------- #
@@ -217,11 +271,14 @@ class HilGuiNode(Node):
         self._manual_success_client = self.create_client(
             Trigger, MANUAL_SUCCESS_SERVICE
         )
+        self._abort_episode_client = self.create_client(
+            Trigger, ABORT_EPISODE_SERVICE
+        )
 
         self.get_logger().info(
             "gello_hil_gui_node up; publishing %s at %.0f Hz "
             "(data=[engaged, gain]); actor status=%s; scene ready=%s; "
-            "success mode=%s; manual success=%s"
+            "success mode=%s; manual success=%s; abort episode=%s"
             % (
                 DEADMAN_TOPIC,
                 PUBLISH_HZ,
@@ -229,6 +286,7 @@ class HilGuiNode(Node):
                 SCENE_READY_SERVICE,
                 AUTO_SUCCESS_SERVICE,
                 MANUAL_SUCCESS_SERVICE,
+                ABORT_EPISODE_SERVICE,
             )
         )
 
@@ -333,6 +391,9 @@ class HilGuiNode(Node):
     def manual_success_service_ready(self) -> bool:
         return self._client_ready(self._manual_success_client)
 
+    def abort_service_ready(self) -> bool:
+        return self._client_ready(self._abort_episode_client)
+
     def call_auto_success(self, enabled: bool):
         request = SetBool.Request()
         request.data = bool(enabled)
@@ -340,6 +401,15 @@ class HilGuiNode(Node):
 
     def call_manual_success(self):
         return self._manual_success_client.call_async(Trigger.Request())
+
+    def call_abort_episode(self):
+        """Issue the non-blocking abort Trigger; Qt polls the returned Future.
+
+        Bookkeeping only.  The arm has already been stopped by the caller
+        releasing the deadman -- see ``MainWindow._do_abort_episode``.
+        """
+
+        return self._abort_episode_client.call_async(Trigger.Request())
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +443,19 @@ class MainWindow(QMainWindow):
         self._success_run_id = None
         self._success_result_text = ""
         self._success_result_color = _GRAY
+        # ABORT EPISODE. ``_abort_release_pending`` covers the ~100 ms between
+        # the immediate deadman release and the Trigger dispatch: without it the
+        # button would stay live in that window and a double click would release
+        # the deadman twice and fire two Triggers.
+        self._abort_future = None
+        self._abort_call_started: Optional[float] = None
+        self._abort_release_pending = False
+        self._abort_queued = False
+        self._abort_target = None
+        self._abort_confirmed_target = None
+        self._abort_last_status = None
+        self._abort_result_text = ""
+        self._abort_result_color = _GRAY
         self._closing = False
 
         self.setWindowTitle("GELLO -> UR7e  HIL deadman")
@@ -619,6 +702,20 @@ class MainWindow(QMainWindow):
         self._scene_result.setAlignment(Qt.AlignCenter)
         self._scene_result.setWordWrap(True)
         grid.addWidget(self._scene_result, 11, 0, 1, 2)
+
+        # END EPISODE lives at the very bottom, away from MARK SUCCESS, because
+        # the two have opposite meanings and a misclick on either is
+        # unrecoverable.
+        self._abort_button = QPushButton(_ABORT_BUTTON_TEXT)
+        self._abort_button.setMinimumHeight(36)
+        self._abort_button.setStyleSheet(_ABORT_IDLE)
+        self._abort_button.clicked.connect(self._on_abort_episode)
+        grid.addWidget(self._abort_button, 12, 0, 1, 2)
+
+        self._abort_result = QLabel("")
+        self._abort_result.setAlignment(Qt.AlignCenter)
+        self._abort_result.setWordWrap(True)
+        grid.addWidget(self._abort_result, 13, 0, 1, 2)
         return box
 
     # -------------------------------------------------------------- slider --
@@ -884,6 +981,248 @@ class MainWindow(QMainWindow):
                 self._manual_success_queued = False
                 self._manual_success_target = None
 
+    # ------------------------------------------------------- abort episode --
+    def _set_abort_result(self, text: str, color: str) -> None:
+        self._abort_result_text = str(text)
+        self._abort_result_color = color
+
+    def _abort_request_pending(self) -> bool:
+        """One abort at a time: in flight, mid-release, or already queued."""
+
+        return bool(
+            self._abort_future is not None
+            or self._abort_release_pending
+            or self._abort_queued
+        )
+
+    def _on_abort_episode(self) -> None:
+        """Two-click confirm, then truncate the episode and re-home.
+
+        The confirm text must not promise a rollback.  Ending the episode ends
+        it as a bootstrap-safe truncation (``done=False, truncated=True,
+        masks=1.0, success=False``) instead of a fabricated success or a false
+        Bellman terminal -- but every transition already sent, including the
+        ones that led here, is already in the learner's replay buffer and there
+        is no RPC that can take it back.
+        """
+
+        snapshot = self._node.get_actor_snapshot()
+        if not abort_episode_enabled(
+            snapshot["status"],
+            request_pending=self._abort_request_pending(),
+            service_ready=self._node.abort_service_ready(),
+        ):
+            return
+        self._armed_click(
+            "abort_episode",
+            self._do_abort_episode,
+            warn=_ABORT_CONFIRM_WARN,
+        )
+
+    def _do_abort_episode(self) -> None:
+        """Release the deadman FIRST, then send the Trigger as bookkeeping.
+
+        ORDER IS SAFETY-CRITICAL -- DO NOT REORDER.  ``UR7eEnv`` drives the arm
+        from the GELLO leader on a background 30 Hz daemon thread that re-reads
+        the deadman every tick, so releasing it here stops GELLO FOLLOWING in
+        ~33 ms.  The actor thread only notices an abort once per control period
+        (~512 ms mean, 854 ms worst), and its WAIT_HOME_APPROVAL wait does not
+        look at the deadman at all (gap G32).  Ending the episode is precisely
+        the "operator is gripping GELLO during an emergency" case, so the fast
+        path has to run before the slow one; the Trigger merely records the
+        outcome.
+
+        THE DEADMAN DOES NOT STOP THE POLICY.  It gates only the background
+        follower and ``GelloIntervention.action()``; nothing on the policy path
+        consults it.  So when the policy is driving -- the majority case, and
+        the very case ``abort_episode_enabled`` cites for allowing this in AUTO
+        -- the arm keeps executing policy actions until the actor notices, up
+        to one loop period.  The operator-facing label below must say that; an
+        operator who reads "arm stopped" and reaches into the workspace is the
+        accident this control exists to prevent.
+        """
+
+        snapshot = self._node.get_actor_snapshot()
+        status = snapshot["status"]
+        if status is None:
+            self._set_abort_result(
+                "END EPISODE ignored: no actor status.", _RED
+            )
+            self._refresh()
+            return
+
+        # Do not wait for the next 50 ms QTimer tick: publish the explicit
+        # release immediately, then leave ~100 ms before the Trigger call.
+        self._engaged = False
+        self._armed["primary"] = False
+        try:
+            self._node.publish_deadman(False, self._slider_gain())
+        except Exception as exc:  # noqa: BLE001 -- shutdown/ROS failure
+            # ``self._engaged`` is already False, so the 20 Hz tick keeps
+            # publishing a released deadman; if publishing is broken entirely
+            # the env's staleness watchdog fail-stops the loop anyway.
+            self._set_abort_result(
+                f"FAILED before request: deadman publish error: {exc}", _RED
+            )
+            self._refresh()
+            return
+
+        self._abort_release_pending = True
+        self._abort_target = (status["run_id"], int(status["episode_id"]))
+        self._set_abort_result(_ABORT_RELEASE_TEXT, "#aa6600")
+        self._refresh()
+        QTimer.singleShot(_SCENE_RELEASE_DELAY_MS, self._dispatch_abort_episode)
+
+    def _dispatch_abort_episode(self) -> None:
+        if self._closing or not self._abort_release_pending:
+            return
+        self._abort_release_pending = False
+        snapshot = self._node.get_actor_snapshot()
+        status = snapshot["status"]
+        if not abort_episode_enabled(
+            status,
+            request_pending=self._abort_request_pending(),
+            service_ready=self._node.abort_service_ready(),
+        ):
+            state = status.get("state", "unknown") if status else "unknown"
+            self._set_abort_result(
+                "END EPISODE not sent (deadman stayed released): actor state "
+                f"is {state} or {ABORT_EPISODE_SERVICE} is unavailable.",
+                "#aa6600",
+            )
+            self._refresh()
+            return
+        try:
+            self._abort_future = self._node.call_abort_episode()
+        except Exception as exc:  # noqa: BLE001 -- service/shutdown race
+            self._abort_future = None
+            self._abort_target = None
+            self._set_abort_result(
+                f"FAILED to call END EPISODE: {exc}", _RED
+            )
+            self._refresh()
+            return
+
+        self._abort_call_started = time.monotonic()
+        self._set_abort_result("END EPISODE request pending...", "#aa6600")
+        self._refresh()
+
+    def _poll_abort(self, snapshot: dict) -> None:
+        """Resolve the abort Future and clear it at run/episode boundaries."""
+
+        status = snapshot["status"]
+        # Snapshot the PREVIOUS status before it is overwritten below: the
+        # confirmation latch needs the edge, not just the current value.
+        previous = self._abort_last_status
+        if status is not None and actor_run_changed(
+            self._abort_last_status, status
+        ):
+            previous = None
+            self._cancel_future(self._abort_future)
+            self._abort_future = None
+            self._abort_call_started = None
+            self._abort_release_pending = False
+            self._abort_queued = False
+            self._abort_target = None
+            self._abort_confirmed_target = None
+            self._set_abort_result(
+                "New actor run detected; END EPISODE control reset.", "#1565c0"
+            )
+        if status is not None:
+            self._abort_last_status = dict(status)
+
+        future = self._abort_future
+        if future is not None and future.done():
+            try:
+                response = future.result()
+                accepted = bool(response.success)
+                message = (response.message or "").strip()
+            except Exception as exc:  # noqa: BLE001 -- surface service error
+                accepted = False
+                message = f"service error: {exc}"
+            self._abort_future = None
+            self._abort_call_started = None
+            if accepted:
+                self._abort_queued = True
+                detail = f" — {message}" if message else ""
+                self._set_abort_result(
+                    "END EPISODE queued; the episode ends as a truncation "
+                    f"with no success{detail}",
+                    _RED,
+                )
+            else:
+                self._abort_target = None
+                self._set_abort_result(
+                    "FAILED to end episode: "
+                    f"{message or 'request rejected'}",
+                    _RED,
+                )
+        elif (
+            future is not None
+            and self._abort_call_started is not None
+            and time.monotonic() - self._abort_call_started
+            > _OPERATOR_CALL_TIMEOUT_S
+        ):
+            self._cancel_future(future)
+            self._abort_future = None
+            self._abort_call_started = None
+            self._abort_target = None
+            self._set_abort_result(
+                "FAILED: END EPISODE request timed out "
+                "(deadman stayed released).",
+                _RED,
+            )
+
+        # Actor telemetry is authoritative for the outcome. Report the
+        # confirmation once per episode so it cannot overwrite later messages.
+        #
+        # EDGE, NOT LEVEL.  The actor clears ``terminal_reason`` once the next
+        # episode publishes its first status, so the honest signal is the
+        # transition into OPERATOR_ABORT.  Latching on the level instead would
+        # burn this one-shot on episode N+1 the moment a stale reason survived
+        # the boundary -- which is exactly what happened before, and would cost
+        # the operator the confirmation for their SECOND end-episode in a run.
+        # ``ours`` is the belt-and-braces path: if the cleared status is ever
+        # missed between two 100 ms polls, an episode WE targeted still
+        # confirms.  A reason we neither saw arrive nor asked for is ignored
+        # rather than reported, because a false confirmation is worse than a
+        # missing one.
+        if (
+            status is not None
+            and status.get("terminal_reason") == _ABORT_TERMINAL_REASON
+        ):
+            confirmed = (status["run_id"], int(status["episode_id"]))
+            fresh_edge = (
+                previous is not None
+                and previous.get("terminal_reason") != _ABORT_TERMINAL_REASON
+            )
+            ours = (
+                self._abort_target is not None
+                and confirmed == self._abort_target
+            )
+            if confirmed != self._abort_confirmed_target and (
+                fresh_edge or ours
+            ):
+                self._abort_confirmed_target = confirmed
+                self._set_abort_result(
+                    "Actor confirmed OPERATOR_ABORT — episode truncated, no "
+                    "success. Transitions already collected stay in replay. "
+                    "Approve HOME, reset the scene, then start the next one.",
+                    _RED,
+                )
+
+        # Release the one-shot latch when the targeted episode is gone, exactly
+        # as the queued MARK SUCCESS latch is released.
+        if self._abort_queued and status is not None:
+            active_target = (status["run_id"], int(status["episode_id"]))
+            if (
+                active_target != self._abort_target
+                or status.get("state")
+                not in {"POLICY_RUNNING", "HUMAN_INTERVENTION", "HOLD"}
+            ):
+                self._abort_queued = False
+                self._abort_target = None
+
     def _set_scene_result(self, text: str, color: str) -> None:
         self._scene_result_text = str(text)
         self._scene_result_color = color
@@ -1135,6 +1474,7 @@ class MainWindow(QMainWindow):
         snapshot = self._node.get_actor_snapshot()
         self._poll_scene_ready(snapshot)
         self._poll_success_controls(snapshot)
+        self._poll_abort(snapshot)
         self._apply_state_indicator(snapshot)
         self._apply_buttons(snapshot)
         self._apply_actor_panel(snapshot)
@@ -1308,6 +1648,40 @@ class MainWindow(QMainWindow):
             f"color: {self._scene_result_color}; font-weight: bold;"
         )
 
+        abort_ready = self._node.abort_service_ready()
+        abort_enabled = abort_episode_enabled(
+            status,
+            request_pending=self._abort_request_pending(),
+            service_ready=abort_ready,
+        )
+        self._abort_button.setEnabled(abort_enabled)
+        if self._abort_release_pending:
+            abort_text = "Releasing deadman..."
+        elif self._abort_future is not None:
+            abort_text = "END EPISODE request pending..."
+        elif self._abort_queued:
+            abort_text = "END EPISODE QUEUED (current episode)"
+        elif state not in {"POLICY_RUNNING", "HUMAN_INTERVENTION", "HOLD"}:
+            abort_text = "END EPISODE (waiting for active episode)"
+        elif not abort_ready:
+            abort_text = "END EPISODE (waiting for service...)"
+        else:
+            abort_text = _ABORT_BUTTON_TEXT
+        # Same arm/disarm shape as the primary ENGAGE button: keep the armed
+        # look only while the confirm window is open AND the click is still
+        # legal, otherwise drop the arm so it cannot fire later by surprise.
+        if self._armed.get("abort_episode") and abort_enabled:
+            self._abort_button.setText(_ABORT_ARMED_TEXT)
+            self._abort_button.setStyleSheet(_ABORT_ARMED)
+        else:
+            self._armed["abort_episode"] = False
+            self._abort_button.setText(abort_text)
+            self._abort_button.setStyleSheet(_ABORT_IDLE)
+        self._abort_result.setText(self._abort_result_text)
+        self._abort_result.setStyleSheet(
+            f"color: {self._abort_result_color}; font-weight: bold;"
+        )
+
     def _apply_pub_lamp(self):
         status = self._node.get_pub_status()
         age = status["age_s"]
@@ -1335,6 +1709,7 @@ class MainWindow(QMainWindow):
         self._cancel_future(getattr(self, "_scene_future", None))
         self._cancel_future(getattr(self, "_mode_future", None))
         self._cancel_future(getattr(self, "_manual_success_future", None))
+        self._cancel_future(getattr(self, "_abort_future", None))
         for t in (getattr(self, "_pub_timer", None),
                   getattr(self, "_ui_timer", None)):
             if t is not None:

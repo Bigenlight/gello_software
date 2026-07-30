@@ -125,6 +125,36 @@ CLEANED=false
 # hang cleanup() forever, which would also strand the cameras (their kill/wait
 # never even runs). _kill_and_wait() gives each process a grace period, then
 # escalates to SIGKILL so cleanup ALWAYS completes.
+# --- Qt font-warning suppression (viewer only) -------------------------------
+# WHAT IT HIDES: exactly the two lines the Qt plugin bundled in pip's
+# opencv-python 4.13.0 prints five times per cv2 window:
+#     QFontDatabase: Cannot find font directory .../cv2/qt/fonts.
+#     Note that Qt no longer ships fonts. Deploy some (...) or switch to fontconfig.
+#
+# WHY NOT AN ENV VAR (measured on this machine, 2026-07-30): cv2/config-3.py
+# OVERWRITES os.environ["QT_QPA_FONTDIR"] with <cv2>/qt/fonts at import time, so
+# exporting QT_QPA_FONTDIR=/usr/share/fonts/truetype/dejavu changes nothing (the
+# warning is byte-identical with and without it).  The message is an
+# uncategorised qWarning, so QT_LOGGING_RULES='qt.qpa.fonts.warning=false' and
+# 'qt.qpa.*.warning=false' do not touch it either; only 'default.warning=false'
+# does, and that is a blanket rule that would also hide real Qt errors -- so it
+# is deliberately NOT used.  Creating the missing directory inside site-packages
+# is also out (pip owns that tree).
+#
+# Everything else on the viewer's stderr -- including qt.qpa.plugin errors -- is
+# passed through untouched.  TO RE-ENABLE the noise: delete the
+# `2> >(...)` redirection on the viewer launch below.
+#
+# Both patterns are anchored at BOTH ends.  Matching the second line only up to
+# `Deploy some ` would swallow that whole line no matter what got appended to
+# it.  If Qt ever rewords the message the line stops being filtered and shows
+# up -- that is the correct failure direction for a noise filter.
+_filter_qt_font_noise() {
+    grep --line-buffered -v -E \
+        -e '^QFontDatabase: Cannot find font directory .*/cv2/qt/fonts\.$' \
+        -e '^Note that Qt no longer ships fonts\. Deploy some \(.*\) or switch to fontconfig\.$' || true
+}
+
 _kill_and_wait() {
     local pid="$1" name="$2" grace_s="${3:-5}"
     [ -z "${pid}" ] && return 0
@@ -254,11 +284,25 @@ else
     # cleanup() above. `wait` below still blocks the script exactly like a plain
     # foreground run would, until the window closes or Ctrl-C fires the trap.
     VIEWER_LAUNCHED=true
+    # The stderr filter is a process substitution, so $! is still the viewer's
+    # own PID -- cleanup()/_kill_and_wait() semantics are unchanged (verified on
+    # bash 5.1.16).
+    #
+    # `trap '' INT TERM` applies to the FILTER ONLY, and it is not cosmetic: the
+    # grep sits in this script's foreground process group, so a terminal Ctrl-C
+    # signals it directly and it dies immediately -- while the viewer is still
+    # being shut down by cleanup()/_kill_and_wait() and is still writing to that
+    # now-closed pipe.  The result is that exactly the shutdown-path stderr (the
+    # KeyboardInterrupt traceback and the rclpy/cv2 teardown diagnostics) is
+    # lost, plus a BrokenPipeError in the child.  Ignoring INT/TERM in the
+    # filter keeps it alive until its stdin reaches EOF, i.e. until the viewer
+    # is really gone.
     python3 "$SCRIPT_DIR/camera_viewer.py" \
         --cam1-topic "${CAM1_TOPIC}" \
         --cam2-topic "${CAM2_TOPIC}" \
         --cam1-label "cam1 - SCENE - ${CAM1_SERIAL}" \
-        --cam2-label "cam2 - WRIST - ${CAM2_SERIAL}" &
+        --cam2-label "cam2 - WRIST - ${CAM2_SERIAL}" \
+        2> >(trap '' INT TERM; _filter_qt_font_noise >&2) &
     VIEWER_PID=$!
     wait "${VIEWER_PID}"
 fi

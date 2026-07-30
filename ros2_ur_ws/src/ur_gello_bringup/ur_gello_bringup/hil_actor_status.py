@@ -17,6 +17,7 @@ ACTOR_STATUS_TOPIC = "/hil/actor_status"
 SCENE_READY_SERVICE = "/hil/scene_ready"
 AUTO_SUCCESS_SERVICE = "/hil/set_auto_success"
 MANUAL_SUCCESS_SERVICE = "/hil/manual_success"
+ABORT_EPISODE_SERVICE = "/hil/abort_episode"
 
 ACTOR_STATES = frozenset(
     {
@@ -328,6 +329,41 @@ def manual_success_enabled(
         and not auto_success
         and not request_pending
         and not success_queued
+        and service_ready
+    )
+
+
+def abort_episode_enabled(
+    status: Optional[Mapping[str, Any]],
+    *,
+    request_pending: bool,
+    service_ready: bool,
+) -> bool:
+    """Enable END EPISODE for one active episode, in MANUAL *and* AUTO.
+
+    Deliberately NOT a copy of :func:`manual_success_enabled`: the
+    ``auto_success`` and ``success_queued`` conditions are absent on purpose.
+    Ending an episode is not an assertion that the task succeeded -- it says
+    "stop this episode now, as a truncation, and go back to the start pose" --
+    so gating it on MANUAL would take the button away in exactly the AUTO run
+    where a wandering policy has to be stopped.  The server
+    (`RosOperatorSession._on_abort_episode`) applies the same rule and accepts
+    the request regardless of the success mode.
+
+    It does NOT retract data.  Every transition already sent is already in the
+    learner's replay buffer (the Step handler inserts before it Acks, and the
+    transport has no cancel RPC), so the operator-facing strings in
+    :mod:`gello_hil_gui_node` must never promise a rollback.
+
+    ``request_pending`` is the caller's notion of "an abort is already in
+    flight or already queued for this episode"; the server rejects a second
+    token anyway, so this only keeps the button honest.
+    """
+
+    return bool(
+        status is not None
+        and status.get("state") in ACTIVE_CONTROL_STATES
+        and not request_pending
         and service_ready
     )
 

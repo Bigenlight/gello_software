@@ -347,7 +347,12 @@ def test_every_server_terminal_homes_and_waits(
     assert len(operator.wait_statuses) == 2  # startup plus terminal boundary
     assert len(operator.home_wait_statuses) == 1
     assert operator.home_wait_statuses[0].terminal_reason == expected_reason
-    assert operator.wait_statuses[1].terminal_reason == expected_reason
+    # ...but it is cleared once HOME completes, so it never decorates the NEXT
+    # episode's WAIT_SCENE_READY.  A sticky reason there let the GUI burn its
+    # one-shot abort confirmation on an episode that had not started yet, and
+    # it is also what operator_session keys its "too late to abort" rejection
+    # on -- that rejection must not stay armed into a healthy episode.
+    assert operator.wait_statuses[1].terminal_reason == ""
 
 
 def test_final_terminal_homes_then_stops_without_another_wait():

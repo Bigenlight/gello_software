@@ -46,9 +46,12 @@
 | **G29** | **`substep_hz ∈ (HZ, 1.5*HZ]`가 조용히 비활성** | (미발견) | 🟢 **NOTE 임계값 정정됨 (07-30).** 실제 임계는 `1.5*HZ`인데 시작 NOTE는 `HZ`에서만 떴다. 도달성 사실상 0(config 30.0 고정, CLI 미노출) |
 | **G30** | **startup preposition의 GO/거리 상한이 기본 경로에 없음** | (미발견) | 🟠 **운영자 결정 기록.** 기본 즉시 JTC 이동; optional delay/confirm만 제공 |
 | **G31** | **자연스러운 global `max_steps` 소진은 HOME 승인 gate를 거치지 않음** | (미발견) | 🟡 기본 1,000,000이라 저빈도. 짧은 실기 CLI와 함께 후속 정리 |
-| **G32** | **`suspend_follower()` 호출부가 배선되지 않았다** | (미발견) | 🟠 **신규 (07-30 오후)** `WAIT_SCENE_READY` / `WAIT_HOME_APPROVAL`에서 추종자가 살아 있다. **후자는 데드맨을 아예 안 본다.** 호출부가 `remote_actor.py`(다른 세션 소유) |
+| **G32** | **`suspend_follower()` 호출부가 배선되지 않았다** | (미발견) | 🟡 **위험은 닫혔다 (07-30 저녁)** `remote_actor._park_follower`가 모든 blocking wait 앞에서 `await_follower_quiescent()`를 부른다. `suspend_follower()` 자체는 **여전히 호출부 0**이고, `WAIT_HOME_APPROVAL`이 데드맨을 안 보는 것도 그대로. **실기 미검증** |
 | **G33** | **포화 transition의 서버측 제외가 미구현** | (미발견) | 🟠 **신규 (07-30 오후)** 예산 제거의 대가를 닫는 두 경로 중 하나. proto 신규 필드 + pb2 재생성 + `SCHEMA_VERSION` bump 필요. 🛑 **protobuf가 unknown field를 조용히 버리므로 반쪽 업그레이드는 무증상 오염** |
 | **G34** | **`run_real_hil.py`로 ARM하는 것이 production보다 덜 안전해졌다** | (미발견) | 🟠 **신규 (07-30 오후)** 그 러너는 `DefaultUR7eEnvConfig`라 박스가 꺼져 있는데(**G1**), 예산이 빠진 지금 **박스가 유일한 위치 상한**이다. 검증 순서가 뒤집혔다 |
+| **G35** | **시간 초과가 진짜 종료로 학습된다 (`masks=0.0`)** | (미발견) | 🔴 **신규 (07-30 저녁, 적대적 검수)** `MAX_EPISODE_LENGTH` 도달이 `done=True`가 되고 `truncated`는 리터럴 `False`다 → episode마다 한 줄씩 부트스트랩이 끊긴다. **기존 결함이며 ABORT 작업과 무관**하지만 거기서 증명됐다. offline demo 2,037개는 무사 |
+| **G36** | **중단된 episode를 사후에 식별할 수 없다** | (미발견) | 🟠 **신규 (07-30 저녁)** replay store는 RAM 전용, checkpoint는 agent state만 직렬화, ingress sidecar는 `truncated`를 `terminal_for_stack`으로 뭉갠다. actor 로컬 pickle은 `--checkpoint-path`가 필요한데 `run_hil_actor.sh`가 안 넘긴다 |
+| **G37** | **그리퍼만 staleness gate가 없다 — 죽은 채널이 "활짝 열림"으로 읽힌다** | (미발견) | 🟠 **신규 (07-30 저녁)** `_update_currpos`가 joint/tcp_pose는 stale이면 raise하는데 그리퍼는 age를 버린다(`pct, _ =`). `None` → `0.0`이고 이 계약에서 `0.0`은 **OPEN**이다. `gripper_position`은 `state[0]` |
 
 ```bash
 export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
@@ -1916,7 +1919,33 @@ actor 전체 `max_steps`가 자연 소진되는 드문 경로는 현재 승인 �
 
 ---
 
-## G32 — `suspend_follower()`의 **호출부가 없다**: 운영자 WAIT 중에도 추종자가 산다 🟠 (신규 2026-07-30 오후)
+## G32 — `suspend_follower()`의 **호출부가 없다**: 운영자 WAIT 중에도 추종자가 산다 🟡 **위험은 닫혔다, 함수는 여전히 미배선 (2026-07-30 저녁)**
+
+> ### ✅ 2026-07-30 저녁 갱신 — `END EPISODE` 작업이 **다른 수단으로** 닫았다
+>
+> `suspend_follower()` 자체는 **아직도 production 호출부 0**이고 docstring도 "NOT WIRED UP
+> YET"인 채다. 아래 「사실」 절의 그 서술은 그대로 유효하다. **그러나 위험 자체는 닫혔다** —
+> `remote_actor._park_follower`가 새로 생겨 **모든 blocking operator wait 앞에서**
+> `await_follower_quiescent()`(없으면 `disarm_intervention_follow()`)를 부른다:
+>
+> | 지점 | 무엇이 앞서는가 |
+> |---|---|
+> | `wait_for_home_approval` (공유 terminal 경로 `_close_episode`) | `_park_follower` |
+> | 첫 `wait_for_scene_ready` (기동 시퀀스) | `env.reset()` → `await_follower_quiescent()` + `_force_policy_ownership()` |
+> | `END EPISODE` 소비 직후 | `_park_follower` (blocking wait보다 먼저) |
+>
+> **대기 중 재arming도 불가능하다**: 승격 지점은 코드 전체에서
+> `GelloIntervention._update_follow_arming` 하나뿐이고, 그것은 RL 스레드의 step 경계에서만
+> 도는데 대기 중에는 **바로 그 스레드가 블록돼 있다.**
+>
+> 🔑 **`disarm` 대신 `await_follower_quiescent`를 쓰는 것이 load-bearing이다.** 전자는 "더
+> 이상 명령을 내지 않는다"만 보장하고 추종 스레드가 **정차했는지는 안 기다린다.** 중단 직후엔
+> HOME 이동이 붙는데, 30 Hz로 아직 발행 중인 추종자는 last-write-wins 백엔드에서
+> `go_to_reset`을 **표로 이겨** `reset did not arrive within 10.0s`를 만든다 — 2026-07-30
+> 실기에서 조작자가 실제로 본 문자열이다.
+>
+> ⚠️ **남은 것 둘:** (1) `WAIT_HOME_APPROVAL`의 `_on_scene_ready` 분기가 데드맨을 안 보는 것
+> 자체는 그대로다(`WAIT_SCENE_READY` 분기는 본다), (2) **실기 미검증**. 오프라인 테스트만 있다.
 
 ### 사실
 
@@ -2032,6 +2061,106 @@ CSV의 포화 비율이 **둘 중 무엇을 먼저 할지의 근거**가 되도�
    background 경로의 실기 판정을 이 러너로만 하는 것은 그 자체가 위험을 만든다.
 3. 박스 클램프는 `clipped`로 보고되며 `governed`와 **다른 게이트**다 — 지금 CSV로는
    박스에 대해 아무것도 말할 수 없다(꺼져 있으므로 `clipped`가 뜰 리 없다).
+
+---
+
+## G35 — **시간 초과가 진짜 종료로 학습된다** 🔴 (신규 2026-07-30 저녁, 적대적 검수)
+
+`MAX_EPISODE_LENGTH`(100 = 10 s)로 끝난 episode의 마지막 전이가 `masks=0.0`으로 저장된다.
+즉 critic이 **"100스텝에서 세상이 끝나고 그 뒤 가치는 0"**이라고 배운다. 성공으로 끝난
+episode와 **구분이 안 된다** — 둘 다 `dones=True, masks=0.0`이고 차이는 `reward`뿐이다.
+
+**증명 사슬** (전부 코드에서 확인, 📌 2026-07-30):
+
+| 단계 | 근거 |
+| --- | --- |
+| `done`에 시간 초과가 섞인다 | `ur7e_env.py::UR7eEnv.step` — `done = curr_path_length >= max_episode_length or bool(reward) or self.terminate` |
+| 로컬 reward는 **항상 False** | `cube_in_cup.py`의 `_REWARD_THRESHOLD`가 의도적으로 전부 0 → `compute_reward`가 `if not self._REWARD_THRESHOLD.any(): return False` |
+| `truncated`가 리터럴이다 | 같은 함수의 `return ob, int(reward), done, False, info` — 4번째가 상수 `False` |
+| wrapper가 통과만 시킨다 | `GelloIntervention` → `RelativeFrame` → `Quat2Euler` → `SERLObsWrapper` → `ChunkingWrapper` → `GripperPenaltyWrapper` 전부 pass-through. `TimeLimit` 없음 |
+| mask가 거기서 갈린다 | `remote_actor.build_data` — `"masks": 0.0 if bool(done) else 1.0` |
+| 서버가 복구해 주지 않는다 | `rlpd_receive_server.py`는 `effective_success`일 때만 다시 쓰고, 그 분기는 `dones=True`를 넣는다 |
+| 부트스트랩이 죽는다 | `serl_launcher` SAC — `target = r + discount * masks * target_next_min_q` |
+
+19-D `state`에 **시간 인덱스가 없다**(`observation_schema.py`: gripper_pose, tcp_force, tcp_pose,
+tcp_torque, tcp_vel). 그래서 critic은 "이게 마지막 스텝이었다"를 조건으로 삼을 수 없고,
+0 타깃이 t=100 근처에서 도달 가능한 **평범한 상태의 가치까지 오염시킨다.**
+
+**범위**
+
+- 🟢 **canonical offline demo 2,037개는 무사하다.** `--outcome success`로 만들어졌고
+  `learner/recorded_demo.py`가 마지막 전이에만 `done=True, masks=0.0, reward=1.0`을 준다 —
+  그건 **진짜** terminal이라 옳다.
+- 🔴 **온라인 replay는 오염된다.** MANUAL이 기본이라 `MARK SUCCESS`로 끝나지 않은 episode는
+  전부 시간 초과로 끝난다 → **episode마다 정확히 한 줄씩**, 정상 상태에서 replay의 약 1 %.
+- `_terminal_reason`의 `TRUNCATED` 분기는 `run_remote_actor`에서 **도달 불가능했다**
+  (client가 `truncated=True`를 보낸 적이 없으므로). 단 변환기
+  `scripts/convert_recorded_takes_to_demo.py --outcome truncated`는 만들 수 **있다** — 안 쓰였을 뿐이다.
+
+**고칠 때 같이 봐야 하는 것.** 시간 초과가 올바르게 `truncated=True`를 내기 시작하면
+`truncated`가 **더 이상 ABORT의 고유 표식이 아니게 된다**(지금은 우연히 고유하다).
+영속 `terminal_reason` 로그나 `Meta` 신규 필드가 **먼저** 있어야 하고, 후자는
+proto + 양단 `pb2` 재생성 + `SCHEMA_VERSION` bump를 요구한다(반쪽 업그레이드 = 무증상 오염).
+
+**주의 — 고치면 계보가 갈린다.** `masks` 의미가 바뀌므로 지금 checkpoint 위에 이어 학습하면
+두 규약이 한 버퍼에 섞인다. `run_hil_server.sh --new-lineage`가 필요하고, learner fingerprint에
+`MAX_EPISODE_LENGTH`도 `ACTION_SCALE`도 **없어서**(G18) 그 불일치는 **조용히 통과한다.**
+
+---
+
+## G36 — 중단된 episode를 **사후에 식별할 수 없다** 🟠 (신규 2026-07-30 저녁)
+
+`END EPISODE`(G32 항목·`04` §10 참조)로 끝난 episode는 `truncated=True`로 저장된다. 문제는
+**그 표식이 어디에도 영속되지 않는다는 것**이다. 확인한 경로 넷:
+
+| 경로 | 상태 |
+| --- | --- |
+| learner replay store | **RAM 전용.** 디스크로 나가지 않는다 |
+| `learner/checkpoint.py` | `agent.state` + 메타데이터만 직렬화 — 버퍼는 대상이 아니다 |
+| ingress sidecar(`IngressRecord`) | `truncated`를 **`terminal_for_stack = done or truncated`로 뭉갠다** — 원본 플래그가 사라진다 |
+| actor 로컬 pickle(`_dump_data`) | 플래그를 **들고 있다.** 단 `--checkpoint-path`가 있어야 하고 **`run_hil_actor.sh`는 그걸 안 넘긴다** → production에는 그 백업이 없다 |
+
+즉 learner 프로세스가 죽는 순간 "어느 episode가 조작자에 의해 중단됐나"는 **복원 불가능**하다.
+
+🪤 **지금은 우연히 식별된다 — 그리고 그 우연이 곧 사라진다.** `truncated == True`는 현재
+완벽한 ABORT 표식인데, 그 이유는 **G35 때문에 다른 어떤 것도 `truncated`를 내지 않기 때문**이다.
+G35를 올바르게 고치면 시간 초과 truncation과 조작자 중단이 **구분 불가능해지고, 그때 실패하는
+테스트는 하나도 없다.** 그러므로 **G35보다 먼저** 영속 표식이 있어야 한다.
+
+**두 갈래 비용.** 싼 쪽은 `run_hil_actor.sh`가 `--checkpoint-path`를 넘기고
+`terminal_reason`을 별도 파일로 남기는 것이다. 제대로 된 쪽(전이 자체에 `OPERATOR_ABORT`
+라벨)은 `Meta` 신규 필드 + 양단 `pb2` 재생성 + `SCHEMA_VERSION` bump를 요구한다 —
+**protobuf가 unknown field를 조용히 버리므로 laptop만 업그레이드하면 Kanu가 라벨을 말없이
+폐기한다**(무증상 오염).
+
+---
+
+## G37 — **그리퍼만 staleness gate가 없다**: 죽은 채널이 "활짝 열림"으로 읽힌다 🟠 (신규 2026-07-30 저녁)
+
+`UR7eEnv._update_currpos`는 관측 소스마다 신선도를 다르게 다룬다:
+
+| 소스 | stale일 때 |
+| --- | --- |
+| `/joint_states` | `RuntimeError("/joint_states stale (…)")` |
+| `/tcp_pose_broadcaster/pose` | `RuntimeError("tcp pose stale (…)")` |
+| 카메라 | `RuntimeError("camera 'X' has no fresh frame")` |
+| **그리퍼** | **아무 검사도 없다** |
+
+코드 그대로다 — `pct, _ = self.backend.get_gripper_percent()`로 **age를 버리고**,
+`self.curr_gripper_pos = np.array([pct if pct is not None else 0.0])`으로 `None`을 `0.0`에
+접는다. 그런데 `robotiq_gripper_modbus_node` 계약에서 **`0.0`은 OPEN**이다(1.0이 CLOSED).
+
+**결과:** 그리퍼 노드가 죽거나 Modbus가 끊기면 관측은 오류가 아니라 **"그리퍼가 활짝 열려
+있다"**고 단언한다. 그리고 `gripper_position`은 **`state[0]`**, 즉 인코더가 보는 **첫 번째
+원소**다(19-D 알파벳순 계약). 정책은 잡은 물체를 놓친 줄 모르고, 저장되는 전이도 같은 거짓을
+싣는다.
+
+⚠️ **복구 경로에서 특히 문제가 된다.** 하드웨어 번들 재기동 뒤 다른 세 소스는 자기 gate가
+신선해질 때까지 막아 주지만 그리퍼는 안 막는다 — 재arming 직후 몇 프레임이 조용히 `0.0`일 수
+있다. 재기동 복구 절차(`09_HIL_ACTOR_RUNBOOK.md`)는 그래서 그리퍼 신선도를 **따로** 기다려야
+한다.
+
+📌 발견 경위: 2026-07-30 저녁 충돌 복구 조사 중. **기존 결함이고 이번 작업과 무관하다.**
 
 ---
 

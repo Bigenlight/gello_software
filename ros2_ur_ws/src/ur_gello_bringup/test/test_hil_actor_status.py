@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from ur_gello_bringup.hil_actor_status import (
+    ABORT_EPISODE_SERVICE,
     SCENE_REQUEST_IDLE,
+    abort_episode_enabled,
     actor_run_changed,
     actor_banner,
     classifier_verdict_summary,
@@ -491,3 +493,564 @@ def test_gui_scene_future_timeout_cancels_and_reenables_request():
     assert future.cancelled is True
     assert window._scene_request_state == SCENE_REQUEST_IDLE
     assert "timed out" in window.result[0]
+
+
+# --------------------------------------------------------------------------- #
+# ABORT EPISODE                                                                #
+# --------------------------------------------------------------------------- #
+def test_abort_service_name_is_the_frozen_contract():
+    assert ABORT_EPISODE_SERVICE == "/hil/abort_episode"
+
+
+def test_end_episode_operator_strings_do_not_overclaim():
+    """The operator ACTS on these four strings, so lock what they may say.
+
+    Nothing is discarded: the transport has no cancel/retract RPC and the
+    server inserts into replay inside the Step handler before it Acks.  And the
+    deadman does not stop the policy -- it gates only the GELLO follower.
+    """
+
+    from ur_gello_bringup import gello_hil_gui_node as gui_module
+
+    captions = (
+        gui_module._ABORT_BUTTON_TEXT,
+        gui_module._ABORT_ARMED_TEXT,
+        gui_module._ABORT_CONFIRM_WARN,
+        gui_module._ABORT_RELEASE_TEXT,
+    )
+    for text in captions:
+        low = text.lower()
+        assert "discard" not in low, text
+        assert "cannot be recovered" not in low, text
+        assert "cannot undo" not in low, text
+        assert "arm stopped" not in low, text
+        assert "immediately" not in low, text
+
+    # ... and each must positively carry its own truth.
+    assert gui_module._ABORT_BUTTON_TEXT == "END EPISODE (truncate & re-home)"
+    assert "data stays" in gui_module._ABORT_ARMED_TEXT
+    assert "cannot be withdrawn" in gui_module._ABORT_CONFIRM_WARN
+    assert "NO success" in gui_module._ABORT_CONFIRM_WARN
+    assert "replay buffer" in gui_module._ABORT_CONFIRM_WARN
+    assert "GELLO following stopped" in gui_module._ABORT_RELEASE_TEXT
+    assert "policy stops within one step" in gui_module._ABORT_RELEASE_TEXT
+
+    # The armed caption sits on the button, so it must stay button-sized.
+    assert len(gui_module._ABORT_ARMED_TEXT) <= 60
+
+
+def test_abort_button_gate_is_active_episode_and_one_request_only():
+    base = dict(
+        status=_status(),
+        request_pending=False,
+        service_ready=True,
+    )
+    assert abort_episode_enabled(**base)
+    assert not abort_episode_enabled(**dict(base, request_pending=True))
+    assert not abort_episode_enabled(**dict(base, service_ready=False))
+    assert not abort_episode_enabled(**dict(base, status=None))
+    for state in ("WAIT_SCENE_READY", "WAIT_HOME_APPROVAL", "HOMING",
+                  "FAULT", "STOPPED"):
+        assert not abort_episode_enabled(
+            **dict(base, status=dict(base["status"], state=state))
+        ), state
+    for state in ("POLICY_RUNNING", "HUMAN_INTERVENTION", "HOLD"):
+        assert abort_episode_enabled(
+            **dict(base, status=dict(base["status"], state=state))
+        ), state
+
+
+def test_abort_is_legal_in_auto_mode_unlike_mark_success():
+    """Abort is not a success assertion, so AUTO must not take it away."""
+
+    auto = _status(auto_success=True)
+
+    assert not manual_success_enabled(
+        auto,
+        auto_success=True,
+        request_pending=False,
+        success_queued=False,
+        service_ready=True,
+    )
+    assert abort_episode_enabled(auto, request_pending=False, service_ready=True)
+
+
+class _AbortWindowState:
+    """Duck-typed stand-in: exercises MainWindow logic without a Qt window."""
+
+    def __init__(self, **fields):
+        self._abort_future = None
+        self._abort_call_started = None
+        self._abort_release_pending = False
+        self._abort_queued = False
+        self._abort_target = None
+        self._abort_confirmed_target = None
+        self._abort_last_status = None
+        self.result = ("", "")
+        self.__dict__.update(fields)
+
+    def _set_abort_result(self, text, color):
+        self.result = (text, color)
+
+    @staticmethod
+    def _cancel_future(future):
+        if future is not None:
+            future.cancel()
+
+
+def _poll_abort(window, status):
+    from ur_gello_bringup import gello_hil_gui_node as gui_module
+
+    gui_module.MainWindow._poll_abort(window, {"status": status})
+
+
+def test_abort_future_acceptance_latches_a_one_shot_queued_flag():
+    from ur_gello_bringup import gello_hil_gui_node as gui_module
+
+    active = _status()
+    window = _AbortWindowState(
+        _abort_future=_SceneFuture(
+            done=True, response=SimpleNamespace(success=True, message="queued")
+        ),
+        _abort_call_started=time.monotonic(),
+        _abort_target=(active["run_id"], active["episode_id"]),
+    )
+
+    _poll_abort(window, active)
+
+    assert window._abort_future is None
+    assert window._abort_release_pending is False
+    assert window._abort_queued is True
+    assert "END EPISODE queued" in window.result[0]
+    # The Ack must NOT be read as "the episode is gone from replay".
+    assert "discard" not in window.result[0].lower()
+
+    # The latch is what keeps a second Trigger from racing the actor.  With the
+    # future resolved and nothing mid-release, ``_abort_queued`` is now the ONLY
+    # thing that can make a request pending -- so toggling it and re-reading the
+    # REAL ``_abort_request_pending`` proves the wiring, instead of hand-feeding
+    # the flag into ``abort_episode_enabled`` (which would only re-test that).
+    pending = gui_module.MainWindow._abort_request_pending
+    assert pending(window) is True
+    window._abort_queued = False
+    assert pending(window) is False
+    window._abort_queued = True
+    assert not abort_episode_enabled(
+        active, request_pending=pending(window), service_ready=True
+    )
+
+
+def test_abort_rejection_and_service_error_are_surfaced_and_recoverable():
+    rejected = _AbortWindowState(
+        _abort_future=_SceneFuture(
+            done=True,
+            response=SimpleNamespace(success=False, message="not active"),
+        ),
+        _abort_call_started=time.monotonic(),
+    )
+    _poll_abort(rejected, _status())
+    assert rejected._abort_queued is False
+    assert "FAILED to end episode: not active" in rejected.result[0]
+
+    raised = _AbortWindowState(
+        _abort_future=_SceneFuture(done=True, failure=RuntimeError("gone")),
+        _abort_call_started=time.monotonic(),
+    )
+    _poll_abort(raised, _status())
+    assert "service error: gone" in raised.result[0]
+    # Recoverable: nothing pending, so the button comes back.
+    assert abort_episode_enabled(
+        _status(), request_pending=False, service_ready=True
+    )
+
+
+def test_abort_future_timeout_cancels_and_reenables_the_button():
+    from ur_gello_bringup import gello_hil_gui_node as gui_module
+
+    future = _SceneFuture(done=False)
+    window = _AbortWindowState(
+        _abort_future=future,
+        _abort_call_started=(
+            time.monotonic() - gui_module._OPERATOR_CALL_TIMEOUT_S - 0.1
+        ),
+    )
+
+    _poll_abort(window, _status())
+
+    assert future.cancelled is True
+    assert window._abort_future is None
+    assert "timed out" in window.result[0]
+    assert "deadman stayed released" in window.result[0]
+
+
+def test_abort_queued_latch_clears_at_the_episode_boundary():
+    active = _status()
+    window = _AbortWindowState(
+        _abort_queued=True,
+        _abort_target=(active["run_id"], active["episode_id"]),
+    )
+
+    # Still the same active episode -> latch holds.
+    _poll_abort(window, active)
+    assert window._abort_queued is True
+
+    # Actor consumed it and left the active states -> latch releases.
+    _poll_abort(
+        window,
+        _status(
+            state="WAIT_HOME_APPROVAL",
+            control_owner="HOLD",
+            classifier_evaluated=False,
+            terminal_reason="OPERATOR_ABORT",
+        ),
+    )
+    assert window._abort_queued is False
+    assert window._abort_target is None
+
+
+def _aborted_status(**overrides):
+    return _status(
+        state="WAIT_HOME_APPROVAL",
+        control_owner="HOLD",
+        classifier_evaluated=False,
+        terminal_reason="OPERATOR_ABORT",
+        **overrides,
+    )
+
+
+def test_abort_outcome_is_read_from_terminal_reason_once_per_episode():
+    """The confirmation fires on the EDGE into OPERATOR_ABORT, once."""
+
+    aborted = _aborted_status()
+    window = _AbortWindowState(_abort_last_status=_status())
+
+    _poll_abort(window, aborted)
+    assert "OPERATOR_ABORT" in window.result[0]
+    assert "truncated" in window.result[0]
+    # It must not claim the data went away -- nothing is retractable.
+    assert "discard" not in window.result[0].lower()
+    assert window._abort_confirmed_target == ("run-1", 2)
+
+    window.result = ("", "")
+    _poll_abort(window, aborted)
+    assert window.result == ("", "")  # not rewritten every 100 ms tick
+
+    # The actor clears terminal_reason on the next episode's first status, so
+    # episode 3's own end is a fresh edge and confirms again.
+    _poll_abort(window, _status(episode_id=3))
+    assert window.result == ("", "")
+    _poll_abort(window, _aborted_status(episode_id=3))
+    assert "OPERATOR_ABORT" in window.result[0]
+    assert window._abort_confirmed_target == ("run-1", 3)
+
+
+def test_stale_terminal_reason_cannot_burn_the_next_episodes_confirmation():
+    """Robustness: a sticky OPERATOR_ABORT must not confirm episode N+1.
+
+    If the actor ever carries the reason across the boundary again, latching on
+    the LEVEL would consume the one-shot on episode 3 before it starts, and the
+    operator's second end-episode of the run would silently get no confirmation.
+    """
+
+    window = _AbortWindowState(_abort_last_status=_status())
+    _poll_abort(window, _aborted_status())
+    assert window._abort_confirmed_target == ("run-1", 2)
+
+    window.result = ("", "")
+    stale = _status(episode_id=3, terminal_reason="OPERATOR_ABORT")
+    _poll_abort(window, stale)  # episode 3 running, reason left over
+    assert window.result == ("", "")
+    assert window._abort_confirmed_target == ("run-1", 2)
+
+    # ... and when the operator really ends episode 3, they are still told --
+    # the request they made for THAT episode is the second, independent path.
+    window._abort_target = ("run-1", 3)
+    _poll_abort(window, _aborted_status(episode_id=3))
+    assert "OPERATOR_ABORT" in window.result[0]
+    assert window._abort_confirmed_target == ("run-1", 3)
+
+
+def test_unrequested_terminal_reason_seen_first_is_not_reported():
+    """A GUI started mid-run must not invent a confirmation it never saw."""
+
+    window = _AbortWindowState()  # no previous status, no request of our own
+
+    _poll_abort(window, _aborted_status())
+
+    assert window.result == ("", "")
+    assert window._abort_confirmed_target is None
+
+
+def test_new_actor_run_clears_a_pending_abort():
+    future = _SceneFuture(done=False)
+    window = _AbortWindowState(
+        _abort_future=future,
+        _abort_call_started=time.monotonic(),
+        _abort_release_pending=True,
+        _abort_queued=True,
+        _abort_target=("run-old", 2),
+        _abort_last_status=_status(run_id="run-old"),
+    )
+
+    _poll_abort(
+        window,
+        _status(
+            run_id="run-new",
+            state="HOMING",
+            classifier_evaluated=False,
+            classifier_env_step=-1,
+        ),
+    )
+
+    assert future.cancelled is True
+    assert window._abort_future is None
+    assert window._abort_release_pending is False
+    assert window._abort_queued is False
+    assert window._abort_target is None
+    assert "END EPISODE control reset" in window.result[0]
+
+
+class _FakeAbortNode:
+    """Records the ORDER of deadman publishes vs. the abort Trigger."""
+
+    def __init__(self, status, *, service_ready=True):
+        self.status = status
+        self.service_ready = service_ready
+        self.calls = []
+
+    def get_actor_snapshot(self):
+        return {"status": self.status}
+
+    def publish_deadman(self, engaged, gain):
+        self.calls.append(("publish_deadman", bool(engaged), float(gain)))
+
+    def abort_service_ready(self):
+        return self.service_ready
+
+    def call_abort_episode(self):
+        self.calls.append(("call_abort_episode",))
+        return _SceneFuture(done=False)
+
+
+def _abort_click_window(monkeypatch, node):
+    from ur_gello_bringup import gello_hil_gui_node as gui_module
+
+    deferred = []
+
+    class _FakeQTimer:
+        @staticmethod
+        def singleShot(ms, callback):
+            deferred.append((ms, callback))
+
+    monkeypatch.setattr(gui_module, "QTimer", _FakeQTimer)
+
+    window = _AbortWindowState(
+        _node=node,
+        _engaged=True,
+        _armed={"primary": True},
+        _closing=False,
+    )
+    window._slider_gain = lambda: 1.0
+    window._refresh = lambda: None
+    window._abort_request_pending = (
+        lambda: gui_module.MainWindow._abort_request_pending(window)
+    )
+    window._dispatch_abort_episode = (
+        lambda: gui_module.MainWindow._dispatch_abort_episode(window)
+    )
+    return gui_module, window, deferred
+
+
+def test_abort_click_releases_the_deadman_before_calling_the_service(
+    monkeypatch,
+):
+    """SAFETY: the 30 Hz follower stops in ~33 ms; the actor takes ~512 ms."""
+
+    node = _FakeAbortNode(_status(state="HUMAN_INTERVENTION",
+                                  control_owner="HUMAN"))
+    gui_module, window, deferred = _abort_click_window(monkeypatch, node)
+
+    gui_module.MainWindow._do_abort_episode(window)
+
+    # The deadman release happened synchronously, and NOTHING else has run yet.
+    assert node.calls == [("publish_deadman", False, 1.0)]
+    assert window._engaged is False
+    assert window._armed["primary"] is False
+    assert window._abort_release_pending is True
+    assert window._abort_target == ("run-1", 2)
+    assert "Deadman released" in window.result[0]
+
+    # Only afterwards, on the deferred tick, is the Trigger sent.
+    assert [ms for ms, _ in deferred] == [gui_module._SCENE_RELEASE_DELAY_MS]
+    deferred[0][1]()
+    assert node.calls[-1] == ("call_abort_episode",)
+    assert window._abort_release_pending is False
+    assert window._abort_future is not None
+
+
+def test_abort_dispatch_is_skipped_but_deadman_stays_released(monkeypatch):
+    node = _FakeAbortNode(_status(state="HUMAN_INTERVENTION",
+                                  control_owner="HUMAN"))
+    gui_module, window, deferred = _abort_click_window(monkeypatch, node)
+
+    gui_module.MainWindow._do_abort_episode(window)
+    # The episode ended on its own during the 100 ms release window.
+    node.status = _status(
+        state="WAIT_HOME_APPROVAL",
+        control_owner="HOLD",
+        classifier_evaluated=False,
+        terminal_reason="TRUNCATED",
+    )
+    deferred[0][1]()
+
+    assert node.calls == [("publish_deadman", False, 1.0)]
+    assert window._abort_future is None
+    assert "deadman stayed released" in window.result[0]
+    assert window._engaged is False
+
+
+def test_abort_deadman_publish_failure_aborts_the_request_not_the_release(
+    monkeypatch,
+):
+    node = _FakeAbortNode(_status(state="HUMAN_INTERVENTION",
+                                  control_owner="HUMAN"))
+
+    def _boom(engaged, gain):
+        raise RuntimeError("rclpy is down")
+
+    node.publish_deadman = _boom
+    gui_module, window, deferred = _abort_click_window(monkeypatch, node)
+
+    gui_module.MainWindow._do_abort_episode(window)
+
+    # Intent is still recorded locally, so the 20 Hz tick keeps publishing
+    # engaged=False and the env's staleness watchdog fail-stops regardless.
+    assert window._engaged is False
+    assert window._abort_release_pending is False
+    assert deferred == []
+    assert "deadman publish error" in window.result[0]
+
+
+# --------------------------------------------------------------------------- #
+# The real click entry point: gate pre-check + two-click confirm               #
+# --------------------------------------------------------------------------- #
+def _abort_confirm_window(monkeypatch, node):
+    """``_abort_click_window`` plus the real ``_armed_click`` machinery."""
+
+    gui_module, window, deferred = _abort_click_window(monkeypatch, node)
+    window.fired = 0
+    window.hints = []
+
+    def _fire():
+        window.fired += 1
+
+    def _show(text, msec=0):
+        window.hints.append(text)
+
+    window._do_abort_episode = _fire
+    window.statusBar = lambda: SimpleNamespace(showMessage=_show)
+    window._disarm = lambda key: gui_module.MainWindow._disarm(window, key)
+    window._armed_click = (
+        lambda key, action, warn="the robot WILL move":
+        gui_module.MainWindow._armed_click(window, key, action, warn=warn)
+    )
+    return gui_module, window
+
+
+def test_abort_click_needs_two_clicks_and_the_warning_is_true(monkeypatch):
+    """POLICY_RUNNING: the case the abort gate exists for, and the case where
+    'arm stopped' would be a lie."""
+
+    gui_module, window = _abort_confirm_window(
+        monkeypatch, _FakeAbortNode(_status())
+    )
+
+    gui_module.MainWindow._on_abort_episode(window)
+
+    assert window.fired == 0  # first click only ARMS
+    assert window._armed["abort_episode"] is True
+    warning = window.hints[-1]
+    assert "NO success" in warning
+    assert "cannot be withdrawn" in warning
+    # BLOCKER 1: the transport has no cancel/retract RPC, so the confirm text
+    # must never promise that anything is thrown away or recoverable.
+    assert "discard" not in warning.lower()
+    assert "cannot be recovered" not in warning
+
+    gui_module.MainWindow._on_abort_episode(window)
+
+    assert window.fired == 1
+    assert window._armed["abort_episode"] is False
+
+
+@pytest.mark.parametrize(
+    "node_kwargs, status_kwargs, window_fields",
+    [
+        ({"service_ready": False}, {}, {}),
+        ({}, {"state": "WAIT_HOME_APPROVAL", "control_owner": "HOLD",
+              "classifier_evaluated": False}, {}),
+        ({}, {}, {"_abort_queued": True}),
+        ({}, {}, {"_abort_release_pending": True}),
+    ],
+)
+def test_abort_click_pre_check_blocks_arming(
+    monkeypatch, node_kwargs, status_kwargs, window_fields
+):
+    """The gate runs BEFORE the two-click arm, so a blocked click is silent."""
+
+    node = _FakeAbortNode(_status(**status_kwargs), **node_kwargs)
+    gui_module, window = _abort_confirm_window(monkeypatch, node)
+    window.__dict__.update(window_fields)
+
+    gui_module.MainWindow._on_abort_episode(window)
+
+    assert window.fired == 0
+    assert window.hints == []
+    assert window._armed.get("abort_episode") is not True
+
+
+def test_abort_click_without_actor_status_is_a_no_op(monkeypatch):
+    gui_module, window = _abort_confirm_window(
+        monkeypatch, _FakeAbortNode(None)
+    )
+
+    gui_module.MainWindow._on_abort_episode(window)
+
+    assert window.fired == 0
+    assert window.hints == []
+
+
+def test_armed_abort_does_not_fire_after_the_episode_already_ended(monkeypatch):
+    """The pre-check re-runs on the confirming click, not just the arming one."""
+
+    node = _FakeAbortNode(_status())
+    gui_module, window = _abort_confirm_window(monkeypatch, node)
+
+    gui_module.MainWindow._on_abort_episode(window)
+    assert window._armed["abort_episode"] is True
+
+    node.status = _status(
+        state="WAIT_HOME_APPROVAL",
+        control_owner="HOLD",
+        classifier_evaluated=False,
+        terminal_reason="TRUNCATED",
+    )
+    gui_module.MainWindow._on_abort_episode(window)
+
+    assert window.fired == 0
+
+
+def test_abort_post_click_label_never_claims_the_arm_stopped(monkeypatch):
+    """BLOCKER 2: the deadman gates the follower only; the policy path never
+    reads it, so the arm keeps moving for up to one actor loop period."""
+
+    node = _FakeAbortNode(_status())  # POLICY_RUNNING == policy is driving
+    gui_module, window, _deferred = _abort_click_window(monkeypatch, node)
+
+    gui_module.MainWindow._do_abort_episode(window)
+
+    label = window.result[0]
+    assert "GELLO following stopped" in label
+    assert "arm stopped" not in label
+    assert "immediately" not in label.lower()
+    assert "policy stops within one step" in label

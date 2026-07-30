@@ -10,7 +10,19 @@
 > - terminal 뒤 순서는 `WAIT_HOME_APPROVAL`(hold) → `APPROVE HOME` → HOME →
 >   `WAIT_SCENE_READY` → 사람이 장면 재배치 → `START / NEXT ITERATION`이다.
 > - 예전 시작 `GO`/Enter 타이핑은 기본 경로에서 제거됐다. 이것은 타이핑 제거이며
->   pose/controller proof, fresh ENGAGED heartbeat, episode별 HOME/NEXT 승인은 남아 있다.
+>   pose/controller proof, fresh deadman heartbeat, episode별 HOME/NEXT 승인은 남아 있다.
+
+> ## 🆕 2026-07-30 저녁 — 조작자 절차가 네 군데 바뀌었다 (**실기 미검증**)
+>
+> 1. **🛑 시작할 때 ENGAGE를 누르지 않는다.** 세 gate(session 폴링, preflight `[11]`,
+>    `[ARM]` 직전 재검증)가 전부 **fresh DISENGAGED heartbeat 3개**를 요구하도록 바뀌었다.
+>    ENGAGE는 이제 **개입할 때만** 누른다. → §1.4
+> 2. **새 버튼 `END EPISODE (truncate & re-home)`.** episode를 지금 끝내고 re-home한다.
+>    🛑 **데이터를 버리지 않는다** — 이미 보낸 transition은 learner replay에 남는다. → §4.5
+> 3. **충돌 뒤 세션이 죽지 않는다.** 카메라·GUI는 살아 있고 3~5단계만 다시 돈다. → §6.1
+> 4. cv2/Qt 폰트 경고 두 줄이 `launch_cameras.sh`/`run_hil_actor.sh`에서 걸러진다. → §4.2 T3
+>
+> 이 네 가지는 **실기에서 아직 한 번도 돌지 않았다.** §7 표의 C1~C4를 볼 것.
 
 > ## 🛑 지금 이 문서를 읽는 사람이 먼저 알아야 할 것 (2026-07-29)
 >
@@ -99,10 +111,13 @@ cd /home/laptop3/gello_software/ros2_ur_ws
   local `50153 -> Kanu 50053` tunnel을 유지한다. `Ctrl-C`는 tunnel만 닫는다.
 - B는 UR7e/Robotiq/GELLO만 소유한다. 충돌·연결 해제 뒤 C를 내리고 B의 cleanup 완료 후 B만
   다시 띄울 수 있다.
-- C는 카메라/GUI/preposition/armed preflight/actor를 순서대로 실행한다. controller handoff
-  전까지는 GUI `ENGAGED` 확인이 필요하다. handoff 뒤 actor는 HOME에서
+- C는 카메라/GUI/preposition/armed preflight/actor를 순서대로 실행한다. **controller handoff
+  전에 필요한 것은 GUI가 떠서 heartbeat를 내는 것뿐이다 — ENGAGE를 누르지 않는다.**
+  gate는 fresh **DISENGAGED** heartbeat 3개다(§1.4). handoff 뒤 actor는 HOME에서
   `WAIT_SCENE_READY`로 멈추며, 장면을 배치하고 GUI의 `START / NEXT ITERATION`을 누르면
-  deadman을 명시적으로 해제한 뒤 fresh observation으로 policy가 첫 action을 시작한다.
+  fresh observation으로 policy가 첫 action을 시작한다. 그 뒤 개입하고 싶을 때만 ENGAGE한다.
+- C는 actor가 **rc 75(RECOVERABLE)**로 죽으면 카메라·GUI를 그대로 둔 채 조작자가 B를
+  재기동하기를 기다렸다가 3~5단계만 다시 돈다 (§6.1). 그 외 종료 코드는 재시도하지 않는다.
 - 시작 자세가 RESET 0.10 rad 밖이면 C가 `run_hil_preposition.sh`를 호출한다. 현재 기본값은
   체크리스트 출력 뒤 별도 키 입력·카운트다운 없이 JTC 이동이다. 취소 창이 필요하면
   `PREPOSITION_DELAY_S=5 ./run_hil_session.sh`, 옛 GO 프롬프트가 필요하면
@@ -163,8 +178,22 @@ cd $WT/ros2_ur_ws
 | `HIL_PREPOSITION_MARKER_MAX_AGE_S` | `900` | marker 최대 수명. 1~3600초만 허용 |
 | `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. `--arm`과 같이 쓰면 **즉시 FAIL** |
 | `ROS_SETUP` | `/opt/ros/humble/setup.bash` | |
+| `HIL_STARTUP_DEADMAN` | **`disengaged`** 🆕 | deadman gate가 요구하는 상태. `disengaged`\|`engaged`만 유효하고 **오타는 fail-closed로 거부**된다(gate 없음으로 조용히 넘어가지 않는다). `engaged`가 옛 commissioning 동작이다 → §1.4 |
+| `HIL_ACTOR_EXIT_MAP` | `1` 🆕 | `0`이면 rc 75 승격을 끄고 actor의 raw rc를 그대로 낸다 → §6.1 |
 
-📌 2026-07-29 확인: 위 기본값은 전부 `ros2_ur_ws/run_hil_actor.sh:65-93`과 일치한다.
+📌 2026-07-29 확인: 위 기본값은 `ros2_ur_ws/run_hil_actor.sh`의 상단 기본값 블록과 일치한다.
+🆕 두 줄은 2026-07-30 저녁에 추가됐다.
+
+`run_hil_session.sh` 자신이 읽는 변수는 따로 있다 (actor에게 넘기지 않는다):
+
+| 변수 | 기본값 | 비고 |
+|---|---|---|
+| `HIL_STARTUP_DEADMAN` | `disengaged` | 검사한 뒤 `run_hil_actor.sh`로 **export** 해서 세 gate가 같은 값을 쓰게 한다 |
+| `DEADMAN_WAIT_S` (별칭 `ENGAGE_WAIT_S`) | `120` | 요구 상태를 폴링으로 기다리는 시간. 초과해도 진행하고 **preflight `[11]`이 같은 조건으로 FAIL 시킨다.** 옛 이름 `ENGAGE_WAIT_S`는 alias로 남아 있다 |
+| `HIL_ACTOR_RETRY` | `1` | rc 75 뒤 3~5단계 자동 재시도 → §6.1. `0`이면 끈다 |
+| `HIL_ACTOR_RETRY_MAX` | `3` (최대 10) | 실기 팔을 자동 재arming하므로 상한이 걸려 있다 |
+| `HIL_HARDWARE_RECYCLE_WAIT_S` | `900` | 조작자가 Terminal 2를 껐다 켜는 것을 기다리는 최대 시간 |
+| `HIL_RETRY_RESUME_DELAY_S` | `5` | 3단계(팔이 움직인다) 재시작 전 취소 가능한 카운트다운 |
 
 ### 1.2 actor CLI 플래그 (래퍼가 통과시킨다)
 
@@ -233,11 +262,68 @@ cd $WT/ros2_ur_ws
 | 8 | STJC/FPC의 정확한 상태 쌍 | `active/inactive`(handoff 전) 또는 `inactive/active`(이미 완료)만 허용. 둘 다 active/inactive면 FAIL |
 | 9 | `/forward_position_controller/commands`의 **퍼블리셔 수** | 1개라도 있으면 **FAIL·거부** (이 리그 최대 하자) |
 | 10 | `--dry-preflight --arm`이면 현재 관절 오차 ≤0.10 rad. switch 전 상태면 marker·수명·owner/mode·ROS domain·RESET 값도 확인 | 하나라도 다르면 FAIL. 이미 FPC active인 idempotent 경로도 임의 자세면 거부. 검증만 하고 switch하지 않음 |
+| 11 🆕 | **deadman 채널 생존 증명** — `/hil/deadman`에서 fresh heartbeat 3개 연속, 상태는 `HIL_STARTUP_DEADMAN`이 정한다(기본 **DISENGAGED**) | FAIL. `--arm` 없으면 불필요(INFO), `--fake-env`/overlay 실패면 SKIP → §1.4 |
 
-`--dry-preflight`의 모든 점검은 **읽기 전용**이다. 실제 `--arm`은 [1]~[10]이
-통과한 다음에만 publisher 수를 다시 세고 strict controller switch를 수행한다. switch 후
-`STJC=inactive`, `FPC=active`, publisher 0을 다시 확인하며 하나라도 실패하면 actor를 exec하지 않는다.
-이 handoff는 reset/preposition 이동을 자동 호출하지 않는다.
+`--dry-preflight`의 모든 점검은 **읽기 전용**이다. 실제 `--arm`은 [1]~[11]이
+통과한 다음에만 publisher 수를 다시 세고 strict controller switch를 수행한다. `[ARM]` 직전에
+**[11]과 같은 검사를 한 번 더** 돌린다([11] 이후 GUI가 죽었거나 조작자가 상태를 바꿨을 수
+있다). switch 후 `STJC=inactive`, `FPC=active`, publisher 0을 다시 확인하며 하나라도
+실패하면 actor를 exec하지 않는다. 이 handoff는 reset/preposition 이동을 자동 호출하지 않는다.
+
+### 1.4 🆕 deadman gate — **시작할 때 ENGAGE를 누르지 않는다** (2026-07-30)
+
+> ### 🛑 절차가 바뀌었다
+> 이 문서의 이전 판은 곳곳에서 *"HIL GUI를 먼저 ENGAGE하고 GELLO를 RESET anchor에
+> 고정한다"*고 지시했다. **더 이상 그렇게 하지 않는다.** 세 gate가 전부 반대 상태를
+> 요구한다. 아래 「이전 판(보존)」 문구를 남겨 두지만 **따르지 말 것.**
+>
+> **이전 판(보존):** *"2) HIL GUI를 먼저 ENGAGE하고 GELLO를 RESET anchor에 고정한다.
+> dry-preflight도 연속 ENGAGED heartbeat 3개를 요구한다. … controller switch 직전
+> ENGAGED heartbeat를 한 번 더 검사한다."*
+
+**gate의 의미는 바뀌지 않았다 — 요구 상태만 뒤집혔다.** 이것은 여전히 **채널 생존 증명**이다:
+"GUI가 살아서 `/hil/deadman`에 20 Hz로 유효 heartbeat를 내고 있다"를 팔을 프로그램에 넘기기
+전에 확인한다. 연속 fresh heartbeat 3개 요구도 그대로다. 바뀐 것은 **어느 상태여야 하는가**다.
+
+| | 이전 | 지금 (기본) |
+|---|---|---|
+| 요구 상태 | `engaged=1` | **`engaged=0`** |
+| 조작자가 하는 일 | ENGAGE를 두 번 눌러 arm하고 GELLO를 잡은 채 대기 | **아무것도 안 한다.** GUI만 떠 있으면 된다 |
+| handoff 직후 GELLO를 잡으면 | 팔이 따라온다 | **따라오지 않는다** |
+
+세션은 policy 제어로 시작하므로 handoff 시점에 ENGAGED일 이유가 없고, DISENGAGED로 넘기면
+handoff 직후 누군가 GELLO를 건드려도 팔이 움직이지 않는다 — **더 안전한 쪽**이다.
+
+**세 곳이 같은 값을 쓴다** (`run_hil_session.sh`가 검사 후 export 한다):
+
+| # | 어디 | 무엇 |
+|---|---|---|
+| 1 | `run_hil_session.sh`의 폴링 루프 | 요구 상태가 될 때까지 최대 `DEADMAN_WAIT_S`(120 s) 대기. 초과하면 경고만 하고 진행한다 — 강제는 아래 둘이다 |
+| 2 | `run_hil_actor.sh` preflight `[11]` | FAIL |
+| 3 | `run_hil_actor.sh` `[ARM]` 직전 재검증 | 실패하면 **controller를 전환하지 않고** rc 1로 종료 |
+
+**되돌리기 / 도구:**
+
+```bash
+# 옛 commissioning 동작 (ENGAGED 요구) — 세 gate가 함께 바뀐다
+HIL_STARTUP_DEADMAN=engaged ./run_hil_session.sh
+
+# 단독 확인 (읽기 전용). rc 0=OK, 1=상태 틀림/malformed, 2=ROS/토픽 없음
+cd $WT/ros2_ur_ws
+python3 _hil_deadman_check.py --topic /hil/deadman --samples 3 --timeout 2.0 \
+  --require disengaged
+```
+
+`--require`의 기본값은 스크립트 자체에서는 **`engaged`**(옛 동작)이지만, 두 wrapper는 항상
+명시적으로 넘기므로 운영 경로의 기본은 `disengaged`다. `HIL_STARTUP_DEADMAN`에 오타를 내면
+두 wrapper 모두 **fail-closed로 거부**한다 — "gate 없음"으로 조용히 해석되지 않는다.
+
+> ⚠️ **받아들인 대가:** DISENGAGED로 시작하면 policy가 팔을 몰기 **전에** ENGAGE 전이가 한
+> 번도 실행되지 않는다. GUI는 actor status가 `POLICY_RUNNING`/`HUMAN_INTERVENTION`/`HOLD`가
+> 되기 전까지 ENGAGE 버튼을 **비활성화**하므로(`engage_button_enabled`), 그 세션의 첫 ENGAGE는
+> **policy가 이미 움직이는 중**에 일어난다. 조작자에게 이 사실을 보이고 명시적으로 수정하지
+> 않기로 했다 — `08_OPEN_GAPS.md` G22의 「받아들인 대가」 항목에 기록돼 있고, 탈출구는
+> `HIL_STARTUP_DEADMAN=engaged`다.
 
 ---
 
@@ -811,9 +897,133 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 
 ---
 
+## 5.2 🆕 `END EPISODE` — 망친 episode를 지금 끝낸다 (2026-07-30 저녁)
+
+GUI 세 번째 버튼(빨강, **두 번 클릭**). 서비스는 `/hil/abort_episode`(`std_srvs/Trigger`).
+episode 도중 아무 때나 눌러 **성공 판정 없이** 지금 끝내고, 평소와 같은
+`WAIT_HOME_APPROVAL` → `APPROVE HOME` → HOME → `WAIT_SCENE_READY` 경로를 탄다.
+`terminal_reason`은 `OPERATOR_ABORT`. MANUAL/AUTO **양쪽에서** 받는다 — 망친 episode를
+끝내는 것은 성공 주장이 아니기 때문이다.
+
+### 🛑 무엇이 버려지고 무엇이 안 버려지나 — 조작자는 이걸 반드시 알아야 한다
+
+**아무것도 버려지지 않는다.** proto에 cancel/retract RPC가 **없고**(`Health` /
+`GetServerInfo` / `GetBufferStatus` / `BeginEpisode` / `Step` 5개뿐), 서버는 `Ack`를 만들기
+**전에** Step 핸들러 안에서 동기적으로 replay store에 insert한다. 즉 `network.step()`이
+돌아온 시점에 그 행은 **이미 learner가 gradient batch를 뽑는 버퍼 안에 있다.**
+
+> 클릭 시점까지의 모든 전이는 — 충돌도, 이상한 자세도 — **정상적으로 학습된다.**
+> 게다가 그 순간 조작자는 대개 GELLO를 잡고 있으므로 그 행들은 `intervened=1`이라
+> **두 버퍼 모두에** 들어가고, RLPD 50:50 분할이 **가중치를 올려 준다.**
+
+버튼이 실제로 사주는 것은 둘뿐이다:
+
+1. **step limit까지 안 기다리고 지금 끝내는 것**
+2. **조작된 terminal 대신 정직한 bootstrap-safe truncation** — `done=False, truncated=True,
+   masks=1.0, success=False`. 이게 없으면 critic이 "조작자가 포기한 지점에서 세상이 끝난다"고
+   배운다(→ `08_OPEN_GAPS.md` **G35**가 바로 그 병이다).
+
+⚠️ 사후 감사는 아직 불가능하다 → **G36**.
+
+### ⏱️ 즉시가 아니다
+
+actor는 토큰을 **iteration당 두 번** 읽는다 — `env.step` **직전**(대기 중이던 policy action이
+폐기된다)과 **직후**(방금 실행된 전이가 truncated로 기록된다). 최악은 **루프 한 주기**
+(실측 평균 512 ms, 최대 854 ms)다.
+
+GUI는 Trigger **전에** 데드맨을 먼저 놓아 GELLO 추종을 **~33 ms**에 멈춘다.
+🛑 **그러나 데드맨은 policy 경로를 전혀 게이팅하지 않는다** — 배경 follower와
+`GelloIntervention.action()`만 본다. **policy가 몰고 있을 때 데드맨을 놓는 것은 아무것도
+멈추지 않는다.** 버튼 문구가 이것을 말하도록 되어 있다.
+
+### 거절되는 경우
+
+* 활성 상태(`POLICY_RUNNING`/`HUMAN_INTERVENTION`/`HOLD`)가 아닐 때
+* **`terminal_reason`이 이미 세워졌을 때** — episode가 방금 끝난 창이다. 여기서 수락하면
+  다음 publish의 boundary 규칙에 토큰이 조용히 버려져 **거짓 SUCCESS가 그대로 남는다.**
+  그래서 보이는 거절로 바꿨다:
+  `episode 0 has already ended (SUCCESS); it is too late to abort it. Press APPROVE HOME, then abort the next episode.`
+* 이미 abort가 큐에 있을 때
+
+---
+
+## 5.3 🆕 충돌 복구 — 세션이 하드웨어 재기동에서 살아남는다 (2026-07-30 저녁)
+
+**예전:** 충돌 → actor 사망 → `run_hil_session.sh`의 EXIT 트랩이 GUI와 카메라까지 무조건
+정리 → 세션 전체를 다시 만든다.
+**지금:** 카메라·GUI·터널은 그대로 살아 있고 **3~5단계(preposition → preflight → actor)만**
+재시도 루프를 돈다.
+
+### 조작자 절차
+
+```
+① 로봇 상태 정리 — 펜던트에서 fault 해제. 팔이 어디 껴 있으면 local control로 뺀다.
+② Terminal 2에서 Ctrl-C → [cleanup] 완료 대기 → ./run_hil_hardware.sh 다시 실행
+③ Terminal 3은 그대로 둔다   ← 여기가 바뀐 부분
+```
+
+Terminal 3이 새 번들을 자동 감지하고 `HIL_RETRY_RESUME_DELAY_S`(기본 5 s) 뒤 preposition부터
+다시 시작한다. **키 입력은 없다.**
+
+### 종료 코드 계약 (`run_hil_actor.sh`)
+
+| rc | 의미 | 재시도 |
+| --- | --- | --- |
+| `0` | 정상 종료 | ✗ |
+| `1` | preflight FAIL 또는 handoff 거부 — **arming 자체가 없었음** | ✗ |
+| `2` | 래퍼 usage/config 오류 | ✗ |
+| `70` | actor 종료 후 **controller 복귀 실패** — 소유권 불명, 펜던트 확인 필요 | ✗ |
+| `75` | **recoverable** | 후보 |
+| `>=128` | 신호(130 = Ctrl-C) | ✗ |
+
+**`75`는 그냥 "죽었다"가 아니다.** 감시자가 `/hil/actor_status`에서 **`env_step >= 0`을 실제로
+본 경우에만** 승격된다(`_OperatorReporter`는 `env_step`을 −1로 시작하고 `position()`은 전이
+루프 안에서만 불린다). 그래서 핸드셰이크 거부, schema-hash 불일치, **첫 전이
+`ActorProtocolError`**(2026-07-30 `d6965a9`가 고친 그 실패) 같은 **결정론적 실패는 승격되지
+않고 재시도되지 않는다** — 재시도해 봐야 같은 실패를 반복하며 매번 자동 이동만 한 번씩 쓴다.
+승격을 끄려면 `HIL_ACTOR_EXIT_MAP=0`.
+
+### 재시도가 걸리는 세 조건 — 전부 만족해야 한다
+
+1. **조작자가 번들을 정말 재기동했다는 증거.** 세 entrypoint(`ur_control.launch.py` /
+   `robotiq_gripper_modbus` / `gello_publisher`)가 모두 있고 **PID 집합이 이전 세대와 하나도
+   겹치지 않을 것.** "떠 있나"가 아니라 **세대 교체**를 본다.
+2. 세 토픽이 `run_hil_hardware.sh` 자신의 READY 기준을 만족
+   (`/joint_states` 50 Hz, `/robotiq_gripper/position_percent` 2 Hz, `/gello/joint_states` 15 Hz).
+3. 🔑 **dashboard 서비스로 읽은 robot mode `RUNNING` + safety mode `NORMAL`.**
+
+**세 번째가 핵심이다.** 위 토픽 셋은 전부 RTDE **읽기**라 `PROTECTIVE_STOP` 중에도 계속
+흐른다. 그것만 보고 재arming하면, 팔이 우연히 RESET 0.10 rad 안에 있을 때
+`run_hil_preposition.sh`가 무동작 분기를 타고 마커를 쓰고, controller 전환도 성공하고
+(controller_manager는 안전 상태를 모른다), actor가 **움직이지 않는 로봇에 명령을 흘린다.**
+
+### 한계와 스위치
+
+`HIL_ACTOR_RETRY`(0/1, 기본 1) · `HIL_ACTOR_RETRY_MAX`(기본 3, 상한 10) ·
+`HIL_HARDWARE_RECYCLE_WAIT_S`(기본 900) · `HIL_RETRY_RESUME_DELAY_S`(기본 5).
+
+**모든 안전 proof가 매 시도마다 처음부터 다시 돈다 — 캐시되는 것은 없다.** preposition 마커
+무효화 후 재생성, RESET 자세 재증명, publisher 0 확인, strict switch와 사후 검증, 그리고
+`[11]`·`[ARM]` 두 곳의 fresh heartbeat 3개. **resume이 아니라 새 arming이다.**
+
+🛑 **재시도 경로에서 RESET 복귀는 shell의 `run_hil_preposition.sh`가 한다 — GUI의
+`APPROVE HOME`이 아니다.** `APPROVE HOME`과 `START / NEXT ITERATION`은 같은
+`/hil/scene_ready` Trigger이고 그 **서버는 actor 프로세스 안에서 생성**된다. actor가 죽어 있는
+동안 GUI는 client 핸들만 들고 있으므로 **그 버튼들은 아무 효과가 없다.** 재시도 경로에서
+GUI에 요구되는 것은 버튼이 아니라 **DISENGAGED heartbeat라는 채널 생존**뿐이고, GUI는 기본이
+DISENGAGED 20 Hz 발행이라 조작자가 아무것도 안 해도 통과한다.
+
+⚠️ 재시도 뒤 첫 관측의 **그리퍼 값은 믿지 말 것** → **G37**(그리퍼만 staleness gate가 없어
+죽은 채널이 `0.0` = OPEN으로 읽힌다).
+
+---
+
 ## 6. 중단 · 복구
 
 * **actor 중단:** T6에서 `Ctrl-C`. armed 래퍼가 신호를 actor에게 전달하고 실제 child 종료까지 기다린다.
+  Qt 폰트 경고 2줄은 `launch_cameras.sh`와 `run_hil_actor.sh`에서 stderr 필터로 걸러진다.
+  필터는 `trap '' INT TERM` 아래에서 도므로 **Ctrl-C가 필터를 먼저 죽여 actor의 종료 경로
+  stderr를 통째로 날리는 일은 없다.** 진짜 Qt 오류는 그대로 통과한다.
 * **팔이 움직이는 중이라면 먼저 펜던트 E-STOP.**
 * 정상 종료/예외 뒤에는 actor의 command publisher가 사라진 것을 확인한 다음 STJC로
   strict 복귀한다. `controller cleanup PASS`를 확인한다. publisher가 남거나 controller 쌍이

@@ -39,6 +39,7 @@ from ur_env.operator_session import (
     STOPPED,
     WAIT_HOME_APPROVAL,
     WAIT_SCENE_READY,
+    resolve_follow_controls,
 )
 
 
@@ -541,6 +542,27 @@ class _OperatorReporter:
                 flush=True,
             )
 
+    def clear_terminal(self) -> None:
+        """Retire the finished episode's terminal label.
+
+        ``terminal_reason`` is deliberately sticky ACROSS the terminal window:
+        it is set on the terminal publish and must survive WAIT_HOME_APPROVAL
+        and the HOMING publish, because that window is where the operator reads
+        WHY the robot stopped, and ``operator_session`` refuses a new ABORT
+        request while it is non-empty -- otherwise a press made at the home gate
+        would be accepted, acknowledged, and then silently dropped into an
+        episode that is already over.
+
+        It must NOT survive into the next episode.  It is a one-shot signal:
+        left sticky, the GUI's confirmation latch is spent by the fresh
+        episode's own WAIT_SCENE_READY/HOMING statuses before that episode has
+        taken a single step, and a second abort in the same run is never
+        confirmed to the operator.  So the boundary is exactly here -- after
+        HOME has completed, before the first status of the new episode.
+        """
+
+        self.terminal_reason = ""
+
     def wait_for_scene_ready(self, *, message: str) -> None:
         if self.session is None:
             return
@@ -574,12 +596,141 @@ def _control_state(info: Mapping[str, Any], intervened: bool) -> tuple[str, str]
     return POLICY_RUNNING, OWNER_POLICY
 
 
-def _terminal_reason(outcome: Any) -> str:
+def _terminal_reason(outcome: Any, *, aborted: bool = False) -> str:
+    """Rank the terminal reason, most specific first.
+
+    ``OPERATOR_ABORT`` outranks everything, including SUCCESS.  An aborted
+    transition already carries ``auto_success=False`` and
+    ``operator_success=False``, so the server cannot report success for it; the
+    ranking is belt-and-braces so a future server that did would still leave the
+    row auditable as "the operator discarded this episode" rather than silently
+    relabelling it a win.
+
+    It also outranks TRUNCATED, which an abort would otherwise collide with:
+    abort is the FIRST producer of ``truncated=True`` anywhere in this stack
+    (``UR7eEnv.step`` returns a hard-coded ``False``), so without this branch
+    every abort would be indistinguishable from a time-limit truncation that no
+    component actually emits.
+    """
+
+    if aborted:
+        return "OPERATOR_ABORT"
     if bool(outcome.success):
         return "SUCCESS"
     if bool(outcome.truncated):
         return "TRUNCATED"
     return "EPISODE_LIMIT"
+
+
+def _consume_operator_abort(
+    operator_session: Optional[Any], run_id: str, episode_id: int
+) -> bool:
+    """Spend this episode's one-shot ABORT token, if one is latched.
+
+    Factored out because the loop reads the token TWICE per iteration -- once
+    before ``env.step`` and once after -- and both reads must be identical,
+    including the ``getattr`` guard that keeps an operator session predating the
+    abort control working unchanged.
+
+    The token is one-shot and episode-scoped in
+    ``RosOperatorSession.consume_operator_abort``: a press therefore lands in
+    exactly one of the two windows and is spent exactly once, and a token
+    latched against another ``(run_id, episode_id)`` is never stolen.
+    """
+
+    if operator_session is None:
+        return False
+    consume = getattr(operator_session, "consume_operator_abort", None)
+    if not callable(consume):
+        return False
+    return bool(consume(run_id, episode_id))
+
+
+def _consume_operator_success(
+    operator_session: Optional[Any], run_id: str, episode_id: int
+) -> bool:
+    """Spend this episode's one-shot MARK SUCCESS token, if one is latched."""
+
+    if operator_session is None:
+        return False
+    consume = getattr(operator_session, "consume_operator_success", None)
+    if not callable(consume):
+        return False
+    return bool(consume(run_id, episode_id))
+
+
+def _park_follower(env: Any) -> None:
+    """Stop the background GELLO follower AND wait for it to park.
+
+    ``UR7eEnv`` drives the arm from the leader on a 30 Hz daemon thread that is
+    completely independent of ``env.step``.  Every blocking operator wait in
+    this loop (``WAIT_HOME_APPROVAL`` in particular, which does not look at the
+    deadman at all) therefore runs with the arm still following a hand that is
+    still on GELLO -- gap G32 in ``docs/testing/08_OPEN_GAPS.md``.  Stopping the
+    follower before any such wait is what closes it.
+
+    WHY QUIESCENCE AND NOT MERELY A DISARM.  ``disarm_intervention_follow``
+    guarantees only that no FURTHER human command is issued; it does not wait
+    for a tick already in flight to finish, and the thread may still be
+    publishing.  Every caller here is about to HOME, and ``ur7e_env`` documents
+    what a follower still publishing at 30 Hz does to that: it out-votes
+    ``go_to_reset``'s 20 Hz republish in a last-write-wins backend, the arm
+    never reaches ``RESET_TOLERANCE_RAD``, and the operator gets ten seconds of
+    blind motion followed by "reset did not arrive".  An abort that left the
+    follower running would reproduce exactly the failure it exists to rescue the
+    operator from, so prefer ``await_follower_quiescent`` when the env has it.
+
+    ``resolve_follow_controls`` only verifies ``disarm_intervention_follow`` is
+    callable, hence the getattr/callable guard on the stronger call rather than
+    an assumption that it exists.
+
+    A missing follower is tolerated and reported, not fatal: fake envs and the
+    test stubs have no follower thread and so have no hazard to close, and an
+    emergency abort must still finish discarding the episode and going HOME
+    rather than dying halfway with the arm under power.
+
+    WHY A FAILED PARK IS ONLY WARNED ABOUT HERE, AND WHY THERE IS NO RETURN
+    VALUE.  This function does not decide the run's fate, and an earlier
+    docstring claiming it "propagates to the FAULT path" described behaviour the
+    code never had.  The refusal lives one layer down, where it can be enforced
+    against the motion itself: ``UR7eEnv.reset`` calls
+    ``await_follower_quiescent`` again and raises ``RuntimeError("intervention
+    follower did not confirm it stopped ...")`` rather than stream a 20 Hz HOME
+    target into a backend a live 30 Hz follower would keep winning.  That
+    exception reaches ``run_remote_actor``'s handler, which publishes FAULT and
+    re-raises.  The system is therefore fail-closed -- the close just happens at
+    the HOME call, not here.  Reporting a status back to these callers would be
+    worse than useless: the abort path still has a legitimate transition to
+    ship, and the shared terminal path is about to call this again, so any
+    caller acting on it would either drop real data or duplicate ``reset``'s
+    refusal badly.  The warning below is the whole contribution -- it names the
+    follower as the likely cause before ``reset`` fails with its own diagnosis.
+    """
+
+    try:
+        controls = resolve_follow_controls(env)
+    except RuntimeError as exc:
+        print(
+            f"[remote-actor] no intervention follow controls to stop: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    await_quiescent = getattr(controls, "await_follower_quiescent", None)
+    if callable(await_quiescent):
+        # Already disarms internally, so this is a superset of the fallback.
+        if not await_quiescent():
+            # Bounded wait, and a timeout is reported rather than waited out:
+            # HOME is about to be attempted anyway and will refuse loudly with
+            # its own diagnosis.  Say here that the follower is the likely cause.
+            print(
+                "[remote-actor] WARNING: intervention follower did not park "
+                "within its timeout; a HOME move may not converge",
+                file=sys.stderr,
+                flush=True,
+            )
+        return
+    controls.disarm_intervention_follow()
 
 
 def run_remote_actor(
@@ -758,7 +909,167 @@ def _run_remote_actor_impl(
         terminal_reason="",
     )
 
+    def _close_episode(reason: str, *, final_step: bool) -> None:
+        """Park the follower, hold at the terminal pose, HOME once approved.
+
+        Shared by every way an episode can end -- server terminal, post-step
+        abort, pre-step abort -- so those cannot drift apart.  The park is here
+        rather than after the gate because WAIT_HOME_APPROVAL blocks this thread
+        indefinitely and never consults the deadman, so an operator still
+        gripping GELLO would otherwise keep driving the arm for the whole wait
+        (``docs/testing/08_OPEN_GAPS.md`` G32); it is also what keeps the HOME
+        move that follows from being out-voted by a follower still publishing at
+        30 Hz.  ``_park_follower`` is idempotent, so an abort path that already
+        parked ahead of its Step RPC pays nothing extra here.
+        """
+
+        if operator_session is None:
+            return
+        _park_follower(env)
+        reporter.wait_for_home_approval(
+            message=(
+                f"{reason}; robot is holding at the terminal pose. "
+                "Press APPROVE HOME to allow HOME motion."
+            )
+        )
+        reporter.publish(
+            HOMING,
+            OWNER_NONE,
+            message=(
+                f"{reason}; returning HOME before stop"
+                if final_step
+                else f"{reason}; returning HOME"
+            ),
+        )
+        # HOME is a motion-safety operation and therefore precedes all
+        # optional local deepcopy/pickle I/O.  Disk or memory failure must not
+        # strand a successful episode at its terminal pose.
+        env.reset(options={"operator_approved_home": True})
+
+    def _open_episode(reason: str) -> None:
+        """Scene-ready gate, fresh O0, BeginEpisode for the next episode."""
+
+        nonlocal observation, observation_id, source_timestamp_ns
+        nonlocal session_id, action_result, episodes_started
+
+        if operator_session is not None:
+            # The finished episode's label stops here, before the first status
+            # the new episode publishes.  See _OperatorReporter.clear_terminal.
+            reporter.clear_terminal()
+            reporter.wait_for_scene_ready(
+                message=(
+                    f"HOME after {reason}; reset the scene, DISENGAGE, "
+                    "then press Resume"
+                )
+            )
+            reporter.publish(
+                HOMING,
+                OWNER_NONE,
+                message="scene ready accepted; refreshing HOME observation",
+            )
+        observation, reset_info = env.reset()
+        if sidecar_scheduler is not None:
+            # Per-episode reset: the interval counter and any escalation state
+            # are about "how long since this episode last checked", and carrying
+            # them across a reset would put the first query of the new episode
+            # at an arbitrary offset.
+            sidecar_scheduler.reset()
+        source_timestamp_ns = validate_timestamp_ns(
+            reset_info.get("timestamp_ns")
+        )
+        session_id = session_id_factory()
+        if not session_id:
+            raise ValueError("session_id_factory returned an empty ID")
+        observation_id = f"{session_id}:0"
+        action_result = network.begin_episode(
+            observation,
+            run_id=run_id,
+            session_id=session_id,
+            episode_id=episode_id,
+            observation_id=observation_id,
+            timestamp_ns=source_timestamp_ns,
+        )
+        episodes_started += 1
+        reporter.publish(
+            POLICY_RUNNING,
+            OWNER_POLICY,
+            message="policy episode running",
+            success=False,
+            terminal_reason="",
+        )
+
     for env_step in range(max_steps):
+        # ---- operator abort: PRE-step read ----------------------------- #
+        # The first of this iteration's two reads of the same one-shot token,
+        # and the reason it has to exist: the deadman gates only the background
+        # follower and ``GelloIntervention.action()`` -- the POLICY path never
+        # consults it (``grep -n deadman`` over ur7e_env.py and ros_backend.py
+        # finds docstrings only).  About 412 ms of the 512 ms production loop is
+        # spent inside the blocking Step RPC below.  A press landing in that
+        # window latched too late for the post-step read that had already
+        # returned, so the loop advanced and ran ``env.step(policy_action)``
+        # BEFORE reading it: up to one full ACTION_SCALE step (1.25 cm plus
+        # rotation) executed after the operator said stop, with the target
+        # persisting for ``target_stale_s`` = 0.30 s.  Reading here spends the
+        # token before ``env.step`` instead, so that press discards the pending
+        # policy action unexecuted.  Both reads are kept -- a press lands in
+        # exactly one window, and the token is one-shot, so it cannot be spent
+        # twice.
+        if _consume_operator_abort(operator_session, run_id, episode_id):
+            # No ``env.step``, therefore NO TRANSITION.  Nothing was executed
+            # and there is no next observation to pair with an action, so there
+            # is nothing to ship: the episode's last shipped transition keeps
+            # ``truncated=False`` and ``masks=1.0`` and the critic bootstraps
+            # from a state the robot really reached.  That is strictly better
+            # than the alternative of stepping a zero/hold action to keep a
+            # transition flowing, which would mint a row no policy ever chose,
+            # stamp it as policy data (``policy_actions_synthetic`` is a
+            # run-level flag about the transform, not about this), and teach the
+            # critic from an action the operator's abort explicitly cancelled.
+            # Nothing desynchronises: ``observation``/``observation_id``/
+            # ``source_timestamp_ns``/``step_id`` were all advanced at the
+            # bottom of the previous iteration, and this iteration adds no
+            # transition of its own to keep consistent.
+            _park_follower(env)
+            # Same rule as the post-step abort: spend any queued MARK SUCCESS
+            # for the episode being discarded and throw the value away, so a
+            # click made before the abort cannot outlive the episode it was
+            # meant for.  Nothing here can consume it later -- there is no
+            # transition to attach it to.
+            _consume_operator_success(operator_session, run_id, episode_id)
+            # ``aborted`` short-circuits ahead of every field of the outcome,
+            # and there is no outcome here: no Step RPC was made.
+            reason = _terminal_reason(None, aborted=True)
+            reporter.position(
+                episode_id=episode_id,
+                episode_step=step_id,
+                env_step=env_step,
+            )
+            reporter.publish(
+                HOLD,
+                OWNER_HOLD,
+                message=(
+                    f"{reason} before the pending policy action; the action "
+                    "was discarded unexecuted"
+                ),
+                success=False,
+                terminal_reason=reason,
+            )
+            final_step = env_step + 1 >= max_steps
+            if not final_step:
+                episode_id += 1
+                step_id = 0
+                reporter.position(
+                    episode_id=episode_id,
+                    episode_step=0,
+                    env_step=env_step,
+                )
+            _close_episode(reason, final_step=final_step)
+            if final_step:
+                break
+            _open_episode(reason)
+            continue
+
         policy_action = validate_action(
             action_result.action,
             action_shape=action_shape,
@@ -775,20 +1086,57 @@ def _run_remote_actor_impl(
         next_observation, reward, done, truncated, info = env.step(policy_action)
         next_timestamp_ns = validate_timestamp_ns(info.get("timestamp_ns"))
         next_observation_id = f"{session_id}:{step_id + 1}"
+
+        # ---- operator abort: POST-step read ---------------------------- #
+        # The second of this iteration's two reads.  It exists because this is
+        # the only point at which a transition that DID happen can still be
+        # relabelled before it is built and shipped: a press landing while
+        # ``env.step`` was running belongs to the step it interrupted, and
+        # truncating that transition is the honest record of it.  A press
+        # landing in the Step RPC window instead is caught by the pre-step read
+        # at the top of the next iteration, which discards the pending action
+        # rather than executing it.  Between the two, "immediate" is bounded by
+        # the remainder of the current window -- never by a whole extra policy
+        # action.
+        aborted = _consume_operator_abort(operator_session, run_id, episode_id)
+        if aborted:
+            # FIRST, ahead of every RPC, pickle and blocking operator wait
+            # below.  Abort is by definition "something went wrong while the
+            # operator is holding GELLO", and the waits this episode is about to
+            # enter would otherwise let that hand keep driving the arm (G32).
+            _park_follower(env)
+
         auto_success = bool(
             getattr(operator_session, "auto_success", False)
             if operator_session is not None
             else False
         )
         operator_success = False
-        if operator_session is not None and not auto_success:
-            consume_operator_success = getattr(
-                operator_session, "consume_operator_success", None
+        if aborted or not auto_success:
+            # UNCONDITIONAL when aborting, including in AUTO where the token is
+            # otherwise never read.  Not exploitable today only because
+            # ``operator_session._on_set_auto_success`` clears the token on
+            # every mode edge -- i.e. abort's correctness would depend on an
+            # invariant in a different file.  Spending it here removes that
+            # dependency outright.
+            operator_success = _consume_operator_success(
+                operator_session, run_id, episode_id
             )
-            if callable(consume_operator_success):
-                operator_success = bool(
-                    consume_operator_success(run_id, episode_id)
-                )
+        if aborted:
+            # ABORT beats a queued MARK SUCCESS.  The success token is still
+            # consumed above -- discarding its VALUE while leaving the token
+            # latched would let a click made before the collision resolve the
+            # NEXT episode.
+            #
+            # Forcing auto_success=False is not cosmetic either: it is what
+            # makes the truncation stick.  The server's reward runtime computes
+            # ``operator_success or (auto_success and classifier_success)`` and,
+            # on an effective success, overwrites the transition with
+            # ``masks=0.0, dones=True, truncated=False``.  In AUTO, a classifier
+            # that happened to fire on the abort frame would otherwise convert
+            # the discarded episode into a terminal win.
+            auto_success = False
+            operator_success = False
         data = build_data(
             actor_id=actor_id,
             run_id=run_id,
@@ -807,12 +1155,18 @@ def _run_remote_actor_impl(
             observation_id=observation_id,
             next_observation_id=next_observation_id,
             reward=reward,
-            done=done,
-            truncated=truncated,
+            # An abort ends the episode WITHOUT a Bellman terminal.
+            # ``done=False, truncated=True`` yields ``masks=1.0``, i.e. the
+            # critic bootstraps from the next state.  Emitting ``done=True``
+            # here would teach it that the world ends wherever the operator
+            # happened to give up, which is a statement about the operator, not
+            # about the task.
+            done=False if aborted else done,
+            truncated=True if aborted else truncated,
             info=info,
             action_shape=action_shape,
         )
-        provisional_terminal = bool(done) or bool(truncated)
+        provisional_terminal = aborted or bool(done) or bool(truncated)
 
         # ---- classifier sidecar ---------------------------------------- #
         # The classifier deliberately does NOT run on every step.  Sparse
@@ -908,11 +1262,17 @@ def _run_remote_actor_impl(
                 > outcome.classifier_threshold
             )
             transition["reward_model_id"] = outcome.reward_model_id
-        terminal = bool(outcome.done) or bool(outcome.truncated)
+        # ``or aborted`` is defensive, not decorative.  The server passes a
+        # non-success ``truncated`` through untouched, so it normally reports
+        # the terminal by itself; but the abort already told this Step
+        # ``request_action=False``, so a server that dropped the flag would
+        # leave the loop with no action to execute and the follower disarmed
+        # mid-episode.  Honour the operator's decision locally either way.
+        terminal = aborted or bool(outcome.done) or bool(outcome.truncated)
         intervened = data["meta"]["intervened"] == 1
         if intervened:
             total_intervention_steps += 1
-        reason = _terminal_reason(outcome) if terminal else ""
+        reason = _terminal_reason(outcome, aborted=aborted) if terminal else ""
         reporter.position(
             episode_id=episode_id,
             episode_step=step_id,
@@ -941,26 +1301,10 @@ def _run_remote_actor_impl(
                     episode_step=0,
                     env_step=env_step,
                 )
-            if operator_session is not None:
-                reporter.wait_for_home_approval(
-                    message=(
-                        f"{reason}; robot is holding at the terminal pose. "
-                        "Press APPROVE HOME to allow HOME motion."
-                    )
-                )
-                reporter.publish(
-                    HOMING,
-                    OWNER_NONE,
-                    message=(
-                        f"{reason}; returning HOME before stop"
-                        if final_step
-                        else f"{reason}; returning HOME"
-                    ),
-                )
-                # HOME is a motion-safety operation and therefore precedes all
-                # optional local deepcopy/pickle I/O.  Disk or memory failure
-                # must not strand a successful episode at its terminal pose.
-                env.reset(options={"operator_approved_home": True})
+            # PIGGYBACK on the abort fix, and deliberately on the SHARED
+            # terminal path: SUCCESS and EPISODE_LIMIT enter the same
+            # deadman-blind WAIT_HOME_APPROVAL that an abort does (G32).
+            _close_episode(reason, final_step=final_step)
 
         if checkpoint_path:
             # Optional local backup is replay-ready.  This does not resend
@@ -987,49 +1331,7 @@ def _run_remote_actor_impl(
         if terminal:
             if final_step:
                 break
-
-            if operator_session is not None:
-                reporter.wait_for_scene_ready(
-                    message=(
-                        f"HOME after {reason}; reset the scene, DISENGAGE, "
-                        "then press Resume"
-                    )
-                )
-                reporter.publish(
-                    HOMING,
-                    OWNER_NONE,
-                    message="scene ready accepted; refreshing HOME observation",
-                )
-            observation, reset_info = env.reset()
-            if sidecar_scheduler is not None:
-                # Per-episode reset: the interval counter and any escalation
-                # state are about "how long since this episode last checked",
-                # and carrying them across a reset would put the first query of
-                # the new episode at an arbitrary offset.
-                sidecar_scheduler.reset()
-            source_timestamp_ns = validate_timestamp_ns(
-                reset_info.get("timestamp_ns")
-            )
-            session_id = session_id_factory()
-            if not session_id:
-                raise ValueError("session_id_factory returned an empty ID")
-            observation_id = f"{session_id}:0"
-            action_result = network.begin_episode(
-                observation,
-                run_id=run_id,
-                session_id=session_id,
-                episode_id=episode_id,
-                observation_id=observation_id,
-                timestamp_ns=source_timestamp_ns,
-            )
-            episodes_started += 1
-            reporter.publish(
-                POLICY_RUNNING,
-                OWNER_POLICY,
-                message="policy episode running",
-                success=False,
-                terminal_reason="",
-            )
+            _open_episode(reason)
             continue
 
         if result.action is None:
