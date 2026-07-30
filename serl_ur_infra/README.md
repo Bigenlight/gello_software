@@ -61,7 +61,11 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 
 디렉터리 밖 관련 문서: [`../docs/testing/README.md`](../docs/testing/README.md)(하드웨어·통신 검증 런북 00~09) ·
 [`../docs/testing/09_HIL_ACTOR_RUNBOOK.md`](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)(actor 기동) ·
-[`../docs/testing/08_OPEN_GAPS.md`](../docs/testing/08_OPEN_GAPS.md)(미해결 갭).
+[`../docs/testing/08_OPEN_GAPS.md`](../docs/testing/08_OPEN_GAPS.md)(미해결 갭) ·
+[`../docs/testing/04_HIL_INTERVENTION.md`](../docs/testing/04_HIL_INTERVENTION.md)
+(개입 루프 정본. **§4.5 실기 러너 `tests/run_real_hil.py`**, **§9 손맛 실측과 🛑 되돌리면 안 되는 것 3개**) ·
+[`../docs/testing/00_SETUP_AND_SAFETY.md`](../docs/testing/00_SETUP_AND_SAFETY.md)
+(인터프리터·`PYTHONPATH`·컨트롤러 함정 정본).
 
 ## 구조
 
@@ -71,7 +75,8 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | `ur_env/envs/config.py` | `DefaultEnvConfig` | 태스크별 config 베이스 |
 | `ur_env/envs/ros_backend.py` | Flask 로봇 서버 (HTTP) | rclpy 백그라운드 노드 — 토픽 I/O |
 | `ur_env/envs/policy_delta_controller.py` | (Franka 임피던스 컨트롤러가 하던 일) | 정책 델타 → 거버너 → IK → 게이트 → 조인트 명령 |
-| `ur_env/envs/wrappers.py` | `SpacemouseIntervention` | `GelloIntervention` — 데드맨 + 앵커 클러치 개입 |
+| `ur_env/envs/wrappers.py` | `SpacemouseIntervention` | `GelloIntervention` — 데드맨 + 앵커 클러치 개입 + 창 안 30 Hz 서브스텝 드라이버 |
+| `ur_env/envs/leader_stream.py` 🆕 | (upstream에 대응물 **없다** — `SpacemouseIntervention`에는 입력 저역통과나 창 예산이 없고, `filtered_expert_a`는 축 마스킹일 뿐이다: `franka_env/envs/wrappers.py:207-247`) | **개입 손맛 계약** (`4197f5b`). `OneEuro`(`bridge_stages.py:42-106` 비트 동일 이식) · `LeaderFilter`(`note_sample`=리더 cadence / `filtered`=출력 틱, **API가 두 cadence 분리를 강제한다**) · `InterventionBudget`(창당 `ACTION_SCALE` 변위 예산, 경로 길이 회계). 순수 numpy/stdlib — rclpy·gym·config import 없음. **설계 근거가 모듈 docstring에 전부 있다** |
 | `ur_env/classifier_sidecar.py` 🆕 | (upstream `classifier_keys` 별도 카메라 등록에 대응) | **reward classifier 전용 무크롭 이미지 계약.** `build_sidecar`(랩톱: full-res BGR → 128×128 → JPEG) · `decode_classifier_frames`(서버: 라이브 뷰어와 같은 레시피) · `validate_sidecar`(구조 검증, numpy만) · `SidecarScheduler`(~2 Hz + 정지 게이트 + 성공 근처 에스컬레이션) · `directory_sha256`(orbax **디렉터리** 체크포인트 핑거프린트, G19) |
 
 **sidecar가 관측 계약을 깨지 않는 이유** (헷갈리기 쉬운 지점이라 여기 적는다):
@@ -90,9 +95,16 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 
 - **액션**: `[-1,1]^7` (6D EEF 델타 + 그리퍼), `ACTION_SCALE`로 실단위 변환 — FrankaEnv와 동일.
 - **정책 경로**: 델타를 `T_cmd`에 적분 → 거버너 rate cap → seed 기반 IK → 조인트 스텝 게이트 → 의심스러우면 HOLD. (`eef_delta.py` 후반부의 단순화판; 추후 본체 재사용으로 교체 예정)
-- **개입 경로**: 데드맨(스페이스바 홀드, 추후 풋스위치)을 누르는 순간 (GELLO, 로봇 명령 자세) 앵커 래치 → 앵커 델타를 per-step env 액션으로 재표현(클립이 자연스러운 추격 속도 제한이 됨) → `info["intervene_action"]` 보고.
+- **개입 경로**: 데드맨(GUI 토픽 기본, 추후 풋스위치)을 누르는 순간 (GELLO, 로봇 명령 자세) 앵커 래치 → 앵커 델타를 per-step env 액션으로 재표현(클립이 자연스러운 추격 속도 제한이 됨) → `info["intervene_action"]` 보고.
+  - **(2026-07-30, `4197f5b`) 창 안에서 리더를 30 Hz로 재샘플링한다.** 앵커/gain 래치 의미는
+    그대로고, 바뀐 것은 **액추에이터 층**이다: 100 ms 창의 sleep이 서브스텝 페이싱으로 바뀌어
+    (`ur7e_env.py::_drive_intervention_substeps`) 타깃이 창당 3회 갱신되고, 리더 입력은
+    One-Euro를 지나며, 창 총 변위는 `InterventionBudget`이 `ACTION_SCALE`로 묶는다.
+    **"1 스텝 = 1 transition"과 10 Hz 저장 주기는 불변이다.** 정책 경로는 `driver is None`으로
+    갈라져 예전 그대로 sleep 한 번이다. `config.INTERVENTION["substep_hz"] <= HZ`거나
+    `INTERVENTION` 블록이 없는 config는 기능이 꺼지고 변경 이전 동작으로 퇴화한다.
 - **카메라**: franka_env처럼 pyrealsense2로 장치를 직접 열지 않고, `launch_cameras.sh`가 띄우는 realsense2_camera 드라이버의 `/camX/.../compressed` 토픽을 구독 (RealSense는 이중 오픈 불가 + 기존 viewer/recorder 생태계와 공존). JPEG 디코드→크롭→128×128 리사이즈→RGB는 FrankaEnv와 동일. `DISPLAY_IMAGE=True`면 정책 시점 이미지를 OpenCV 창으로 실시간 표시 (ImageDisplayer 포팅).
-  - **(2026-07-29) 디코드된 full-res BGR은 크롭 직전에 보관된다** (`ur7e_env.py` 의 `self._last_camera_frames[key] = bgr`, ≈`:781` — 바로 다음 줄이 크롭이다). `last_camera_frames()` 로 꺼내며 **참조지 복사가 아니다 — read-only로 다룰 것.** reward classifier sidecar의 원본이고, 이 덕분에 추가 디코드 비용이 0이다. fake env는 항상 비어 있다.
+  - **(2026-07-29) 디코드된 full-res BGR은 크롭 직전에 보관된다** (`ur7e_env.py` 의 `self._last_camera_frames[key] = bgr`, ≈`:1064` — 바로 다음 줄이 크롭이다). `last_camera_frames()` 로 꺼내며 **참조지 복사가 아니다 — read-only로 다룰 것.** reward classifier sidecar의 원본이고, 이 덕분에 추가 디코드 비용이 0이다. fake env는 항상 비어 있다.
   - 🪤 **RealSense 시리얼: 카메라는 한 쌍뿐이고 필드가 두 개다.** `serial_no:=` 가 매칭하는 **모듈 시리얼**은 `147122072740`(cam1, plain D435) / `243222072700`(cam2, D435IF)이고, 커널 USB 디스크립터(`journalctl`, `/sys/.../serial`)가 노출하는 **ASIC 시리얼**은 `151623020789` / `322743060038` 이다. **저널 grep으로 "어느 카메라가 붙어 있나"를 판정하지 마라** — 두 세션이 그렇게 해서 각각 정반대의 틀린 결론에 도달했다. 정본은 [`../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md).
 - **fake_env 모드**: ROS/카메라 없이 space 정의와 zero 관측만 제공 — learner 노드용.
 
@@ -124,7 +136,7 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | keepout 존 | ✅ | ❌ | |
 | anti-windup lag 클램프 | ✅ | ❌ (리더 폭주용이라 정책 경로엔 덜 급함) | |
 | 해석적 line search | ✅ | ❌ | |
-| 워크스페이스 박스 (`ABS_POSE_LIMIT`) | (keepout으로 대체) | 🟠 **구현·배선 완료**(`clip_safety_box`), **단 기본 config에서는 비활성** | 구현 `ur7e_env.py::_build_safety_box`(≈`:224`), 클립 `::_clip_xyz_euler`(≈`:309`)·`::clip_safety_box`(≈`:345`). *(줄 번호는 동시 편집으로 밀린다 — 심볼 이름으로 찾을 것.)* `DefaultUR7eEnvConfig`의 `ABS_POSE_LIMIT_LOW/HIGH`가 **영벡터**라 `_safety_box_active=False` 로 떨어진다 — **의도된 refuse-don't-clamp**(0 부피 박스로 클램프하면 TCP를 base 원점으로 몰아 팔을 자기 베이스에 박는다). `run_real_hil.py`가 그 config를 쓰므로 실기에서 박스가 발동한 적이 없다. 측정 박스는 `cube_in_cup.py`에만 있다 |
+| 워크스페이스 박스 (`ABS_POSE_LIMIT`) | (keepout으로 대체) | 🟠 **구현·배선 완료**(`clip_safety_box`), **단 기본 config에서는 비활성** | 구현 `ur7e_env.py::UR7eEnv._build_safety_box`(≈`:272`), 클립 `::_clip_xyz_euler`(≈`:357`)·`::clip_safety_box`(≈`:393`). *(줄 번호는 동시 편집으로 밀린다 — 심볼 이름으로 찾을 것.)* `DefaultUR7eEnvConfig`의 `ABS_POSE_LIMIT_LOW/HIGH`가 **영벡터**라 `_safety_box_active=False` 로 떨어진다 — **의도된 refuse-don't-clamp**(0 부피 박스로 클램프하면 TCP를 base 원점으로 몰아 팔을 자기 베이스에 박는다). `run_real_hil.py`가 그 config를 쓰므로 실기에서 박스가 발동한 적이 없다. 측정 박스는 `cube_in_cup.py`에만 있다 |
 
 > 🪤 **이 줄에 대한 낡은 포인터 주의.** `../docs/testing/08_OPEN_GAPS.md`(G1 및 부록)는
 > 이 항목을 **`serl_ur_infra/README.md:59` 의 "❌ config만 존재, 미작동"** 으로 인용한다.
@@ -151,7 +163,22 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 - [ ] HOLD/reject_reason을 step info로 노출 + staleness safe-stop 정책 통일 + UR fault recovery
 - [x] v_max vs ACTION_SCALE 정합 — 2026-07-28 해결. 3층을 균일 1.25배로 맞춰 헤드룸 1.20x 유지
       (`ACTION_SCALE` 0.0125/0.0625, `GOVERNOR` 0.15/0.75/0.0625, `UPSAMPLER` 0.0025)
-- [ ] 데드맨 하드웨어 (풋스위치, 현재 스페이스바) + 성공/실패 라벨링 키
+- [ ] 데드맨 하드웨어 (풋스위치) + 성공/실패 라벨링 키
+      — *(이전 판 문구 "현재 스페이스바"는 낡았다: 두 entrypoint 모두 `--deadman` 기본값이
+      `topic`(GUI)이다 — `tests/run_real_hil.py`·`scripts/run_remote_rlpd_actor.py`의
+      `--deadman` 인자, G12. 스페이스바는 명시 옵션이고 `04` §1.1이 위험을 설명한다.)*
+- [x] **개입 손맛(빳빳함) — 2026-07-30 해결, 실기 PASS** (`4197f5b`). 원인은 10 Hz가 아니라
+      창당 타깃 1회 갱신. 30 Hz 재샘플링 + One-Euro 이식 + `InterventionBudget`.
+      DRY RUN 300스텝(개입 272)·ARMED 150스텝(개입 120) 둘 다 전체 PASS,
+      dp_ratio 중앙값 1.000 / held 0% / `substeps=2`, 조작자 확인 양호.
+      (같은 날 세 번째 run — DRY `--scale 0.5`, 개입 144 — 은 고친 판정으로 **SKIP**이다:
+      비포화 58표본이 개수 게이트 20은 넘지만 축 여기가 1.4/3.6/1.4 cm로 2 cm 게이트 미달.
+      `governed`는 3 run 전부 0이었으나 **첫 타깃만 집계한 값**이다 → `04` §9.9.)
+      금지사항 3개(가속도 제한·`target_stale_s`·`soft_start_s`)는 `../docs/testing/04_HIL_INTERVENTION.md` §9.3.
+- [ ] 🟠 **대각 이동의 governor 상시 절삭** — `ACTION_SCALE` 헤드룸이 축별로만 성립해서
+      2축 0.849배 / 3축 0.693배로 이미 잘리고 있었다. `4197f5b`가 만든 게 아니고
+      **관측 수단(`governed_scale`)만 생겼다.** 저장 액션 과대기록 경로다 → 위 "저장 액션 불변식" 절.
+- [ ] 개입 예산 소진 후 HOLD (창이 늘어질 때) — **코드로 못 고친다, G21 종속**
 - [ ] `GelloIntervention._leader_T`에 TCP_OFFSET 배선 (config는 있음, 현재 플랜지 기준)
 - [ ] 로봇 노트북에서 mock 하드웨어 검증 (QoS `VERIFY(hw)` 주석 참고, 그리퍼 방향 육안 확인)
 - [ ] per-task config 예제 (`examples/experiments/<task>/config.py` 형식)
@@ -202,6 +229,81 @@ clip`으로 만들어 실행과 저장에 같은 값을 쓰므로 구조적으�
 `ACTION_SCALE*HZ`가 거버너 캡을 넘으면 실행만 잘리고 저장은 그대로라 이
 불변식이 깨진다 — 그래서 거버너 기본값은 스케일 최대의 ~120%로 잡았고
 (순수 안전망), env 기동 시 위반하면 WARNING을 찍는다.
+
+### 🆕 (2026-07-30, `4197f5b`) 개입 경로에는 `InterventionBudget`이 그 불변식을 지킨다
+
+개입 중 리더를 **창 안에서 30 Hz로 재샘플링**하게 되면서(손맛 근거는
+[`../docs/testing/04_HIL_INTERVENTION.md`](../docs/testing/04_HIL_INTERVENTION.md) §9),
+"창당 한 번 앵커 델타 → clip"만으로는 이 불변식이 **보장되지 않는다.** 이유는 창의 실제 길이다:
+
+- 명목 창은 100 ms지만 gRPC 왕복이 `env.step` **밖**에 있어 실효 스텝 주기가 늘어난다
+  (`04` §9.1). 숫자는 출처를 구분해서 인용할 것:
+  - **101 ms** — 2026-07-30 실기 3 run의 실측 스텝 주기 중앙값. **단 이 run들은
+    `run_real_hil.py`이고 gRPC가 없다** (`tests/run_real_hil.py` docstring).
+  - **112~122 ms / 158 ms / 197 ms** — actor 경로의 *산출* 주기. 07-29 빠른 링크
+    (RPC p50 12~22 ms)면 앞의 값, **열화 링크**(13 Mbit/s, RPC p50 58 ms / p99 97 ms)면
+    뒤의 두 값이다 (`04` §9.1 표 1 + G16).
+  - **0.700 s** — 오프라인 시나리오 행. 2026-07-29 관측된 첫 policy publish **5.474 s**와
+    learner 경합 중 **learner step** 중앙값 약 **1.12 s**에서 유도한 것이며,
+    **1.12 s는 env 스텝 주기의 실측이 아니다** (`04` §9.5 / `08` G21).
+- 사람이 그 창을 **무제한 추종**하면 1 s 창에서 `ACTION_SCALE` 여러 스텝 분량을 이동하는데,
+  기록되는 액션은 `[-1,1]`에서 클립되므로 최대 `1.0`밖에 못 말한다. 즉 transition이 실제로
+  일어난 움직임을 **체계적으로 과소기록**한다 (정책 경로의 과대기록과 부호만 반대인 같은 결함).
+
+그래서 `ur_env/envs/leader_stream.py::InterventionBudget`이 **창당 총 변위를 정확히
+`ACTION_SCALE` 1스텝**(cube_in_cup 기준 0.0125 m / 0.0625 rad)으로 묶고, 그 창에서 실제로
+소비된 양을 `consumed_action()`으로 되돌려 buffer에 넣는다. 즉 **예산이 불변식을 지키는
+장치**다. 회계는 net 변위가 아니라 **경로 길이**(서브스텝 크기의 합)로 하므로 `exhausted`가
+래치되고(되돌아와도 False로 돌아가지 않는다), net norm ≤ 경로 길이이므로 보고되는 액션도
+같이 묶인다. 예산 소진 후 남은 시간은 HOLD이고 그건 코드가 아니라
+**G21(RPC 지연) 비용**이다 → `../docs/testing/08_OPEN_GAPS.md` G21.
+
+### 속도 3층과 개입 예산 — 예산은 4번째 층이 **아니다**
+
+3층(`ACTION_SCALE` / `GOVERNOR` / `UPSAMPLER` — `ur_env/envs/config.py`의 세 블록, 각 상단
+주석이 근거를 담고 있다)은 2026-07-28에
+균일 1.25배로 정렬해 헤드룸 1.20x를 유지한다. 개입 예산은 그 위에 얹은 **새 층이 아니라
+`ACTION_SCALE`에서 직접 파생된 같은 수**다(`InterventionBudget.__init__`가 `action_scale`을
+그대로 받는다). 그래서:
+
+- 예산은 3층 비율을 **바꾸지 않는다.** 다만 개입 창에서는 실효 상한이 governor가 아니라
+  **예산**이 된다 — 0.0125 m(예산) < 0.0150 m(`v_max`/HZ)이므로 예산이 먼저 묶는다.
+  2026-07-30 실기 **3 run**(개입 536표본)에서 `governed=0`으로 관측된 것이 이 설계대로의
+  결과다. ⚠️ **단 그 값은 창의 첫 타깃만 집계하던 코드로 측정됐다** — "첫 타깃에서 절삭
+  없음"만 증명하고, 창 전체(서브스텝 2회 포함) 절삭 여부는 아직 **미관측**이다.
+  지금 `governed`는 창 전체 OR / `governed_scale`은 창 전체 최솟값이다
+  (`tests/run_real_hil.py` docstring (e)).
+- **예산을 끄거나 완화해도 3층 비율 계약 자체는 깨지지 않는다.** 커밋된 코드는 창의 **첫
+  타깃도 `dt = 1/substep_hz`로** 과금하므로(`ur7e_env.py::UR7eEnv._apply_action`) 창 총
+  governor 허용량은 `3 × v_max/30 = 0.0150 m` = `v_max/HZ`와 정확히 같다.
+  > **이전 판(보존):** *"예산을 끄거나 완화하면 서브스텝이 만든 governor 창 총량(첫 타깃
+  > `1/HZ` + 서브스텝 `1/30` ×2 = 0.0250 m, **1.67배**)이 그대로 드러나 헤드룸 계약이 개입
+  > 경로에서 깨진다."* — 이 관찰은 **커밋 전 워킹 트리** 기준이었고 `4197f5b`가 해소했다.
+  > 📌 2026-07-30 커밋된 코드에서 직접 확인. 전모는 `../docs/testing/08_OPEN_GAPS.md` G24의
+  > "✅ 정정" 절.
+- `ACTION_SCALE`을 올리면 이 여유(0.0125 → 0.0150)가 **먼저** 소진된다 → G18.
+
+**`governed` / `governed_scale`로 governor 절삭이 처음 관측 가능해졌다**
+(`ur_env/envs/policy_delta_controller.py::PolicyDeltaController.step`이 반환하는 `info`.
+*줄 번호는 적지 않는다 — 이 파일은 동시 편집으로 계속 밀린다*). `run_real_hil.py` CSV에도
+`substeps`와 함께 컬럼으로 나온다. 이전에는 절삭이 일어나도 어디에도 안 남았다.
+🛑 **계측 범위가 07-30 실기 이후 바뀌었다:** 지금 `governed`는 창 전체 **OR**,
+`governed_scale`은 창 전체 **최솟값**이다. 07-30 3 run은 **첫 타깃만** 집계하던 코드로
+측정됐으므로 옛 CSV와 새 CSV의 같은 이름 컬럼을 **비교하면 안 된다.**
+
+> ### 🐛 기존 결함이 이때 드러났다 — `ACTION_SCALE` 헤드룸은 **축별로만** 성립한다
+> 헤드룸 1.20x는 **한 축 기준** 계산이다(`0.0150 / 0.0125`). 액션이 여러 축에 동시에 걸리면
+> 요청 변위의 크기가 `√n`배로 커지는데 governor 캡은 벡터 norm에 걸리므로:
+>
+> | 전 스케일 액션 | 요청 변위 | governor 캡(`v_max`/HZ) | `governed_scale` |
+> | --- | --- | --- | --- |
+> | 1축 | 0.0125 m | 0.0150 m | 1.000 (절삭 없음) |
+> | 2축 대각 | 0.0177 m | 0.0150 m | **0.849** |
+> | 3축 대각 | 0.0217 m | 0.0150 m | **0.693** |
+>
+> **즉 대각 이동은 이미 상시 절삭되고 있었다.** 이것은 `4197f5b`가 만든 문제가 **아니고**
+> (3층 정렬 이후 계속 그랬다) 이번 변경이 만든 것은 **관측 수단**뿐이다. 저장 액션 불변식의
+> 관점에서는 정책 경로의 알려진 과대기록 경로이며, 아직 **고쳐지지 않았다** → G2/G18.
 
 ## 설치 (예정)
 

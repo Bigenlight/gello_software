@@ -1,6 +1,7 @@
 # HIL-SERL 실기 투입 — 통신·하드웨어 검증 런북 (인덱스)
 
-> 🚩 **새 세션이라면 [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](../../serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md)를 먼저 읽어라.** 현재 상태·다음 할 일·안전 규칙이 거기 모여 있다. 이 디렉터리는 개별 검증 절차다.
+> 🚩 **새 세션이라면 루트 [`CLAUDE.md`](../../CLAUDE.md) → [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) 순서로 읽어라.** 현재 상태·다음 할 일·안전 규칙이 거기 모여 있다. 이 디렉터리는 개별 검증 절차다.
+> *(이전 판(보존)은 `HANDOFF_NEXT_SESSION_KO.md`를 진입점으로 지목했다. 그 문서는 **첫 실물 E2E 이전**의 리그 조사 기록이라 최신 상태 지침이 아니다 — 다만 §"테스트 — 이 명령 그대로"(`:254-264`)는 여전히 pytest 재현 명령의 정본이다.)*
 
 이 디렉터리는 **HIL-SERL을 실제 UR7e에 올리기 전에 통신·하드웨어 경로를 사람이 직접
 확인하는 절차**를 담는다. 학습 모델(learner/policy)은 이 문서의 범위가 **아니다**.
@@ -108,12 +109,15 @@ export WT=/home/laptop3/gello_software
 | 5 | GELLO 발행 안정성 | **PASS** | 30.004 Hz (std 0.15 ms), 30초 901샘플, 드롭 0, `comm failed` 0회, 트리거 0.000~1.000 전 구간 |
 | 6 | EEF 텔레옵 (실기) | **PASS** (사용자 직접 검증) | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef` + `./run_eef_gui.sh` |
 | 7 | 오프라인 단위 테스트 `ur_gello_bringup` | **PASS** | **436 passed in 7.09s** (2026-07-29 통합 checkout에서 재실행). §4에 재현 명령 |
-| 7b | 오프라인 단위 테스트 `serl_ur_infra` | **PASS** | ⚠️ **기준선이 움직이는 중이다.** `333`(07-29 오전) → `337`(`40b99f8` recorder→demo 변환기) → **`429 passed, 11 skipped in 3.77s`** (sidecar 작업 트리에서 이 문서 작성 중 실측). **코드 에이전트가 아직 붙어 있어 더 오를 수 있다 — 이 숫자를 고정 기준으로 쓰지 말고 매번 다시 돌려라.** 불변인 것은 두 가지다: **skipped는 정확히 11**이어야 하고, **passed가 *내려가면*** PYTHONPATH에서 `serl_launcher`가 빠진 것이며 그때 **skip 사유가 거짓말을 한다** → `00` §4.2 |
+| 7b | 오프라인 단위 테스트 `serl_ur_infra` | **PASS** | 📌 2026-07-30 `4197f5b`에서 **`579 passed, 11 skipped in 8.98s`** (actor venv `/home/laptop3/venvs/gello-hil-actor/bin/python`). 계보: `333`(07-29 오전) → `337`(`40b99f8`) → `429`(classifier sidecar) → `497`(07-30 오전) → **`579`**(신규 82 = leader_stream 28 / governor_dt 38 / intervention_substeps 16). ⚠️ **인터프리터를 안 적은 passed 수는 무의미하다** — `venvs/hilserl`(jax 0.5.3, numpy 1.26.4)은 jax skip들이 실제로 돌아 passed가 늘고 skipped가 11 → 4로 줄어든다. ✅ 한때 여기서 났던 `1 failed`(`test_governor_dt.py::test_env_step_surfaces_governed_in_info`)는 **해소됐다** — numpy 승격 차이가 아니라 허용범위가 float32 산술보다 타이트했던 것(`rel=1e-9` → `1e-6`), 근거는 `00` §4.2. 불변인 것: **actor venv에서 skipped는 정확히 11**, **passed가 *내려가면*** PYTHONPATH에서 `serl_launcher`가 빠진 것이고 그때 **skip 사유가 거짓말을 한다** → `00` §4.2. 🪤 `tests/test_env_fake_backend.py`는 **0개 수집**되어 이 총계에 흔적이 없다 → `08` G25 |
 | 8 | 타이밍 baseline | **매 실행 재측정** | `test_ur_kin.py`(k)가 매 실행마다 찍는다. 📌 2026-07-29 실측 `worst-case tick = 0.836 ms (generic pose)`, 2026-07-27은 `1.314 ms (near-singular)`. **값도 pose 종류도 실행마다 바뀐다 — 고정값으로 인용하지 말 것.** 판정은 "예산 4.0 ms @250 Hz 미만"이다 |
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
 | 9b | HIL 개입 루프 (**실기, 팔 구동**) | **PASS (2026-07-28, `run_real_hil.py` 경로에 한함)** | `--arm --scale 0.25`, 100스텝 중 개입 64, `held=0`. 개입 불변식 4종(anchor-latch 0 / gain-latch 0 / 저장==실행 1.000 / held-rate 0%) 통과. **frame-map = 단위행렬**(포화 제외 잔차 0.093, 기준 0.15). → `04` §4.5 |
 | 9b′ | 같은 루프를 **actor entrypoint**로 | **핵심 E2E PASS / continuous PARTIAL** | 실제 replay 201, GELLO intervention 153, policy 48. learner 102/gradient 204/policy publish v2. 첫 publish 경계 RPC timeout 뒤 controller cleanup PASS → 최신 상태 문서 |
-| 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py:81-155`, `wrappers.py:301-328`, `tests/test_gello_gripper_wiring.py`(📌 2026-07-29 **23 passed**); commit `6a0b127`. 07-28 실기도 이 채널은 껐다 |
+| 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py`의 `GELLO_TRIGGER_TOPIC`·`GELLO_TRIGGER_STALE_S`·`_on_gello_trigger`, `wrappers.py::GelloIntervention._expert_gripper`, `tests/test_gello_gripper_wiring.py`(📌 2026-07-30 재측정 **24 passed**); commit `6a0b127`. 07-28 실기도 이 채널은 껐다. *(줄 번호 제거 2026-07-30: 옛 판의 `ros_backend.py:81-155` / `wrappers.py:301-328`은 `4197f5b`로 크게 밀렸고 `wrappers.py`는 아직 동시 편집 중이다 — **심볼로 찾을 것.**)* |
+| 9d | 개입 **손맛**(빳빳함/덜덜거림) — 창 안 30 Hz 리더 재샘플링 + One-Euro + 변위 예산 | **PASS (2026-07-30, 실제 UR7e, `4197f5b`)** | `run_real_hil.py` **3 run**(DRY `--scale 0.5` / DRY `--scale 1.0` / ARMED `--scale 1.0`) 중 뒤 두 run PASS, 첫 run은 고친 판정으로 **SKIP**(포화 제외 후 축별 여기 2 cm 미달). **DRY RUN `--scale 1.0`** 300스텝(개입 272): frame-map 잔차 0.016 / alpha 1.005 / 표본 141(포화 131 제외) · action-exec dp_ratio 중앙값 1.000 · held 0 %. **ARMED `--scale 1.0 --max-steps 150`**(개입 120): 잔차 0.130 / alpha 0.983 / 표본 51(포화 69 제외) · dp_ratio 1.000 · held 0 % · **조작자 손맛 확인 양호**. 모든 개입 스텝 `substeps=2`(창당 타깃 3회 갱신), `governed=0`(예산이 governor보다 타이트해 먼저 묶는 설계대로) → `04` §9 |
+| 9d′ | 같은 손맛 수정의 **연속 운용**(창이 늘어질 때) | **미검증 — 코드로는 못 고친다** | 창 0.700 s에서 HOLD 51.5 %, 리더속도 추종 66 %. 예산 소진 후 남는 HOLD는 필터·rate·외삽 어느 것도 못 없앤다 → `08` G21, `04` §9.5 |
+| 9e | 개입 서브스텝의 **mock RViz** 확인 | **미검증** | `04` §3 루프는 이번에도 건너뛰었다. 실기 PASS가 mock PASS를 대체하지 않는다(G24 검증 순서 ②) |
 | 10 | gRPC actor 루프백 스모크 | **PASS (오프라인)** | `test_actor_grpc_transport/identity_pinning/smoke/rlpd_receive_smoke` = **35 passed** (venv python). 같은 4개 파일이 **시스템 python3에서는 무한 hang** → §0-1 |
 | 10b | **Kanu 왕복 (Stage A, fake-env)** | 📌 **PASS (2026-07-27 기록)** | 100스텝 acceptance 통과. 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버였다. 절차·수치 정본은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) |
 | 10c | 레이턴시 실측 (Kanu 왕복) | 📌 **두 세션이 약 6배 다르다 — 세션마다 재측정** | 07-27: RTT p50 **58.6** / p95 75.8 / **p99 97.1 ms**, 링크 약 **13 Mbit/s**. 07-29(**유휴 리그**): ssh-실효 **약 83 Mbit/s**(min 75.5/max 98.5), ICMP p50 **1.75** / p99 24.4 ms, 손실 0%. 링크는 **2.4 GHz ch.3 `iptime_709`**(5 GHz SSID 없음), kanu는 **캠퍼스 4홉**이지 WAN이 아니다. 🛑 **"해결됐다"로 읽지 마라** — 07-29는 카메라·actor·조작자가 **전부 꺼진** 상태였다. 유선 NIC `enx00e04c3600bd`가 **있는데 안 꽂혀 있다** → `05` §5.3 |
@@ -165,11 +169,11 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`01_GRIPPER.md`](01_GRIPPER.md) | Robotiq 2F-85 단독 검증(**PASS**) + RL/개입 배선과 `:54321` 단일 클라이언트 규칙 |
 | [`02_GELLO_LEADER.md`](02_GELLO_LEADER.md) | GELLO 리더 검증(**PASS**) + Dynamixel 진단 스캔 + 트리거가 별도 토픽인 이유 |
 | [`03_EEF_MODE.md`](03_EEF_MODE.md) | EEF 텔레옵 단계 상승 P6 → P7 → P8 → P9a → P9b (사용자 검증 완료, 재현 절차) |
-| [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) | 데드맨 2종, 앵커/gain 래치, mock RViz 루프, **실기 러너 `run_real_hil.py`**, 좌표계 3×3, 그리퍼 개입, 개입 메타데이터 계약 |
+| [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) | 데드맨 2종, 앵커/gain 래치, mock RViz 루프, **실기 러너 `run_real_hil.py`**, 좌표계 3×3, 그리퍼 개입, 개입 메타데이터 계약, **§9 손맛 실측 5개 표 + 🛑 되돌리면 안 되는 것 3개(2026-07-30)** |
 | [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, 포트 기본값, schema fail-fast(v2), **분류기 sidecar 전송 계약(§3.2)**, **레이턴시·대역폭 실측(§5.3–5.4)**, Kanu 터널 |
 | [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대(시리얼·크롭·역할), QoS/TRANSIENT_LOCAL 함정, 토픽 유량 점검, 19-D state 계약, F/T 프레임 |
 | [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
-| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전 갭 **G1~G20**과 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록. G15/G19/G20은 2026-07-29에 닫혔다 |
+| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전 갭 **G1~G25**와 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록. G15/G19/G20은 2026-07-29에 닫혔고, **G24(개입 손맛)·G25(`test_env_fake_backend.py` 0개 수집)는 2026-07-30 신규** |
 | [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, Kanu 서버 기동 |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
@@ -191,7 +195,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 [A] 오프라인 (로봇 불필요, 위험 0)
  A1  ROS2 워크스페이스 빌드             -> 00 §2
  A2  ur_gello_bringup 단위테스트 436개  -> 00 §4.1  [PASS 2026-07-29]
- A3  serl_ur_infra 단위테스트 (개수 변동) -> 00 §4.2  [PASS 2026-07-29, 429p/11s]
+ A3  serl_ur_infra 단위테스트 (개수 변동) -> 00 §4.2  [PASS 2026-07-30, 579p/11s, actor venv]
  A4  gRPC 루프백 스모크 (mock 서버)     -> 05 §2    [PASS 오프라인]
         ↓
 [B] 하드웨어 단독 (팔 미동작)
@@ -213,6 +217,8 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 [D'] 실기 HIL 개입 (팔 움직임, zero-policy)  ** run_real_hil.py **
  D'1 DRY_RUN 300스텝 + CSV 검토          -> 04 §4.5 [PASS 2026-07-28]
  D'2 --arm --scale 0.25, 개입 불변식 4종 -> 04 §4.5 [PASS 2026-07-28]
+ D'3 손맛 수정(30 Hz 재샘플링) 검증       -> 04 §9   [PASS 2026-07-30]
+       DRY_RUN --scale 1.0 300스텝 -> --arm --scale 1.0 150스텝, 둘 다 전체 PASS
         ↓
 [E] 장애 주입 (팔 움직임 포함)
  E1  통신/프로세스 계열 (E1~E5)         -> 07      [미검증]
@@ -233,6 +239,9 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 
 **현재 위치: 실물 HIL-SERL 원형 [G1~G2]까지 도달했다. 다음 blocker는 [G3] 동시
 학습/추론 latency와 policy-first/episode GUI 운영 흐름이다.**
+2026-07-30에 [D′3](개입 손맛)이 추가로 PASS했다 — **[G3]와 독립**이다(learner·gRPC 서버를
+쓰지 않는 zero-policy 경로). 다만 손맛의 **나머지 절반**은 [G3]/G21이 열려 있는 동안
+회수되지 않는다 → 표 9d′.
 
 > - [F]가 [C]/[E]보다 먼저 끝난 것은 순서를 어긴 게 아니라, [F]가 **로봇을 전혀 움직이지 않는
 >   fake-env 경로**이기 때문이다.

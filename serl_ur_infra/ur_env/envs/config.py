@@ -71,6 +71,14 @@ class DefaultUR7eEnvConfig:
     # one alone and the next silently truncates it, which re-breaks the
     # invariant above.
     ACTION_SCALE: np.ndarray = np.array([0.0125, 0.0625, 1.0])
+    # DO NOT raise this because "the intervention feels slow". This number IS
+    # the meaning of a policy action (1.0 = 12.5 cm/s = the policy's top speed);
+    # raise it and the human demonstrates motion the policy cannot execute, and
+    # the 2,037 canonical demo actions silently change physical meaning — the
+    # learner fingerprint does not carry ACTION_SCALE, so nothing rejects the
+    # mismatch (08_OPEN_GAPS.md G18). To try a different hand feel for ONE run,
+    # use ``tests/run_real_hil.py --scale``: it scales all three layers together
+    # and stores nothing. Smoothness is INTERVENTION.substep_hz, not this.
 
     # ---- workspace safety box (TCP, UR base frame) ---- #
     ABS_POSE_LIMIT_LOW: np.ndarray = np.zeros((6,))
@@ -123,6 +131,13 @@ class DefaultUR7eEnvConfig:
         # updates, but after roughly three target periods stop chasing the old
         # goal: acceleration-limit to zero and publish the current stream HOLD.
         "target_stale_s": 0.30,
+        # DO NOT revert max_accel_rad_s2 / target_stale_s / soft_start_s because
+        # the INTERVENTION feels stiff. Measured 2026-07-30, all three move the
+        # wrong way: dropping the accel limit takes fully-stopped time 16% ->
+        # 76%, target_stale_s 0.30 -> 0.50 takes it 17.5% -> 54.5%, and
+        # soft_start_s 0.7 -> 0 takes ripple 1.92 -> 4.09. The stiffness came
+        # from the target UPDATE RATE, fixed by INTERVENTION.substep_hz below.
+        # Numbers and method: docs/testing/04_HIL_INTERVENTION.md §9.3.
     }
 
     # ---- human intervention: in-window leader resampling ---- #
@@ -154,6 +169,17 @@ class DefaultUR7eEnvConfig:
     # LEADER joints only -- never to a policy action; filtering policy actions
     # would blur action->effect credit assignment in replay, which is why
     # UPSAMPLER above still refuses to carry any filter.
+    #
+    # WHO READS THESE.  ``substep_hz`` -> ``UR7eEnv.intervention_substep_hz``
+    # (ur7e_env.py:193), which paces the in-window loop AND is the rate
+    # ``GelloIntervention`` builds its LeaderFilter + InterventionBudget at
+    # (wrappers.py:353).  ``one_euro_*`` reach ``LeaderFilter`` only, never the
+    # policy path.  Full call chain: leader_stream.py module docstring.
+    #
+    # VERIFIED on the real UR7e 2026-07-30: ARMED ``run_real_hil.py --arm
+    # --scale 1.0``, 120 intervened steps, every check PASS (substeps=2 in every
+    # window = 3 target updates per window, dp_ratio median 1.000, held 0%,
+    # operator confirmed the hand feel).  Evidence: 04_HIL_INTERVENTION.md §9.
     INTERVENTION: Dict[str, float] = {
         "substep_hz": 30.0,
         "one_euro_min_cutoff": 1.0,

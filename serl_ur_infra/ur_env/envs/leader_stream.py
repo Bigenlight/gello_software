@@ -4,16 +4,26 @@ Pure numpy/stdlib on purpose: no rclpy, no gym, no config import, so the code
 that is unit-tested IS the code the actor runs (same rule as
 ``ros2_ur_ws/src/ur_gello_bringup/ur_gello_bringup/bridge_stages.py:31-33``).
 
+WHERE THIS FILE SITS IN THE MECHANISM.  It is the pure-maths piece — a leader
+filter and a per-window displacement budget, no clock and no robot.  Its only
+caller is ``GelloIntervention`` (``ur_env/envs/wrappers.py``: both objects are
+built in ``__init__:353`` and spent in ``charge:607`` / ``substep:618``), which
+is in turn driven by ``UR7eEnv._drive_intervention_substeps``
+(``ur_env/envs/ur7e_env.py:553``).  The ordered call chain of the whole
+intervention-substep path is written out once, in the ``wrappers.py`` module
+docstring.
+
 WHY THIS MODULE EXISTS — THE MEASURED STIFFNESS
 ----------------------------------------------
 Operators report that the arm feels "빳빳" (stiff / notchy) while they drive it
 by GELLO during an intervention, and the cause is not the filter or the gains:
-it is the *target update cadence*.  ``UR7eEnv.step``
-(``ur_env/envs/ur7e_env.py:431-441``) applies the action **once** — a single
-``_apply_action`` — and then sleeps out the rest of the control period without
-ever re-reading the leader.  The 250 Hz command stream underneath is
+it is the *target update cadence*.  ``UR7eEnv.step`` applied the action
+**once** — a single ``_apply_action`` — and then slept out the rest of the
+control period without ever re-reading the leader.  That branch still exists and
+is now the POLICY path only (``ur_env/envs/ur7e_env.py:670-678``); intervened
+steps take the substep branch instead.  The 250 Hz command stream underneath is
 acceleration limited by design (``ur_env/envs/ros_backend.py:140``
-``AccelerationLimitedJointStream``, ``ur_env/envs/config.py:109-116``
+``AccelerationLimitedJointStream``, ``ur_env/envs/config.py:117-124``
 ``max_accel_rad_s2 = 8.0``), and an acceleration-limited stream chasing ONE
 fixed goal per window necessarily runs "accelerate -> arrive -> brake -> **sit
 still**" once per window.
@@ -21,7 +31,7 @@ still**" once per window.
 Measured directly on the upsampler with a constant 0.15 rad/s leader:
 
     joint-target updates per 100 ms | time fully stopped | ripple
-    1 (today's env.step)            | 16% nominal, and   | 2.27
+    1 (one target per window)       | 16% nominal, and   | 2.27
                                     | 40% at the real    |
                                     | 0.197 s step period|
                                     | (gRPC p99 included)|
@@ -36,7 +46,17 @@ Two conclusions from that table, both load-bearing:
   (``ur7e_gello.yaml:120``).  That stack is the reference "good hand feel".
 * **Do not touch the acceleration limit.**  Removing it measures *worse*
   (76% stopped): the stream then bangs between the per-tick step ceiling and
-  zero.  The limiter is not the disease.
+  zero.  The limiter is not the disease.  Two neighbouring knobs measure the
+  same way; all three are pinned with the numbers in ``config.py`` next to
+  ``UPSAMPLER``.
+
+Everything in the table is OFFLINE measurement — it comes from driving
+``AccelerationLimitedJointStream`` directly, with no robot.  The resulting
+30 Hz path was afterwards confirmed on hardware: ARMED on the real UR7e
+2026-07-30 (``tests/run_real_hil.py --arm --scale 1.0``, 120 intervened steps,
+every check PASS, operator confirmed the hand feel).  Both sets of numbers, and
+the method for reproducing the offline ones, are in
+``docs/testing/04_HIL_INTERVENTION.md`` §9.
 
 ONE FILTER, TWO CADENCES (the API split is a correctness requirement)
 --------------------------------------------------------------------
@@ -97,14 +117,14 @@ stops tracking until the next window opens) instead of the buffer telling a
 lie.  Because the window budget IS one ACTION_SCALE step, dividing the
 accumulated displacement by the budget (:meth:`InterventionBudget.consumed_action`)
 is the same division ``GelloIntervention`` already performs
-(``ur_env/envs/wrappers.py:407-413``), so the reported action lands in
+(``ur_env/envs/wrappers.py:433-440``), so the reported action lands in
 ``[-1,1]`` by construction rather than by clipping.
 
 PROPORTIONAL, NEVER PER-AXIS
 ----------------------------
 Over-budget requests are shrunk by the **norm** of the position vector and,
 separately, the norm of the rotation vector — the same treatment as the
-anti-windup clamp at ``ur_env/envs/wrappers.py:391-405``, and for the same
+anti-windup clamp at ``ur_env/envs/wrappers.py:417-431``, and for the same
 measured reason recorded there: an axis-wise ``clip`` of a saturated diagonal
 request bends its direction (``[2.0, 0.5] -> [1.0, 0.5]``), which the operator
 feels as the arm going somewhere they did not point.  Direction is preserved;
@@ -120,7 +140,12 @@ WHAT THIS MODULE DOES NOT DO
   (``filtered``) and when a control window opens (``begin_window``).
 * The gripper is not budgeted.  ``action_scale[2]`` exists only to keep the
   argument shape identical to ``ACTION_SCALE``; the gripper action is a
-  discrete 3-state command, not a displacement (``wrappers.py:416-446``).
+  discrete 3-state command, not a displacement (``wrappers.py:442-469``).
+* ``ros_backend.py`` was deliberately NOT touched to make any of this work, and
+  should not be: ``send_joint_command`` is already a short-lock last-write-wins
+  target update and ``_upsample_loop`` does not care how often the target moves,
+  so a faster target cadence needs nothing from the backend.  Hand feel is a
+  question about this module and the cadence above it, not about the backend.
 """
 
 from __future__ import annotations
@@ -236,7 +261,7 @@ class LeaderFilter:
 
     One :class:`OneEuro` per joint, all constructed at the OUTPUT period
     (``1/output_hz``), mirroring the bridge's per-joint filter list
-    (``gello_ur_bringup/gello_ur_bridge_node.py:410-416``).  Joints are
+    (``ur_gello_bringup/gello_ur_bridge_node.py:410-416``).  Joints are
     independent — no cross-joint coupling — so this is a bundle, not a filter.
 
     The whole point of the class is that the two cadences cannot be confused:
@@ -425,7 +450,7 @@ class InterventionBudget:
         ``xi`` is ``(6,)`` = ``[dx, dy, dz (m), wx, wy, wz (rad)]``, the
         increment for ONE substep (base-frame, the convention
         ``PolicyDeltaController``/``GelloIntervention`` already use,
-        ``wrappers.py:291-297``).
+        ``wrappers.py:387-392``).
 
         Returns ``(allowed_xi (6,), exhausted)``.  Requests that fit are
         returned untouched — the budget is a ceiling on the window, not a
@@ -482,7 +507,7 @@ class InterventionBudget:
 
         ``÷ budget`` IS ``÷ ACTION_SCALE`` (they are the same number), so this is
         the same normalisation ``GelloIntervention`` performs at
-        ``wrappers.py:407-413`` — which is what makes it a *legal stored action*
+        ``wrappers.py:433-440`` — which is what makes it a *legal stored action*
         rather than a rescaled guess.  Each component is already inside
         ``[-1,1]`` (``|sum_i| <= ||sum|| <= path <= budget``); the clip is a
         belt-and-braces guard against accumulated float error, never a

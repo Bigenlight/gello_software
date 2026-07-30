@@ -39,9 +39,9 @@
 - 실제 `SACAgentHybridSingleArm`을 사용해 CTA update → publish → checkpoint → fresh agent restore → production composition 재조립 → action/RNG/counter 확인 → 추가 update/checkpoint까지 검증했다.
 - 실제 reward classifier checkpoint(`e329986b...`, Jul-24 단일 파일 flax msgpack 87 MB)는 로컬에서 **SHA 검증, load, warm-up까지만** 성공했다. 이것은 artifact I/O 검증이지 분류 성능 검증이 아니며, **분류 성능은 당시 검증하지 않았다.** 이후 **2026-07-28 Kanu GPU 실측(0724 도메인 success 프레임 1,123장, 크롭 없는 입력, threshold 0.85)** 에서 이 checkpoint의 success recall이 `0.0%`(1,123장 중 0건, mean 확률 `0.007`)로 확인돼 **폐기 대상**이 됐다. ※ 같은 checkpoint가 **0720 test split**(무크롭)에서는 recall `93.4%` @0.85 / FPR `0.0%` 다(§12.3) — 도메인이 다르면 숫자가 이렇게 갈린다. **"recall 0%"를 조건 없이 인용하지 마라.** 그대로 실기에 물리면 로봇이 성공해도 reward가 영원히 0이고 학습이 시작되지 않는다. 근거는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md), 새 정본 경로는 [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md) 1.3에 있다. annotation-only TensorFlow shim 때문에 Flax가 잘못된 TensorFlow I/O backend를 고르던 문제는 infra-owned local-I/O 설정으로 수정했고, 이 수정 자체는 계속 유효하다.
 - fake canonical demo generator가 추가됐다. 이 raw artifact는 construction `--dry-run` 또는 명시적으로 bounded된 `--synthetic-e2e` acceptance에만 허용된다. 일반 robot-data learner serving은 계속 거부한다.
-- **테스트 (2026-07-29 sidecar 작업 중 워킹 트리에서 실측):** `serl_ur_infra/tests` = **`429 passed, 11 skipped`**. 명령은 §9.
-  - 🚧 **이 숫자는 잠정값이다.** 측정 시점에 코드 에이전트 여러 개가 같은 트리를 동시에 편집 중이었고 커밋되지 않은 변경 위에서 잰 값이다. **커밋 후 다시 재고 이 줄을 확정할 것.** 다만 **skipped는 정확히 `11` 이어야 하고 그건 변하지 않았다.**
-  - 계보: `43ba314` `333` → `40b99f8`(recorder take 변환) `337` → 현재 `429`. **`333` 을 현행 기준선으로 인용하지 마라** — `40b99f8` 이전 값이다.
+- **테스트 (📌 2026-07-30 작업 트리 실측, `gello-hil-actor` = numpy 2.2.6):** `serl_ur_infra/tests` = **`588 passed, 11 skipped`**. 명령은 §9. ⚠️ **인터프리터를 안 적은 passed 수는 무의미하다** — 같은 코드가 `hilserl`(numpy 1.26.4, jax 0.5.3)에서는 **`619 passed, 4 skipped`**다.
+  - 🚧 **`588` 은 미커밋 변경을 포함한 작업 트리 값이다.** 커밋 `4197f5b` 시점의 값은 **`579 passed / 11 skipped`**(커밋 메시지 기록)이고, 차이는 미커밋 작업(`tests/test_operator_session.py` 4개 등)에서 온다. **커밋이 정리되면 다시 재서 이 줄을 확정할 것.** `gello-hil-actor` 에서 **skipped는 정확히 `11`** 이고 그건 변하지 않았다.
+  - 계보(전부 `gello-hil-actor`): `43ba314` `333` → `40b99f8`(recorder take 변환) `337` → classifier sidecar `429` → 07-30 오전 `497` → `4197f5b`(30 Hz 서브스텝, +82 = leader_stream 28 / governor_dt 38 / intervention_substeps 16) `579` → 📌 07-30 작업 트리 `588`. **`333`·`429` 를 현행 기준선으로 인용하지 마라.**
   - 🪤 `third_party/hil-serl/serl_launcher` 를 `PYTHONPATH` 에서 빼면 passed 수가 **조용히 떨어지고**(`43ba314` 기준으로는 `300 passed, 13 skipped`였다) skip 사유가 "submodule is not checked out"이라고 거짓말한다. **기준선보다 낮은 passed 수 = `serl_launcher` 가 `PYTHONPATH` 에서 빠진 것**이고, 이때 skipped도 11을 벗어난다. **녹색이 아니라 passed 수를 볼 것.**
   - UR/GELLO `ur_gello_bringup` = **`436 passed`** (2026-07-29 `43ba314` 측정, 이번 변경은 이 suite를 건드리지 않아 재실행하지 않았다).
   - *(2026-07-27 `248255f` 시점의 역사값: `253 passed, 4 skipped, 6 warnings` / `436 passed`. 실제 frozen-trunk agent `2 passed`, checkpoint/resume `1 passed`, local fake E2E `1 passed`. §5.1)*
@@ -413,7 +413,7 @@ production CLI는 `--resume-latest`뿐 아니라 explicit `--resume-path`에도 
 - exact grasp-penalty allowed values `[0, configured penalty]`
 - JAX/JAXLIB/Flax/Distrax/TFP version
 
-resume에서 document 또는 SHA가 다르면 즉시 실패한다. **reward threshold도 fingerprint에 들어간다**(`scripts/run_rlpd_learner_server.py:528-550` 의 `run_contract`). 기본값은 **0.85 → 0.5(`53d5cf6`, 2026-07-29) → 0.2(`1b02857`, 2026-07-29)** 로 두 번 내려왔고, 현재 `ur_env/rlpd_receive_server.py:73` 의 `DEFAULT_REWARD_THRESHOLD = 0.2` 다. 따라서 **0.85 또는 0.5로 학습한 checkpoint는 기본값 0.2인 지금 그대로 resume되지 않는다.** 이 거부는 의도된 동작이다 — reward function이 바뀌면 다른 MDP이므로 lineage를 섞으면 안 된다. 구 lineage를 이어받으려면 `--reward-threshold` 로 그때의 값을 명시해야 하며, 0.2를 고른 근거(측정이 아니라 비용 비대칭 판단)와 거기 붙는 조건은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다. 🪤 **actor와 learner의 threshold 불일치를 막는 가드는 아직 없다.** 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
+resume에서 document 또는 SHA가 다르면 즉시 실패한다. **reward threshold도 fingerprint에 들어간다**(`scripts/run_rlpd_learner_server.py` 의 `run_contract`). 기본값은 **0.85 → 0.5(`53d5cf6`, 2026-07-29) → 0.2(`1b02857`, 2026-07-29)** 로 두 번 내려왔고, 현재 `ur_env/rlpd_receive_server.py::DEFAULT_REWARD_THRESHOLD = 0.2` (:75) 다. 따라서 **0.85 또는 0.5로 학습한 checkpoint는 기본값 0.2인 지금 그대로 resume되지 않는다.** 이 거부는 의도된 동작이다 — reward function이 바뀌면 다른 MDP이므로 lineage를 섞으면 안 된다. 구 lineage를 이어받으려면 `--reward-threshold` 로 그때의 값을 명시해야 하며, 0.2를 고른 근거(측정이 아니라 비용 비대칭 판단)와 거기 붙는 조건은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다. 🪤 **actor와 learner의 threshold 불일치를 막는 가드는 아직 없다.** 이전 raw/random-crop checkpoint와 frozen-trunk/no-aug checkpoint는 fingerprint가 다르며 자동 migration하지 않는다. synthetic E2E와 production robot execution scope도 서로 resume하지 않는다. 아직 task identity, exact source commit/upstream revision, actor allowlist까지 모두 묶는 최종 format은 확정 전이다.
 
 ### 4.8 reward classifier와 Flax local-I/O 수정
 
@@ -686,13 +686,13 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
    - 사용자가 지정한 현재 fake-data acceptance는 완료됐다.
    - fake는 bounded `--synthetic-e2e`에서만 live learner에 허용되고 production robot-data scope에는 의도적으로 차단된다.
    - 사용자가 `take_23` 제외 23개를 success로 승인했고 2,037-transition 영구 artifact를 생성했다. laptop3/Kanu strict-load와 SHA 일치까지 확인했다.
-   - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 **`--run-id`를 노출하지 않고**(2026-07-29 재확인: CLI에 없음) `remote_actor.py:243`에서 `uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
-   - **생산 경로는 두 개다.** 기존 recorder take는 `scripts/convert_recorded_takes_to_demo.py`로 변환한다(`RECORDED_TAKE_DEMO_CONVERSION_KO.md`). 새 actor 녹화는 `remote_actor.py`의 `_dump_data`(`remote_actor.py:189-198`)가 `--checkpoint-path`를 받아 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고, `load_demo_pickles`가 그 `{"meta":…, "transition":…}` 형식을 바로 받는다.
-   - 🪤 **선결 조건: `buffer_period = 0`**(`ur_experiments/cube_in_cup.py:265`). 0이면 `_dump_data` 가 호출되지 않아 `--checkpoint-path` 를 줘도 pickle이 **하나도** 안 쓰인다. 이 값을 뒤집는 CLI 플래그도 없다(§11.7).
+   - **`--synthetic-e2e`로는 우회할 수 없다.** 그 모드는 서버가 `allowed_run_ids`를 화이트리스트로 강제하는데, `run_remote_rlpd_actor.py`는 **`--run-id`를 노출하지 않고**(2026-07-29 재확인: CLI에 없음) `remote_actor.py`의 `run_id or uuid.uuid4().hex`로 매번 새로 만든다. 실제 robot actor의 run_id를 서버에 미리 등록할 방법이 없어 `FailedPreconditionError`로 거부된다.
+   - **생산 경로는 두 개다.** 기존 recorder take는 `scripts/convert_recorded_takes_to_demo.py`로 변환한다(`RECORDED_TAKE_DEMO_CONVERSION_KO.md`). 새 actor 녹화는 `remote_actor.py::_dump_data`가 `--checkpoint-path`를 받아 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고, `load_demo_pickles`가 그 `{"meta":…, "transition":…}` 형식을 바로 받는다.
+   - 🪤 **선결 조건: `buffer_period = 0`**(`ur_experiments/cube_in_cup.py` 의 `buffer_period`, 현재 :271). 0이면 `_dump_data` 가 호출되지 않아 `--checkpoint-path` 를 줘도 pickle이 **하나도** 안 쓰인다. 이 값을 뒤집는 CLI 플래그도 없다(§11.7).
    - 🪤 **`--mock-policy-noise` 로 채운 데이터는 demo로 쓰면 안 된다.** `1a4f93d` 이후 모든 전이에 `meta.policy_actions_synthetic=true` 가 박힌다.
 
 3. **실제 robot/task/camera E2E**
-   - task config의 `GRASP_PENALTY`(`-0.02`), action convention, camera key/shape/timing을 확인한다. → task config는 `ur_experiments/cube_in_cup.py`로 확정됐고 `GRASP_PENALTY`(`cube_in_cup.py:223`)도 서버 기본값과 일치한다(§11.2).
+   - task config의 `GRASP_PENALTY`(`-0.02`), action convention, camera key/shape/timing을 확인한다. → task config는 `ur_experiments/cube_in_cup.py`로 확정됐고 `GRASP_PENALTY`(`cube_in_cup.py::CubeInCupConfig.GRASP_PENALTY`, 현재 :229)도 서버 기본값과 일치한다(§11.2).
    - robot laptop → SSH tunnel → Kanu → classifier/replay → policy response를 검증한다. → **zero-action receive server 상대로는 100-step 왕복 검증 완료**(2026-07-27, fake-env actor; §11.4). 실제 정책 응답은 learner server 배포 후로 남는다.
    - ⚠️ **~~카메라가 현재 물리적으로 차단 상태다~~ → 2026-07-28에 해소됐다**(§11.10 — 허브 고장이 아니었다). §11.6은 07-27 시점의 기록으로만 읽어라.
    - **남은 것은 "카메라를 켠 상태의 canonical observation 전 경로"다.** 아직 실기 미검증이다. ~~그 경로가 바로 §12.1의 크롭 불일치가 실제로 물리는 지점이다.~~ → **2026-07-29 정정: 크롭 불일치는 sidecar 분리로 해소됐다**(§12.1). 대신 **이 경로에서 sidecar 자체가 처음 실기를 탄다** — 정지 게이트(`stationary_speed_max`)가 실제 속도 노이즈에서 열리는지, ~2 Hz 첨부가 100 ms 스텝 예산 안에 들어오는지가 여기서 처음 드러난다.
@@ -756,7 +756,7 @@ online trunk가 update로 변하면 cached feature 의미가 깨지므로 publis
 
 상세 Kanu 명령은 [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)에 있다.
 
-**로컬 빠른 suite — 이 명령을 그대로 쓸 것 (2026-07-29 sidecar 작업 중 워킹 트리에서 `429 passed, 11 skipped` 실측):**
+**로컬 빠른 suite — 이 명령을 그대로 쓸 것 (📌 2026-07-30 작업 트리에서 `588 passed, 11 skipped` 실측, `gello-hil-actor`):**
 
 ```bash
 cd /home/laptop3/gello_software
@@ -767,10 +767,11 @@ env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
   PYTHONPATH="$PWD/serl_ur_infra:$PWD/third_party/hil-serl/serl_launcher:$OVERLAY" \
   /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest -q \
   -p no:cacheprovider serl_ur_infra/tests
-# -> 429 passed, 11 skipped   (🚧 잠정값 — 아래 참고)
+# -> 588 passed, 11 skipped   (📌 2026-07-30 작업 트리 / gello-hil-actor. 🚧 미커밋 포함 — 아래 참고)
 ```
 
-> 🚧 **`429` 는 잠정값이다.** 코드 에이전트 여러 개가 같은 트리를 동시에 편집하던 중, **커밋되지 않은 변경 위에서** 잰 값이다. 커밋이 정리되면 다시 재서 이 줄을 확정할 것. **반면 `11 skipped` 는 확정이다** — 기준선(`43ba314` `333`, `40b99f8` `337`)부터 지금까지 skip 수는 한 번도 바뀌지 않았다.
+> 🚧 **`588` 은 미커밋 변경을 포함한 값이다.** 커밋 `4197f5b` 시점 값은 **`579 passed / 11 skipped`**다. 커밋이 정리되면 다시 재서 이 줄을 확정할 것. **`11 skipped` 는 `gello-hil-actor` 에서 확정이다** — `43ba314` `333` 이후 skip 수는 한 번도 바뀌지 않았다.
+> ⚠️ **인터프리터를 바꾸면 수가 바뀐다:** `hilserl`(numpy 1.26.4, jax 0.5.3)에서는 **`619 passed, 4 skipped`**다. **인터프리터를 안 적은 passed 수는 판정에 쓸 수 없다.**
 >
 > 🪤 **`third_party/hil-serl/serl_launcher` 를 `PYTHONPATH` 에서 빼면 passed 수가 조용히 떨어진다.** `43ba314` 기준으로는 `300 passed, 13 skipped` 였다. 사라지는 것이 하필 `test_cube_in_cup_config.py` 와 `test_frame_wrappers.py` 이고, skip 사유가 "submodule is not checked out"이라고 **거짓말한다.** 새 worktree에서는 서브모듈 미초기화로 296/17이 된다. **기준선보다 낮은 passed 수와 11이 아닌 skipped 수는 둘 다 이 증상이다. 녹색이 아니라 passed 수를 볼 것.**
 >
@@ -916,7 +917,7 @@ robot actor 쪽 불변식 (§11):
 
 *(문서 커밋 `22b0df2` / `30d21c4` / `db01e64` / `142ea2a` / `921a155` / `af8b576` / `9934533` / `d65913a` / `3ff5f80` 은 생략했다. 전체 목록은 `git log --oneline 5fb716b..3f199d4`.)*
 
-테스트: **2026-07-29 `43ba314` 에서 `333 passed, 11 skipped`** (§5.1, §9). *(07-27 `ee3240e` worktree 시점 값은 `332 passed, 11 skipped, 1 xfailed` 였다. `607e541` 이 그 strict xfail을 제거하고 회귀 가드로 전환했다 — §11.7-2.)* UR/GELLO suite `436 passed`.
+테스트: **2026-07-29 `43ba314` 에서 `333 passed, 11 skipped`** (역사값 — 현행 기준선은 §1의 계보. §5.1, §9). *(07-27 `ee3240e` worktree 시점 값은 `332 passed, 11 skipped, 1 xfailed` 였다. `607e541` 이 그 strict xfail을 제거하고 회귀 가드로 전환했다 — §11.7-2.)* UR/GELLO suite `436 passed`.
 
 ### 11.1 `5fb716b` 에서 actor가 실행 불가능했던 4개 층
 
@@ -945,12 +946,12 @@ robot actor 쪽 불변식 (§11):
 | `TCP_POSE_SOURCE` / `TCP_OFFSET_XYZ_RPY` | `"driver"` / `[0]*6` | **flange frame. 결합된 한 세트** |
 | `ABS_POSE_LIMIT_LOW` | `[0.375, −0.229, 0.185, 2.60, −0.30, 1.10]` | §11.3 |
 | `ABS_POSE_LIMIT_HIGH` | `[0.642, 0.272, 0.550, π, 0.35, 2.20]` | X/Y는 데이터 범위의 1.5배(탐사 여유), Z 상한은 데이터 최대 |
-| `IMAGE_CROP` (`:211-214`) | cam1 `[20:670, 340:990]` (650×650) / cam2 `[0:720, 420:1140]` (720×720) | **cam2가 손목 카메라**. ✅ **2026-07-29: 이 값은 옳고 그대로 간다.** 예전 `KNOWN CONFLICT` 주석(classifier 학습 전처리와 불일치)은 **`G15 ... RESOLVED -- BY DECOUPLING` 으로 대체됐다** — classifier는 이제 이 이미지를 아예 보지 않는다; §12.1 |
+| `IMAGE_CROP` (`::IMAGE_CROP`, 현재 `:217-221`) | cam1 `[20:670, 340:990]` (650×650) / cam2 `[0:720, 420:1140]` (720×720) | **cam2가 손목 카메라**. ✅ **2026-07-29: 이 값은 옳고 그대로 간다.** 예전 `KNOWN CONFLICT` 주석(classifier 학습 전처리와 불일치)은 **`G15 ... RESOLVED -- BY DECOUPLING` 으로 대체됐다** — classifier는 이제 이 이미지를 아예 보지 않는다; §12.1 |
 | `CLASSIFIER_SIDECAR` (≈`:303`) | `enabled=True`, `interval_steps=5`(10 Hz → ~2 Hz), `stationary_speed_max=0.05 m/s`, `escalate_probability=0.05` | classifier에 **무크롭** 프레임을 보내는 주기 정책. env config가 아니라 task config에 있다 — 소비자가 actor 루프뿐이기 때문. 🚧 `stationary_speed_max` 는 **코드가 스스로 `PLACEHOLDER` 라고 밝힌 값**이라 녹화 take에서 실측해야 한다. `escalate_probability` 는 난수 확률이 아니라 **"매 스텝 분류로 전환하는 확률 임계"** 이고, threshold 0.2를 넘는 스텝을 놓치지 않으려고 일부러 그보다 낮게 뒀다 |
 | `MAX_EPISODE_LENGTH` | `100` (HZ=10 → 10 s) | |
-| `GRASP_PENALTY` (`:223`) | `−0.02` | learner 서버 기본값과 일치해야 함 |
-| `DRY_RUN` (`:227`) | `True` | 파일 기본값은 여전히 `True` = 모든 로봇 명령 publish 차단. **`--arm`(`607e541`)이 런타임에 이걸 해제한다** — `_build_actor_environment` **이전에** 적용돼야 한다(§11.7) |
-| `buffer_period` (`:265`) | `0` | demo pickle이 하나도 안 쓰인다. canonical demo 녹화의 선결 조건(§7 P0-2) |
+| `GRASP_PENALTY` (`::GRASP_PENALTY`, 현재 `:229`) | `−0.02` | learner 서버 기본값과 일치해야 함 |
+| `DRY_RUN` (`::DRY_RUN`, 현재 `:233`) | `True` | 파일 기본값은 여전히 `True` = 모든 로봇 명령 publish 차단. **`--arm`(`607e541`)이 런타임에 이걸 해제한다** — `_build_actor_environment` **이전에** 적용돼야 한다(§11.7) |
+| `buffer_period` (현재 `:271`) | `0` | demo pickle이 하나도 안 쓰인다. canonical demo 녹화의 선결 조건(§7 P0-2) |
 
 `TCP_POSE_SOURCE`/`TCP_OFFSET_XYZ_RPY`/`ABS_POSE_LIMIT` 세 설정은 **반드시 함께 움직인다**. box를 flange frame에서 측정했으므로, 실제 0.174 m tool offset을 넣거나 pose source를 `fk` 로 바꾸면 관측 pose가 오류 없이 17.4 cm 이동해 z 바닥이 테이블 아래로 내려간다. `test_pose_reference_point_stays_coupled` 가 이를 고정한다.
 
@@ -968,7 +969,7 @@ robot actor 쪽 불변식 (§11):
 
 `clip_safety_box` 는 부호를 보존하는 abs-clip으로 구현했다. 두 게이트 모두 단위 테스트는 통과했고(`tests/test_clip_safety_box.py`, `tests/test_reset_branch_cut.py`) **실기 검증은 2026-07-29 현재도 아직**이다.
 
-> **⚠️ 07-27 판본은 그 이유를 "`DRY_RUN=True` 라서"라고 적었다. 그건 07-28에 바뀌었다.** 팔은 `--arm` 으로 실제로 움직였다(§11.9). 그런데 **게이트는 여전히 실기에서 작동한 적이 없다** — 이유가 바뀌었을 뿐이다. 07-28 세션은 `run_real_hil.py` 경로였고 거기서는 `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*` 가 zeros(`ur_env/envs/config.py:76-77`)라 코드가 0-부피 박스를 감지해 박스를 **끈다**. 실측 박스는 `cube_in_cup.py` 에만 있다. 자세한 것은 §11.7-3.
+> **⚠️ 07-27 판본은 그 이유를 "`DRY_RUN=True` 라서"라고 적었다. 그건 07-28에 바뀌었다.** 팔은 `--arm` 으로 실제로 움직였다(§11.9). 그런데 **게이트는 여전히 실기에서 작동한 적이 없다** — 이유가 바뀌었을 뿐이다. 07-28 세션은 `run_real_hil.py` 경로였고 거기서는 `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*` 가 zeros(`config.py::DefaultUR7eEnvConfig.ABS_POSE_LIMIT_LOW/HIGH`, 현재 :84-85)라 코드가 0-부피 박스를 감지해 박스를 **끈다**. 실측 박스는 `cube_in_cup.py` 에만 있다. 자세한 것은 §11.7-3.
 
 ### 11.4 실기 검증된 것 (2026-07-27 측정)
 
@@ -985,14 +986,14 @@ robot actor 쪽 불변식 (§11):
 
 **Kanu에는 실제 정책 inference server가 없다.** 과거에 떠 있던 `run_rlpd_receive_server.py` 는 `FakeActionRuntime` 이라 항상 zero action을 돌려줬다(`model_id` = `fake-zero-action-v0`). 실제 정책 추론은 지금까지 **한 번도** 일어난 적이 없다.
 
-실제 서빙은 `run_rlpd_learner_server.py` 가 한다. 이 스크립트는 receive server의 **엄격한 상위집합**이다 — 같은 gRPC ingress + 같은 classifier runtime에 더해 실제 `SACAgentHybridSingleArm` 추론(`ur_env/learner/composition.py:366` 에서 `VersionedPolicyRuntime` 을 만들고 `composition.py:411,431` 의 `build_actor_service(sample_action=runtime)` 로 꽂는다), CTA 학습, feature replay, checkpoint를 한 프로세스에 조립한다. 둘 다 기본 port 50053이라 **동시 실행 불가**이며, receive server가 떠 있다면 내리고 learner가 인수하는 것이 맞다(랩탑 SSH 터널도 그대로 재사용된다).
+실제 서빙은 `run_rlpd_learner_server.py` 가 한다. 이 스크립트는 receive server의 **엄격한 상위집합**이다 — 같은 gRPC ingress + 같은 classifier runtime에 더해 실제 `SACAgentHybridSingleArm` 추론(`ur_env/learner/composition.py` 가 `VersionedPolicyRuntime` 을 만들어 `build_actor_service(sample_action=runtime)` 로 꽂는다), CTA 학습, feature replay, checkpoint를 한 프로세스에 조립한다. 둘 다 기본 port 50053이라 **동시 실행 불가**이며, receive server가 떠 있다면 내리고 learner가 인수하는 것이 맞다(랩탑 SSH 터널도 그대로 재사용된다).
 
 serving model ID (`ur_env/learner/config.py:14-17`):
 
 - production: `hil-serl-hybrid-sac-resnet10-trunk-cache-v1`
 - `--synthetic-e2e`: `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`
 
-학습 시작 게이트는 `batches.py:362-366` 의 `ready` — **online replay ≥ 100 AND offline demo ≥ 1**. 둘 다 필요하다. replay가 100 미만이면 서버는 정상적으로 뜬 채 policy version 0을 계속 서빙하고 워커는 대기한다.
+학습 시작 게이트는 `ur_env/learner/batches.py::RLPDBatchSampler.ready` — **online replay ≥ 100 AND offline demo ≥ 1**. 둘 다 필요하다. replay가 100 미만이면 서버는 정상적으로 뜬 채 policy version 0을 계속 서빙하고 워커는 대기한다.
 
 **Kanu 환경 점검 결과 — 추가 설치 불필요, 단 베이스 env를 쓸 것.**
 
@@ -1020,7 +1021,7 @@ serving model ID (`ur_env/learner/config.py:14-17`):
 
 - `XLA_PYTHON_CLIENT_PREALLOCATE=false` **필수**. 07-27에 receive server가 GPU 7에서 12.3 GiB를 잡고 있던 것은 JAX 기본 75% preallocation(16376 × 0.75) 때문이었다. 16 GiB 카드에서 이걸 두면 learner + classifier가 한 GPU에 못 들어간다.
 - `--resnet-cache` 는 run root 안의 새 경로로 지정할 것. `~/.serl/resnet10_params.pkl` 의 SHA가 다르면 `ResNetAssetError` 로 즉사하며 코드는 절대 덮어쓰지 않는다. (현재는 SHA가 일치하므로 기본값도 안전하다.)
-- `preflight_checkpoint_run` (`composition.py:91`) 은 `--resume-*` 없이 시작할 때 checkpoint root에 기존 항목이 있으면 **거부**한다. 새 run은 반드시 빈 root.
+- `preflight_checkpoint_run` (`ur_env/learner/composition.py::preflight_checkpoint_run`) 은 `--resume-*` 없이 시작할 때 checkpoint root에 기존 항목이 있으면 **거부**한다. 새 run은 반드시 빈 root.
 - `--dry-run` 은 gRPC를 bind하지 않고 `rlpd_learner_dry_run_passed` 출력 후 즉시 exit한다. 구성 검증 전용이라 actor가 붙을 수 없다.
 - `--target-learner-step` 을 생략하면 무한 continuous 학습이다. 첫 실전은 `5000` 을 권장한다.
 - 학습 워커가 fault를 내도 서버는 last-known-good 정책을 계속 서빙하므로 gRPC health는 ready로 보인다. `rlpd_learner_worker_fault` 이벤트를 로그로 감시해야 한다(§7 P0-4).
@@ -1060,10 +1061,10 @@ actor가 pin해야 하는 값:
 
 **남은 것 (2026-07-29 `43ba314` 에서 전부 미수정 확인):**
 
-1. **전역 ESC 리스너** (`ur_env/envs/ur7e_env.py:197-208`) — deadman 배선과 **별개**다. 아무 창에서 ESC를 누르면 `self.terminate` 가 서고 에피소드가 끝난다. 미수정.
+1. **전역 ESC 리스너** (`ur_env/envs/ur7e_env.py::UR7eEnv.__init__`의 pynput 블록, `grep -n "keyboard.Listener"`) — deadman 배선과 **별개**다. 아무 창에서 ESC를 누르면 `self.terminate` 가 서고 에피소드가 끝난다. 미수정.
 2. **`run_real_hil.py` 의 frame-map 판정이 포화 표본을 걸러내지 않는다.** 포화 구간에서는 명령 델타가 리더 변위와 무관하게 `ACTION_SCALE` 노름에 고정되므로 `robot_dp ≈ M @ leader_dp` 모델 자체가 성립하지 않는데, 판정은 그 표본을 넣고 최소자승을 돌린 뒤 FAIL을 띄우며 "좌표계를 의심하라"고 안내한다 — **오진 유도다.** `held`(거버너 거부)만 세고 ACTION_SCALE 노름 클립은 안 세는 것이 사각지대. 미수정. *(07-28 측정은 포화 표본을 손으로 걸러내서 통과시켰다 — §11.9. 즉 결함은 판정 코드에 남아 있고, 측정 자체는 유효하다.)*
-3. 🔴 **workspace box가 `run_real_hil.py` 에서 비활성이다.** `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*` 가 zeros(`ur_env/envs/config.py:76-77`)이고 측정된 박스는 `ur_experiments/cube_in_cup.py:162-167` 에만 있다. 코드가 0-부피 박스를 감지해 끄는 것은 올바른 처리지만, 실측 결과 **DRY RUN 300 스텝 중 241 스텝(80%)이 측정 박스 밖**이었고 시작점에서 **최대 73.9 cm** 이탈했다. `--arm` 이었다면 팔이 실제로 거기까지 갔다. 속도 제한은 *얼마나 빨리* 가는지만 막지 *어디로* 가는지는 안 막는다. **이것이 §1 판정표에서 "팔은 움직였는데 workspace box는 여전히 실기 미검증"인 이유다.**
-4. **`buffer_period = 0`** (`ur_experiments/cube_in_cup.py:265`) 이라 `--checkpoint-path` 를 줘도 actor-format demo pickle이 하나도 안 쓰인다. CLI 플래그도 없다. 기존 recorder take는 별도 converter로 살릴 수 있으므로, 이것은 **새 actor 직접 녹화 경로의 선결 조건**이다(§7 P0-2).
+3. 🔴 **workspace box가 `run_real_hil.py` 에서 비활성이다.** `DefaultUR7eEnvConfig.ABS_POSE_LIMIT_*` 가 zeros(`config.py::ABS_POSE_LIMIT_LOW/HIGH`, 현재 :84-85)이고 측정된 박스는 `ur_experiments/cube_in_cup.py:162-167` 에만 있다. 코드가 0-부피 박스를 감지해 끄는 것은 올바른 처리지만, 실측 결과 **DRY RUN 300 스텝 중 241 스텝(80%)이 측정 박스 밖**이었고 시작점에서 **최대 73.9 cm** 이탈했다. `--arm` 이었다면 팔이 실제로 거기까지 갔다. 속도 제한은 *얼마나 빨리* 가는지만 막지 *어디로* 가는지는 안 막는다. **이것이 §1 판정표에서 "팔은 움직였는데 workspace box는 여전히 실기 미검증"인 이유다.**
+4. **`buffer_period = 0`** (`ur_experiments/cube_in_cup.py` 의 `buffer_period`, 현재 :271) 이라 `--checkpoint-path` 를 줘도 actor-format demo pickle이 하나도 안 쓰인다. CLI 플래그도 없다. 기존 recorder take는 별도 converter로 살릴 수 있으므로, 이것은 **새 actor 직접 녹화 경로의 선결 조건**이다(§7 P0-2).
 
 ### 11.8 환경 함정 (반복 발생)
 
@@ -1103,8 +1104,8 @@ actor가 pin해야 하는 값:
 
 현재 3층 값 (2026-07-29 `43ba314` 에서 코드 확인):
 
-- `ACTION_SCALE = [0.0125, 0.0625, 1.0]` — `ur_env/envs/config.py:73`
-- `GOVERNOR = {v_max 0.15, w_max 0.75, dq_step_max 0.0625}` — `config.py:86-90`
+- `ACTION_SCALE = [0.0125, 0.0625, 1.0]` — `config.py::DefaultUR7eEnvConfig.ACTION_SCALE` (:73)
+- `GOVERNOR = {v_max 0.15, w_max 0.75, dq_step_max 0.0625}` — `config.py::GOVERNOR` (:94-98)
 - 업샘플러 250 Hz, `max_step_rad 0.0025` — `ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml:64`
 - 검증된 텔레옵 상한 `v_max 0.16` / `w_max 1.0` — `ur7e_gello_eef.yaml:238,241`
 
@@ -1130,7 +1131,7 @@ actor가 pin해야 하는 값:
 정본은 [`../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md)
 `:69-70`, `:82-83` 이고, 코드 기본값도 이미 모듈 시리얼로 일치해 있다 —
 `ros2_ur_ws/launch_cameras.sh:69-70`, `ros2_ur_ws/_resolve_camera_serials.sh`,
-`ros2_ur_ws/src/gello_recorder/gello_recorder/gello_recorder_gui.py:78-79`.
+`ros2_ur_ws/src/gello_recorder/gello_recorder/gello_recorder_gui.py:55-56`.
 즉 `43ba314` 가 기본값으로 되돌린 쌍이 **옳았다.**
 
 > 🪤 **저널 grep으로 이걸 다시 유도하지 마라.** 서로 다른 두 세션이 각각 저널 grep만
@@ -1199,7 +1200,7 @@ actor가 pin해야 하는 값:
 > | --- | --- | --- |
 > | proto 변경 | **없음** — 전송이 이미 generic named-tensor map이다 | `serl_ur_infra/proto/actor_transport.proto` |
 > | **관측 schema hash** | **불변** `3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903` — hash는 `CANONICAL_OBSERVATION_SPEC` **문서**에서 나오고 wire payload에서 나오지 않는다. sidecar는 canonical 검증 **이전에** 벗겨진다 | 이 세션에서 `CANONICAL_OBSERVATION_SCHEMA_HASH` 직접 출력해 대조 · `ur_env/actor_network.py::_split_classifier_sidecar` |
-> | 프로덕션 이미지 출처 | `get_im()` 이 **어차피 디코드하는** full-res BGR을 크롭 **직전**에 참조로 보관 | `ur_env/envs/ur7e_env.py` 의 `self._last_camera_frames[key] = bgr` (≈`:781`, 크롭은 **바로 다음 줄**) |
+> | 프로덕션 이미지 출처 | `get_im()` 이 **어차피 디코드하는** full-res BGR을 크롭 **직전**에 참조로 보관 | `ur_env/envs/ur7e_env.py` 의 `self._last_camera_frames[key] = bgr` (≈`:1064`, 크롭은 **바로 다음 줄**) |
 > | 리사이즈 | 서버가 했을 것과 **같은** 결정적 `cv2.resize(bgr,(128,128))` 를 랩톱이 수행 후 JPEG 인코드 | `ur_env/classifier_sidecar.py::_resize_for_classifier` (producer/consumer 공용 단일 정의) |
 > | threshold | **0.2 그대로** | `ur_env/rlpd_receive_server.py::DEFAULT_REWARD_THRESHOLD` |
 >
@@ -1277,7 +1278,7 @@ def preprocess_frame(frame_bgr, crop):
 
 **추론 전처리** (우리 `ur_env/envs/ur7e_env.py::get_im()`): JPEG decode(BGR) → **`IMAGE_CROP` 적용**(cam1 `img[20:670,340:990]` 650×650, cam2 `img[0:720,420:1140]` 720×720) → 128×128 리사이즈 → BGR→RGB.
 
-**서버는 이미지 변환을 하나도 하지 않는다.** `ur_env/rlpd_receive_server.py::_classifier_observation()` (`:169-176`) 는 canonical `(1,128,128,3)` uint8 을 그대로 통과시키는 strict-validating passthrough다. `grep -n "1280\|720\|resize\|cv2\." rlpd_receive_server.py` 는 **0 hit**. 따라서 원인은 전적으로 **actor 쪽 `IMAGE_CROP`** 이다.
+**서버는 이미지 변환을 하나도 하지 않는다.** `ur_env/rlpd_receive_server.py::validate_classifier_frames` / `::_classifier_model_input` 은 canonical `(1,128,128,3)` uint8 을 그대로 통과시키는 strict-validating passthrough다. `grep -n "1280\|720\|resize\|cv2\." rlpd_receive_server.py` 는 **0 hit**. 따라서 원인은 전적으로 **actor 쪽 `IMAGE_CROP`** 이다.
 
 > **⚠️ 위 문단은 2026-07-28 시점의 코드 서술이다. 함수 이름과 입력이 07-29에 바뀌었다.**
 > `_classifier_observation()` 은 **없어졌다.** 지금은 `_classifier_model_input()` 이고,
@@ -1333,7 +1334,7 @@ def preprocess_frame(frame_bgr, crop):
 
 **그 머지는 2026-07-29 `3f199d4` 로 일어났다.** 현재 상태:
 
-- `serl_ur_infra/ur_experiments/cube_in_cup.py` 는 **canonical branch에 존재하고** `IMAGE_CROP` 이 채워져 있다(`:211-214`).
+- `serl_ur_infra/ur_experiments/cube_in_cup.py` 는 **canonical branch에 존재하고** `IMAGE_CROP` 이 채워져 있다(현재 `:217-221`).
 - 따라서 **crop된 canonical observation이 classifier로 가는 것이 이제 기본 경로다.** "우연히 일치하던" 보호막은 사라졌다.
 - 🪤 **단, 이것이 "지금 프로덕션이 깨지고 있다"는 뜻은 아니다** — 2026-07-29 기준 **kanu에는 classifier를 물고 있는 gRPC 서버가 아예 떠 있지 않고**(§11.5, §12.5), kanu의 worktree `/tmp/gello-hil-rl-receive-server-v2` 는 여전히 `5fb716b` 다. **즉 결함은 코드에 실재하고, 다음에 실기 run을 띄우는 순간 물린다.**
 

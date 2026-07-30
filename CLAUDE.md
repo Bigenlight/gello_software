@@ -25,6 +25,28 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 
 ## 지금 상태 한 줄
 
+**2026-07-30 개입 손맛 수정이 실기에서 PASS (`4197f5b`).** 개입 중 팔이 "빳빳"했던 원인은
+10 Hz 자체가 아니라 **타깃 갱신 방식**이었다 — `env.step`이 100 ms 창에서 관절 타깃을 한 번만
+세우고 그 사이 리더를 다시 읽지 않아, 250 Hz 업샘플러가 매 창마다 가속→도달→제동→**정지**를
+반복했다(gRPC 왕복이 `env.step` 밖이라 실효 갱신은 6~10 Hz). 해결은 검증된 EEF teleop과 같은
+방식이다: 개입 중 **리더를 30 Hz로 재샘플링** + **One-Euro**(`bridge_stages.py`에서 비트 동일
+이식) + `InterventionBudget`이 창당 총 변위를 `ACTION_SCALE`로 묶는다
+(신규 `ur_env/envs/leader_stream.py`, `ros_backend.py`는 무변경).
+실기 3 run 중 뒤 두 run 전체 PASS (2026-07-30, 실제 UR7e, `tests/run_real_hil.py`).
+첫 run(DRY `--scale 0.5`, 개입 144)은 고친 판정으로 **SKIP**이다 — 포화 표본을 빼면
+축별 여기가 2 cm 게이트에 못 미친다. 포화를 포함하면 세 run **전부** FAIL로 나온다
+(잔차 0.776 / 0.154 / 0.358) — 그래서 포화 제외는 첫 run을 구제하는 사후 변명이 아니다:
+
+| run | 결과 |
+| --- | --- |
+| DRY RUN `--scale 1.0` (300스텝, 개입 272) | frame-map 잔차 **0.016** / alpha **1.005** / 표본 141(포화 131 제외) · action-exec dp_ratio 중앙값 **1.000** · held **0 %** |
+| ARMED `--scale 1.0 --max-steps 150` (개입 120) | 잔차 **0.130** / alpha **0.983** / 표본 51(포화 69 제외) · dp_ratio **1.000** · held **0 %** · **조작자 손맛 확인 양호** |
+
+모든 개입 스텝에 `substeps=2`(창당 타깃 3회 갱신 = 첫 타깃 + 서브스텝 2)가 기록됐고
+`governed=0`이다 — 예산이 governor보다 타이트해 **먼저 묶는** 설계대로의 동작이다. ⚠️ 단 이 세 run은 **첫 타깃만 집계하던 코드**로 측정됐고, shipped config에서는 `_paced_request`가 요청을 `ACTION_SCALE/3`(0.00417 m)로 깎아 서브스텝 governor 캡(`v_max/substep_hz`=0.0050 m)에 **닿을 수 없다** — 즉 `governed=0`은 "창 전체에서 절삭 없음"이 아니라 애초에 절삭이 불가능했다는 뜻이다.
+원인 규명·금지사항·5개 실측표는 [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §9,
+요약은 [`docs/testing/08_OPEN_GAPS.md`](docs/testing/08_OPEN_GAPS.md) G24.
+
 **2026-07-29 첫 실물 production-model E2E smoke 성공.** 실제 UR7e에서
 `ENGAGE=GELLO`, `DISENGAGE=policy`를 확인했고, Kanu에 online transition **201개**
 (intervention **153개**)가 들어가 learner **102 step / gradient 204 / policy version 2**까지
@@ -45,6 +67,11 @@ checkpoint 디렉터리 해시(G19)도 고쳤다. 단 이번 run은 per-transiti
 1.12초였고 첫 publish는 5.47초였다. 또한 launcher는 commissioning용 `ENGAGED` 시작을 강제하고,
 classifier verdict GUI와 `SUCCESS -> HOME -> scene reset WAIT -> operator RESUME` 상태 기계가 없다.
 sidecar가 고치지 못하는 cam1 **가림(occlusion)**도 남아 있다.
+
+**개입 쪽에서 남은 것 하나** — 위 2 run은 zero-policy + 사람 개입이라 창 주기가 짧았다.
+연속 운용에서 창이 늘어져(첫 publish 5.47 s, learner step 중앙 1.12 s) **예산이 소진되면 남은
+시간은 HOLD**이고, 그건 필터·rate·외삽으로 못 고친다 — **G21(RPC 지연) 종속**이다
+(`08_OPEN_GAPS.md` G21, `04_HIL_INTERVENTION.md` §9.5).
 
 ## 읽는 순서 — 이 셋만 읽고 멈춰라
 
@@ -83,6 +110,7 @@ sidecar가 고치지 못하는 cam1 **가림(occlusion)**도 남아 있다.
 | 녹화 take를 learner용 offline demo로 변환 | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) (`40b99f8`) — **`--outcome success\|truncated`는 사람이 명시한다.** 변환기는 성공을 추측하지 않는다. learner는 offline demo가 0이면 학습을 시작하지 않는다 |
 | 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
 | mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
+| GELLO 개입 손맛·좌표계 **실기** 검증 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §4.5·§9 — `serl_ur_infra/tests/run_real_hil.py`. 기본 `DRY_RUN`이고 `--arm`을 줄 때만 움직인다. **정책이 zero 고정이라 learner도 gRPC 서버도 필요 없다** — 3-CLI 운영 워크플로우와 혼동하지 말 것(실제로 혼동이 있었다). 컨트롤러 요구도 다르다(FPC) → [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.5 |
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
 | 처음부터 환경 세팅 / 세션 전 프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
 | 그리퍼만 단독으로 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
@@ -134,6 +162,9 @@ serl_ur_infra/
   ur_env/envs/ur7e_env.py          get_im, clip_safety_box, go_to_reset, 관측 조립
   ur_env/envs/config.py            속도 3층(ACTION_SCALE/GOVERNOR/UPSAMPLER), 카메라 토픽
   ur_env/envs/wrappers.py          GelloIntervention, 데드맨, 그리퍼 페널티
+  ur_env/envs/leader_stream.py     개입용 리더 30 Hz 재샘플링 — One-Euro 이식(bridge_stages.py
+                                   비트 동일) + InterventionBudget(창당 변위 예산). **설계 근거가
+                                   모듈 docstring에 전부 있다**
   ur_env/envs/frame_wrappers.py    RelativeFrame, Quat2EulerWrapper
   ur_env/envs/ros_backend.py       rclpy 백엔드, 250 Hz 업샘플러
   ur_env/remote_actor.py           actor 루프, 전이 생성·전송, sidecar 부착 계측
@@ -161,11 +192,58 @@ ros2_ur_ws/
 - **GELLO Dynamixel에 토크를 걸지 말 것.** 수동 read-only 리더다.
 - **gRPC 코드는 `/home/laptop3/venvs/gello-hil-actor/bin/python`으로만.** 시스템 `python3`의
   grpcio 1.30.2가 손상돼 오류 없이 100% CPU로 무한 정지한다.
+  **단 "무조건 venv"는 아니다** — `tests/run_real_hil.py`는 gRPC를 안 쓰고 rclpy를 쓰므로
+  **시스템 `python3`가 맞다.** 그리고 **ROS 러너에서 `PYTHONPATH`를 덮어쓰면 rclpy가 사라진다**
+  (`RuntimeError: rclpy not available` — 2026-07-30 실기에서 발생). pytest 정본 명령은 반대로
+  덮어쓰는 게 맞다. 두 규칙의 대비는 [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.4에 표로 있다.
 - **`IMAGE_CROP`을 "분류기가 안 맞으니" 지우지 말 것.** 데이터셋 측정값이고 정책이 1차 소비자다.
   해결은 **분류기에게 무크롭 sidecar를 따로 주는 것**이다(`ur_env/classifier_sidecar.py`).
   *(이전 판은 "해결은 classifier 재학습이다"라고 적었다 — 재학습은 채택되지 않았다. 분리를
   택한 덕분에 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 측정값이 전부 살아남았다.)*
-- **테스트는 passed 수를 볼 것.** PYTHONPATH에서 `serl_launcher`가 빠지면 조용히 떨어지고
-  skip 사유가 거짓말을 한다. 2026-07-29 실기 준비 기준선은 **497 passed / 11 skipped**다.
-  *(HEAD `40b99f8`에서는 337이었고, 옛 문서의 333/429는 그보다 이전 값이다.)*
+- **개입이 빳빳하다는 이유로 가속도 제한 · `target_stale_s` · `soft_start_s`를 되돌리지 말 것.**
+  실측은 셋 다 **반대로 간다**: `UPSAMPLER.max_accel_rad_s2`(8.0) 제거 → 관절 완전정지
+  16 % → **76 %**(리플 2.27 → 4.17), `target_stale_s` 0.30 → 0.50 → 정지 17.5 % → **54.5 %**,
+  `soft_start_s` 0.7 → 0 → 리플 1.92 → **4.09**. 셋은 원인이 아니라 낮은 갱신 주기가 만든
+  stop-and-go를 **완화하고 있던 것**이다. 근거(창 조건·메커니즘 포함)는
+  [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §9(특히 §9.3),
+  요약은 `08_OPEN_GAPS.md` G24.
+- **`ACTION_SCALE`을 "개입이 느리다"는 이유로 올리지 말 것.** 그건 안전 한계가 아니라
+  **정책의 액션 의미 자체**다 — 0.0125 m/step × 10 Hz = **12.5 cm/s가 정책의 최고속**이고,
+  개입 변위 예산도 여기서 직접 파생된다(`ur_env/envs/config.py`의 `ACTION_SCALE` INVARIANT 주석).
+  올리면 사람이 **정책이 실행할 수 없는 시범**을 보이게 되고, canonical demo 2,037 transition과
+  액션의 의미가 갈리는데 learner fingerprint에 `ACTION_SCALE`이 **없어서**(G18) 조용히 통과한다.
+  손맛 확인용으로는 `serl_ur_infra/tests/run_real_hil.py --scale`을 쓴다 — 3층
+  (`ACTION_SCALE`/`GOVERNOR`/`UPSAMPLER`)을 **함께** 곱하고 그 배율을 CSV 헤더에 남긴다.
+- **테스트는 passed 수를 볼 것 — 그리고 어느 인터프리터인지 같이 적을 것.** PYTHONPATH에서
+  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-30 `4197f5b`
+  기준선은 **579 passed / 11 skipped** (8.98 s,
+  `/home/laptop3/venvs/gello-hil-actor/bin/python`). 재현 명령 정본은
+  `serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md:254-264`:
+
+  ```bash
+  cd /home/laptop3/gello_software
+  set +u; source /opt/ros/humble/setup.bash; source ros2_ur_ws/install/setup.bash; set -u
+  OVERLAY=$(python3 -c "import ur_gello_bringup,os;print(os.path.dirname(os.path.dirname(ur_gello_bringup.__file__)))")
+  env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="$PWD/serl_ur_infra:$PWD/third_party/hil-serl/serl_launcher:$OVERLAY" \
+    /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest -q \
+    -p no:cacheprovider serl_ur_infra/tests
+  ```
+
+  계보: 333 → 337(`40b99f8`) → 429(classifier sidecar) → **497**(07-30 오전, `4197f5b` 이전)
+  → **579**(`4197f5b`; 신규 82 = `test_leader_stream` 28 / `test_governor_dt` 38 /
+  `test_intervention_substeps` 16). 옛 문서에 남은 333·337·429·497은 전부 이전 값이다.
+  🪤 **인터프리터를 안 적은 "passed 개수"는 무의미하다.** 같은 명령을
+  `/home/laptop3/venvs/hilserl/bin/python`(jax 0.5.3 있음, numpy 1.26.4)으로 돌리면
+  jax 테스트가 더 돌아 passed가 늘고 skipped가 11 → 4로 줄어든다. gRPC·actor 경로의
+  정본 인터프리터는 actor venv이므로 **기준선은 actor venv 값**이다.
+
+  ✅ **해소됨** — 한때 hilserl에서 `test_governor_dt.py::test_env_step_surfaces_governed_in_info`
+  1건이 떨어졌다(`0.8485281248` vs `0.8485281374 ± 8.5e-10`). 원인은 numpy 승격 차이가
+  아니라 **허용범위가 애초에 잘못됐던 것**이다: 액션 dtype이 계약상 `float32`라
+  `xi = action * ACTION_SCALE`에 ~1e-7 상대오차가 실리는데 `rel=1e-9`로 잡혀 있었다.
+  actor venv에서 통과한 건 우연이다. `rel=1e-6`으로 고쳐 **두 인터프리터 모두 통과**한다.
+  잡으려는 회귀(캡이 안 물림 1.0, 3배 오차)는 1e-6에서 수십만 배 떨어져 있다.
+  그리고 `serl_ur_infra/tests/test_env_fake_backend.py`는 pytest에서 **0개 수집**되므로 이
+  총계에 **아무 흔적도 남기지 않는다** → `08_OPEN_GAPS.md` G25.
 - **메인 브랜치는 여러 사람이 공유한다.** 머지·리베이스 전에 상대 checkout이 깨끗한지 확인할 것.

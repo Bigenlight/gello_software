@@ -41,7 +41,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 |---|---|
 | **유발** | (a) GELLO USB를 뽑는다, 또는 (b) `pkill -f gello_publisher` |
 | **기대 (텔레옵 경로)** | 브리지의 leader 워치독(`staleness_timeout_s` 기본 0.5 s, `gello_ur_bridge_node.py:136-137`)이 걸려 **발행 중단 + 재시드 강제**. 컨트롤러는 **마지막 명령 자세를 홀드**. GELLO가 돌아오면 **자동 재개** (`GELLO_UR7E_SETUP_CLI.md:667`) |
-| **기대 (HIL/RL 경로)** | `LEADER_STALE_S = 0.3`(`wrappers.py:218`) 초과 → `_disengage()` → **정책이 이어받아 팔을 계속 움직인다** (`wrappers.py:330-343`). **정지가 아니다.** |
+| **기대 (HIL/RL 경로)** | `LEADER_STALE_S = 0.3`(`wrappers.py::GelloIntervention.LEADER_STALE_S`) 초과 → `_disengage()` → **정책이 이어받아 팔을 계속 움직인다** (`wrappers.py::GelloIntervention._disengage`, 검사는 `::action` / `::substep`). **정지가 아니다.** |
 | **함정 (a)** | USB를 뽑아도 `gello_publisher` **프로세스는 살아 있다.** `get_joint_state()` 실패는 `except`로 잡혀 2초 throttle 경고 후 사이클만 스킵한다 (`gello_publisher_node.py:167-173`). 즉 **`pgrep`으로는 장애를 감지할 수 없다** |
 | **확인** | `ros2 topic hz /gello/joint_states` (멈춤), 러너 로그의 `intervened` 값, `ros2 topic echo /forward_position_controller/commands` |
 | **PASS** | ① 팔이 튀지 않는다(점프 0) ② 텔레옵: 홀드 후 복귀 시 자동 재개, 재개 순간 점프 없음 ③ HIL: 0.3 s 안에 `intervened`가 0으로 떨어진다 |
@@ -54,8 +54,8 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | 드라이버 launch 터미널에서 Ctrl-C, 또는 `ros2 lifecycle`/컨트롤러 언로드로 `joint_state_broadcaster` 정지 |
-| **기대** | env가 다음 `_update_currpos()`에서 **예외를 던진다**: 0.2 s 초과 시 `RuntimeError: /joint_states stale` (`ur7e_env.py:653-655`, `config.py:143`), 아예 없으면 `RuntimeError: no /joint_states received yet` (`ur7e_env.py:651`) → **actor 프로세스가 죽는다** |
-| **⚠️ 이것은 graceful safe-stop이 아니다** | 코드에도 그렇게 적혀 있다: `TODO(together): safe-stop policy (freeze + operator prompt) instead of raise` (`ur7e_env.py:652-654`). 현재는 그냥 예외 → 크래시다 |
+| **기대** | env가 다음 `_update_currpos()`에서 **예외를 던진다**: 0.2 s 초과 시 `RuntimeError: /joint_states stale` (`ur7e_env.py::UR7eEnv._update_currpos`, 임계는 `config.py::DefaultUR7eEnvConfig.JOINT_STATE_STALE_S` :222), 아예 없으면 `RuntimeError: no /joint_states received yet` (같은 함수) → **actor 프로세스가 죽는다** |
+| **⚠️ 이것은 graceful safe-stop이 아니다** | 코드에도 그렇게 적혀 있다: `TODO(together): safe-stop policy (freeze + operator prompt) instead of raise` (`ur7e_env.py::UR7eEnv._update_currpos`). 현재는 그냥 예외 → 크래시다 |
 | **확인** | 러너 스택트레이스, `ros2 topic hz /joint_states`, 팔이 마지막 자세를 홀드하는지 |
 | **PASS** | 팔이 **마지막 명령 자세에서 정지**하고, 예외 메시지가 원인을 정확히 지목한다 |
 | **복구** | 드라이버 재기동 → Method A면 `ur_play`, Method B면 `ur_resend`. env는 새로 띄운다 |
@@ -71,7 +71,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | `kill -9 <runner pid>` |
-| **기대** | 백엔드의 250 Hz 업샘플러 스레드는 **daemon**이므로 프로세스와 함께 죽는다 (`ros_backend.py:242`). 명령 발행 중단 → `forward_position_controller`가 **마지막 명령 자세를 홀드** |
+| **기대** | 백엔드의 250 Hz 업샘플러 스레드는 **daemon**이므로 프로세스와 함께 죽는다 (`ros_backend.py::URRosBackend.__init__`의 `self._up_thread = threading.Thread(..., daemon=True)`). 명령 발행 중단 → `forward_position_controller`가 **마지막 명령 자세를 홀드** |
 | **PASS** | 팔이 즉시 그 자리에 서고, 감속 램프도 fault도 없다 |
 | **복구** | 러너 재기동. `reset()`이 `go_to_reset()`으로 **팔을 RESET_JOINTS로 이동시킨다** — 재기동 = 움직임이다, 각오하고 누를 것 |
 
@@ -80,10 +80,10 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | `kill -STOP <runner pid>` (SIGSTOP) |
-| **기대** | **업샘플러에는 타깃 스테일 정책이 없다.** 코드 주석이 명시한다: `TODO(together): target-staleness policy (stop publishing after N s without a fresh target?)` (`ros_backend.py:417-421`). 따라서 스레드가 계속 돌면 **마지막 타깃을 무한히 재발행**한다 |
+| **기대** 🔧 **정정 (📌 2026-07-30)** | **업샘플러에는 이제 타깃 스테일 정책이 있다.** `UPSAMPLER["target_stale_s"] = 0.30`을 넘기면 가속제한을 걸어 0까지 감속하고 현재 스트림을 **HOLD**로 발행한다 (`config.py::UPSAMPLER` + `ros_backend.py::AccelerationLimitedJointStream.advance`의 stale 분기; `08` G4b). 따라서 스레드가 계속 돌아도 **마지막 타깃을 무한히 추종하지는 않는다.**<br>**이전 판(보존):** *"업샘플러에는 타깃 스테일 정책이 없다. 코드 주석이 명시한다: `TODO(together): target-staleness policy ...` (`ros_backend.py:417-421`). 따라서 스레드가 계속 돌면 마지막 타깃을 무한히 재발행한다."* — 그 TODO는 `ros_backend.py`에 더 이상 없다(📌 `grep -c "TODO(together)"` → 0). |
 | **왜 위험한가** | 파이썬 스레드는 SIGSTOP으로 프로세스 전체가 멈추므로 이 경우엔 발행도 멎는다. 하지만 **GIL을 잡고 있는 다른 스레드가 블록된 경우**(예: 카메라 디코드 hang, gRPC 대기)에는 업샘플러만 계속 돌 수 있다. 그때 로봇은 "누구도 지시하지 않는 명령"을 계속 받는다 |
 | **확인** | `ros2 topic hz /forward_position_controller/commands` — 러너가 멈췄는데도 250 Hz가 유지되는가 |
-| **PASS 판정** | 이 시나리오는 **현재 코드로는 PASS 조건을 정의할 수 없다.** 관측 결과를 기록하고 `08_OPEN_GAPS.md` G4에 반영한다 |
+| **PASS 판정** | **미검증.** 후보 기준: 0.30 s 안에 명령 스트림이 HOLD로 감속하고 팔이 정지한다. 실기/mock에서 한 번도 확인되지 않았으므로 관측 결과를 기록하고 `08_OPEN_GAPS.md` G4b에 반영한다 |
 | **복구** | `kill -CONT` 후 정상 종료, 또는 E-STOP |
 
 ### E3c — GUI / 카메라 노드 kill
@@ -92,7 +92,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 |---|---|
 | **유발** | `pkill -f gello_hil_gui` / `pkill -f realsense2_camera_node` |
 | **기대 (GUI)** | 첫 heartbeat 수신 뒤 0.5 s 워치독 → `DeadmanHeartbeatStaleError` → 하위 env/FPC에 새 정책 액션을 보내지 않고 actor 종료. CLI `finally`가 network/env를 닫음 |
-| **기대 (카메라)** | 0.5 s(`IMAGE_STALE_S`) 후 `get_im()`이 `RuntimeError: camera 'camX' has no fresh frame` (`ur7e_env.py:750-757`) → 러너 크래시 |
+| **기대 (카메라)** | 0.5 s(`IMAGE_STALE_S`) 후 `get_im()`이 `RuntimeError: camera 'camX' has no fresh frame` (`ur7e_env.py::UR7eEnv.get_im`) → 러너 크래시 |
 | **PASS** | 두 경우 모두 팔이 마지막 자세에서 정지하고 원인 메시지가 정확하다. GUI 단절에서는 policy fallback/transition 전송이 없어야 한다 |
 
 ---
@@ -120,7 +120,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | (a) cam2 USB 뽑기(**손목에 손이 들어간다 — 팔 정지 확인 후**), (b) `pkill -f "realsense2_camera_node.*cam2"`, (c) 렌즈를 가려 프레임 내용만 죽이기 |
-| **기대 (a)(b)** | 0.5 s 후 `RuntimeError: camera 'cam2' has no fresh frame (age=...s)` → 러너 크래시 (`ur7e_env.py:750-757`) |
+| **기대 (a)(b)** | 0.5 s 후 `RuntimeError: camera 'cam2' has no fresh frame (age=...s)` → 러너 크래시 (`ur7e_env.py::UR7eEnv.get_im`) |
 | **기대 (c)** | **아무 일도 안 일어난다.** 신선도만 보고 내용은 안 본다. 검은 화면이 그대로 관측/버퍼에 들어간다 |
 | **⚠️ TRANSIENT_LOCAL 함정** | 퍼블리셔가 TRANSIENT_LOCAL이라 **카메라가 이미 죽은 뒤에 붙은 구독자도 캐시된 마지막 프레임을 한 장 받는다.** `ros2 topic echo --once`가 성공하는 것을 "살아 있음"의 근거로 쓰지 말 것 → `06_SENSORS.md` §3.0 |
 | **확인** | `ros2 topic hz /cam2/cam2/color/image_raw/compressed` (**`echo`가 아니라 `hz`**) |
@@ -194,8 +194,8 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | 개입/정책으로 어느 한 관절을 리밋 쪽으로 계속 민다 |
-| **기대** | IK 해가 `within_joint_limits(q_sol, margin=0.0)`를 통과 못 하면 컨트롤러가 **HOLD**하고 `reject_reason = "JOINT_LIMIT"`을 낸다 (`policy_delta_controller.py:184`). 해 자체가 없으면 `"NO_IK"` (`:182`, `:213`) |
-| **확인** | `step()` info의 `held` / `reject_reason` (env가 `info`에 합쳐서 반환한다, `ur7e_env.py:390-406`) |
+| **기대** | IK 해가 `within_joint_limits(q_sol, margin=0.0)`를 통과 못 하면 컨트롤러가 **HOLD**하고 `reject_reason = "JOINT_LIMIT"`을 낸다 (`policy_delta_controller.py::PolicyDeltaController.step`의 `_hold(info, "JOINT_LIMIT")`). 해 자체가 없으면 `"NO_IK"` (같은 함수의 두 `_hold(info, "NO_IK")`) |
+| **확인** | `step()` info의 `held` / `reject_reason` (env가 `info`에 합쳐서 반환한다, `ur7e_env.py::UR7eEnv.step`) |
 | **PASS** | 리밋 근처에서 팔이 **정지(HOLD)**하고, 계속 밀어도 넘어가지 않으며, 손을 되돌리면 즉시 추종이 재개된다 |
 | **복구** | 리더를 반대 방향으로 되돌린다. 텔레옵 EEF면 disengage → 재배치 → engage |
 
@@ -207,9 +207,9 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 |---|---|
 | **유발** | 팔을 완전 신전(어깨-손목 정렬) 자세로 몰고 간다 |
 | **기대 (텔레옵 EEF 경로)** | `sigma_min` 기반 **자동 감속(gamma)**. 감속은 정상 동작이지 결함이 아니다 (`GELLO_UR7E_EEF_MODE.md:198`). `~/eef/state`의 `sigma_min`/`gamma`로 관측 |
-| **🛑 기대 (RL 경로)** | **`sigma_min` 감속이 없다.** `PolicyDeltaController`는 `eef_delta` 후반부의 **단순화판**이고, 특이점 감속·keepout·anti-windup·해석적 line search·branch-lock IK가 **전부 빠져 있다** (`serl_ur_infra/README.md`의 현황표). 대신 line search로 스텝을 줄이고, 안 되면 `"STEP_LIMIT"` HOLD (`policy_delta_controller.py:186-217`) |
+| **🛑 기대 (RL 경로)** | **`sigma_min` 감속이 없다.** `PolicyDeltaController`는 `eef_delta` 후반부의 **단순화판**이고, 특이점 감속·keepout·anti-windup·해석적 line search·branch-lock IK가 **전부 빠져 있다** (`serl_ur_infra/README.md`의 현황표). 대신 line search로 스텝을 줄이고, 안 되면 `"STEP_LIMIT"` HOLD (`policy_delta_controller.py::PolicyDeltaController.step`의 line-search 블록) |
 | **확인** | 텔레옵: `ros2 topic echo /gello_ur_bridge/eef/state`. RL: `info["reject_reason"]` 빈도 |
-| **PASS** | 텔레옵: 부드럽게 감속. RL: **HOLD가 폭풍처럼 뜨지 않고** 드물게 `STEP_LIMIT`만 (line search 도입 후 측정치 98% held → 0% held, `policy_delta_controller.py:195`) |
+| **PASS** | 텔레옵: 부드럽게 감속. RL: **HOLD가 폭풍처럼 뜨지 않고** 드물게 `STEP_LIMIT`만 (line search 도입 후 측정치 98% held → 0% held, 근거는 `PolicyDeltaController.step`의 line-search 주석) |
 | **복구** | 특이점에서 빠져나오는 방향으로 리더를 움직인다 |
 
 ---
@@ -234,7 +234,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | **유발** | (a) 그리퍼 노드가 도는 중에 두 번째 `run_ur7e_gripper.sh`를 띄운다, (b) 로봇을 POWER_OFF한다, (c) 팔 드라이버(`use_tool_communication:=true`)와 TCP 모드 그리퍼 노드를 동시에 띄운다 |
 | **기대** | 전부 `no/invalid status response` → `_drop_connection()` → 단일 재연결 루프 (`robotiq_gripper_modbus_node.py:203-215`, `:155-164`). **여러 재연결 루프가 동시에 뜨지는 않는다**(`:158-160`의 가드) |
 | **확인** | 그리퍼 노드 로그, `ros2 topic hz /robotiq_gripper/position_percent`(멈춤) |
-| **⚠️ 조용한 오정보** | env는 `position_percent`가 안 오면 `curr_gripper_pos = 0.0`으로 둔다 = **"완전 열림"으로 보인다** (`ur7e_env.py:681-683`). 그리퍼가 죽은 것과 열린 것이 관측상 구별되지 않는다 |
+| **⚠️ 조용한 오정보** | env는 `position_percent`가 안 오면 `curr_gripper_pos = 0.0`으로 둔다 = **"완전 열림"으로 보인다** (`ur7e_env.py::UR7eEnv._update_currpos`). 그리퍼가 죽은 것과 열린 것이 관측상 구별되지 않는다 |
 | **PASS** | ① 두 번째 노드가 조용히 성공하지 않는다 ② 원인 제거 후 자동 재연결 ③ 재연결 후 `set_closed`가 정상 동작 |
 | **복구** | (a) 중복 노드 종료 (b) `power on` + `brake release` (c) 그리퍼를 `serial_port:=/tmp/ttyUR`로 전환 → `01_GRIPPER.md` §5 |
 
@@ -247,7 +247,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **절차** | mock+RViz에서 러너를 띄우고 액션 `[0,0,0,0,0,0,-1]`(닫기) / `[0,...,+1]`(열기)을 쏜다. 실기 그리퍼로 하려면 그리퍼 노드만 실기에 붙인다 |
-| **기대** | `-1` → `send_gripper_percent(1.0)`(닫기), `+1` → `0.0`(열기). 단 `GRIPPER_SLEEP = 0.6 s` 디바운스 때문에 **10 Hz 루프에서 6스텝에 1번만** 반영된다 (`ur7e_env.py:726-741`, `config.py:146`) |
+| **기대** | `-1` → `send_gripper_percent(1.0)`(닫기), `+1` → `0.0`(열기). 단 `GRIPPER_SLEEP = 0.6 s` 디바운스 때문에 **10 Hz 루프에서 6스텝에 1번만** 반영된다 (`ur7e_env.py::UR7eEnv._send_gripper_command`, `config.py::GRIPPER_SLEEP` :225) |
 | **PASS** | 방향이 맞고, 디바운스가 예상대로 동작하며, `position_percent`가 따라 움직인다 |
 
 ---
@@ -279,13 +279,13 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | | |
 |---|---|
 | **유발** | 팔을 `RESET_JOINTS`에서 **wrist_3가 반대 분기**인 자세로 옮긴 뒤 `reset()`을 부른다. 실측 사례: 실제 `wrist_3 = +3.1795`, 목표 `-3.1331` (물리적으로 0.029 rad) |
-| **기대 (수정 후)** | `go_to_reset()`(`ur7e_env.py:520`)이 `wrapped_nearest`(`:567-591`)로 목표를 현재 회전수로 옮긴다 → 명령되는 `wrist_3`는 **+3.1501 부근**. 거리 가드가 보는 값도 6.31이 아니라 branch-safe 값 |
+| **기대 (수정 후)** | `ur7e_env.py::UR7eEnv.go_to_reset`이 `ur_kin.wrapped_nearest`로 목표를 현재 회전수로 옮긴다 → 명령되는 `wrist_3`는 **+3.1501 부근**. 거리 가드가 보는 값도 6.31이 아니라 branch-safe 값 |
 | **⚠️ 어떤 러너로 유발하나** | `cube_in_cup` config를 쓰는 경로여야 한다. `run_real_hil.py`의 기본 `--reset-mode startup`은 **기동 시점 관절을 그대로 `RESET_JOINTS`로 잡으므로 이 경로를 실행하지 않는다** — 2026-07-28 실기 세션이 이 항목을 닫지 못한 이유다 |
 | **🛑 수정 전이었다면** | 6.31 rad를 계산 → 가드가 배선 고장처럼 보이는 에러를 내거나, 통과 시 **손목이 한 바퀴 돌며 2F-85 케이블을 감음**(H3) |
 | **확인 (DRY_RUN에서 전부 가능)** | 러너 로그/CSV의 **명령된 관절 목표값**. `wrist_3` 명령값이 현재 값 근처인가? |
 | **PASS** | ① 명령 `wrist_3`가 현재 값에서 0.1 rad 이내 ② 거리 가드가 통과 ③ `DRY_RUN=False`로 갔을 때 손목이 한 방향으로 짧게만 움직인다 |
 | **⚠️ 순서** | **반드시 `DRY_RUN=True`로 먼저** 로그를 본다. 이 항목은 눈으로 확인하기 전에 arm하면 안 된다 |
-| **회귀** | `tests/test_reset_branch_cut.py` (📌 2026-07-29 재실행 **10 passed**) |
+| **회귀** | `tests/test_reset_branch_cut.py` (📌 2026-07-30 재실행 **11 passed**; 07-29에는 10) |
 
 같이 볼 것: `cube_in_cup`의 `RESET_MAX_DIST_RAD`가 `0.5` → **`0.9`**로 올라갔다
 (`cube_in_cup.py:103`; `DefaultUR7eEnvConfig` 기본값은 `1.5`, `config.py:53`).

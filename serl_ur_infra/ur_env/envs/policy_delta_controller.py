@@ -21,6 +21,12 @@ to know how long the tick they are capping is. ``dt=None`` reproduces the
 10 Hz behaviour bit for bit. See ``step()`` for why the controller never
 measures dt off the wall clock.
 
+Two callers, one gate stack. Policy path: ``UR7eEnv._apply_action``
+(ur7e_env.py:501, ``dt=None``). Intervention path: ``GelloIntervention.substep``
+(wrappers.py:618, ``dt=1/30``), paced by
+``UR7eEnv._drive_intervention_substeps``. The ordered call chain of that second
+path is written out in the ``wrappers.py`` module docstring.
+
 TODO(together): replace the simplified internals below with the real
 EefDeltaController machinery (sigma_min throttle with asymmetric escape,
 analytic branch-lock, keepout, line search). Cleanest path is probably
@@ -28,7 +34,16 @@ refactoring eef_delta so its post-anchor pipeline is callable with a T_des
 directly — then this file shrinks to a thin adapter and both the policy path
 and GELLO intervention share one gate stack.
 
-UNTESTED SKELETON — do not run against real hardware until reviewed.
+REAL-HARDWARE STATUS (supersedes the "UNTESTED SKELETON — do not run against
+real hardware" line this file used to carry): this gate stack has driven the real
+UR7e. The HIL intervention runner passed 2026-07-28, the first full
+policy+intervention E2E ran 2026-07-29, and the 30 Hz intervention sub-step path
+passed ARMED 2026-07-30 (dp_ratio median 1.000, held 0% over 120 intervened
+steps; docs/testing/04_HIL_INTERVENTION.md §9). Two things are still NOT proven
+on hardware: the TODO above (the real eef_delta machinery is not in here,
+08_OPEN_GAPS.md G2), and the governor's rate-cap truncation — ``governed`` was
+False in every window of the 07-30 run, so that branch has only ever been
+exercised by tests/test_governor_dt.py.
 """
 
 from typing import Callable, Optional, Tuple
@@ -117,7 +132,7 @@ class PolicyDeltaController:
         """(dt, dq_step_max) for one call. ``None`` -> the nominal tick, verbatim.
 
         WHY dq_step_max SCALES WITH dt.  ``GOVERNOR["dq_step_max"]`` is written
-        per tick but is specified as a RATE: config.py:98-101 pins 0.0625 rad at
+        per tick but is specified as a RATE: config.py:106-109 pins 0.0625 rad at
         10 Hz as "the same rate ceiling" as the 250 Hz upsampler's 0.0025
         rad/tick, i.e. 0.625 rad/s, and config.py:66-72 requires the three speed
         layers (ACTION_SCALE / GOVERNOR / UPSAMPLER) to stay in a fixed ratio
@@ -172,13 +187,13 @@ class PolicyDeltaController:
 
         ``dt`` — length of THIS tick in seconds, for the governor's rate cap
         and the joint-step gate. ``None`` (the default, and what UR7eEnv.step
-        passes at ur7e_env.py:494) means the nominal ``1/hz``, handled so the
+        passes at ur7e_env.py:501) means the nominal ``1/hz``, handled so the
         policy path stays bit-identical to before this parameter existed.
         The 30 Hz intervention sub-step driver passes ``dt=1/30``.
 
         WHY THE CALLER PASSES dt INSTEAD OF THE CONTROLLER MEASURING IT.
         A ``time.monotonic()`` diff inside step() looks strictly better and is
-        wrong here, because the governor is a hardware safety net (config.py:79-90)
+        wrong here, because the governor is a hardware safety net (config.py:87-98)
         and wall-clock dt makes that net a function of unrelated load:
 
         * Real steps have been measured stretching to ~1.12 s under learner
@@ -198,7 +213,7 @@ class PolicyDeltaController:
         # trace at all — `scale` was computed and dropped on the floor, and
         # info["clipped"] covers only the workspace box, a DIFFERENT gate. A
         # silently rate-capped action is the same undiagnosable failure as a
-        # silently clamped one (ur7e_env.py:452-456): big action, little motion,
+        # silently clamped one (ur7e_env.py:699-704): big action, little motion,
         # nothing in the reward to explain it. It is also the only observable
         # for the ACTION_SCALE*HZ < v_max/w_max headroom invariant
         # (config.py:55-63) being violated at run time, i.e. for the stored
@@ -277,6 +292,9 @@ class PolicyDeltaController:
         # outside the box, see above). The line search below is deliberately NOT
         # folded in — that is the joint-step gate, a different limit, whose
         # terminal case already reports reject_reason="STEP_LIMIT".
+        # NOT observed on real hardware: the 2026-07-30 ARMED run reported
+        # governed=0 in every window, so the truncation this reports is covered
+        # by tests only (see the module docstring's REAL-HARDWARE STATUS).
         info["governed_scale"] = float(min(scale_req, scale_net))
         info["governed"] = info["governed_scale"] < 1.0
 

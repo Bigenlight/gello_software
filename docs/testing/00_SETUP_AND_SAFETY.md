@@ -180,6 +180,19 @@ ACTOR_PY=/home/laptop3/venvs/gello-hil-actor/bin/python   # grpcio 1.74.0
 > (`readelf -sW`, 바이트 스캔 모두 음성). 정확한 기계어 원인은 **미확인**이고,
 > **행동 자체는 위 명령으로 100% 재현된다.** 판단 근거로는 재현 결과만 쓸 것.
 
+##### 어느 인터프리터를 쓰는지는 "gRPC를 import하는가"로 정해진다 (2026-07-30 보강)
+
+| 실행할 것 | 인터프리터 | 왜 |
+|---|---|---|
+| actor (`scripts/run_remote_rlpd_actor.py`, `run_hil_actor.sh`) | **`/home/laptop3/venvs/gello-hil-actor/bin/python`** | gRPC 채널을 연다 |
+| receive server / learner (Kanu 쪽 포함) | **venv python** | 같은 이유 |
+| `serl_ur_infra` pytest | **venv python** | gRPC 테스트 4파일이 포함된다 (§4.2) |
+| **`serl_ur_infra/tests/run_real_hil.py`** | **시스템 `python3`가 맞다** | 이 러너는 **gRPC를 import하지 않는다**(정책이 zero 고정, learner·서버 불필요). 대신 **rclpy·cv2가 필요**하고 그건 시스템 python3에 있다 |
+| `ur_gello_bringup` pytest | 시스템 `python3` | ROS `launch` 모듈이 필요 (§4.1) |
+
+즉 **"무조건 venv"가 아니다.** 규칙은 "gRPC를 타면 venv, ROS/rclpy를 타면 시스템 python3"이고,
+`run_real_hil.py`는 후자다.
+
 #### (2) `PYTHONPATH`는 **이어붙인다**. 덮어쓰지 않는다
 
 ```bash
@@ -198,9 +211,67 @@ ls $WT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages   # 존�
 
 `source install/setup.bash`가 이 경로를 `PYTHONPATH`에 넣어 주는데, 덮어쓰면 사라진다.
 
+> ### 🛑 2026-07-30 실기에서 이걸로 넘어졌다 — 덮어쓰면 **rclpy가 사라진다**
+> pytest 명령의 `PYTHONPATH=...` 부분을 러너에 그대로 옮겨 붙인 것이 원인이다:
+>
+> ```bash
+> # ❌ RuntimeError: rclpy not available — use fake_env=True
+> PYTHONPATH="$PWD/serl_ur_infra:$PWD/third_party/hil-serl/serl_launcher:$OVERLAY" \
+>   python serl_ur_infra/tests/run_real_hil.py
+> ```
+>
+> `source /opt/ros/humble/setup.bash`가 넣어 준 경로가 날아가서 **rclpy 자체가 안 보인다.**
+> 메시지가 `fake_env=True`를 권하지만 그건 **오진 유도**다 — 환경이 잘못된 것이고, fake_env로
+> 바꾸면 로봇을 전혀 안 건드리는 다른 실험이 된다.
+>
+> **ROS 노드를 쓰는 러너(`run_real_hil.py`, `run_rviz_*.py`)는 `source` 두 줄만 하고
+> `PYTHONPATH`를 손대지 않는다.** 꼭 추가해야 하면 반드시 끝에 `:$PYTHONPATH`를 붙인다:
+>
+> ```bash
+> set +u; source /opt/ros/humble/setup.bash; source $WT/ros2_ur_ws/install/setup.bash; set -u
+> cd $WT/serl_ur_infra
+> python3 tests/run_real_hil.py                       # ✅ PYTHONPATH 미변경
+> PYTHONPATH="$WT/serl_ur_infra:$PYTHONPATH" python3 tests/run_real_hil.py   # ✅ 이어붙임
+> ```
+>
+> `run_hil_actor.sh` preflight **[4]단계**가 검사하는 항목이 정확히 이것이지만
+> (**이어붙였는지 / 덮어썼는지**), 명령을 대화형으로 조립할 때는 아무도 안 잡아 준다.
+
 #### (3) 그런데 pytest에는 ROS `PYTHONPATH`를 붙이면 **안 된다**
 
-→ §4.2. 이 둘은 서로 반대다. 헷갈리면 §4의 명령을 그대로 복사한다.
+→ §4.2. **이 둘은 서로 반대다** — 헷갈리면 §4의 명령을 그대로 복사한다.
+
+| | ROS `PYTHONPATH` | 이유 |
+|---|---|---|
+| `run_real_hil.py` 등 **ROS 러너** | **필요** (`source`가 넣어 준 것을 지우지 말 것) | rclpy·`ur_kin` |
+| `serl_ur_infra` **pytest** | **금지** (`env -u PYTHONPATH` 후 재구성) | ROS pytest 플러그인이 컬렉션을 무너뜨려 `1 skipped`로 떨어진다 |
+
+**그래서 §4.2의 정본 명령이 `PYTHONPATH`를 덮어쓰는 것은 실수가 아니라 의도다.**
+그 명령줄을 러너에 재사용하는 것이 실수다.
+
+### 3.5 🛑 컨트롤러 요구가 러너마다 다르다 — 틀리면 **조용히** 아무 일도 안 일어난다 (2026-07-30)
+
+| 무엇을 띄우나 | active 컨트롤러 | 근거 |
+|---|---|---|
+| `ros2_ur_ws/run_hil_hardware.sh` (운영 3-CLI) | **STJC** (`scaled_joint_trajectory_controller`) | `run_hil_hardware.sh`의 `initial_joint_controller:=` |
+| `serl_ur_infra/tests/run_real_hil.py` (개입 검증 러너) | **FPC** (`forward_position_controller`), **컨트롤러 전환 로직이 없다** | `tests/run_real_hil.py` 상단 주석 "T1 — 실기 드라이버 + forward_position_controller" |
+
+**즉 3-CLI로 하드웨어를 띄운 뒤 `run_real_hil.py`를 그대로 돌리면 명령이 아무데도 안 간다.**
+증상은 예외가 아니라 `!! 구독자가 없다 — forward_position_controller가 active가 아닐 수 있다`
+**경고 한 줄**뿐이고 스텝은 계속 돈다 — 조용한 실패다. `run_real_hil.py`용 T1은 브리지 없이 드라이버를 직접 띄운다:
+
+```bash
+ros2 launch ur_robot_driver ur_control.launch.py \
+    ur_type:=ur7e robot_ip:=192.168.10.11 \
+    initial_joint_controller:=forward_position_controller \
+    headless_mode:=true launch_rviz:=false
+# headless_mode:=true 는 펜던트가 REMOTE 모드여야 한다
+ros2 control list_controllers | grep forward_position_controller   # -> active 확인
+```
+
+절차 전문·안전 설계는 [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) §4.5·§9와
+`tests/run_real_hil.py` 상단 주석에 있다 — 여기서는 **함정만** 적는다.
+(FPC에 퍼블리셔가 둘이 되는 경우의 위험은 `04` §4.)
 
 ---
 
@@ -239,7 +310,7 @@ python3 -m pytest test/ -q -p no:anyio
   > **판정 기준은 "예산 4.0 ms 미만"이지 특정 값이 아니다.** 예산을 넘으면 출력에
   > `WARNING: exceeds budget`이 붙는다 (`test_ur_kin.py:445-446`).
 
-### 4.2 `serl_ur_infra` — 333 tests
+### 4.2 `serl_ur_infra` — 579 passed / 11 skipped (2026-07-30 `4197f5b`, actor venv)
 
 ```bash
 cd $WT/serl_ur_infra
@@ -248,10 +319,51 @@ PYTHONPATH="$WT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages
 /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest tests -q -p no:anyio
 ```
 
-📌 실측(2026-07-29): **`333 passed, 11 skipped in 3.39s`**.
-2026-07-27 워크트리 실측은 `332 passed, 11 skipped, 1 xfailed`였다 — 머지로 1개 늘었고
-xfail은 없어졌다. **개수를 기대값으로 하드코딩하지 말고, 아래 세 함정 때문에 개수가
-줄지 않았는지만 본다.**
+📌 실측(2026-07-30, `4197f5b`, `/home/laptop3/venvs/gello-hil-actor/bin/python`):
+**`579 passed, 11 skipped in 8.98s`**.
+
+계보 — 옛 문서에 남은 숫자를 현재 기준선으로 인용하지 말 것:
+
+| 값 | 시점 |
+|---|---|
+| `332 passed, 11 skipped, 1 xfailed` | 2026-07-27 (구 워크트리) |
+| `333` | 2026-07-29 오전 (머지 후, xfail 소멸) |
+| `337` | `40b99f8` recorder take → learner demo 변환기 |
+| `429` | classifier sidecar |
+| `497` | 2026-07-30 오전 (`4197f5b` **이전**) |
+| **`579`** | **`4197f5b`** — 신규 82 = `test_leader_stream` 28 / `test_governor_dt` 38 / `test_intervention_substeps` 16 |
+
+> ### 🪤 인터프리터를 안 적은 "passed 개수"는 **무의미하다** (2026-07-30 실측)
+> 위 579는 **actor venv**(gRPC용, jax 없음, numpy 2.2.6) 기준이다. 같은 명령을
+> `/home/laptop3/venvs/hilserl/bin/python`(jax 0.5.3, numpy 1.26.4)으로 돌리면
+> passed가 늘고 **skipped가 11 → 4로 줄어든다** (jax가 있어 §4.3의 skip들이 실제로
+> 실행된다).
+>
+> **판정 기준선은 actor venv 값이다.** 다른 인터프리터의 수와 비교해 회귀를 판단하지 말 것.
+>
+> ### ✅ 해소된 함정 — 허용범위가 너무 타이트했다 (2026-07-30)
+>
+> 한때 hilserl 쪽에서 `1 failed`가 났다:
+> `test_governor_dt.py::test_env_step_surfaces_governed_in_info`,
+> `0.8485281248` vs `0.8485281374 ± 8.5e-10` (3회 재현, actor venv에서는 통과).
+>
+> **numpy 승격 차이가 원인이 아니었다.** 허용범위가 애초에 틀렸다 — 액션 dtype이
+> 계약상 `float32`(`run_contract`의 `"action": {"dtype": "float32"}`)라
+> `xi = action * ACTION_SCALE`에 **~1e-7 상대오차**가 실리는데 단언이 `rel=1e-9`였다.
+> 산술이 낼 수 있는 정밀도보다 타이트했고, actor venv에서 통과한 것이 우연이다.
+> `rel=1e-6`으로 고쳐 **두 인터프리터 모두 통과**한다.
+>
+> 🪤 **일반 교훈**: `env.step`을 통과하는 값에 `rel < 1e-7`을 걸지 마라. 액션은
+> float32다. 컨트롤러를 직접 호출하는(float64 `xi`) 단언은 1e-9도 안전하다 —
+> 같은 파일에 두 종류가 섞여 있고, 그 구분이 이유다.
+
+**개수를 기대값으로 하드코딩하지 말고, 아래 세 함정 때문에 개수가 줄지 않았는지만 본다.**
+
+> ### 🪤 그리고 총계에 **아예 안 나타나는** 파일이 하나 있다
+> `tests/test_env_fake_backend.py`는 `def test_*`가 없어 pytest에서 **0개 수집**된다
+> (skip도 error도 남기지 않는다). 10 Hz 스텝 페이싱·업샘플러 틱 예산·`ACTION_SCALE`↔governor
+> 정합 단언이 거기 있는데 **실행되지 않는다** → [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) **G25**.
+> 새 테스트 파일을 넣을 때 `--collect-only`로 수집 여부를 확인하는 습관이 이래서 필요하다.
 
 동등한 대안(플러그인 자동로딩까지 끄고 리포 루트에서 실행):
 
@@ -264,9 +376,11 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
   /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest -q -p no:cacheprovider serl_ur_infra/tests
 ```
 
-📌 2026-07-29: 같은 `333 passed, 11 skipped`.
-(이 형태는 `OVERLAY`를 하드코딩하지 않아 오버레이 레이아웃이 바뀌어도 버틴다.
-`env -u PYTHONPATH`가 **`OVERLAY` 계산 뒤에** 와야 하는 점만 주의.)
+📌 2026-07-30: 같은 **`579 passed, 11 skipped in 8.98s`** (2026-07-29에는 같은 형태로 `333`이었다).
+이 형태가 `HANDOFF_NEXT_SESSION_KO.md:254-264`의 정본 명령과 같은 것이다.
+(`OVERLAY`를 하드코딩하지 않아 오버레이 레이아웃이 바뀌어도 버틴다.
+`env -u PYTHONPATH`가 **`OVERLAY` 계산 뒤에** 와야 하는 점만 주의. `PYTHONPATH`를 이렇게
+**덮어쓰는 것은 pytest에서만 옳다** — 러너에 재사용하면 rclpy가 사라진다, §3.4(2).)
 
 세 부분이 전부 필요하고, 각각 빠뜨렸을 때의 증상이 다르다:
 
@@ -274,7 +388,7 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
 |---|---|---|
 | `env -u PYTHONPATH` (= ROS 경로가 남음) | **`collected 0 items / 1 skipped`** → `no tests collected`. **에러가 없어서 통과한 것처럼 보인다** | `PYTHONPATH=/opt/ros/humble/... pytest tests` → 0 collected |
 | venv python 대신 `python3` | 4개 파일이 **영원히 멈춘다**(각각 무한 hang): `test_actor_grpc_transport.py`, `test_actor_identity_pinning.py`, `test_actor_smoke.py`, `test_rlpd_receive_smoke.py`. 나머지는 정상 통과하므로 "느린 테스트"로 착각하기 쉽다 | 45 s 타임아웃 4/4 발생. venv에서는 각각 21/11/2/1 = **35 passed** |
-| `serl_launcher` 경로 | hang도 실패도 없이 **조용히 skip**된다: `test_cube_in_cup_config`, `test_frame_wrappers`, `test_reset_branch_cut` 등 | 📌 2026-07-29: `333 passed, 11 skipped` → **`300 passed, 13 skipped`** |
+| `serl_launcher` 경로 | hang도 실패도 없이 **조용히 skip**된다: `test_cube_in_cup_config`, `test_frame_wrappers`, `test_reset_branch_cut` 등 | 📌 2026-07-29 실측: `333 passed, 11 skipped` → **`300 passed, 13 skipped`**. *(이 낙차는 333 시절 값이다 — 579 기준의 낙차는 재측정 안 했다. 판정은 "기준선보다 내려갔는가"로 한다.)* |
 
 > ### 🪤 skip 사유가 거짓말을 한다
 > serl_launcher가 없을 때 뜨는 skip 메시지는
@@ -304,7 +418,12 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
 
 ### 4.3 JAX가 필요한 테스트
 
-로봇 랩톱에는 jax/flax가 없다. 아래는 `SKIPPED`로 나오는 것이 **정상**이고, Kanu에서 돌린다.
+**actor venv**(`venvs/gello-hil-actor`)에는 jax/flax가 없다. 아래는 그 인터프리터에서
+`SKIPPED`로 나오는 것이 **정상**이고, 학습 자체는 Kanu에서 돌린다.
+
+> 🔧 **정정 (2026-07-30):** 이전 판은 "**로봇 랩톱에** jax/flax가 없다"고 적었다. 랩톱 기준으로는
+> 낡았다 — `/home/laptop3/venvs/hilserl/bin/python`에는 **jax 0.5.3이 있다**. 없는 것은
+> **actor venv**다. 그 venv로 돌리면 아래 skip들이 실제로 실행되고 총계가 달라진다(§4.2의 함정 박스).
 
 ```
 test_learner_composition.py            could not import 'jax'
@@ -410,7 +529,7 @@ Ctrl-C에 대한 정확한 거동: 브리지가 죽으면 컨트롤러는 **마�
 | **GUI가 죽는 것은 E-STOP과 같다** | **아니다.** 첫 heartbeat 수신 뒤 0.5 s 단절은 이제 `DeadmanHeartbeatStaleError`로 actor를 fail-stop하고 새 정책 액션을 보내지 않아 FPC가 마지막 명령을 홀드한다. 하지만 이는 소프트웨어 정지일 뿐 전원 차단·브레이크 체결이 아니다 | `RosTopicDeadman.is_engaged()` (`STALE_S = 0.5`), actor CLI의 `finally` |
 | **ESC를 누르면 정지한다** | **아니다.** `self.terminate=True` → 그 **에피소드가 끝나고**, 그 다음 `reset()`이 `go_to_reset()`으로 **팔을 RESET_JOINTS로 이동시킨다.** ESC는 "정지"가 아니라 "지금 에피소드 끝내고 리셋 자세로 가"다. **게다가 pynput 전역 리스너라 터미널 포커스가 필요 없다 — 아무 창에서 누른 ESC도 잡힌다.** 반영은 다음 step 경계에서다 | `ur7e_env.py:197-208`(리스너), `:505-512`(reset→go_to_reset), `:520`(`go_to_reset`) |
 | **펜던트 속도 슬라이더를 0%로 내리면 정지** | **아니다.** 속도 스케일일 뿐이며 명령 스트림은 계속 흐른다. 슬라이더를 올리는 순간 밀린 명령이 그대로 실행된다. 정지 수단으로 쓰지 말 것 | (UR PolyScope 동작. 리포 근거 없음 — 조작 원칙) |
-| **`DRY_RUN=True`니까 안전하다** | 조건부로 맞다. `DRY_RUN`은 `URRosBackend(dry_run=...)`로 전달되어 명령 발행을 막지만, **`run_rviz_hil.py`는 `DRY_RUN=False`를 일부러 박아 놨다**(`tests/run_rviz_hil.py:55`). 또 `run_real_hil.py --arm`과 actor의 `--arm`은 **CLI로 `DRY_RUN`을 끈다.** 그 스크립트들을 무심코 실기에 겨누지 말 것 | `config.py:153`, `cube_in_cup.py:227`, `run_rviz_hil.py:34`, `:55` |
+| **`DRY_RUN=True`니까 안전하다** | 조건부로 맞다. `DRY_RUN`은 `URRosBackend(dry_run=...)`로 전달되어 명령 발행을 막지만, **`run_rviz_hil.py`는 `DRY_RUN=False`를 일부러 박아 놨다**(`tests/run_rviz_hil.py:55`). 또 `run_real_hil.py --arm`과 actor의 `--arm`은 **CLI로 `DRY_RUN`을 끈다.** 그 스크립트들을 무심코 실기에 겨누지 말 것 | `config.py:232`, `cube_in_cup.py:233`, `run_rviz_hil.py:34`, `:55` |
 | **`pos_scale:=0.0`이면 팔이 안 움직인다** | **아니다.** TCP 위치만 고정되고 회전 채널은 100% 살아 있어 팔이 크게 스윙한다 | `03_EEF_MODE.md` §2, `config/ur7e_gello_eef.yaml:66-73` |
 
 ### 6.1.1 🔧 새로 확인된 위험: 리셋이 손목을 **한 바퀴 돌릴 수 있었다** (H3, 수정됨)

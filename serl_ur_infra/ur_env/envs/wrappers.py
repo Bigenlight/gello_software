@@ -45,10 +45,36 @@ into one transition:
     allowance, harvested when the window closes — the executed==reported
     invariant survives even though the total is unknown when ``step`` starts.
 
-See the "UR7eEnv substep-driver protocol" section below and
-``UR7eEnv.begin_intervention_window``.  The POLICY path is untouched by all of
-this, by construction: no driver is installed, so ``UR7eEnv.step`` takes the
-same single-target-plus-sleep branch it always did.
+THE WHOLE PATH, in call order.  This is the canonical copy of the list; the
+other four files of the mechanism carry a short pointer back here instead of
+repeating it:
+
+  GelloIntervention.step (:705) -> _open_substep_window (:683) installs THIS
+    object as the driver, via UR7eEnv.begin_intervention_window (ur7e_env.py:526)
+  UR7eEnv.step (ur7e_env.py:657) consumes the one-shot driver, then
+    _apply_action(action, driver) (ur7e_env.py:449) issues the FIRST target:
+      charge (:607) -> PolicyDeltaController.step(xi, dt=1/substep_hz)
+      (policy_delta_controller.py:183, wired at ur7e_env.py:502-505) ->
+      backend.send_joint_command
+    _drive_intervention_substeps (ur7e_env.py:553) then paces the rest of the
+    window at 30 Hz instead of sleeping it away:
+      substep(dt) (:618) -> leader re-read -> LeaderFilter (leader_stream.py:259)
+      -> InterventionBudget.take (leader_stream.py:447) -> controller.step(dt=1/30)
+      -> backend.send_joint_command
+    window closes -> consumed_window_action (:663) is harvested into
+      info["intervention_window_action"] (ur7e_env.py:654)
+  back in step() that key becomes info["intervene_action"] (:738).
+
+The POLICY path is untouched by all of this, by construction: no driver is
+installed, so ``UR7eEnv.step`` takes the same single-target-plus-sleep branch it
+always did.  Protocol contract: ``UR7eEnv.begin_intervention_window``; the
+substep methods live under "UR7eEnv substep-driver protocol" below.
+
+VERIFIED on the real UR7e 2026-07-30: ARMED ``run_real_hil.py --arm --scale
+1.0``, 120 intervened steps, every check PASS — substeps=2 in every window,
+frame-map residual 0.130 / alpha 0.983, action-exec dp_ratio median 1.000,
+held 0%, operator confirmed the hand feel.  Evidence:
+docs/testing/04_HIL_INTERVENTION.md §9.
 
 TODO(together):
 - deadman hardware: pynput key hold for now; USB footswitch later.

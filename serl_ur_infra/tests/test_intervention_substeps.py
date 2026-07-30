@@ -212,11 +212,26 @@ class _Config(DefaultUR7eEnvConfig):
     GRIPPER_SLEEP = 0.0
 
 
-def _build(clock, *, hz=10.0, substep_hz=30.0, leader_step=0.0, deadman=None):
+def _build(
+    clock,
+    *,
+    hz=10.0,
+    substep_hz=30.0,
+    leader_step=0.0,
+    deadman=None,
+    governor=None,
+):
     """A reset, engaged GelloIntervention over a real UR7eEnv + fake backend.
 
     ``substep_hz=None`` omits the whole ``INTERVENTION`` block, i.e. the exact
     pre-substep code path.
+
+    ``governor`` overrides individual ``GOVERNOR`` keys.  Tightening ``v_max``
+    is the ONLY way to make the task-space rate cap bind on the intervention
+    path at all: with the shipped caps a paced request
+    (``ACTION_SCALE[0]/3`` = 0.00417 m) always fits inside the per-substep
+    allowance (``v_max/substep_hz`` = 0.0050 m), which is exactly why the
+    2026-07-30 ARMED hardware run reported ``governed=0`` in every window.
     """
 
     config = _Config()
@@ -227,6 +242,8 @@ def _build(clock, *, hz=10.0, substep_hz=30.0, leader_step=0.0, deadman=None):
         config.INTERVENTION = dict(
             DefaultUR7eEnvConfig.INTERVENTION, substep_hz=float(substep_hz)
         )
+    if governor is not None:
+        config.GOVERNOR = dict(DefaultUR7eEnvConfig.GOVERNOR, **governor)
 
     backend = _SubstepBackend(clock)
     backend.leader_step = np.full(6, float(leader_step))
@@ -605,3 +622,414 @@ def test_the_shipped_default_config_enables_substepping_at_the_leader_rate():
     ):
         assert DefaultUR7eEnvConfig.INTERVENTION[name] == value
         assert f"{name}: {value}" in yaml_text
+
+
+@pytest.mark.parametrize(
+    "substep_hz, expected_substeps", [(12.0, 0), (15.1, 1), (20.0, 1), (30.0, 2)]
+)
+def test_a_substep_only_fits_above_one_and_a_half_times_hz(
+    clock, substep_hz, expected_substeps
+):
+    """The half-period guard puts the real threshold at 1.5*HZ, not HZ.
+
+    ``_drive_intervention_substeps`` refuses a tick with less than half a period
+    of window left, so a substep only fits when ``1.5/substep_hz < 1/HZ``.  Two
+    consequences worth pinning, both reported rather than silently adjusted
+    (which of the two rates is wrong is a task decision, exactly as the
+    off-nominal-HZ warning in ``UR7eEnv.__init__`` says, and config.py pins
+    substep_hz to 30.0 with no CLI exposing it):
+
+    * The startup NOTE beside that loop is worded against ``substep_hz <= HZ``,
+      so a ``substep_hz`` in ``(HZ, 1.5*HZ]`` — 12.0 here — runs ZERO substeps
+      while announcing nothing at all.
+    * ``substep_hz == 1.5*HZ`` exactly (15.0 at HZ=10) is float-DEGENERATE and
+      is therefore deliberately absent from the cases below: ``next_tick`` and
+      ``window_end - 0.5*period`` land on the same value up to rounding, so the
+      identical config yields 0 or 1 substeps depending on the window's absolute
+      start instant (measured: 0 on the second window, 1 on the first).  Only
+      the logged ``intervention_substeps`` column is affected — the displacement
+      budget bounds the window either way — but a config sitting on that point
+      would log two different things for the same setup.
+    """
+
+    wrapper, _, _ = _build(
+        clock, hz=10.0, substep_hz=substep_hz, leader_step=0.002
+    )
+
+    _, _, _, _, info = wrapper.step(_zeros_action())
+
+    assert info["intervention_substeps"] == expected_substeps
+
+
+# =========================================================================== #
+# 9. governed/governed_scale describe the WHOLE window, not its first tick     #
+# =========================================================================== #
+class _ScriptedDriver:
+    """The substep-driver protocol with scripted substep results, nothing else.
+
+    WHY A DOUBLE HERE, when the rest of this file deliberately drives the real
+    ``GelloIntervention``.  With the shipped GOVERNOR the governor can never bind
+    on the intervention path: ``_paced_request`` shrinks every request to
+    ``ACTION_SCALE/3`` (0.00417 m), which is below the per-substep allowance
+    ``v_max/substep_hz`` (0.0050 m).  So on the real path all three ticks of a
+    window carry the same ``governed_scale`` and the aggregation cannot be told
+    apart from any of its broken variants.  Scripting the substeps is the only
+    way to ask "WHICH tick's cut ends up in info".
+
+    The first target is NOT scripted: ``charge()`` returns a real ``xi`` and the
+    real ``PolicyDeltaController`` produces its ``governed_scale``, so that half
+    of the merge is measured rather than asserted into existence.  The
+    end-to-end counterpart — the real driver, a tightened ``v_max`` — is the
+    last test in this section.
+    """
+
+    def __init__(self, results, *, first_xi=None, window_action=None):
+        self._results = [dict(r) for r in results]
+        self._first_xi = (
+            np.zeros(6) if first_xi is None else np.asarray(first_xi, dtype=float)
+        )
+        self._window_action = (
+            np.zeros(7, dtype=np.float32)
+            if window_action is None
+            else np.asarray(window_action, dtype=np.float32)
+        )
+        self.charged = []
+        self.substep_dts = []
+
+    def charge(self, xi):
+        self.charged.append(np.asarray(xi, dtype=float).copy())
+        return self._first_xi.copy()
+
+    def substep(self, dt):
+        self.substep_dts.append(float(dt))
+        if self._results:
+            return dict(self._results.pop(0))
+        return {"issued": True}
+
+    def consumed_window_action(self):
+        return self._window_action.copy()
+
+
+def _cut(scale):
+    """One substep result the governor shrank to ``scale``."""
+    return {"issued": True, "governed": True, "governed_scale": float(scale)}
+
+
+def _uncut():
+    """One substep result nothing cut.
+
+    ``governed_scale`` is PRESENT and 1.0 because that is what
+    ``PolicyDeltaController.step`` always returns — the key is seeded on every
+    tick.  An uncut substep that omitted the key would hide the ``dict.update``
+    overwrite this section exists to pin.
+    """
+    return {"issued": True, "governed": False, "governed_scale": 1.0}
+
+
+def _scripted_window(clock, *, substeps, first_scale=None, governor=None):
+    """Run ONE intervened window: real env + real controller + scripted substeps.
+
+    ``first_scale`` is the cut the governor must apply to the FIRST target, or
+    None for a request small enough that nothing is cut.  The magnitude is
+    derived from the live env (``v_max * 1/substep_hz``), so a config change
+    cannot silently turn these tests into no-ops.
+    """
+
+    _, env, backend = _build(clock, hz=10.0, substep_hz=30.0, governor=governor)
+    cap = env.controller.v_max / env.intervention_substep_hz
+    xi = np.zeros(6)
+    xi[0] = cap * 0.5 if first_scale is None else cap / float(first_scale)
+    driver = _ScriptedDriver(substeps, first_xi=xi)
+    env.begin_intervention_window(driver)
+    _, _, _, _, info = env.step(_zeros_action())
+    return info, driver, env, backend
+
+
+def test_a_cut_that_happens_only_in_a_substep_still_reaches_the_window(clock):
+    """First half of the defect: ``governed`` was missing from the OR list.
+
+    ``held``/``clipped`` were OR-ed across substeps and ``governed`` was not, so
+    a log line saying ``governed=0`` meant "the FIRST target was not cut" — and
+    the first target is precisely the tick that, with the shipped config, is
+    structurally never cut.  The claim an operator reads it as ("nothing in this
+    window was truncated") was therefore unsupported by the data.
+    """
+
+    info, _, _, _ = _scripted_window(clock, substeps=[_cut(0.7), _uncut()])
+
+    assert info["governed"] is True
+    assert info["governed_scale"] == pytest.approx(0.7, rel=1e-6)
+
+
+def test_a_cut_that_happens_only_at_the_first_target_survives_the_merge(clock):
+    """Second half: ``dict.update`` let a later 1.0 erase the first target's cut.
+
+    Not a corner case — the real substeps always report a ``governed_scale``
+    (``PolicyDeltaController`` seeds the key on every tick), so an uncut substep
+    after a cut first target overwrote it every single time.
+    """
+
+    info, _, _, _ = _scripted_window(
+        clock, first_scale=0.5, substeps=[_uncut(), _uncut()]
+    )
+
+    assert info["governed"] is True
+    assert info["governed_scale"] == pytest.approx(0.5, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    "first_scale, substep_scales, expected",
+    [
+        (0.9, [0.7, 1.0], 0.7),    # the tightest cut is a substep
+        (0.5, [1.0, 1.0], 0.5),    # the tightest cut is the first target
+        (None, [0.4, 0.8], 0.4),   # and it is not simply the last one seen
+        (0.6, [0.6, 0.6], 0.6),    # a tie is still that same number
+    ],
+)
+def test_governed_scale_is_the_tightest_cut_anywhere_in_the_window(
+    clock, first_scale, substep_scales, expected
+):
+    """``governed_scale`` is a MINIMUM over the window, not a last-write-wins.
+
+    It answers "how hard was this window cut at worst".  A mean or a last value
+    would let a single 1.0 tick hide a 0.4 one, which is the same
+    undiagnosable-truncation failure ``governed`` exists to remove.
+    """
+
+    substeps = [_uncut() if s >= 1.0 else _cut(s) for s in substep_scales]
+
+    info, _, _, _ = _scripted_window(
+        clock, first_scale=first_scale, substeps=substeps
+    )
+
+    assert info["governed_scale"] == pytest.approx(expected, rel=1e-6)
+    # The flag and the number must never disagree: a consumer that reads only
+    # one of them must not get a different answer from a consumer reading the
+    # other (run_real_hil.py writes both to the same CSV row).
+    assert info["governed"] is (expected < 1.0)
+
+
+def test_an_uncut_window_reports_no_governing_at_all(clock):
+    info, _, _, _ = _scripted_window(clock, substeps=[_uncut(), _uncut()])
+
+    assert info["governed"] is False
+    assert info["governed_scale"] == 1.0
+    assert info["intervention_substeps"] == 2
+
+
+def test_a_window_with_no_substeps_keeps_the_first_targets_governing(clock):
+    """``substep_hz == HZ`` leaves no room, so nothing may be folded in.
+
+    The fold-in must not invent a ``governed_scale`` for a window that never ran
+    a substep; the first target's own number has to arrive unchanged.
+    """
+
+    wrapper, env, _ = _build(
+        clock, hz=10.0, substep_hz=10.0, leader_step=0.01, governor={"v_max": 0.02}
+    )
+    wrapper.step(_zeros_action())          # engage / anchor
+
+    seen = []
+    real_step = env.controller.step
+
+    def spy(xi, dt=None):
+        q_cmd, ctrl_info = real_step(xi, dt)
+        seen.append(float(ctrl_info["governed_scale"]))
+        return q_cmd, ctrl_info
+
+    env.controller.step = spy
+    _, _, _, _, info = wrapper.step(_zeros_action())
+
+    assert len(seen) == 1                  # one target, no substep
+    assert info["intervention_substeps"] == 0
+    assert info["governed"] is True        # not vacuous: the cap really did bind
+    assert info["governed_scale"] == seen[0]
+
+
+def test_the_policy_path_reports_only_its_own_governing(clock):
+    """A policy step must not acquire substep aggregate keys, ever."""
+
+    wrapper, env, _ = _build(
+        clock,
+        hz=10.0,
+        substep_hz=30.0,
+        governor={"v_max": 0.02},
+        deadman=_FakeDeadman(engaged=False),
+    )
+    action = np.zeros(7, dtype=np.float32)
+    action[0] = 1.0
+
+    _, _, _, _, info = wrapper.step(action)
+
+    assert env._intervention_driver is None
+    assert "intervention_substeps" not in info
+    assert info["governed"] is True
+    # dt=None means the NOMINAL 1/HZ cap, NOT the 1/substep_hz one: 0.02*0.1 =
+    # 0.0020 m allowed against a full-scale 0.0125 m request.
+    expected = 0.02 * (1.0 / env.hz) / env.action_scale[0]
+    assert info["governed_scale"] == pytest.approx(expected, rel=1e-6)
+
+
+def test_a_held_first_target_never_gains_governing_from_a_substep(clock):
+    """A held window takes the pre-substep branch and reports no governor keys.
+
+    Reporting a substep's ``governed_scale`` on a held window would claim the
+    rate cap truncated a command that was never issued at all.
+    """
+
+    wrapper, env, backend = _build(
+        clock, hz=10.0, substep_hz=30.0, leader_step=0.01, governor={"v_max": 0.02}
+    )
+    wrapper.step(_zeros_action())          # engage / anchor
+    issued_before = len(backend.commands)
+
+    env.request_hold("EXTERNAL_HOLD")
+    _, _, _, _, info = wrapper.step(_zeros_action())
+
+    assert info["held"] is True
+    assert info["reject_reason"] == "EXTERNAL_HOLD"
+    assert "intervention_substeps" not in info
+    # _apply_action's hold branch returns no governor keys of its own, so a held
+    # window reports step()'s DEFAULTS — not values synthesized from a substep
+    # aggregate that does not exist. The defaults exist so the info schema does
+    # not depend on which branch ran (same rule as held/clipped); a held window
+    # commanded nothing, so "not governed, scale 1.0" is the honest reading.
+    assert info["governed"] is False and info["governed_scale"] == 1.0
+    assert len(backend.commands) == issued_before
+
+
+def test_the_real_intervention_path_reports_a_substep_only_cut(clock):
+    """The same defect end to end: real driver, real controller, no scripting.
+
+    The FIRST engaged window is the one real-path case where the two sources can
+    be told apart.  ``_engage`` anchors on the very leader sample the first
+    target is built from, so that target is the exact ZERO delta and cannot be
+    governed, while every substep afterwards sees leader motion.  ``v_max`` is
+    tightened because with the shipped value a paced request never reaches the
+    cap — the same reason the 2026-07-30 ARMED run logged ``governed=0`` in
+    every window.
+    """
+
+    wrapper, env, _ = _build(
+        clock, hz=10.0, substep_hz=30.0, leader_step=0.01, governor={"v_max": 0.02}
+    )
+    seen = []
+    real_step = env.controller.step
+
+    def spy(xi, dt=None):
+        q_cmd, ctrl_info = real_step(xi, dt)
+        seen.append(float(ctrl_info["governed_scale"]))
+        return q_cmd, ctrl_info
+
+    env.controller.step = spy
+    _, _, _, _, info = wrapper.step(_zeros_action())
+
+    assert info["intervention_substeps"] == 2
+    assert len(seen) == 3
+    assert seen[0] == 1.0, "the engage-edge first target is a zero delta"
+    assert all(s < 1.0 for s in seen[1:]), "only the substeps are cut here"
+    assert info["governed"] is True
+    assert info["governed_scale"] == pytest.approx(min(seen), rel=1e-6)
+
+
+# =========================================================================== #
+# 10. recorded action vs executed motion — the two places they can disagree    #
+# =========================================================================== #
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN GAP (adversarial review 2026-07-30): InterventionBudget.take "
+        "charges the REQUEST, so any gate BELOW the budget that shrinks the "
+        "commanded step leaves info['intervene_action'] overstating the motion. "
+        "GelloIntervention._paced_request argues this away for the GOVERNOR "
+        "only; the IK line search is not covered by that argument and reports "
+        "nothing (governed stays False). Fixing it needs a refund/commit path "
+        "in leader_stream.InterventionBudget, i.e. outside ur7e_env.py."
+    ),
+)
+def test_a_line_search_shrink_must_not_be_left_out_of_the_recorded_action(clock):
+    """저장 액션 == 실행 액션, when the JOINT gate (not the governor) is binding.
+
+    ``PolicyDeltaController``'s line search shrinks the task step until
+    ``max|dq| <= dq_step_max``.  It fires whenever the requested step needs more
+    joint travel than the (dt-scaled) gate allows — reachable by shrinking the
+    gate, as done deterministically here, or at the shipped gate by a
+    poorly-conditioned Jacobian, which is the same branch (commit 4197f5b
+    measured the pre-line-search STEP_LIMIT storm at sigma=0.56, i.e. nowhere
+    near a singularity).
+
+    The budget has already been charged with the full request by then, and
+    ``consumed_action()`` reports the charge, so the transition claims motion
+    the arm never made.  ``governed`` is False here — the governor is not the
+    gate that fired — so there is no observable at all.  Measured over-report
+    at ``dq_step_max=0.002``: 28x.
+    """
+
+    wrapper, env, _ = _build(
+        clock,
+        hz=10.0,
+        substep_hz=30.0,
+        leader_step=0.05,
+        governor={"dq_step_max": 0.002},
+    )
+    wrapper.step(_zeros_action())          # engage / anchor
+
+    p_before = env.controller.tcp_cmd()[:3, 3].copy()
+    _, _, _, _, info = wrapper.step(_zeros_action())
+    commanded = float(
+        np.linalg.norm(env.controller.tcp_cmd()[:3, 3] - p_before)
+    )
+    recorded = float(
+        np.linalg.norm(np.asarray(info["intervene_action"], dtype=float)[:3])
+    ) * env.action_scale[0]
+
+    assert not info["held"], info["reject_reason"]
+    assert info["governed"] is False, "the governor is not the gate under test"
+    assert recorded == pytest.approx(commanded, rel=0.05)
+
+
+def test_a_braked_window_records_zeros_for_a_target_it_already_commanded(clock):
+    """Pins the SIZE of the deliberate under-report in a mid-window dropout.
+
+    ``_drive_intervention_substeps`` records exactly ``zeros(7)`` when the
+    leader dies mid-window, and argues the brake "has already cut whatever
+    motion was in flight".  It cuts FUTURE motion; the first target of the
+    window was issued from a fresh leader sample and its displacement is not
+    unwound by ``request_hold()``/``controller.reset()`` — those re-anchor the
+    integrator ON the stop point.  So the record under-reports a genuinely
+    human-commanded displacement of one paced substep share, i.e. 1/3 of a
+    full-scale action.  Deliberate, bounded, and asserted here so it stays
+    measured instead of assumed.
+
+    (The FIRST engaged window cannot show this — the engage edge makes its first
+    target a zero delta — so this drops out on the second window.)
+    """
+
+    wrapper, env, backend = _build(
+        clock, hz=10.0, substep_hz=30.0, leader_step=0.01
+    )
+    wrapper.step(_zeros_action())          # engage / anchor
+
+    p_before = env.controller.tcp_cmd()[:3, 3].copy()
+    issued_before = len(backend.commands)
+    # Fresh for this window's action() poll, unusable for every substep poll.
+    backend.leader_stale_after = backend.polls + 1
+
+    _, _, _, _, info = wrapper.step(_zeros_action())
+
+    np.testing.assert_array_equal(
+        info["intervene_action"], np.zeros(7, dtype=np.float32)
+    )
+    assert info["held"] is True
+    assert info["reject_reason"] == "GELLO_STALE"
+    assert info["intervention_substeps"] == 0
+    assert backend.holds == 1
+    # The first target DID reach the backend before the brake...
+    assert len(backend.commands) == issued_before + 1
+    # ...and it moved the commanded pose by exactly one paced substep share
+    # (InterventionBudget.nominal_substep_share = ACTION_SCALE/3), which the
+    # zero record omits.
+    commanded = float(
+        np.linalg.norm(env.controller.tcp_cmd()[:3, 3] - p_before)
+    )
+    assert commanded == pytest.approx(env.action_scale[0] / 3.0, rel=1e-5)

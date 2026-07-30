@@ -7,8 +7,13 @@
 real robot"이라고 쓰여 있다). 거기에는 mock 전용 완화값이 하드코딩돼 있다:
 
     RESET_MAX_DIST_RAD = 7.0     (실기 기본 1.5)     <- 리셋이 온 사방을 쓸고 감
-    ACTION_SCALE       = [0.0375, 0.1875, 1.0]       <- 실기 기본의 3배(0.375 m/s)
-    GOVERNOR v_max     = 0.45                        <- 실기 기본 0.15의 3배
+    ACTION_SCALE       = [0.03, 0.10, 1.0]           <- 실기 기본의 2.4배(0.3 m/s)
+    GOVERNOR v_max     = 0.36                        <- 실기 기본 0.15의 2.4배
+
+    (2026-07-30 정정: 이 세 줄은 오래 [0.0375, 0.1875, 1.0] / v_max 0.45 /
+     "3배"로 적혀 있었다. run_rviz_hil.py의 실제 값은 위와 같고 배율은 2.4배다.
+     mock 완화값을 실기 config로 옮기는 사고를 막으려는 경고문인데 그 숫자가
+     틀려 있었다 — 값은 run_rviz_hil.py에서 직접 확인할 것.)
 
 즉 **실기에서 HIL 개입 경로(GelloIntervention)를 검증할 러너가 없었다.**
 이 파일이 그 자리를 채운다. 설계 원칙은 세 가지다.
@@ -28,7 +33,7 @@ real robot"이라고 쓰여 있다). 거기에는 mock 전용 완화값이 하�
 ================================================================================
 * `--arm` 없이는 로봇이 절대 움직이지 않는다. 처음에는 **반드시 `--arm` 없이**
   돌려서 CSV/좌표계/앵커가 말이 되는지 먼저 확인한다. DRY_RUN에서도 아래
-  (a)(b)(c)(d) 검증은 **전부** 가능하다(뒤의 "DRY_RUN으로 검증되는 것" 참고).
+  (a)(b)(c)(d)(e) 검증은 **전부** 가능하다(뒤의 "DRY_RUN으로 검증되는 것" 참고).
 * `--arm`을 붙이면 UR7e가 **물리적으로 움직인다.** 펜던트 E-STOP을 손에 닿는
   곳에 두고, 작업 공간을 비우고, 사람이 팔의 궤적 안에 들어가지 않게 한다.
 * `/forward_position_controller/commands`에 **다른 퍼블리셔가 있으면 안 된다.**
@@ -58,9 +63,37 @@ real robot"이라고 쓰여 있다). 거기에는 mock 전용 완화값이 하�
     cd ~/gello_software && source /opt/ros/humble/setup.bash \
       && source ros2_ur_ws/install/setup.bash
 
+🛑 인터프리터와 PYTHONPATH — 2026-07-30에 실제로 이걸로 한 번 실패했다
+    * 인터프리터는 **시스템 `python3`가 맞다.** 이 러너는 gRPC를 import하지 않으므로
+      CLAUDE.md의 "gRPC 코드는 `/home/laptop3/venvs/gello-hil-actor/bin/python`으로만"
+      규칙의 대상이 아니다. 여기 필요한 것은 ROS 오버레이(`rclpy`,
+      `ur_gello_bringup.ur_kin`)이고, 위 두 `source`가 그것을 준다.
+    * **`PYTHONPATH`를 덮어쓰지 마라.** 덮어쓰면 오버레이가 사라져
+      `RuntimeError: rclpy not available`로 죽는다. 더할 것이 있으면 반드시
+      `PYTHONPATH="...:$PYTHONPATH"`로 **이어붙인다.**
+    * 그 실패의 출처: 오프라인 테스트용 명령
+      (`env -u PYTHONPATH PYTHONPATH="<serl_launcher ...>" .../gello-hil-actor/bin/python
+      -m pytest tests`)을 이 러너에 복사해 오는 것. 그 명령은 **ROS 없이 도는 pytest 전용**
+      이다. 두 명령을 섞지 말 것.
+
 --------------------------------------------------------------------------------
 T1 — 실기 드라이버 + forward_position_controller (브리지 없이)
 --------------------------------------------------------------------------------
+🛑 3-CLI 운영 워크플로우(`run_hil_server.sh` / `run_hil_hardware.sh` /
+   `run_hil_session.sh`)를 여기에 쓰지 마라. `run_hil_hardware.sh`는 UR7e를
+   **STJC**(scaled_joint_trajectory_controller)로 띄운다. 이 러너는 **FPC가 active**여야
+   하고, **컨트롤러 전환 로직이 아예 없다.** STJC 리그에 이 러너를 붙이면:
+
+     - DRY: 아래 preflight가 "구독자가 없다"를 **경고로만** 찍고 그대로 진행한다
+       (발행 자체를 안 하므로 CSV는 정상적으로 채워진다 — 그래서 눈치채기 어렵다).
+     - `--arm`: preflight가 subscribers < 1 을 보고 **거부**한다.
+     - 최악: 구독자 수가 0이 아니어도 **FPC가 active라는 보장은 없다.** 그러면 명령이
+       아무데도 가지 않고 러너는 조용히 성공한 것처럼 보인다.
+
+   그래서 아래 "T1 확인"의 `ros2 control list_controllers`를 **눈으로** 봐야 한다.
+   운영 3-CLI와 이 러너의 차이는
+   serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md §9.6에도 적어 두었다.
+
 권장 (A) 표준 드라이버를 직접, teleop 브리지 없이 띄운다:
 
     ros2 launch ur_robot_driver ur_control.launch.py \
@@ -130,6 +163,17 @@ T4 — 이 러너
     # 4단계: 기본보다 빠르게 (별도 잠금 해제 필요)
     python3 tests/run_real_hil.py --arm --scale 2.0 --allow-fast
 
+    ⚠️ `--scale`의 기본값 0.5는 **안전을 위한 기본이고 판정에 유리한 값이 아니다.**
+       0.5에서는 창 예산이 6.25 cm/s뿐이라 사람 손 속도로 쉽게 포화되고, 포화 표본은
+       frame-map 판정에서 제외되므로 SKIP이 되기 쉽다(2026-07-30 실측: 개입 144스텝
+       중 59.7 %가 포화되어 판정 표본이 58개로 줄고, 축 여기가 2 cm 게이트에 미달했다).
+       frame-map을 **판정**받으려면 `--scale 1.0`으로 올리거나 리더를 더 천천히 움직인다.
+       0.5로 볼 것은 (a)(b)(d)(e)와 명령이 말이 되는지다.
+
+    2026-07-30 실기에서 실제로 돌린 순서:
+       python3 tests/run_real_hil.py --scale 1.0                       # DRY, 개입 272
+       python3 tests/run_real_hil.py --arm --scale 1.0 --max-steps 150  # ARMED, 개입 120
+
 --------------------------------------------------------------------------------
 T5 (선택) — 카메라. `--cameras`를 쓸 때만 필요.
 --------------------------------------------------------------------------------
@@ -149,8 +193,9 @@ T5 (선택) — 카메라. `--cameras`를 쓸 때만 필요.
 
 한 층만 올리면 다음 층이 **조용히 잘라먹는다.** 그러면 버퍼에 저장된 액션은
 "내가 3 cm 갔다"고 주장하는데 실제로는 1 cm만 간 상태가 되어, SERL이 학습하는
-(obs, action, next_obs) 전이가 전부 과장된다. `config.py:56-63`의 INVARIANT과
-`ur7e_env.py:96-109`의 경고가 정확히 이 얘기다.
+(obs, action, next_obs) 전이가 전부 과장된다. `config.py:58-63`의 INVARIANT과
+`ur7e_env.py:94-110`의 경고가 정확히 이 얘기다. (줄번호는 2026-07-30 `4197f5b`
+기준 — 그 커밋이 두 파일의 줄을 크게 밀었다.)
 
 그래서 `--scale s`는 **한 곳에서** 세 층을 함께 곱한다:
 
@@ -193,9 +238,36 @@ CSV 스키마 — 이걸로 무엇을 검증하는가
     나오면 governor/업샘플러가 잘라먹고 있다는 뜻이고, 3층 스케일링이 어긋난
     것이다. `held`/`reject_reason`이 그 원인을 알려준다.
 
+(e) 개입 서브스텝 · governor 절삭 관측 — 컬럼 3개 (2026-07-30 신규)
+    `substeps` = 이 창에서 **서브스텝이 타깃을 갱신한 횟수.** 30 Hz 서브스텝 /
+    100 ms 창의 설계값은 **2**이고, `_apply_action`이 세팅한 첫 타깃을 합치면
+    **창당 타깃 3회 갱신**이다. **0이면 서브스텝 경로가 아예 돌지 않았다** —
+    정책 스텝이거나, held 창이거나, config의 `INTERVENTION.substep_hz <= HZ`로
+    (또는 `INTERVENTION` 블록 부재로) 기능이 꺼진 것이다. 즉 이 컬럼이 "개입이
+    빳빳한가"의 1차 관측 수단이다.
+
+    `governed` / `governed_scale` = governor의 task-space rate cap이 요청을
+    깎았는지와 그 배율. **창 전체 기준**이다: `governed`는 첫 타깃과 모든
+    서브스텝에 대해 OR, `governed_scale`은 그중 **최솟값**(= 창 안에서 가장 센
+    절삭)이다. 최솟값인 이유는 0.7로 깎인 서브스텝이 뒤이은 1.0에 가려지면
+    안 되기 때문이다.
+    ⚠️ 2026-07-30 실기 세 run은 **첫 타깃만 집계하던 코드**로 측정됐다. 그때의
+    `governed` 전부 0은 "창 전체에서 절삭 없음"이 아니라 "첫 타깃에서 절삭
+    없음"만 증명한다 — 서브스텝 2회의 절삭은 그 run에서 관측되지 않았다.
+    개입 창에서 보통 0인 이유: 창 변위 예산(= ACTION_SCALE 1스텝, scale 1.0에서
+    0.0125 m)이 governor 캡(v_max/HZ = 0.0150 m)보다 **더 타이트해서 예산이 먼저
+    묶기 때문**이다. 참고로 같은 커밋이 처음 드러낸 사실 — ACTION_SCALE 헤드룸이
+    축별로만 성립해서 **대각 이동은 상시 절삭된다**(2축 0.849배, 3축 0.693배).
+    정책 경로에서는 이 컬럼이 그 절삭을 잡아낸다.
+
+    `reject_reason == BUDGET_EXHAUSTED`는 그 예산이 소진된 창이고 **held가 아니다.**
+    예산만큼은 정확히 실행됐으므로 `dp_ratio`는 여전히 1.0이다. 포화는 "리더가
+    예산보다 빨랐다"는 뜻이며, 아래 frame-map 판정에서 **제외**된다.
+
 컬럼:
     t_wall, t_mono, episode, step
     intervened, anchored, held, reject_reason
+    substeps, governed, governed_scale
     deadman_engaged, deadman_age_s, gain_latched, gain_live
     leader_age_s, lq0..lq5, leader_grip, leader_tcp_x/y/z
     g_anchor_x/y/z, r_anchor_x/y/z
@@ -215,15 +287,54 @@ anchor/gain/anchored는 `step()` **직후** 값이다. engage 엣지에서 앵�
 
   PASS anchor-latch : ENGAGE 구간 내 앵커 변동 < 1e-9 m
   PASS gain-latch   : ENGAGE 구간 내 gain_latched 변동 없음
-  PASS frame-map    : 최소자승 M이 단위행렬에서 max 0.15 이내(충분히 움직였을 때)
+  PASS frame-map    : "매핑은 단위행렬(래그 이득 alpha 배)"이라는 가설의 상대잔차
+                      < 0.15. 최소자승 M은 **참고 진단으로만** 찍는다 — 판정은
+                      잔차다(3x3을 식별하려 들면 손으로 만든 여기가 약할 때
+                      멀쩡한 시스템을 FAIL로 오판한다. summarize() 주석 참고).
   PASS action-exec  : 개입/비-held 스텝의 dp_ratio 중앙값이 0.85~1.15
   PASS held-rate    : held 비율 < 10%
+
+⚠️ frame-map은 **포화 표본(reject_reason == BUDGET_EXHAUSTED)을 판정에서 제외한다.**
+   왜: alpha는 래그의 **크기**는 흡수하지만 **방향 발산**은 흡수하지 못한다. 예산이
+   소진된 창에서는 명령이 리더의 순간 델타 방향이 아니라 **누적 오차 방향**으로 가고,
+   사람이 나갔다 되돌아오면 L(리더 누적)-R(로봇 누적) 관계가 직선이 아니라
+   **히스테리시스 루프**가 되어 멀쩡한 시스템이 FAIL로 오판된다.
+   2026-07-30 실측(같은 CSV, 표본만 다르게 — 리더가 앵커에서 최대 74.68 cm 나갔고
+   그 run의 예산은 6.25 cm/s였다):
+
+       전체 144표본    alpha 0.227   잔차 0.776   -> FAIL
+       비포화 58표본   alpha 0.992   잔차 0.058   -> 기준 안쪽
+
+   제외가 게이트를 헐렁하게 만드는 것은 아니다: 표본이 줄어 **SKIP으로 떨어질 수 있다.**
+   위 CSV는 지금 코드에서 축 여기가 1.4/3.6/1.4 cm뿐이어서 PASS가 아니라 SKIP이다.
+   **PASS는 다시 천천히 움직여서 받는 것이다.**
+
+📌 조작 지침 — 이걸 안 지키면 판정 표본이 사라진다
+   `X -> Y -> Z` **한 축씩** 5~10 cm를, **초당 3~5 cm로 천천히**, 축을 섞지 말고 움직인다.
+   창 예산은 `ACTION_SCALE[0] * HZ * scale`(scale 1.0에서 12.5 cm/s, 0.5에서 6.25 cm/s)이고
+   그보다 빠르면 그 창은 포화된다. 판정 게이트는 비포화 표본 20개 이상 **그리고**
+   축당 여기 2 cm 초과다. 한 축씩 5~10 cm면 넉넉하다.
+
+📌 2026-07-30 실기 실측 (실제 UR7e). 상세·리그·CSV 경로는
+   serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md §3A:
+
+     DRY   --scale 1.0 (개입 272)  전체 PASS  잔차 0.016  alpha 1.005  표본 141(포화 131 제외)
+     ARMED --scale 1.0 (개입 120)  전체 PASS  잔차 0.130  alpha 0.983  표본  51(포화  69 제외)
+
+   세 run 모두 `substeps`가 개입 창 **전부 2**(창당 타깃 3회 갱신), `governed` 전부 0
+   (단 그 시점 코드는 첫 타깃만 집계했다 — 위 (e) 경고 참고),
+   `dp_ratio` 중앙값 1.000, held 0 %, 스텝 주기 중앙값 101 ms. 조작자 주관 확인
+   "손맛 양호" — 이것은 **보고이고 계측이 아니다.**
+   ⚠️ 이 검증에는 learner도 gRPC도 없었다(정책 zero). 그래서 창 **사이**(RPC 구간)의
+   부드러움은 여기서 **판정되지 않는다** — 08_OPEN_GAPS.md G21 / G24를 볼 것.
 
 추가로 사람 눈으로 확인할 것:
   - DISENGAGE 하면 즉시 정책(zero)으로 돌아가 팔이 멈추는가
   - GUI를 끄면 첫 수신 후 0.5 s 안에 stale 예외로 러너가 종료되고,
     해당 틱에 정책 fallback 명령이 나가지 않는가
   - `--arm`에서 팔이 리더를 따라 "느리지만 매끄럽게" 따라오는가
+    (이 감각의 수치 대응물이 `substeps` 컬럼이다. 손맛이 나빠졌는데 원인을 모르면
+     먼저 `substeps`가 0으로 떨어진 창이 있는지 보라.)
 
 ================================================================================
 이 러너로 검증할 수 없는 것
@@ -236,8 +347,14 @@ anchor/gain/anchored는 `step()` **직후** 값이다. engage 엣지에서 앵�
   - UR 폴트/보호정지 복구, E-STOP 후 재개 시나리오.
   - DRY_RUN에서는: 실제 팔이 명령을 따라오는지(업샘플러->FPC->하드웨어 추종),
     실제 관성/지연, 그리퍼 구동. DRY_RUN은 "명령이 옳게 계산되는가"까지만
-    본다 — 다만 (a)(b)(c)(d)는 전부 DRY_RUN에서 검증된다(컨트롤러의 T_cmd가
+    본다 — 다만 (a)(b)(c)(d)(e)는 전부 DRY_RUN에서 검증된다(컨트롤러의 T_cmd가
     가상으로 진행하므로 명령 궤적이 그대로 나온다).
+  - (e)의 서브스텝 확인도 DRY_RUN에서 그대로 된다: DRY_RUN이 막는 것은 **발행뿐**
+    이고(ros_backend.py:702, 710), 30 Hz 페이싱 루프·리더 재읽기·One-Euro·창 예산·
+    governor는 ARMED와 동일하게 돈다. 그래서 `substeps`가 개입 창에서 2로 나오는지,
+    `dp_ratio`가 1.0인지, 포화가 몇 %인지는 **팔을 움직이지 않고** 먼저 확인할 수 있다.
+    반대로 DRY_RUN이 판정하지 **못하는** 것은 그 매끄러운 명령열을 실제 하드웨어가
+    따라오는지, 그리고 조작자의 손맛이다.
 """
 
 import argparse

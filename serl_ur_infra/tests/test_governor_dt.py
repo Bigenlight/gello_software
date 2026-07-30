@@ -14,7 +14,9 @@ would have let through
     joint step 0.0625 -> 0.1875 rad   (dq_step_max)
 
 i.e. 3x the hardware budget, silently.  The governor is the rate safety net for
-this arm (``ur_env/envs/config.py:79-90``), so that must not be reachable.
+this arm (``ur_env/envs/config.py`` — the ``GOVERNOR`` block and the comment
+above it, currently :87-98; find it by name, the line numbers move), so that
+must not be reachable.
 
 Two things are pinned here.
 
@@ -236,7 +238,8 @@ def test_per_substep_joint_travel_stays_inside_the_scaled_gate(n):
 def test_dq_step_max_scales_proportionally_with_dt():
     """dq_step_max is a per-tick expression of a RATE, not an absolute step.
 
-    config.py:98-101 ties 0.0625 rad @ 10 Hz to the upsampler's 0.0025 rad @
+    config.py's ``UPSAMPLER`` block (its ``max_step_rad`` comment, currently
+    :106-109) ties 0.0625 rad @ 10 Hz to the upsampler's 0.0025 rad @
     250 Hz — both 0.625 rad/s — and the backend cannot emit faster than that, so
     a 30 Hz tick keeping the full 0.0625 rad would only bank command-vs-measured
     lag.  Direct check on the resolver so the intent is pinned, not inferred.
@@ -467,6 +470,17 @@ def test_env_step_surfaces_governed_in_info():
     _, _, _, _, info = env.step(action)  # diagonal: 18% over the allowance
     assert info["governed"] is True
     expected = GOVERNOR["v_max"] * DT / (config.ACTION_SCALE[0] * np.sqrt(2.0))
-    assert info["governed_scale"] == pytest.approx(expected, rel=1e-9)
+    # float32 tolerance, NOT the rel=1e-9 the direct-controller cases above use.
+    # This is the only assertion here that reaches the governor through
+    # ``env.step``, and the action dtype is float32 by contract (run_contract
+    # "action": {"dtype": "float32"} in scripts/run_rlpd_learner_server.py), so
+    # ``xi = action * ACTION_SCALE`` carries ~1e-7 relative float32 error into
+    # the scale. rel=1e-9 is tighter than the arithmetic can be and only passed
+    # by luck of NEP 50 promotion: measured 2026-07-30, numpy 2.2.6 gave
+    # 0.8485281374 (passed) and numpy 1.26.4 gave 0.8485281248 (failed, 1.5e-8
+    # off) for the same code. The regressions this guards against — the cap not
+    # binding at all (1.0) or binding 3x wrong — are orders of magnitude away
+    # from 1e-6, so nothing is lost by loosening it.
+    assert info["governed_scale"] == pytest.approx(expected, rel=1e-6)
     assert info["clipped"] is False and info["held"] is False
     env.close()

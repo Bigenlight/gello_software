@@ -16,16 +16,23 @@ What is different underneath (and why this file exists):
     COMPLIANCE/PRECISION params        no compliance; conservative rate/step caps
     franka error recovery              TODO: UR dashboard/fault handling
 
-Validation status (2026-07-24):
+Validation status:
 - OFFLINE-TESTED: the full control/observation path (scale -> governor -> IK ->
   gates -> commands -> fk obs) passes tests/test_env_fake_backend.py on a
   ROS-free machine (world-frame delta semantics, gripper scale/direction,
   10 Hz pacing, upsampler convergence all asserted).
-- NOT yet validated on a real ROS graph — run tests/run_rviz_fake_rl.py on the
-  robot laptop against mock hardware first (QoS, topic wiring; see VERIFY(hw)
-  comments), and keep config.DRY_RUN=True near a real robot until the
-  PolicyDeltaController is upgraded to the full eef_delta gate stack
-  (README: "PolicyDeltaController 현황 vs eef_delta 본체").
+- REAL HARDWARE (supersedes the 2026-07-24 "not yet validated on a real ROS
+  graph" note this file used to carry): the intervention runner passed on the
+  real UR7e 2026-07-28 (docs/testing/04_HIL_INTERVENTION.md §4.5), the first
+  full policy+intervention E2E ran 2026-07-29 (CLAUDE.md), and the 30 Hz
+  in-window substep path passed ARMED 2026-07-30 (§9). config.DRY_RUN stays
+  True by default and run_real_hil.py still needs an explicit --arm to publish.
+- STILL NOT validated on hardware: the workspace box. The default config leaves
+  ABS_POSE_LIMIT_* at zeros, so the runs above detected a zero-volume box and
+  disabled it (08_OPEN_GAPS.md G1); the measured box lives only in
+  ur_experiments/cube_in_cup.py. PolicyDeltaController is also still the
+  simplified gate stack, not the full eef_delta one (G2; README:
+  "PolicyDeltaController 현황 vs eef_delta 본체").
 """
 
 import queue
@@ -187,12 +194,21 @@ class UR7eEnv(gym.Env):
             intervention_cfg.get("substep_hz", 0.0)
         )
         if self.intervention_substep_hz > 0.0:
-            if self.intervention_substep_hz <= self.hz:
+            # 1.5x, not 1x: _drive_intervention_substeps only refreshes while at
+            # least HALF a substep period is left in the window
+            # (`next_tick < window_end - 0.5 * period`), so the first substep
+            # needs 1.5 periods of room. substep_hz in (hz, 1.5*hz] therefore
+            # runs ZERO substeps while looking enabled — and exactly 1.5*hz is
+            # float-degenerate, yielding 0 or 1 depending on the window's
+            # absolute start instant. Measured 2026-07-30 at HZ=10:
+            # substep_hz 12.0 -> 0 substeps, 15.0 -> 0 or 1, 30.0 -> 2.
+            if self.intervention_substep_hz <= 1.5 * self.hz:
                 print(
                     f"[UR7eEnv] NOTE: INTERVENTION substep_hz "
-                    f"({self.intervention_substep_hz}) does not exceed HZ "
-                    f"({self.hz}) — no substep fits inside a step window, so "
-                    "in-window leader resampling is effectively DISABLED"
+                    f"({self.intervention_substep_hz}) is not above 1.5x HZ "
+                    f"({1.5 * self.hz}) — no substep reliably fits inside a step "
+                    "window, so in-window leader resampling is effectively "
+                    "DISABLED"
                 )
             elif abs(self.hz - NOMINAL_CONTROL_HZ) > 1e-9:
                 # GelloIntervention rations each substep's request with
@@ -506,6 +522,15 @@ class UR7eEnv(gym.Env):
 
     # ------------------------------------------------------------------ #
     # human intervention: 30 Hz leader resampling inside the step window  #
+    #                                                                    #
+    # THIS FILE'S PIECE: hold the one-shot driver, charge its first      #
+    # target (_apply_action, :502-505), pace the window                  #
+    # (_drive_intervention_substeps), harvest what executed (:654).      #
+    # UPSTREAM: GelloIntervention.step -> _open_substep_window           #
+    # (wrappers.py:705, :683).  DOWNSTREAM: driver.substep ->            #
+    # LeaderFilter / InterventionBudget (wrappers.py:618,                #
+    # leader_stream.py:259, :379).  Ordered call chain: the wrappers.py  #
+    # module docstring.                                                  #
     # ------------------------------------------------------------------ #
     def begin_intervention_window(self, driver) -> None:
         """Install a ONE-SHOT substep driver for the NEXT ``step`` call.
@@ -556,6 +581,19 @@ class UR7eEnv(gym.Env):
         Returns the extra ctrl_info this window produced.  Booleans are OR-ed
         across substeps because they are operator/log signals ("did anything
         get clamped/held in this window at all"), not per-tick state.
+        ``governed_scale`` is instead reduced by MINIMUM — "how hard was this
+        window cut at worst" — and the first target's value is folded in by the
+        caller, which is the only scope that sees both.
+
+        VERIFIED on the real UR7e 2026-07-30 (ARMED, ``run_real_hil.py --arm
+        --scale 1.0``, 120 intervened steps, every check PASS): this loop ran
+        ``substeps=2`` in EVERY intervened window (i.e. 3 target updates per
+        window), frame-map residual 0.130 / alpha 0.983, action-exec dp_ratio
+        median 1.000, held 0%, and the operator confirmed the hand feel.  The
+        mid-window brake branch below is NOT covered by that run — held was 0%,
+        so no GELLO dropout was exercised on hardware; it is unit-tested only
+        (tests/test_intervention_substeps.py).  Evidence:
+        docs/testing/04_HIL_INTERVENTION.md §9.
         """
         period = 1.0 / self.intervention_substep_hz
         extra: Dict[str, object] = {"intervention_substeps": 0}
@@ -577,9 +615,19 @@ class UR7eEnv(gym.Env):
                 extra["intervention_substeps"] = (
                     int(extra["intervention_substeps"]) + 1
                 )
-            for key in ("held", "clipped"):
+            for key in ("held", "clipped", "governed"):
                 if result.get(key):
                     extra[key] = True
+            # governed_scale is a MINIMUM, not an OR: it answers "how hard was
+            # this window cut at worst", so a 0.7 substep must not be hidden by
+            # a later 1.0 one.  Seeded from the substeps only; the first
+            # target's value is folded in at the merge site in step(), which is
+            # the only place that can see both.
+            scale = result.get("governed_scale")
+            if scale is not None:
+                extra["governed_scale"] = min(
+                    float(scale), float(extra.get("governed_scale", 1.0))
+                )
             if result.get("reject_reason"):
                 extra["reject_reason"] = result["reject_reason"]
 
@@ -618,11 +666,26 @@ class UR7eEnv(gym.Env):
         if extra.get("intervention_window_braked"):
             # A window whose leader died is a HOLD window, recorded as the exact
             # zero action — the same rule GelloIntervention.action applies when
-            # the leader is already unusable when the window opens.  Reporting
-            # the fraction that escaped before the brake would instead teach the
-            # learner a human command that no human issued, and the brake has
-            # already cut whatever motion was in flight.  The escaped motion is
-            # bounded by this window's budget either way.
+            # the leader is already unusable when the window opens.
+            #
+            # This UNDERSTATES the window, and the cost is not zero. Measured
+            # 2026-07-30: the first target had already commanded 0.004167 m
+            # (= ACTION_SCALE/3, normalised action 0.333) before the brake, and
+            # request_hold() + controller.reset() cut only what was still IN
+            # FLIGHT — they re-anchor the integrator ON the stop point, they do
+            # not rewind the displacement already commanded. (Two earlier
+            # versions of this comment claimed the brake "already cut whatever
+            # motion was in flight" and that reporting it would be "a command no
+            # human issued"; both were wrong — that first target came from a
+            # fresh leader sample, so a human did issue it.) The first
+            # intervened window hides this because the engage anchor makes its
+            # first delta exactly zero; it shows from the second window on.
+            #
+            # Recording zeros is still the choice: it keeps one rule for "the
+            # leader was unusable in this window" whether the failure landed
+            # before or during it, and the understatement is bounded by one
+            # window budget. tests/test_intervention_substeps.py pins the size
+            # so the trade stays visible instead of being rediscovered.
             extra["intervention_window_action"] = np.zeros(7, dtype=np.float32)
         elif int(extra["intervention_substeps"]) >= 1:
             extra["intervention_window_action"] = driver.consumed_window_action()
@@ -652,11 +715,19 @@ class UR7eEnv(gym.Env):
             time.sleep(max(0, (1.0 / self.hz) - dt))
         else:
             ctrl_info = dict(ctrl_info)
-            ctrl_info.update(
-                self._drive_intervention_substeps(
-                    driver, start_time + (1.0 / self.hz)
-                )
+            first_scale = float(ctrl_info.get("governed_scale", 1.0))
+            extra = self._drive_intervention_substeps(
+                driver, start_time + (1.0 / self.hz)
             )
+            # dict.update would let the substeps' governed_scale erase the first
+            # target's. The window's answer is the tightest cut anywhere in it,
+            # so fold the first target in here — this is the only scope that
+            # sees both _apply_action's ctrl_info and the substep aggregate.
+            if "governed_scale" in extra:
+                extra["governed_scale"] = min(
+                    float(extra["governed_scale"]), first_scale
+                )
+            ctrl_info.update(extra)
 
         self._update_currpos()
         ob = self._get_obs()
@@ -676,7 +747,18 @@ class UR7eEnv(gym.Env):
         # Silent clamping is the single hardest failure to diagnose after the
         # fact, so every clamped tick is reported. Present (False) even in fake
         # mode so log schemas do not depend on the run mode.
-        info = {"succeed": bool(reward), "held": False, "clipped": False}
+        # governed/governed_scale get defaults for the same reason held/clipped
+        # do. Without them a HELD window is the ONE window with no governor keys
+        # at all (the hold branch of _apply_action returns early, before any
+        # controller.step), so the info schema would depend on which branch ran
+        # — exactly what the sentence above says it must not do.
+        info = {
+            "succeed": bool(reward),
+            "held": False,
+            "clipped": False,
+            "governed": False,
+            "governed_scale": 1.0,
+        }
         info.update(ctrl_info)
         return ob, int(reward), done, False, info
 

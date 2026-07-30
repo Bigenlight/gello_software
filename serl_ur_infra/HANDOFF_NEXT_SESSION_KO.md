@@ -158,7 +158,7 @@ rs.config().enable_device('147122072740')  ->  MATCHED
 > 정본 설명은 `ros2_ur_ws/launch_cameras.sh` 머리 주석(및
 > `docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`, `docs/testing/06_SENSORS.md`)에 있고,
 > 코드 기본값은 이미 `147122072740` / `243222072700`이다
-> (`_resolve_camera_serials.sh`, `launch_cameras.sh:69-70`, `gello_recorder_gui.py:78-79`).
+> (`_resolve_camera_serials.sh`, `launch_cameras.sh:69-70`, `gello_recorder_gui.py:55-56`).
 
 제품 문자열도 일치한다: `4-4.1 = Depth Camera 435`(plain D435 → cam1),
 `4-4.3 = Depth Camera 435if`(→ cam2 손목).
@@ -216,15 +216,15 @@ rs.config().enable_device('147122072740')  ->  MATCHED
 - **2F-85 그리퍼** — 개폐·방향 확인
 - **GELLO 리더** — 7개 모터
 - **laptop → SSH 터널 → Kanu 100-step gRPC 왕복** — `replay_insert_count:100`, schema hash 양쪽 일치.
-  **단 상대는 zero-action 목 서버**(`model_id=fake-zero-action-v0`, `rlpd_receive_server.py:191`)였다
+  **단 상대는 zero-action 목 서버**(`model_id=fake-zero-action-v0`, `rlpd_receive_server.py:242`)였다
 - **지연/대역폭** — §0 표. 같은 왕복에서 계측
 - **reward classifier 성능** — kanu GPU에서 held-out 채점(§5.2). **크롭 없는 입력** 기준
 
 ### 🟡 코드·단위테스트는 통과, 실기 미검증
 
-- `clip_safety_box` (`ur7e_env.py:334`) — 구현·배선은 됐으나 `run_real_hil.py` 경로에서는 **비활성**(§4.3)
-- `go_to_reset` branch-cut 게이트 (`ur7e_env.py:520`, `ur_kin.wrapped_nearest`)
-- 카메라 첫 프레임 대기 (`_await_first_frames`, `ur7e_env.py:475`)
+- `clip_safety_box` (`ur7e_env.py::UR7eEnv.clip_safety_box`) — 구현·배선은 됐으나 `run_real_hil.py` 경로에서는 **비활성**(§4.3)
+- `go_to_reset` branch-cut 게이트 (`ur7e_env.py::UR7eEnv.go_to_reset`, `ur_kin.wrapped_nearest`)
+- 카메라 첫 프레임 대기 (`ur7e_env.py::UR7eEnv._await_first_frames`)
 - **kanu GPU 쪽 ZMQ 뷰어**(`run_remote_classifier_viewer.sh` + kanu의 `run_remote_reward_classifier_server.sh`) —
   코드는 이제 kanu에도 있지만(§9) **한 번도 안 돌렸다.** 랩톱 CPU 판(위 ✅)으로 충분하다
 
@@ -260,20 +260,24 @@ env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
   PYTHONPATH="$PWD/serl_ur_infra:$PWD/third_party/hil-serl/serl_launcher:$OVERLAY" \
   /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest -q \
   -p no:cacheprovider serl_ur_infra/tests
-# -> 429 passed, 11 skipped  (4.04 s)   ← classifier sidecar 반영 후 실측 (2026-07-29)
+# -> 588 passed, 11 skipped   ← 📌 2026-07-30 작업 트리 실측 (gello-hil-actor, numpy 2.2.6)
 ```
 
-> **🔧 정정 — 이 수는 하루에 두 번 움직였다.** 이전 판은 `333 passed`라고 적었는데
-> 그것은 **`40b99f8` 이전** 값이다. `40b99f8`(recorder take → learner demo 변환)이 **337**로
-> 올렸고, **classifier sidecar 변경**(`tests/test_classifier_sidecar.py` 외)이 **429**로 올렸다.
-> **인용하기 전에 직접 돌려 볼 것.**
+> **🔧 정정 — 이 수는 계속 움직인다. 그리고 인터프리터를 안 적은 passed 수는 무의미하다.**
+> 아래 계보는 전부 **`gello-hil-actor`**(numpy 2.2.6) 기준이다:
+> `43ba314` **333** → `40b99f8`(recorder take → learner demo 변환) **337** →
+> classifier sidecar **429** → 07-30 오전 **497** → `4197f5b`(30 Hz 서브스텝, +82) **579** →
+> 📌 2026-07-30 작업 트리(미커밋 포함) 재실측 **588 passed / 11 skipped**.
+> ⚠️ **같은 코드를 `hilserl`(numpy 1.26.4, jax 0.5.3)로 돌리면 619 passed / 4 skipped다.**
+> 이전 판은 이 절의 기준선을 `429`로 적었다 — 두 단계 낡았다.
+> **인용하기 전에 직접 돌려 보고, 어느 인터프리터인지 같이 적을 것.**
 
 > **🪤 `third_party/hil-serl/serl_launcher`를 PYTHONPATH에서 빼면 조용히 `300 passed, 13 skipped`로 떨어진다.**
 > 사라지는 것이 하필 핵심 테스트 2개(`test_cube_in_cup_config.py`, `test_frame_wrappers.py`)이고,
 > skip 사유가 **"submodule is not checked out"이라고 거짓말을 한다.** 새 체크아웃에서 서브모듈이
-> 정말 미초기화면 296/17이 된다. **녹색이 아니라 passed 수를 볼 것 — 기준선 429에
+> 정말 미초기화면 296/17이 된다. **녹색이 아니라 passed 수를 볼 것 — 위 계보의 현재 기준선에
 > 못 미치면 잘못 돌린 것이다.**
-> *(위 `300 passed, 13 skipped` / `296/17`은 337 시절의 실측이다. sidecar 이후 재측정하지 않았으므로
+> *(위 `300 passed, 13 skipped` / `296/17`은 **337 시절**의 실측이다. 그 뒤 재측정하지 않았으므로
 > 숫자 자체보다 "핵심 테스트가 조용히 사라진다"는 성질을 볼 것.)*
 
 UR·GELLO suite(`ros2_ur_ws/src/*/test`, 11개 파일)는 별도다. 07-28 기록은 **436 passed**이나
@@ -309,9 +313,12 @@ M의 대각 평균 0.871, 비대각 최대 0.084. **결론: 매핑 = I.** 텔레
 
 | 층 | 값 | 출처 |
 | --- | --- | --- |
-| `ACTION_SCALE` | `[0.0125, 0.0625, 1.0]` | `ur_env/envs/config.py:73` |
-| `GOVERNOR` | v_max 0.15 / w_max 0.75 / dq_step_max 0.0625 | `ur_env/envs/config.py:86` |
-| `UPSAMPLER` | hz 250.0, max_step_rad 0.0025 | `ur_env/envs/config.py:98` |
+| `ACTION_SCALE` | `[0.0125, 0.0625, 1.0]` | `config.py::DefaultUR7eEnvConfig.ACTION_SCALE` (:73) |
+| `GOVERNOR` | v_max 0.15 / w_max 0.75 / dq_step_max 0.0625 | `config.py::DefaultUR7eEnvConfig.GOVERNOR` (:94) |
+| `UPSAMPLER` | hz 250.0, max_step_rad 0.0025 | `config.py::DefaultUR7eEnvConfig.UPSAMPLER` (:106) |
+
+*(줄 번호는 `config.py`에 주석이 들어갈 때마다 밀린다 — 심볼 이름으로 찾을 것. 2026-07-30
+`4197f5b` + 후속 주석 작업으로 74줄 이후가 전부 8줄씩 밀렸다.)*
 
 거버너·업샘플러의 조인트 레이트가 둘 다 0.625 rad/s로 맞아떨어진다.
 텔레옵 검증값은 v_max **0.16**(`ur7e_gello_eef.yaml:238`), w_max **1.0**(`:241`),
@@ -329,7 +336,8 @@ max_step_rad **0.0025**(`ur7e_gello.yaml:64`) — 지금 스택은 그보다 빠
 ```
 
 버그가 아니라 구조다. `run_real_hil.py`는 `DefaultUR7eEnvConfig`를 쓰는데 거기
-`ABS_POSE_LIMIT_* = zeros`이고(`config.py:76-77`), 측정된 실제 박스는 액터용 task config인
+`ABS_POSE_LIMIT_* = zeros`이고(`config.py::DefaultUR7eEnvConfig.ABS_POSE_LIMIT_LOW/HIGH`,
+현재 :84-85), 측정된 실제 박스는 액터용 task config인
 `ur_experiments/cube_in_cup.py:162-167`에만 있다. 코드가 0-부피 박스를 감지하고 "한 점에 팔을
 고정하느니 끄겠다"고 판단한다 — 올바른 처리다.
 
@@ -373,8 +381,8 @@ learner 쪽은 "어떤 확률 분포에 threshold를 둘 것인가"를 쟀다. �
 export 스크립트가 `preprocess_frame(frame, crop=None)`을 넘겨 **1280×720 전체를 그대로 128×128로**
 찌그러뜨린다(종횡비 왜곡).
 
-**추론**(우리 `ur_env/envs/ur7e_env.py::get_im()`, `:743`): JPEG decode → **`IMAGE_CROP` 적용**
-(cam1 `img[20:670,340:990]` 650×650, cam2 `img[0:720,420:1140]` 720×720, `cube_in_cup.py:211-214`)
+**추론**(우리 `ur_env/envs/ur7e_env.py::UR7eEnv.get_im`): JPEG decode → **`IMAGE_CROP` 적용**
+(cam1 `img[20:670,340:990]` 650×650, cam2 `img[0:720,420:1140]` 720×720, `cube_in_cup.py::CubeInCupConfig.IMAGE_CROP`, 현재 :217-221)
 → 128×128 리사이즈. **완전히 다른 그림을 먹인다.**
 
 3중 독립 확인:
@@ -480,11 +488,11 @@ export 스크립트가 `preprocess_frame(frame, crop=None)`을 넘겨 **1280×72
 아래는 해결 전 기록이다. 두 결함이 겹쳐 있었고, 둘 다 고쳐야 gRPC 경로가 살았다.
 
 **(1) 디렉터리를 못 받는다.** `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)이
-`os.path.isfile`을 요구한다(`:151`). 정본 `cube_in_cup_all3/checkpoint_150`은 **orbax OCDBT 디렉터리**라
+`os.path.isfile`을 요구한다(해결 전 코드; 지금은 `:153` 주석이 그 사실을 기록한다). 정본 `cube_in_cup_all3/checkpoint_150`은 **orbax OCDBT 디렉터리**라
 로드 시도조차 못 하고 `FileNotFoundError`로 죽는다.
 
 > **🪤 `--expected-classifier-sha256`로 우회되지 않는다.** `RewardClassifierRuntime.__init__`은
-> 기대 SHA를 줬든 말든 `checkpoint_sha256(self.checkpoint_path)`를 **무조건 먼저 호출한다**(`:289`).
+> 기대 SHA를 줬든 말든 `checkpoint_sha256(self.checkpoint_path)`를 **무조건 먼저 호출한다**(현재 `:347`).
 > 옛 판 문서에 "그전까지는 SHA를 명시하면 된다"고 적혀 있었는데 **틀렸다.**
 > **디렉터리 인식(재귀 해시)을 넣는 것 말고 우회로는 없다.**
 
@@ -509,7 +517,7 @@ gRPC 경로도 된다는 증거가 아니다.** 뷰어는 이미 Jul-27로 넘�
 
 ### 5.4 threshold — 0.85 → 0.5 → **0.2**
 
-현재 `DEFAULT_REWARD_THRESHOLD = 0.2` (`ur_env/rlpd_receive_server.py:73`, 커밋 `1b02857`).
+현재 `DEFAULT_REWARD_THRESHOLD = 0.2` (`ur_env/rlpd_receive_server.py:75`, 커밋 `1b02857`).
 
 경위: 0.85는 근거 없이 잡힌 값이었다 → 07-28 측정으로 0.5(`53d5cf6`) → **07-29 누출 감사(`921a155`)에서
 07-28 근거 수치 상당수가 뒤집혔다**(0724 failure 281프레임이 전부 학습 데이터였고, 0720 val split을
@@ -907,7 +915,8 @@ EXPECTED_MODEL_ID=fake-zero-action-v0 ./run_hil_actor.sh --deadman topic --arm -
 
 ### E. 남은 액터 결함 (전부 미수정)
 
-1. **전역 ESC 리스너** (`ur_env/envs/ur7e_env.py:197-208`) — 데드맨과 **별개**다.
+1. **전역 ESC 리스너** (`ur_env/envs/ur7e_env.py::UR7eEnv.__init__`의 pynput 블록,
+   `grep -n "keyboard.Listener" ur_env/envs/ur7e_env.py` — 2026-07-30 기준 :256-267) — 데드맨과 **별개**다.
    아무 창에서 ESC를 누르면 `self.terminate`가 서고 에피소드가 끝난다.
 2. `run_real_hil.py`의 frame-map 판정이 포화 표본을 안 거른다(§4.1) — 오진 유도.
 3. actor/learner threshold 불일치 가드 없음(§5.4).
@@ -976,9 +985,9 @@ EXPECTED_MODEL_ID=fake-zero-action-v0 ./run_hil_actor.sh --deadman topic --arm -
 2,037 transitions로 변환했고 사용자가 `take_23` 제외 전부를 success로 승인했다. 영구
 artifact는 laptop3와 Kanu strict loader를 통과했고 SHA256 `f9718558…032fa`가 일치한다.
 
-새로 actor 형식으로 직접 녹화하는 경로도 있다 — `ur_env/remote_actor.py::_dump_data`(`:189`)가 `--checkpoint-path`를 받으면
+새로 actor 형식으로 직접 녹화하는 경로도 있다 — `ur_env/remote_actor.py::_dump_data`(현재 :424)가 `--checkpoint-path`를 받으면
 `<ckpt>/actor_data/<run_id>/replay/data_<step>.pkl`을 남기고 `load_demo_pickles`가 그 형식을 받는다.
-**단 `buffer_period`가 0이면 아무것도 안 쓴다**(`ur_experiments/cube_in_cup.py:265`) — **CLI 플래그도 없다.**
+**단 `buffer_period`가 0이면 아무것도 안 쓴다**(`ur_experiments/cube_in_cup.py`의 `buffer_period`, 현재 :271) — **CLI 플래그도 없다.**
 새 actor 녹화 경로를 택할 때의 선결 조건이 이것이다.
 
 또한 학습 시작 게이트는 **online replay ≥ 100 AND offline demo ≥ 1**이다. 둘 다 필요하다.
@@ -1014,7 +1023,7 @@ canonical observation v2: `state (1,19) float32`, `cam1`/`cam2 (1,128,128,3) uin
 | 그리퍼 `:54321`은 클라이언트 **하나만** | 반드시 `Ctrl-C`. **`kill -9` 금지** (FIN-WAIT-2가 재접속을 30–45초 굶긴다) |
 | `/joint_states`의 name 순서가 canonical이 아님 | 실제: `[shoulder_lift, elbow, wrist_1, wrist_2, wrist_3, shoulder_pan]`. **name으로 매핑할 것** |
 | 없는 카메라 시리얼로 바인딩 | 조용히 안 뜬다. 이제 자동 해석된다(§2) |
-| 테스트가 "녹색"인데 통과 수가 적음 | serl_launcher 누락. **429가 아니면 잘못 돌린 것**(§3) |
+| 테스트가 "녹색"인데 통과 수가 적음 | serl_launcher 누락. **§3 계보의 현재 기준선(2026-07-30 `gello-hil-actor` 588/11)에 못 미치면 잘못 돌린 것**(§3) |
 | `checkpoint_150` 디렉터리가 5개 | `cube_in_cup_all3`만 우리 것(§5.2) |
 | 뷰어의 확률과 learner의 reward가 다름 | 서로 다른 체크포인트·다른 전처리다(§5.3, §6) |
 

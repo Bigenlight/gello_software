@@ -15,7 +15,8 @@
 > `clip_safety_box`는 **RL 경로 전용**이고 EEF 텔레옵에는 적용되지 않는다.
 >
 > 반대 방향도 참이다: RL 쪽 속도 3층(`ACTION_SCALE`/`GOVERNOR`/`UPSAMPLER`)은
-> **이 문서의 검증된 텔레옵 값에 맞춰 고정**돼 있다 (`config.py:65-108`). 여기 §2.1의
+> **이 문서의 검증된 텔레옵 값에 맞춰 고정**돼 있다 (`config.py`의 `ACTION_SCALE` /
+> `GOVERNOR` / `UPSAMPLER` 세 블록 + 각 상단 주석, 현재 :65-116 — 심볼로 찾을 것). 여기 §2.1의
 > yaml 값이 RL 쪽 상한의 근거이므로, 이 값을 바꾸면 RL 쪽도 같이 재검토해야 한다.
 
 ```bash
@@ -141,7 +142,7 @@ ros2 param set /gello_ur_bridge pos_scale 0.5
 
 - 라이브로 바꾼 값은 **런치를 다시 띄우면 사라진다.** 영구 반영은 yaml + 재빌드.
 - `pos_scale`은 ENGAGED 중에 바꾸면 진행 중 스트로크가 미끄러진다. GUI는 **disengage/engage
-  순간에만** 커밋한다 (`ur7e_gello_eef.yaml:200` 근처 주석, GUI A안).
+  순간에만** 커밋한다 (`ur7e_gello_eef.yaml`의 `pos_scale` 블록 주석 근처, GUI A안).
 - 설정 후 반드시 확인:
 
 ```bash
@@ -209,7 +210,8 @@ ros2 topic echo --once /gello_ur_bridge/eef/commanded_pose    # 우리 FK 기준
 - 어긋나면: 상대 텔레옵에는 대체로 무해하지만(왕복 항등이 우리 DH 안에서 닫힘) **절대 좌표
   정밀도를 기대하면 안 된다.** mm를 크게 넘으면 P7 진행 전 에스컬레이션.
 - 이것은 **HIL-SERL에 직접 영향을 준다**: RL env의 `TCP_POSE_SOURCE` 기본이 `"driver"`
-  (`config.py:132`, `cube_in_cup.py:128`)이므로 관측은 **벤더 FK**로 오는데, 명령 경로와
+  (`config.py::DefaultUR7eEnvConfig.TCP_POSE_SOURCE` :211, `cube_in_cup.py:128`)이므로
+  관측은 **벤더 FK**로 오는데, 명령 경로와
   개입 앵커는 **우리 DH**를 쓴다. 두 계가 다르면 관측과 명령이 서로 다른 좌표계 위에 있게
   된다. → `08_OPEN_GAPS.md` G7
   (오프라인 실측으로 이 불일치의 크기는 **중앙값 0.6 mm**로 확인됐다 — G7 참조.

@@ -10,7 +10,7 @@
 > production 승인은 아니다. 최신 판정은
 > [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)에 있다.
 
-### 현황 요약 (2026-07-29 판정 + **2026-07-30 신규 G24/G25**, 머지 `3f199d4` 이후)
+### 현황 요약 (2026-07-29 판정 + **2026-07-30 G24 실기 PASS · 신규 G25/G26 · 적대적 검수 신규 G27/G28/G29**, 머지 `3f199d4` 이후)
 
 | | 갭 | 07-27 | **지금** |
 |---|---|---|---|
@@ -37,8 +37,13 @@
 | **G21** | **첫 publish/동시 learner가 actor RPC를 막음** | (미발견) | 🔴 replay 201에서 실제 `DEADLINE_EXCEEDED` — 아래 |
 | **G22** | **commissioning ENGAGED gate가 policy-first 시작을 막음** | (미발견) | 🟠 wrapper는 policy-first 지원, launcher UX 미분리 |
 | **G23** | **success 후 scene reset WAIT/Resume와 verdict GUI 없음** | (미발견) | 🔴 reset 뒤 즉시 새 episode |
-| **G24** | **개입 손맛 — 타깃 갱신율이 낮아 매 주기 가속/제동/정지** | (미발견) | 🟠 **신규 (07-30)** 오프라인 실측 완료, 코드 조치 진행 중. 나머지 절반은 **G21 종속** |
-| **G25** | **`test_env_fake_backend.py`가 pytest에서 0개 수집된다** | (미발견) | 🟠 **신규 (07-30)** 10 Hz 페이싱·업샘플러 예산 단언이 **전부 미실행** |
+| **G24** | **개입 손맛 — 타깃 갱신율이 낮아 매 주기 가속/제동/정지** | (미발견) | 🟡 **코드 조치 커밋 + 실기 3 run PASS (07-30, `4197f5b`)** — 조작자 확인 완료. 남은 것: 예산 소진 후 HOLD는 **G21 종속**, mock 루프 0회, 박스 꺼진 상태로 arm(G1) |
+| **G25** | **`test_env_fake_backend.py`가 pytest에서 0개 수집된다** | (미발견) | 🟠 **신규 (07-30) · 여전히 열림** 10 Hz 페이싱·업샘플러 예산 단언이 **전부 미실행**. 단 신규 `test_intervention_substeps.py`(16)가 서브스텝 경로는 덮었다 |
+| **G26** | **`ACTION_SCALE` 헤드룸이 축별로만 성립 — 대각 이동이 상시 절삭된다** | (미발견) | 🟠 **신규 기재 (07-30)** 기존 결함이고 우리 변경과 무관. 2축 **0.849배**, 3축 **0.693배**. 이제 `info["governed"]`로 보이지만 **실기 미관측** |
+| **G26** (보강) | — | — | 🛑 **개입 경로에서는 `governed`로도 절삭이 관측될 수 없다** — 아래 G26 "실기 관측 상태" |
+| **G27** | **line search 축소가 저장 액션에 반영되지 않는다 (최대 28x 과대 진술)** | (미발견) | 🔴 **신규 (07-30 적대적 검수)** 예산은 **요청**을 과금하고 IK line search는 그보다 더 깎는데 `governed`는 **False**로 남는다 → **관측 수단 0**. `strict=True` xfail로 못 박음 |
+| **G28** | **브레이크 창이 이미 실행한 사람 명령을 과소 진술한다** | (미발견) | 🟡 **신규 (07-30)** 리더가 창 중간에 죽으면 기록은 `zeros(7)`인데 첫 타깃은 이미 **0.004167 m**(정규화 0.333)를 명령했다. 의도된 트레이드이고 한 창 예산으로 유계 |
+| **G29** | **`substep_hz ∈ (HZ, 1.5*HZ]`가 조용히 비활성** | (미발견) | 🟢 **NOTE 임계값 정정됨 (07-30).** 실제 임계는 `1.5*HZ`인데 시작 NOTE는 `HZ`에서만 떴다. 도달성 사실상 0(config 30.0 고정, CLI 미노출) |
 
 ```bash
 export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
@@ -59,8 +64,8 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 > **박스를 켠 채로 돈 것이 아니다.**
 >
 > 2026-07-28에 팔을 움직인 것은 `serl_ur_infra/tests/run_real_hil.py`이고, 이 러너는
-> `DefaultUR7eEnvConfig`를 base로 쓴다 (`:296`). 그 기본값은
-> `ABS_POSE_LIMIT_LOW/HIGH = np.zeros((6,))` (`config.py:76-77`)이다.
+> `DefaultUR7eEnvConfig`를 base로 쓴다 (`run_real_hil.py::build_config`). 그 기본값은
+> `ABS_POSE_LIMIT_LOW/HIGH = np.zeros((6,))` (`config.py::DefaultUR7eEnvConfig.ABS_POSE_LIMIT_LOW/HIGH`, 현재 :84-85)이다.
 > `_build_safety_box()`의 **REFUSE-DON'T-CLAMP** 설계상 0-부피 박스는 클램프하지 않고
 > **박스를 끄고 경고만 찍는다.** 즉 그 세션 내내 워크스페이스 클리핑이 없었다.
 >
@@ -75,10 +80,10 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 
 | | 위치 |
 |---|---|
-| 박스 구성·검증 | `UR7eEnv._build_safety_box()` (`ur7e_env.py:213-297`) |
-| 공개 클립 (upstream 시그니처) | `UR7eEnv.clip_safety_box(pose7) -> pose7` (`:334`) |
-| 컨트롤러 훅 (4×4 어댑터) | `UR7eEnv._clip_command_pose(T) -> (T, clipped)` (`:356`) |
-| 배선 | `PolicyDeltaController(..., clip_pose=self._clip_command_pose)` (`:188`), 적용 지점 `policy_delta_controller.py:140-141` |
+| 박스 구성·검증 | `ur7e_env.py::UR7eEnv._build_safety_box` |
+| 공개 클립 (upstream 시그니처) | `ur7e_env.py::UR7eEnv.clip_safety_box(pose7) -> pose7` |
+| 컨트롤러 훅 (4×4 어댑터) | `ur7e_env.py::UR7eEnv._clip_command_pose(T) -> (T, clipped)` |
+| 배선 | `UR7eEnv.__init__`의 `PolicyDeltaController(..., clip_pose=self._clip_command_pose)`, 적용 지점 `policy_delta_controller.py::PolicyDeltaController.step`의 `clip_pose` 호출 |
 | 회귀 테스트 | `tests/test_clip_safety_box.py` — 📌 2026-07-29 재실행 **26 passed** |
 | **박스 값이 있는 곳** | **`ur_experiments/cube_in_cup.py:162-167`뿐.** `DefaultUR7eEnvConfig`는 0벡터 = 비활성 |
 
@@ -116,12 +121,12 @@ TCP_OFFSET_XYZ_RPY  = [0, 0, 0, 0, 0, 0]
 > `TCP_POSE_SOURCE → "fk"`, `TCP_OFFSET_XYZ_RPY → [0,0,0.174,0,0,0]`,
 > z 한계 −0.174 (**0.011 … 0.376**), `PolicyDeltaController`가 `fk(q) @ T_tool`에서 적분.
 >
-> ⚠️ `cube_in_cup.py:126`의 주석은 이 구간을 `0.0045 .. 0.376`이라고 적고 있는데
-> **산술이 낡았다** — z 바닥이 `0.1785`에서 `0.185`로 올라갈 때 같이 갱신되지 않았다.
-> `0.185 − 0.174 = 0.011`이 맞다. (코드 주석 수정은 이 문서 소유 범위 밖 → 부록)
+> 🟢 **정정 (📌 2026-07-30 확인).** 이전 판은 `cube_in_cup.py:126`의 주석이 이 구간을
+> `0.0045 .. 0.376`이라고 적어 산술이 낡았다고 기재했다. **그 주석은 이미 고쳐졌다** —
+> 지금은 `(0.011 .. 0.376)`이고 `0.185 − 0.174 = 0.011`과 일치한다. 부록의 해당 항목도 닫혔다.
 >
 > `_build_safety_box()`가 `TCP_OFFSET`이 0이 아닌데 박스가 켜져 있으면 경고를 찍는다
-> (`ur7e_env.py:285-297`). **경고일 뿐 막지는 않는다.**
+> (`ur7e_env.py::UR7eEnv._build_safety_box` 말미의 `TCP_OFFSET_XYZ_RPY` 경고). **경고일 뿐 막지는 않는다.**
 
 > ### 🔧 z 바닥이 2026-07-27에 한 번 더 정정됐다 (`0.1785` → `0.185`, commit `ee3240e`)
 > 처음에는 "관측 최솟값 = 테이블"이라고 보고 `0.1785`를 썼다. **틀렸다.** 그 최솟값의
@@ -168,18 +173,18 @@ TCP_OFFSET_XYZ_RPY  = [0, 0, 0, 0, 0, 0]
 ### 사실
 
 `serl_ur_infra/README.md`의 현황표를 코드로 재확인했다
-(`serl_ur_infra/ur_env/envs/policy_delta_controller.py:1-20`, `:101-134`):
+(`serl_ur_infra/ur_env/envs/policy_delta_controller.py` 모듈 docstring + `PolicyDeltaController.step`):
 
 | 기능 | `eef_delta` 본체 (텔레옵) | `PolicyDeltaController` (RL) |
 |---|---|---|
 | 속도 거버너 v_max/w_max | ✅ | ✅ |
-| 관절 리밋 게이트 | ✅ | ✅ (`:105`) |
-| 스텝 게이트 → HOLD | ✅ | ✅ (`:134` `STEP_LIMIT`) |
-| **IK** | **branch-lock 해석 IK** (8분기 고정, merge point 처리, 가중 최근접) | **`ik_numeric` seed 방식만** (`:101-104`) |
+| 관절 리밋 게이트 | ✅ | ✅ (`::step`의 `within_joint_limits`) |
+| 스텝 게이트 → HOLD | ✅ | ✅ (`::step`의 `_hold(info, "STEP_LIMIT")`) |
+| **IK** | **branch-lock 해석 IK** (8분기 고정, merge point 처리, 가중 최근접) | **`ik_numeric` seed 방식만** (`::step`의 `ik_numeric(T_des, self.q_cmd)`) |
 | **`sigma_min` 특이점 감속** | ✅ | ❌ |
 | **keepout 존** | ✅ | ❌ |
 | **anti-windup lag 클램프** | ✅ | ❌ |
-| **해석적 line search** | ✅ | ❌ (수치 축소 line search로 대체, `:108-134`) |
+| **해석적 line search** | ✅ | ❌ (수치 축소 line search로 대체 — `::step`의 `---- line search ----` 블록) |
 | **워크스페이스 박스** | (keepout으로 대체) | ❌ (= G1) |
 
 README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**, 그리고 TODO 목록에
@@ -205,8 +210,8 @@ README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**
    | 층 | 값 | 근거 |
    |---|---|---|
    | `ACTION_SCALE` | `[0.0125, 0.0625, 1.0]` → 10 Hz에서 0.125 m/s · 0.625 rad/s | `config.py:73` |
-   | `GOVERNOR` | `v_max 0.15 / w_max 0.75 / dq_step_max 0.0625` (양축 1.200x 헤드룸) | `config.py:86-90` |
-   | `UPSAMPLER` | `hz 250.0 / max_step_rad 0.0025` (= 0.625 rad/s) | `config.py:98-108` |
+   | `GOVERNOR` | `v_max 0.15 / w_max 0.75 / dq_step_max 0.0625` (양축 1.200x 헤드룸) | `config.py::GOVERNOR` (:94-98) |
+   | `UPSAMPLER` | `hz 250.0 / max_step_rad 0.0025` (= 0.625 rad/s) | `config.py::UPSAMPLER` (:106-116) |
 
    **세 층의 비율을 유지한 채로만 움직인다.** `run_real_hil.py --scale`이 그렇게 한다.
    한 층만 올리면 다음 층이 조용히 잘라내고 "저장 == 실행" 불변식이 깨진다.
@@ -224,15 +229,16 @@ README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**
 > ### 🔧 정정
 > 이전 판: *"`URRosBackend`가 트리거 토픽을 구독하지 않는다. 미구현."* — commit `6a0b127`에서
 > 구현됐다. `GRIP_CLOSE_THR = 0.7` / `GRIP_OPEN_THR = 0.3`
-> (`wrappers.py:219-220`, `:323-325`)도 더 이상 데드 코드가 아니다.
+> (`wrappers.py::GelloIntervention` 클래스 상수 + `::_expert_gripper`)도 더 이상 데드 코드가 아니다.
 
 ### 지금의 사실
 
 `URRosBackend`가 `/gripper/gripper_client/target_gripper_width_percent`를 별도 구독하고
 `merge_gello_state()`가 관절 6 + 트리거 1 = 7요소로 합친다
-(`ros_backend.py:81`, `:90`, `:362`). 트리거 부재는 **`NaN`**으로 표현한다 —
+(`ros_backend.py::GELLO_TRIGGER_TOPIC`, `::merge_gello_state`, 호출은 `::URRosBackend.get_gello_state`).
+트리거 부재는 **`NaN`**으로 표현한다 —
 `0.0`은 "완전 열림"이라는 정당한 값이라 센티널로 쓰면 토픽이 죽을 때마다 그리퍼를
-조용히 열어버리기 때문이다. 회귀: `tests/test_gello_gripper_wiring.py` **23 passed**.
+조용히 열어버리기 때문이다. 회귀: `tests/test_gello_gripper_wiring.py` 📌 2026-07-30 **24 passed**(07-29에는 23).
 
 ### 왜 아직 🟡인가
 
@@ -272,7 +278,7 @@ README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**
 | 퍼블리셔 | 근거 |
 |---|---|
 | `gello_ur_bridge` (텔레옵, 250 Hz) | `ur7e_gello_real.launch.py:66`, `:779` |
-| `URRosBackend` (RL env, 250 Hz 업샘플러) | `ros_backend.py:12`, `:111-113` |
+| `URRosBackend` (RL env, 250 Hz 업샘플러) | `ros_backend.py` 모듈 docstring + `::URRosBackend.__init__`의 `self._cmd_pub` |
 
 **ROS2는 이걸 막지 않는다.** 두 스트림이 섞이면 컨트롤러는 마지막에 도착한 값을 따라가고,
 결과는 두 목표 사이를 오가는 채터링이다.
@@ -288,10 +294,10 @@ ros2 topic info /forward_position_controller/commands --verbose | grep -c "Node 
 > ### 🔧 자동 가드 현황 (2026-07-29 갱신 — 세 겹이 됐다)
 > | 어디 | 무엇을 하나 | 근거 |
 > |---|---|---|
-> | `run_hil_actor.sh` preflight [9] | 이 토픽의 **퍼블리셔 수를 직접 세고, 하나라도 있으면 기동 거부** ("이 리그 최대 하자"). `--arm` 여부와 무관 | `run_hil_actor.sh:480-503` |
-> | 같은 스크립트 preflight [8] | `forward_position_controller`가 `active`면 **경고** | `:440-` |
-> | `run_real_hil.py` | `--arm` 시 `count_publishers()`로 세고 거부 | `:439`, `:455` |
-> | **`run_remote_rlpd_actor.py` (신규, `c069e79`)** | `--arm` 시 퍼블리셔가 있으면 거부, **구독자가 0이어도 거부**("컨트롤러가 안 떠 있다") | `:156-198` |
+> | `run_hil_actor.sh` preflight [9] | 이 토픽의 **퍼블리셔 수를 직접 세고, 하나라도 있으면 기동 거부** ("이 리그 최대 하자"). `--arm` 여부와 무관 | `run_hil_actor.sh`의 preflight `[9]` 블록 (`grep -n '\[9\]' run_hil_actor.sh`, 현재 :565) |
+> | 같은 스크립트 preflight [8] | `forward_position_controller`가 `active`면 **경고** | `grep -n '\[8\]' run_hil_actor.sh` (현재 :519) |
+> | `run_real_hil.py` | `--arm` 시 `count_publishers()`로 세고 거부 | `::preflight_command_topic` / `::preflight_command_topics` |
+> | **`run_remote_rlpd_actor.py` (신규, `c069e79`)** | `--arm` 시 퍼블리셔가 있으면 거부, **구독자가 0이어도 거부**("컨트롤러가 안 떠 있다") | 그 파일의 `count_publishers` 사용 지점 |
 >
 > **`run_rviz_hil.py`(mock 러너)에는 여전히 없다.** 그리고 사람이 손으로 두 스택을
 > 띄우는 것은 어떤 가드도 막지 못한다 — 그래서 G4a는 🟠이지 🟢이 아니다.
@@ -351,9 +357,9 @@ layout assertion과 laptop/server schema hash pin을 계속 유지하고, grippe
 
 | 위치 | 동작 | 코드가 인정하는 것 |
 |---|---|---|
-| `/joint_states` 0.2 s 초과 | `RuntimeError` | `TODO(together): safe-stop policy (freeze + operator prompt) instead of raise` (`ur7e_env.py:652-655`) |
-| 카메라 0.5 s 초과 / 부재 | `RuntimeError` | `TODO(together): safe-stop policy instead of raise` (`ur7e_env.py:751-757`) |
-| tcp_pose 부재/낡음 | `RuntimeError` | `:660-668` |
+| `/joint_states` 0.2 s 초과 | `RuntimeError` | `TODO(together): safe-stop policy (freeze + operator prompt) instead of raise` (`ur7e_env.py::UR7eEnv._update_currpos`) |
+| 카메라 0.5 s 초과 / 부재 | `RuntimeError` | `TODO(together): safe-stop policy instead of raise` (`ur7e_env.py::UR7eEnv.get_im`) |
+| tcp_pose 부재/낡음 | `RuntimeError` | 같은 `_update_currpos` (`tcp pose stale`) |
 | 첫 `/hil/deadman` 뒤 0.5 s 초과 | `DeadmanHeartbeatStaleError` | **의도된 fail-stop**: silence를 DISENGAGE로 간주하지 않고 정책 액션 전송 전에 액터 종료 |
 
 즉 센서가 끊기면 **러너가 크래시**한다. 결과적으로 팔은 마지막 명령 자세에서 멈추지만
@@ -421,9 +427,9 @@ README TODO에 남아 있다 ("HOLD/reject_reason을 step info로 노출 + stale
 
 | 누락 | 결과 | 근거 |
 |---|---|---|
-| F/T 브로드캐스터 | force/torque 6개가 **전부 0** — 예외 없음 | `ur7e_env.py:685-690` |
-| 그리퍼 `position_percent` | `curr_gripper_pos = 0.0` = **"완전 열림"으로 보임** | `ur7e_env.py:681-683` |
-| (같은 성질) actor preflight [7b] | 그리퍼 토픽 부재는 **WARN이지 FAIL이 아니다** — 그리퍼 없이도 actor가 뜬다 | `run_hil_actor.sh:418-439` |
+| F/T 브로드캐스터 | force/torque 6개가 **전부 0** — 예외 없음 | `ur7e_env.py::UR7eEnv._update_currpos`의 `curr_force`/`curr_torque` |
+| 그리퍼 `position_percent` | `curr_gripper_pos = 0.0` = **"완전 열림"으로 보임** | 같은 함수의 `curr_gripper_pos` (`pct if pct is not None else 0.0`) |
+| (같은 성질) actor preflight [7b] | 그리퍼 토픽 부재는 **WARN이지 FAIL이 아니다** — 그리퍼 없이도 actor가 뜬다 | `run_hil_actor.sh`의 preflight `[7]` 블록 (`grep -n '\[7\]' run_hil_actor.sh`, 현재 :497) |
 
 **스키마 해시로는 절대 안 잡힌다** — dtype/shape는 완벽히 맞기 때문이다.
 `validate_canonical_observation`도 dtype/shape/유한성만 본다.
@@ -436,14 +442,14 @@ README TODO에 남아 있다 ("HOLD/reject_reason을 step info로 노출 + stale
 ## G9 — 개입 앵커가 **flange 기준**이다 (TCP 오프셋 미배선) 🟡
 
 ```python
-# wrappers.py:235-237
+# wrappers.py::GelloIntervention._leader_T
 def _leader_T(self, q_lead):
     # TODO: @ T_tool_L (flange-only for the skeleton)
     return fk(q_lead)
 ```
 
-env는 `TCP_OFFSET_XYZ_RPY`로 `self.T_tool`을 만들어 두었지만 (`ur7e_env.py:179-182`),
-개입 앵커 계산에는 쓰이지 않는다. `serl_ur_infra/README.md:80` TODO에도 남아 있다
+env는 `TCP_OFFSET_XYZ_RPY`로 `self.T_tool`을 만들어 두었지만 (`ur7e_env.py::UR7eEnv.__init__`의 `self.T_tool` 조립),
+개입 앵커 계산에는 쓰이지 않는다. `serl_ur_infra/README.md`의 "남은 TODO"에도 남아 있다
 ("`GelloIntervention._leader_T`에 TCP_OFFSET 배선 (config는 있음, 현재 플랜지 기준)").
 
 > 🔎 **07-28 실기 결과와의 관계:** 그 세션에서 frame-map이 단위행렬로 확인됐지만
@@ -488,16 +494,16 @@ canonical/Kanu 검증에서는 pinned submodule을 사용했다. 새 checkout에
 >
 > | entrypoint | 근거 |
 > |---|---|
-> | `scripts/run_remote_rlpd_actor.py` | `:51-62` (`default="topic"`), env로 전달은 `:220` |
-> | `tests/run_real_hil.py` | `:651-655` (`default="topic"`) |
+> | `scripts/run_remote_rlpd_actor.py` | `--deadman` 인자의 `default="topic"`, env로 전달은 `deadman=args.deadman` |
+> | `tests/run_real_hil.py` | `::parse_args`의 `--deadman` `default="topic"` |
 > | `tests/run_rviz_hil.py` (mock) | `--deadman topic`을 **줘야** 한다 — 여기만 여전히 opt-in |
 
 ### 남은 잔여 위험 (그래서 이 절을 지우지 않는다)
 
 `GelloIntervention(env, deadman=None)`을 **직접** 만들면 여전히 `SpacebarDeadman()`이
-붙는다 (`wrappers.py:189`). 그것은 **전역 pynput 리스너**라 다른 창에서 친 스페이스도 잡고
-(`wrappers.py:100-120`), X11 오토리핏으로 깜빡이며(그때마다 앵커 재래치),
-gain이 1.0으로 고정이고(`:126-127`), 하트비트 워치독이 없다.
+붙는다 (`wrappers.py::GelloIntervention.__init__`). 그것은 **전역 pynput 리스너**라 다른 창에서 친
+스페이스도 잡고 (`wrappers.py::SpacebarDeadman.__init__`), X11 오토리핏으로 깜빡이며(그때마다
+앵커 재래치), gain이 1.0으로 고정이고(`::SpacebarDeadman.gain`), 하트비트 워치독이 없다.
 
 **완화책:** 새 러너/스크립트를 쓸 때 `deadman=`을 **반드시 명시**한다.
 운영에서는 `--deadman topic` + `run_hil_gui.sh`를 쓴다 (`04_HIL_INTERVENTION.md` §1).
@@ -527,10 +533,10 @@ gain이 1.0으로 고정이고(`:126-127`), 하트비트 워치독이 없다.
 ### 수정 (commit `d49d0f6`)
 
 `ur_kin.wrapped_nearest(target, q)`로 목표를 **팔의 현재 회전수**로 옮긴 뒤, 거리 가드·명령·
-도착 판정을 **전부 그 값으로** 한다 (`go_to_reset()` = `ur7e_env.py:520`, wrap = `:567-591`).
+도착 판정을 **전부 그 값으로** 한다 (`ur7e_env.py::UR7eEnv.go_to_reset`, wrap은 그 안의 `self._kin.wrapped_nearest`).
 팔꿈치(index 2)는 가동범위가 ±π라 일부러 감싸지 않는다 — 그래서 branch-safe 거리는
 순진한 원형 거리 2.755가 아니라 **3.5281**이다.
-회귀: `tests/test_reset_branch_cut.py` 📌 2026-07-29 재실행 **10 passed**.
+회귀: `tests/test_reset_branch_cut.py` 📌 2026-07-30 재실행 **11 passed**(07-29에는 10).
 
 같이 바뀐 것: `cube_in_cup`의 `RESET_MAX_DIST_RAD` `0.5` → **`0.9`** (`cube_in_cup.py:103`;
 `DefaultUR7eEnvConfig` 기본값은 `1.5`, `config.py:53`). 23테이크의 최종 프레임에서
@@ -563,7 +569,8 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 - 2026-07-27 actor 기동 실패 4건 중 1건
 - `serl_ur_infra` 테스트 4개 파일의 무한 hang
   (`test_actor_grpc_transport`, `test_actor_identity_pinning`, `test_actor_smoke`,
-  `test_rlpd_receive_smoke` — venv에서는 **35 passed**)
+  `test_rlpd_receive_smoke` — `gello-hil-actor` venv에서는 📌 2026-07-30 **41 passed**;
+  07-29에는 35이었다)
 
 > 🔎 **어디에 걸리고 어디에 안 걸리는가** — 헷갈리기 쉬운 지점이다.
 > | 스크립트 | 인터프리터 | 왜 |
@@ -932,7 +939,7 @@ RTT p50 58.6 / p95 75.8 / **p99 97.1 ms**.
 이 갭은 새로 생긴 것이 아니라 **여태 갭으로 기재되지 않았을 뿐**이다.
 
 ```python
-# ur7e_env.py:197-208
+# ur7e_env.py::UR7eEnv.__init__  (grep -n "keyboard.Listener")
 from pynput import keyboard
 def on_press(key):
     if key == keyboard.Key.esc:
@@ -945,7 +952,7 @@ self.listener.start()
   브라우저에서, 편집기에서, 다른 GUI에서 누른 ESC가 **로봇 에피소드를 끝낸다.**
 - 데드맨 설정(`--deadman topic`)과 **무관하게** 항상 살아 있다. 끌 수 있는 플래그가 없다.
 - 그리고 `terminate=True`는 정지가 아니다. 그 에피소드가 끝나고, 다음 `reset()`이
-  `go_to_reset()`으로 **팔을 `RESET_JOINTS`로 이동시킨다** (`:505-512`).
+  `go_to_reset()`으로 **팔을 `RESET_JOINTS`로 이동시킨다** (`ur7e_env.py::UR7eEnv.go_to_reset`).
   즉 ESC의 실제 효과는 **"지금 에피소드 끝내고 리셋 자세로 팔을 옮겨라"**다.
 - 유일한 fail-safe: 디스플레이가 없으면 `except Exception`으로 잡혀 리스너가 안 뜬다
   (`:207-208`). 즉 **헤드리스에서는 없고, GUI 세션에서는 항상 있다.**
@@ -957,7 +964,7 @@ self.listener.start()
 
 ## G18 — `ACTION_SCALE`이 learner fingerprint에 **없다** 🟠 (신규)
 
-`run_rlpd_learner_server.py`의 `run_contract`(`:528-`)는 schema hash, threshold,
+`run_rlpd_learner_server.py`의 `run_contract`는 schema hash, threshold,
 classifier sha256, action dtype/shape/range, grasp penalty, 의존성 버전을 담는다.
 **`ACTION_SCALE`은 없다.**
 
@@ -977,7 +984,8 @@ classifier sha256, action dtype/shape/range, grasp penalty, 의존성 버전을 
 ### 🔗 교차 참조 (2026-07-30) — 영향 범위가 **개입 경로까지** 넓다
 
 이 갭은 "learner resume이 조용히 어긋난다"로만 적혀 있었다. 그런데 개입 액션은
-`÷ACTION_SCALE → clip`으로 만들어지므로 (`wrappers.py:256-299`, `04` §2 불변식)
+`÷ACTION_SCALE → clip`으로 만들어지므로
+(`wrappers.py::GelloIntervention._expert_delta_action`, `04` §2 불변식)
 **사람이 한 스텝에 밀 수 있는 변위 예산 자체가 `ACTION_SCALE`이 정한다.** 따라서:
 
 - `ACTION_SCALE`이 바뀌면 **정책 스케일과 개입 손맛이 같이** 바뀐다. 07-28의 25 % 상향은
@@ -990,6 +998,15 @@ classifier sha256, action dtype/shape/range, grasp penalty, 의존성 버전을 
 
 **따라서 완화책 1(손으로 기록)에 `ACTION_SCALE`뿐 아니라 개입 관련 파라미터
 (타깃 갱신율·필터 유무)도 같이 적는다** → G24.
+
+> 📌 **2026-07-30 추가 — 이 헤드룸은 축별로만 성립한다.** 위의 "1.200x 헤드룸"은 축 하나를
+> 밀 때의 값이고, governor는 norm을 캡하므로 2축 대각에서 **0.849배**, 3축에서 **0.693배**로
+> 상시 절삭된다. `ACTION_SCALE`을 올릴 때 남은 여유를 계산하려면 그쪽을 먼저 봐야 한다
+> → **G26**. `governed` 비율도 fingerprint에 없다.
+>
+> 📌 그리고 개입 경로에 대해서는 `4197f5b` 이후 예산이 **norm 기준**으로 창 총량을 묶으므로
+> (`leader_stream.py::InterventionBudget`) 개입 쪽에서는 governor가 물지 않는다 —
+> 실기 3 run에서 `governed`가 개입 536표본 전부 0이었다(`04` §9.9).
 
 ---
 
@@ -1088,7 +1105,7 @@ DEFAULT_CHECKPOINT_SHA256 = (
 > `/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl`이다.
 >
 > learner의 시작 게이트는 online replay ≥ `training_starts` **그리고** offline demo ≥ 1을
-> 요구하므로(`ur_env/learner/runtime.py:228`의 `LearnerNotReadyError` 메시지가 두 수치를 같이 찍는다),
+> 요구하므로(`ur_env/learner/runtime.py`가 `LearnerNotReadyError`를 던지는 지점이 두 수치를 같이 찍는다),
 > **성공 라벨 artifact가 없으면 learner는 학습을 시작하지 않는다.** 현재 artifact는 이
 > 조건을 만족한다.
 
@@ -1098,9 +1115,10 @@ DEFAULT_CHECKPOINT_SHA256 = (
 HIL-SERL은 오프라인 데모로 replay를 시드하는 것을 전제로 한다. 이 선결 조건은 위
 artifact로 충족됐다. 다만 actor 자체의 주기적 pickle 기록 배선은 여전히 꺼져 있다:
 
-- `cube_in_cup`의 **`buffer_period = 0`**이다 (`cube_in_cup.py:265`).
+- `cube_in_cup`의 **`buffer_period = 0`**이다 (`cube_in_cup.py`의 `buffer_period`, 현재 :271).
   actor의 주기적 pickle 덤프는 `if step > 0 and config.buffer_period > 0`으로 게이트돼
-  있으므로 (`ur_env/rlpd_actor.py:258-270`, 기록 함수는 `remote_actor.py:202-207`),
+  있으므로 (`ur_env/rlpd_actor.py`의 `if step > 0 and config.buffer_period > 0`, 기록 함수는
+  `remote_actor.py::_dump_data`),
   **`--checkpoint-path`를 줘도 아무 pickle이 쓰이지 않는다.**
 - 그리고 그 경로는 **쓰기용**이다. 기존 데모를 **읽어서 replay에 시드하는 경로는
   actor entrypoint에 없다** — 그건 learner 쪽 일이다
@@ -1108,7 +1126,7 @@ artifact로 충족됐다. 다만 actor 자체의 주기적 pickle 기록 배선�
 
 **그래서 `--mock-policy-noise`로 만든 데이터를 데모로 쓰면 안 된다.**
 그 모드의 전이에는 `meta.policy_actions_synthetic = true`가 박히고
-(`run_remote_rlpd_actor.py:341-346`), actor가 종료 시 그 사실을 경고한다.
+(`run_remote_rlpd_actor.py`의 `--mock-policy-noise` 처리), actor가 종료 시 그 사실을 경고한다.
 07-27 Kanu 왕복 100스텝도 **synthetic**이다 — 상대가 zero-action 서버였다.
 
 **남은 주의:** 2,037개 중 action norm-clamp가 516개(25.33%)다. 현재 artifact의 출처와
@@ -1141,7 +1159,7 @@ actor/robot 수신을 별도 acceptance로 유지한다.
 
 G21은 actor를 죽이는 문제로만 기재돼 있었지만, **actor가 죽지 않고 살아 있는 동안에도
 조작자의 손에 직접 나타난다.** RPC 왕복이 `env.step` **밖**에 있어서
-(`remote_actor.py:538` → `:609` → 다음 `env.step`) 250 Hz 스트리머가 보는 타깃 갱신 주기가
+(`remote_actor.py::run_remote_actor`의 `env.step` → `network.step` → 다음 `env.step`) 250 Hz 스트리머가 보는 타깃 갱신 주기가
 **100 ms + RPC**가 되고, 그 주기가 곧 개입 손맛이다 (전체 실측은 G24 및
 [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) §9).
 
@@ -1159,6 +1177,22 @@ G21은 actor를 죽이는 문제로만 기재돼 있었지만, **actor가 죽지
 `04` §9.3(b)가 실측으로 금지한다(정지 17.5 % → 54.5 %). **즉 G21을 고치는 것이 유일한 경로다.**
 
 재현: `04_HIL_INTERVENTION.md` §9의 스크립트 (표 1).
+
+> ### 📌 2026-07-30 추가 — 30 Hz 서브스텝이 들어간 뒤에도 이 종속은 남는다 (두 번째 경로)
+> `4197f5b`가 창 **안**의 stop-and-go를 없앴지만(실기 3 run PASS, G24) 창 **자체**가
+> 길어지는 문제는 손대지 않았다. 그리고 `InterventionBudget`은 창 길이와 무관하게 창당
+> 1× `ACTION_SCALE`(0.0125 m)만 주므로 — 저장 액션 불변식이 그걸 요구한다 —
+> **창이 길어지면 사람이 낼 수 있는 최대 속도가 그대로 떨어진다** (산술, 실기 미측정):
+>
+> | 실효 창 길이 | 개입 최대 속도 (`--scale 1.0`) |
+> |---|---|
+> | 0.100 s (명목) | 12.5 cm/s |
+> | 0.197 s (RPC p99) | 6.3 cm/s |
+> | **0.700 s (첫 publish급 stall)** | **1.8 cm/s** |
+>
+> 즉 G21은 업샘플러 HOLD로만 나타나는 게 아니라 **`BUDGET_EXHAUSTED`가 훨씬 빨리 오는
+> 것**으로도 나타난다. 07-30 실기 3 run은 `run_real_hil.py`(RPC 없음)라 이 구간을
+> **재현하지 않았다** → `04` §9.5, G24 "남은 위험" 1.
 
 ---
 
@@ -1194,20 +1228,49 @@ ENGAGED로 억지 대기하면 intervention transition을 계속 생성하므로
 
 ---
 
-## G24 — 개입 손맛: 타깃 갱신율이 낮아 **매 주기 가속/제동/정지** 🟠 (신규 2026-07-30)
+## G24 — 개입 손맛: 타깃 갱신율이 낮아 **매 주기 가속/제동/정지** 🟡 **코드 조치 + 실기 PASS (2026-07-30)**
 
 조작자가 개입 중 팔이 **빳빳하고 덜덜거린다**고 보고했다. 원인은 필터도 게인도
 가속도 제한도 아니라 **타깃 갱신 주기**다.
 
+> ### ✅ 상태 (2026-07-30 저녁) — 조치가 커밋되고 **실기에서 통과했다**
+> commit **`4197f5b`**가 개입 창 안에서 리더를 **30 Hz로 재샘플링**하도록 바꿨고
+> (One-Euro 이식 + `InterventionBudget`), 같은 날 실제 UR7e에서 3 run을 돌렸다.
+>
+> | run | 명령 | 개입 | 판정 |
+> |---|---|---|---|
+> | 1 | `--scale 0.5` (DRY) | 144 | **FAIL** — 러너의 frame-map 판정 결함(코드 아님), 같은 커밋에서 수정 |
+> | 2 | `--scale 1.0` (DRY) | 272 | **전체 PASS** 잔차 0.016 / alpha 1.005 / 표본 141 |
+> | 3 | `--arm --scale 1.0 --max-steps 150` | 120 | **전체 PASS** 잔차 0.130 / alpha 0.983 / 표본 51 |
+>
+> 세 run 전부 개입 스텝에서 `substeps=2`(창당 타깃 3회 갱신), `dp_ratio` 중앙값 **1.000**,
+> `held` 0, anchor/gain latch 변동 0.000e+00. **run 3에서 조작자가 손맛을 확인했다**
+> ("지금 딱 좋은 것 같다").
+> 전체 숫자·재현 명령·CSV 컬럼 해설은
+> [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) **§9.6~§9.9**.
+>
+> 🛑 **run 1의 FAIL을 "개입이 깨졌다"로 인용하지 말 것.** 같은 CSV의 비포화 58표본은
+> alpha 0.992 / 잔차 0.058이었다 — 매핑은 정상이었고 **판정이 포화 표본을 섞고 있었다.**
+> 고친 판정에서 run 1은 PASS가 아니라 **SKIP**(축별 여기 1.4/3.6/1.4 cm < 2 cm)이다 → `04` §9.7.
+>
+> **그래도 🟢이 아니라 🟡인 이유** — 아래 "남은 위험" 4개가 그대로다: 예산 소진 후 HOLD는
+> **G21 종속**(창이 길어지면 개입 최대 속도가 12.5 → 1.8 cm/s로 떨어진다, `04` §9.5),
+> mock RViz 루프는 **여전히 0회**, 그리고 이 3 run은 **워크스페이스 박스가 꺼진 채로**
+> arm됐다(→ **G1**).
+
 ### 사실 (코드에서 확인)
+
+> 📌 아래 표의 `wrappers.py`/`ur7e_env.py`/`config.py` 인용은 **심볼 이름**으로 적는다.
+> `4197f5b`가 `wrappers.py` +326줄 / `ur7e_env.py` +228줄을 넣었고 그 위에서 문서화 작업이
+> 계속 줄을 밀고 있어 줄번호가 며칠도 못 간다 (`04` §2 말미, §9.9).
 
 | | 근거 |
 |---|---|
-| `env.step()`이 100 ms 창에서 타깃을 **한 번만** 세팅하고 나머지를 잔다 | `ur7e_env.py:431-441` |
+| `env.step()`이 100 ms 창에서 타깃을 **한 번만** 세팅하고 나머지를 잔다 | `ur7e_env.py::UR7eEnv.step`의 sleep 분기 — **`4197f5b` 이후 정책 경로 전용** |
 | 그 sleep은 `_apply_action` 시간만 뺀다 — **gRPC는 빼지 않는다** | 같은 줄 |
-| gRPC 왕복이 `env.step` **밖**에 있다 | `remote_actor.py:538`(`env.step`) → `:609`(`network.step`) → 다음 `env.step` |
-| 250 Hz 스트리머는 목표를 넘지 않도록 **제동거리를 남긴다** | `ros_backend.py:280-297` `_safe_step_for_distance` |
-| 가속 상한(8 rad/s²) 도달까지 19.5틱 = **78 ms** | `config.py:109-116` + 실측 |
+| gRPC 왕복이 `env.step` **밖**에 있다 | `remote_actor.py::run_remote_actor`: `env.step` → `network.step` → 다음 `env.step` |
+| 250 Hz 스트리머는 목표를 넘지 않도록 **제동거리를 남긴다** | `ros_backend.py::_safe_step_for_distance` |
+| 가속 상한(8 rad/s²) 도달까지 19.5틱 = **78 ms** | `config.py` `UPSAMPLER.max_accel_rad_s2` + 실측 |
 
 즉 실효 갱신 주기 = **100 ms + RPC**(약 5~9 Hz)이고, 그 주기마다
 **가속 → 제동 → 정지 → 대기**가 반복된다.
@@ -1241,40 +1304,62 @@ ENGAGED로 억지 대기하면 intervention transition을 계속 생성하므로
 또한 **타깃 외삽(velocity feed-forward)은 리플을 소수점까지 전혀 개선하지 않는다** —
 lag만 고친다(`04` §9.2). "덜덜거림"과 "뒤처짐"은 다른 증상이고 다른 해법이다.
 
-### 코드 조치 상태 (2026-07-30, **미커밋 작업 트리 — 진행 중**)
-
-⚠️ 아래는 이 문서를 쓰는 시점의 워킹 트리 관찰이고 **배선이 아직 끝나지 않았다.**
-**실기·mock 검증은 0이다.** 커밋 후 이 표를 다시 확인할 것.
+### 코드 조치 상태 (2026-07-30, **커밋 `4197f5b` — 배선 완료 · 실기 PASS**)
 
 | | 상태 |
 |---|---|
-| `ur_env/envs/leader_stream.py` (신규) | `OneEuro`(`bridge_stages.py:42-106` 이식) + `LeaderFilter`(`note_sample`/`filtered`로 두 cadence 분리) + `InterventionBudget`(창당 1× `ACTION_SCALE` 변위 예산, norm 비례 축소) |
-| `ur_env/envs/policy_delta_controller.py` (수정) | `step(xi, dt=None)` — `dt=None`이면 이전과 bit-identical, 서브스텝은 `dt=1/30`. `dq_step_max`도 `dt`에 비례 축소(rate 불변). `info`에 `governed`/`governed_scale` 추가 |
-| `ur_env/envs/config.py` (수정) | `INTERVENTION = {substep_hz: 30.0, one_euro_*}`. **`substep_hz <= HZ`이면 기능이 꺼지고 이전 동작으로 퇴화한다** (`INTERVENTION` 블록이 없는 config도 그렇다) |
-| `ur_env/envs/ur7e_env.py` (수정) | 100 ms 창의 **sleep을 서브스텝 페이싱으로 대체**한다(`_drive_intervention_substeps`). env 스텝 주기와 "1 스텝 = 1 transition"은 그대로. 정책 경로는 `driver is None`으로 갈라져 sleep 한 번 그대로 |
-| `tests/test_governor_dt.py` (신규) | 📌 2026-07-30 실행 **38 passed** |
-| `tests/test_leader_stream.py` (신규) | 📌 2026-07-30 실행 **28 passed** |
-| **개입 경로 배선 (`wrappers.py`)** | **미완.** `+61` 줄까지 들어왔고(필터 구성·engage 시 재생성·`_expert_delta_xi` 분리) **driver 프로토콜(`charge` / `substep` / `consumed_window_action`)의 구현과 `begin_intervention_window()` 호출자가 아직 없다** — `ur_env/`를 세 이름으로 grep하면 `ur7e_env.py`의 정의·docstring만 나온다 |
+| `ur_env/envs/leader_stream.py` (신규) | `OneEuro`(`bridge_stages.py:42-106` 이식) + `LeaderFilter`(`note_sample`/`filtered`로 두 cadence 분리) + `InterventionBudget`(창당 1× `ACTION_SCALE` 변위 예산, **경로장** 기준, norm 비례 축소) |
+| `ur_env/envs/policy_delta_controller.py` (수정) | `step(xi, dt=None)` — `dt=None`이면 이전과 bit-identical, 개입은 `dt=1/30`. `dq_step_max`도 `dt`에 비례 축소(rate 불변). `info`에 `governed`/`governed_scale` 추가 |
+| `ur_env/envs/config.py` (수정) | `INTERVENTION = {substep_hz: 30.0, one_euro_*}`. **`substep_hz <= HZ`이면 기능이 꺼지고 이전 동작으로 퇴화한다** (`INTERVENTION` 블록이 없는 config도 그렇다) — 예외가 아니라 **조용한 퇴화**이므로 CSV `substeps` 컬럼으로 확인한다 |
+| `ur_env/envs/ur7e_env.py` (수정) | 100 ms 창의 **sleep을 서브스텝 페이싱으로 대체**(`_drive_intervention_substeps`). env 스텝 주기와 "1 스텝 = 1 transition"은 그대로. 정책 경로는 `driver is None`으로 갈라져 sleep 한 번 그대로 |
+| **개입 경로 배선 (`wrappers.py`)** | ✅ **완료.** driver 프로토콜 3종(`charge` / `substep` / `consumed_window_action`)이 `GelloIntervention`에 구현되고 `_open_substep_window` → `UR7eEnv.begin_intervention_window`로 설치된다. 호출 순서 전체는 `wrappers.py` 모듈 docstring(정본) / `04` §9.9 |
+| `tests/test_governor_dt.py` · `test_leader_stream.py` · `test_intervention_substeps.py` (신규) | 📌 2026-07-30 실행 **82 passed** (38 + 28 + 16). 세 번째가 가상 시계로 `UR7eEnv.step`의 서브스텝 루프를 실제로 돌린다 → G25 |
+| 전체 테스트 | **인터프리터를 안 적은 passed 수는 무의미하다.** `serl_ur_infra/tests`를 `gello-hil-actor`(numpy 2.2.6)로 돌린 값: 커밋 `4197f5b` 시점 **579 passed / 11 skipped** (07-29 기준선 497에서 +82), 📌 2026-07-30 **작업 트리(미커밋 포함) 재실측 588 passed / 11 skipped**. 같은 코드를 `hilserl`(numpy 1.26.4, jax 0.5.3)로 돌리면 수가 다르다(**619 passed / 4 skipped**) — 두 수를 섞어 인용하지 말 것 |
 | One-Euro 게인 | `min_cutoff 1.0 / beta 2.0 / d_cutoff 1.0` = `config/ur7e_gello.yaml:43,46,48`과 **일치 확인** |
 | 30 Hz 근거 | `gello_publisher.publish_rate_hz: 30.0` (`ur7e_gello.yaml:26`) — 리더 캐시가 실제로 갱신되는 rate. 그보다 빠르게 서브스텝하면 **같은 샘플을 다시 낸다** |
 
-### ⚠️ 리뷰에서 나온 관찰 — 개입 창의 governor 총량이 늘어난다
+### ✅ 정정 (2026-07-30) — "개입 창의 governor 총량이 1.67배로 늘어난다"는 **커밋에서 해소됐다**
 
-첫 타깃은 `controller.step(xi)`를 **`dt` 없이**(= 1/HZ) 호출하고
-(`ur7e_env.py:_apply_action`) 서브스텝은 `dt = 1/30`으로 호출한다. 그러면 governor가
-허용하는 **창 총량**이 `v_max/HZ`(0.0150 m)에서 `0.0150 + 2 × 0.0050 = 0.0250 m`으로
-**1.67배** 늘어난다.
+> **이전 판(보존):** *"첫 타깃은 `controller.step(xi)`를 `dt` 없이(= 1/HZ) 호출하고
+> 서브스텝은 `dt = 1/30`으로 호출한다. 그러면 governor가 허용하는 창 총량이
+> `v_max/HZ`(0.0150 m)에서 `0.0150 + 2 × 0.0050 = 0.0250 m`으로 **1.67배** 늘어난다.
+> 지금은 `InterventionBudget`(0.0125 m)이 먼저 묶어 문제가 되지 않지만, 예산이 버퍼 정합
+> 장치에서 **governor 헤드룸을 유지하는 유일한 장치**로 격상된다."*
+>
+> 이 관찰은 **커밋 전 워킹 트리** 기준이었다. `4197f5b`에서 첫 타깃도 같은 rate로
+> 과금하도록 고쳤다 — `_apply_action`이 개입 경로에서
+> `controller.step(driver.charge(xi), dt=1.0 / substep_hz)`로 호출한다
+> (`ur7e_env.py::UR7eEnv._apply_action`, 📌 2026-07-30 커밋된 코드에서 직접 확인).
+>
+> 그래서 명목 창(100 ms · 타깃 3회)의 governor 총량은 `3 × v_max/30 = 0.0150 m` =
+> **`v_max/HZ`와 정확히 같다.** 1.67배 확대는 없고, **예산이 없어도 3층 비율 계약
+> (`config.py` `ACTION_SCALE` ↔ `GOVERNOR` 1.200x 헤드룸, G2 완화책 2)이 개입 경로에서
+> 유지된다.** `dt`는 `dq_step_max`도 같은 비율로 줄이므로 joint-step 게이트도 창 전체
+> 예산으로 방치되지 않는다.
+>
+> 창이 명목보다 길어지면 서브스텝이 더 들어가 governor 총량도 같이 커지는데, 그것은
+> **`v_max × 창 길이`라는 rate 계약과 일치**하므로 위반이 아니다. 반대로 **예산은 창 길이와
+> 무관하게 고정**이므로 창이 길어질수록 예산이 **더 강하게** 묶는다 → G21 교차 참조 절.
 
-**지금은 문제가 되지 않는다** — `InterventionBudget`이 창 총량을 `ACTION_SCALE` =
-**0.0125 m**로 먼저 묶기 때문이다(0.0125 < 0.0150). 즉 실효 상한은 예산이 정한다.
-
-**그러나 이것은 예산의 역할이 바뀌었다는 뜻이다.** `leader_stream.py` docstring은 예산을
-**버퍼 정합(buffer-correctness)** 장치로 설명하지만, 위 구조에서는 **governor 헤드룸을
-유지하는 유일한 장치**이기도 하다. 따라서:
-
-- 예산을 끄거나 완화하면 governor 창 총량이 1.67배로 드러난다 (`ACTION_SCALE`과 GOVERNOR의
-  1.200x 헤드룸 계약, `config.py:79-90` / G2 완화책 2가 개입 경로에서 깨진다).
-- `ACTION_SCALE`을 올릴 때 이 여유(0.0125 → 0.0150)가 먼저 소진된다는 점을 같이 봐야 한다 → G18.
+여전히 유효한 부분은 이것이다: **예산은 여전히 실효 상한이다.** 0.0125 m(예산) <
+0.0150 m(governor 창 총량)이므로 개입 경로에서 governor는 물지 않을 것으로 **설계**됐고,
+2026-07-30 실기 3 run의 개입 **536표본 전부 `governed=0`**이었다(`04` §9.9).
+> 🛑 **그 `governed=0`을 "확인됐다"로 읽지 말 것 — 애초에 절삭이 일어날 수 없다 (2026-07-30 적대적 검수).**
+> `_paced_request`가 각 요청을 `ACTION_SCALE/3 = 0.00417 m`로 먼저 깎고, 서브스텝 governor cap은
+> `v_max/substep_hz = 0.0050 m`다. **요청이 cap에 절대 닿지 않는다.** 즉 shipped config에서
+> 개입 경로의 governor 절삭은 **구조적으로 관측 불가능**하고, `governed=0`은 관측 결과가 아니라
+> **산술의 필연**이다.
+> - 그래서 이 값으로 "예산이 governor보다 먼저 묶는다"는 **설계 의도**는 확인되지만,
+>   "governor 절삭이 없다"는 **경험적 주장은 성립하지 않는다** (반증 가능성이 0이므로).
+> - 개입 경로에서 실기 관측이 가능해지려면 `GOVERNOR`를 `ACTION_SCALE` 대비 **조여야** 한다.
+> - ⚠️ **이전 판(보존):** *"그 3 run은 창의 첫 타깃만 집계하던 코드로 측정됐으므로 '첫 타깃에서
+>   절삭 없음'만 증명한다."* — 집계 범위가 첫 타깃만이었던 것은 **사실이고 그 뒤 창 전체
+>   OR/최솟값으로 고쳐졌다**(`run_real_hil.py` docstring (e)). 다만 그것이 `governed=0`의
+>   **원인은 아니다** — 집계를 고쳐도 위 부등식 때문에 여전히 0이다.
+> - 🔴 **더 중요한 것:** governor가 아니라 **joint gate(line search)**가 물리는 경로는
+>   `governed`에 **아무 흔적도 남기지 않는다** → **G27**.
+따라서 `ACTION_SCALE`을 올릴 때 이 여유(0.0125 → 0.0150)가 **먼저** 소진된다 → **G18**.
+그리고 그 헤드룸이 **축별로만** 성립한다는 별개 결함이 → **G26**.
 
 📌 검증한 것 (2026-07-30, 오프라인): One-Euro 이식이 원본 `bridge_stages.py::OneEuro`와
 250 Hz 틱 / 30 Hz 샘플 스케줄에서 **max 차이 0.000e+00 (bit-identical)**,
@@ -1303,16 +1388,28 @@ deadband를 "원본에 있으니 같이" 가져가면 검증된 것의 이름으
 `update_input()`은 리더 cadence(약 30 Hz, `ur7e_gello.yaml:26`), `__call__()`은 출력 틱마다
 호출해야 한다 — 합치면 cutoff가 눈에 보이는 펄스로 열린다 (`bridge_stages.py:56-59`).
 
-### 남은 위험 / 완화책
+### 남은 위험 / 완화책 (2026-07-30 실기 이후 기준)
 
-1. **나머지 절반은 G21 종속이다.** 주기가 0.700 s가 되면 HOLD 51.5 %, 리더 속도 추종 66 %이고
-   이건 코드로 못 고친다 → G21 교차 참조 절.
-2. **변위 예산은 `ACTION_SCALE`에 묶여야 한다.** 서브스텝이 창당 총 변위를 늘리면
-   "저장 액션 == 실행 액션" 불변식(`04` §2)과 3층 비율(G2 완화책 2)이 동시에 깨진다 → G18.
-3. **검증 순서:** ① `tests/` 오프라인 회귀 → ② mock RViz 개입 루프(`04` §3, 여전히 한 번도
-   안 돌았다) → ③ `run_real_hil.py --scale 0.25` DRY_RUN CSV로 저장==실행 불변식 재확인 →
-   ④ `--arm`. **①만 통과한 상태를 "고쳐졌다"로 읽지 말 것.**
-4. 그리고 이 경로의 회귀를 잡아 줄 것으로 기대되는 테스트가 **실제로는 실행되지 않는다** → G25.
+1. **나머지 절반은 여전히 G21 종속이다.** 두 갈래로 나타난다:
+   (a) 주기가 0.700 s가 되면 업샘플러가 HOLD 51.5 %, 리더 속도 추종 66 %,
+   (b) **변위 예산이 창당 고정**이라(저장 액션 불변식이 요구한다) 창이 길어지면 개입 최대
+   속도가 12.5 → 6.3 → **1.8 cm/s**로 떨어진다. 둘 다 코드로 못 고친다 → G21 교차 참조 절,
+   `04` §9.5. **07-30 3 run은 `run_real_hil.py`(RPC 없음)라 이 구간을 재현하지 않았다.**
+2. **변위 예산은 `ACTION_SCALE`에 묶여 있어야 한다.** 실기에서 `dp_ratio` 중앙값 1.000으로
+   불변식이 유지됨을 확인했지만, 예산을 늘리면 "저장 액션 == 실행 액션"(`04` §2)이 먼저
+   깨진다 → G18. 대각 이동에서는 그 헤드룸이 애초에 없다 → **G26**.
+3. **검증 순서 (①②③④ 중 ①③④ 완료, ②는 미완):** ① `tests/` 오프라인 회귀 **82 passed** →
+   ② mock RViz 개입 루프(`04` §3) — **여전히 0회.** 실기가 먼저 돌았다 →
+   ③ DRY_RUN CSV로 저장==실행 불변식 확인 **PASS**(run 1·2) → ④ `--arm` **PASS**(run 3).
+   ⚠️ **②를 건너뛴 것은 사실로 남긴다** — 다음 배선 변경 때 다시 실기부터 가는 것이
+   기본값이 되면 안 된다.
+4. **박스가 꺼진 채로 arm했다.** 3 run 전부 `DefaultUR7eEnvConfig`라
+   `ABS_POSE_LIMIT_*`가 0벡터였다 → **G1**. `cube_in_cup` config(박스 활성)에서 서브스텝
+   개입은 **미검증**이고, 박스 클램프는 `governed`와 **다른 게이트**(`clipped`)라 이번
+   CSV로는 아무것도 말할 수 없다.
+5. 이 경로의 회귀를 잡아 줄 것으로 기대됐던 `test_env_fake_backend.py`는 **여전히 실행되지
+   않는다** → G25. 다만 서브스텝 경로 자체는 신규 `test_intervention_substeps.py`(16)가
+   fake 백엔드 + 가상 시계로 **실제 구동**한다.
 
 ---
 
@@ -1347,12 +1444,44 @@ docstring의 실행 방법도 `conda run -n lerobot python tests/test_env_fake_b
 **즉 위 단언들이 무효화되거나 갱신돼야 하는 종류의 변경인데, 지금은 아무것도 실행되지
 않으므로 회귀가 조용히 통과한다.**
 
+### ✅ 그래도 G24의 새 코드는 이 함정에 빠지지 않았다 (2026-07-30)
+
+`4197f5b`가 넣은 `tests/test_intervention_substeps.py`(**16 tests**, 📌 07-30 실행 확인)는
+`GelloIntervention` + `UR7eEnv`를 **fake 백엔드 + 가상 시계**로 조립해
+`UR7eEnv.step`의 서브스텝 루프를 **실제로 돌린다.** 파일 머리 docstring이 그 이유를
+G25를 이름으로 인용해 적어 두었다 — 다른 개입 테스트는 `step`이 액션만 기록하는 **stub
+env**를 쓰기 때문에 창·컨트롤러·백엔드가 없어 그 루프에 들어갈 수 없다.
+
+```bash
+cd $WT/serl_ur_infra
+env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest \
+  tests/test_intervention_substeps.py tests/test_leader_stream.py \
+  tests/test_governor_dt.py -q -p no:anyio
+# -> 82 passed  (16 + 28 + 38)   ← 2026-07-30 확인
+```
+
+가상 시계를 쓴 이유가 G25 완화책 2와 같은 문제다: 서브스텝 창은 **wall-clock으로 페이싱**
+되므로 "이 창에 서브스텝이 몇 개 들어갔나"를 실시간으로 단언하면 부하 걸린 기계에서
+flaky해진다. `ur7e_env`와 `wrappers` **양쪽의** `time` 모듈을 가상 시계로 교체한다.
+
+**그러므로 G25는 `test_env_fake_backend.py`에 대해서만 열려 있다** — 10 Hz 페이싱,
+업샘플러 틱 예산, `ACTION_SCALE` ↔ governor 정합 단언 셋은 아직 아무도 실행하지 않는다.
+
 ### 왜 눈치채기 어려웠나
 
 `00_SETUP_AND_SAFETY.md` §4.2와 CLAUDE.md가 "**passed 수를 볼 것**"이라고 경고하는 이유가
 이것이다. 이 파일은 skip도 error도 남기지 않고 **그냥 0개**로 수집되므로, 전체 실행의
-passed 총계(2026-07-29 기준선 **497 passed / 11 skipped**)에 **아무 흔적도 남기지 않는다.**
-`serl_launcher` 누락으로 skip되는 파일들과 달리 **경고조차 없다.**
+passed 총계에 **아무 흔적도 남기지 않는다.** `serl_launcher` 누락으로 skip되는 파일들과
+달리 **경고조차 없다.**
+
+> 📌 기준선이 움직였다 (모두 **`gello-hil-actor` 인터프리터**, numpy 2.2.6): 07-30 오전
+> **497 passed / 11 skipped** → 커밋 `4197f5b` **579 passed / 11 skipped**
+> (+82 = leader_stream 28 / governor_dt 38 / intervention_substeps 16) →
+> 📌 2026-07-30 작업 트리(미커밋 포함) 재실측 **588 passed / 11 skipped**.
+> ⚠️ `hilserl` 인터프리터(numpy 1.26.4, jax 0.5.3)는 같은 코드에서 **619 passed / 4 skipped**다.
+> **인터프리터를 안 적은 passed 수는 판정에 쓸 수 없다.**
+> 어느 쪽 숫자를 인용하든 **`test_env_fake_backend.py`의 4개 단언은 두 총계 모두에
+> 포함되지 않는다** — 그게 이 갭이다.
 
 ### 완화책
 
@@ -1372,21 +1501,242 @@ passed 총계(2026-07-29 기준선 **497 passed / 11 skipped**)에 **아무 흔�
 
 ---
 
+## G26 — `ACTION_SCALE` 헤드룸이 **축별로만** 성립한다: 대각 이동은 상시 절삭된다 🟠 (신규 기재 2026-07-30)
+
+🛑 **이것은 기존 결함이고 `4197f5b`(30 Hz 서브스텝)와 무관하다.** 그 커밋이
+`info["governed"]`를 노출해서 **처음 보이게 됐을 뿐**이고, 절삭은 그 전부터 계속 있었다.
+새 갭 번호를 준 이유는 G18(fingerprint)과 G2(3층 비율)의 하위 항목이 아니라 **독립적인
+저장-액션 오염 경로**이기 때문이다.
+
+### 사실 (산술, 📌 2026-07-30 코드에서 값 확인)
+
+| | 값 | 출처 |
+|---|---|---|
+| `ACTION_SCALE` | `[0.0125 m, 0.0625 rad, 1.0]` | `config.py::DefaultUR7eEnvConfig.ACTION_SCALE` |
+| `HZ` | 10 | 같은 파일 |
+| 축당 요청 속도 (액션 = 1.0) | 0.125 m/s · 0.625 rad/s | 위 두 개의 곱 |
+| `GOVERNOR` | `v_max 0.15`, `w_max 0.75` | `config.py::GOVERNOR` |
+| **축별 헤드룸** | **1.200x** | 문서 전체가 인용하는 그 값 |
+
+그런데 **액션 공간은 축별 박스 `[-1,1]³`이고 governor는 벡터의 norm을 캡한다**
+(`policy_delta_controller.py::_govern` — `np.linalg.norm(v)`). 두 계약의 기하가 다르다:
+
+| 동시에 미는 축 | 요청 norm | governor 캡 | **실행/요청 비율** |
+|---|---|---|---|
+| 1축 | 0.125 m/s | 0.15 | 1.000 (헤드룸 1.200x 그대로) |
+| **2축 대각** | 0.1768 m/s | 0.15 | **0.849배** |
+| **3축 대각** | 0.2165 m/s | 0.15 | **0.693배** |
+
+회전도 **정확히 같은 비율**이다(0.625 → 0.75, 2축 0.849 / 3축 0.693 — 07-30 산술 확인).
+
+### 왜 위험한가 — 저장 액션 불변식이 **대각에서** 깨진다
+
+`04` §2의 "저장 액션 == 실행 액션" 불변식은 축 하나를 밀 때만 성립한다. 대각으로 밀면
+**저장은 `[1,1,1]` 그대로, 실행은 69 %**다. 즉 버퍼가 실제 움직임을 **과대**기록한다
+(G18의 "25 % 더 멀리 간다"와 반대 방향의 오염이고, 원인도 다르다).
+
+- 정책은 학습으로 이 절삭을 흡수하지만 **저장되는 것은 요청값**이라 그 transition으로
+  offline 학습·replay·데모 변환을 하면 전부 같은 오차를 물려받는다.
+- `env.step`이 액션을 클립하는 지점(`np.clip(action, low, high)`)은 **축별**이므로
+  이 절삭을 막지도, 기록하지도 않는다.
+- 개입 경로는 지금 영향이 없다 — `_paced_request`가 요청을 `ACTION_SCALE/3 = 0.00417 m`로
+  먼저 깎고 서브스텝 governor cap이 `v_max/30 = 0.0050 m`이므로 **요청이 cap에 닿지 않는다.**
+  **즉 이 갭은 실질적으로 정책 경로의 문제다.**
+- 🔴 **단, 개입 경로에도 같은 종류의 오염이 따로 있다** — governor가 아니라 **joint gate**가
+  물리는 line search 경로이고 `governed`에 흔적을 남기지 않는다 → **G27**.
+
+### 언제부터 있었나 / 왜 안 보였나
+
+- `ACTION_SCALE`과 `GOVERNOR`가 **비율로** 맞춰진 순간부터다. 2026-07-28의 25 % 상향
+  (`a5f9890`)은 3층을 **균일하게** 올렸으므로 이 결함도 그대로 보존됐다 — 그 이전 데이터도
+  같은 성질을 갖는다.
+- governor가 계산한 `scale`이 **아무 곳에도 기록되지 않고 버려지고 있었다.**
+  `4197f5b`가 `info["governed"]` / `info["governed_scale"]`를 처음 추가했고
+  (`policy_delta_controller.py::PolicyDeltaController.step`), `run_real_hil.py`의 CSV에
+  컬럼으로 나온다(`run_real_hil.py`의 `COLUMNS`).
+
+### 실기 관측 상태 — **미관측**
+
+2026-07-30 3 run에서 `governed`는 개입 536표본 **전부 0**이었다. 이유는 두 가지이고
+둘 다 "고쳐졌다"는 뜻이 아니다: (a) 개입 경로는 예산이 먼저 묶는다, (b) **러너는 정책
+액션을 항상 zero로 보낸다.** 따라서 **정책 경로의 대각 절삭은 아직 한 번도 실기에서
+관측되지 않았다.** actor 경로(`09`)에서 이 필드가 로깅되는지도 **미검증**이다.
+
+🛑 **게다가 그 `governed=0` 자체가 창 전체를 덮지 않는다.** 3 run은 **창의 첫 타깃만
+집계하던 코드**로 측정됐다. 그 뒤 `governed`는 창 전체 **OR**, `governed_scale`은 창 전체
+**최솟값**으로 바뀌었다(`run_real_hil.py` docstring (e)의 경고). 즉 07-30 값은
+**"첫 타깃에서 절삭 없음"**만 증명하고 서브스텝 2회분은 **미관측**이다. 개입 경로에서도
+창 전체 절삭 여부는 **다시 재야 한다.**
+
+### 완화책
+
+1. **세션마다 `governed` 비율을 본다.** `run_real_hil.py` CSV에는 컬럼이 있다.
+   actor 경로에서는 `info`로 올라오지만 판독구 유무가 미검증이므로, 대각 절삭을 의심할
+   상황(정책이 대각으로 미는 태스크)에서는 그것부터 확인한다.
+2. **`v_max`를 올려서 "고치지" 말 것 — 지금은 판단 자료가 없다.** 3축 대각을 무손실로
+   허용하려면 `v_max ≥ 0.125 × √3 = 0.2165 m/s`가 되어야 하고, 그러면 3층 비율 계약
+   (`config.py`의 `GOVERNOR` ↔ `UPSAMPLER.max_step_rad`)을 전부 다시 계산해야 하며
+   250 Hz 업샘플러의 per-tick 상한에 부딪힌다. **한 층만 올리면 다음 층이 조용히
+   먹어버린다**(G2 완화책 2).
+3. **데이터를 인용할 때 "액션 1.0 = `ACTION_SCALE`만큼 움직였다"는 축 하나일 때만
+   참이라고 적는다.** 데모 변환(`RECORDED_TAKE_DEMO_CONVERSION_KO.md`)도 저장 액션을
+   그대로 쓴다.
+4. `governed` 비율은 **fingerprint에도 없다** → G18. 즉 "그날 대각이 얼마나 잘렸나"는
+   세션 로그가 없으면 사후 복원이 불가능하다.
+
+---
+
+## G27 — line search 축소가 저장 액션에 반영되지 않는다 🔴 (신규 2026-07-30, 적대적 검수)
+
+🛑 **`4197f5b`가 만든 결함이 아니다.** 그 이전 코드도 "클램프된 요청"을 기록했으므로 같은
+괴리가 있었다. 이번에 처음 **측정되고 테스트로 못 박혔다.**
+
+### 사실
+
+`InterventionBudget.take`는 **요청(request)**을 과금한다. 그런데 요청이 명령으로 나가기까지
+게이트가 두 개 더 있고, 그중 **IK line search**는 예산 아래에서 스텝을 더 깎는다:
+
+| | |
+|---|---|
+| 과금되는 값 | `wrappers.py::GelloIntervention._paced_request` → `InterventionBudget.take`의 **요청** |
+| 저장되는 값 | `::consumed_window_action` = **과금된 양** (= 요청) |
+| 실제 명령되는 값 | `policy_delta_controller.py::PolicyDeltaController.step`의 line search가 `max|dq| <= dq_step_max`를 만족할 때까지 축소한 값 |
+| **관측 수단** | **없다.** governor가 아니라 **joint gate**가 물렸으므로 `info["governed"]`는 **False**로 남는다 |
+
+📌 **실측(창당 비율 = 저장 / 실제 명령):**
+
+| `dq_step_max` | 과대 진술 배율 |
+|---|---|
+| **0.0625 (shipped)** | 1.000 |
+| 0.01 | **5.66x** |
+| 0.002 | **28.4x** |
+
+`_paced_request`의 docstring은 이 괴리를 **governor에 대해서만** 논증해 놓았다(나머지 share가
+`v_max/substep_hz`보다 작으므로 governor는 물지 않는다). **line search는 그 논증의 대상이
+아니다.**
+
+### 왜 shipped gate에서도 위험한가
+
+`dq_step_max = 0.0625`에서 비율이 1.000인 것은 **그 자세에서** line search가 안 걸렸다는
+뜻일 뿐이다. **조건수가 나쁜 Jacobian이면 shipped gate에서도 같은 브랜치**로 들어간다 —
+line search를 도입한 커밋 자체가 **sigma = 0.56**(특이점 근처가 전혀 아닌 자세)에서
+STEP_LIMIT storm을 측정했다고 적고 있다. 즉 "특이점에서만 생기는 일"이 아니다.
+
+### 회귀 못 (지우지 말 것)
+
+```
+tests/test_intervention_substeps.py::
+  test_a_line_search_shrink_must_not_be_left_out_of_the_recorded_action
+```
+
+**`strict=True` xfail이다** — 이 갭을 고치면 **XPASS로 터진다.** 그것이 의도된 알림이다.
+그래서 이 리포의 테스트 요약에는 항상 **`1 xfailed`가 같이 적혀야 한다**(`00` §4.2).
+
+### 연결
+
+- **저장 액션 불변식**(`04` §2, `serl_ur_infra/README.md` "저장 액션 불변식") — 그 절의
+  "개입 경로는 예산이 지킨다"는 논증이 **line search 앞에서 멈춘다.**
+- **G26** — 같은 "저장 > 실행" 오염이지만 원인이 다르다(G26은 governor의 norm 캡, 여기는
+  joint gate). **G26은 `governed`로 보이고 이건 안 보인다**는 것이 결정적 차이다.
+- **G2** — line search 자체가 `eef_delta`의 해석적 line search를 대체한 단순화판이다.
+
+### 완화책
+
+1. **개입 세션에서 `reject_reason`을 본다.** `STEP_LIMIT`가 뜨는 창은 이 경로를 지났을
+   가능성이 높다. 단 line search가 **성공하면** `STEP_LIMIT`도 안 뜬다 — 완전한 관측이 아니다.
+2. **`dq_step_max`를 내리지 말 것.** 배율이 그대로 커진다(위 표).
+3. 근본 수정은 `leader_stream.InterventionBudget`에 **환불/커밋(refund/commit) 경로**가
+   필요하다 — 즉 `ur7e_env.py` 밖이다. 요청 시점이 아니라 **실제 명령된 변위**를 과금해야 한다.
+
+---
+
+## G28 — 브레이크 창이 이미 실행한 사람 명령을 과소 진술한다 🟡 (신규 2026-07-30)
+
+### 사실
+
+리더가 창 **중간에** 죽으면 `ur7e_env.py::UR7eEnv._drive_intervention_substeps`는 정확히
+`zeros(7)`을 기록한다. 그런데 **그 창의 첫 타깃은 이미 명령됐다** —
+`ACTION_SCALE/3 = 0.004167 m`(정규화 **0.333**)이고, 그것은 살아 있는 리더 샘플에서 나온
+**진짜 사람 명령**이다.
+
+`request_hold()` + `controller.reset()`은 **앞으로의** 움직임만 자른다. 이미 나간 변위를
+되돌리지 않고 적분기를 **정지점 위에** 재고정한다.
+
+> **🔧 정정 (2026-07-30):** `ur7e_env.py`의 이전 두 판 주석은 "브레이크가 in-flight 모션을
+> 이미 잘랐다"는 근거로 `zeros(7)`을 정당화했다. **그 근거가 틀렸다** — 브레이크는 미래만
+> 자른다. 주석은 정정됐고, 트레이드는 그대로 유지된다(아래).
+
+### 왜 눈치채기 어려운가
+
+**첫 개입 창에서는 안 보인다.** engage 앵커 때문에 delta가 0이라 첫 타깃도 0이다.
+**두 번째 창부터** 드러난다.
+
+### 판정
+
+**의도된 트레이드이고 한 창 예산(`ACTION_SCALE` 1스텝)으로 유계다.** 대안은 부분 창을
+기록하는 것인데, 그러면 "리더가 죽은 창"이 정상 창과 구별되지 않는다. 다만 **무료가 아니다** —
+G27과 부호가 반대인 같은 종류의 오염이다(G27 과대, G28 과소).
+
+### 회귀 못
+
+```
+tests/test_intervention_substeps.py::
+  test_a_braked_window_records_zeros_for_a_target_it_already_commanded
+```
+
+**크기를 고정하는(pinning) 테스트다** — 이 값이 커지면 트레이드가 더 이상 유계가 아니다.
+
+### 완화책
+
+- 이 창은 `reject_reason`에 남는다. **드롭아웃이 반복되는 세션의 데이터는 신뢰하지 말 것.**
+- 리더 드롭아웃 자체를 줄이는 것이 실질적 완화다 → `07_FAILURE_INJECTION.md` E1.
+
+---
+
+## G29 — `substep_hz ∈ (HZ, 1.5*HZ]`가 조용히 비활성이었다 🟢 (NOTE 정정 2026-07-30)
+
+### 사실
+
+기능 OFF 임계가 문서·NOTE 양쪽에서 **`substep_hz <= HZ`**로 적혀 있었지만, 페이싱 루프의
+**half-period 가드** 때문에 실제 임계는 **`1.5 * HZ`**다. 그 사이 구간은 **substeps 0으로
+돌면서 켜져 있는 것처럼 보였다.**
+
+📌 실측 (HZ = 10):
+
+| `substep_hz` | `substeps` |
+|---|---|
+| 12.0 | **0** |
+| 15.0 | **0 또는 1** (float-degenerate — 창 시작 시각에 따라 갈린다) |
+| 30.0 | 2 (설계값) |
+
+### 판정
+
+**도달성은 사실상 0이다** — `config.py::INTERVENTION`이 `substep_hz = 30.0`을 못 박고 있고
+CLI로 노출되지 않는다. **시작 NOTE의 임계값은 `1.5 * HZ`로 정정됐다**
+(`ur7e_env.py::UR7eEnv.__init__`).
+
+### 왜 갭으로 남기는가
+
+`04` §9.9의 진단 규칙 "`substeps=0`이면 (c) 기능이 꺼진 것"에서 **(c)의 조건이 `HZ`가 아니라
+`1.5*HZ`**라는 것이 판독의 전제다. per-task config가 `substep_hz`를 손대는 순간 다시 관련된다.
+
+---
+
 ## 부록 — 다른 파일에서 발견된 낡은 서술
 
 **이 표의 항목은 전부 `docs/testing/` 밖이다. 고치는 것은 각 파일 소유자의 몫이고,
 여기서는 "이걸 근거로 쓰면 틀린다"는 경고로만 둔다.**
-보통은 코드가 정답이지만, `cube_in_cup.py:126`과 `ros_backend.py:208`처럼
-**코드 주석 쪽이 낡은** 경우도 있다.
+보통은 코드가 정답이지만, `ros_backend.py`의 `VERIFY(hw)` 주석처럼 **코드 주석 쪽이 낡은**
+경우도 있다. (`cube_in_cup.py:126`도 그랬는데 📌 2026-07-30 확인 결과 **이미 고쳐졌다** — 아래.)
 
 | 파일 | 낡은 서술 | 실제 (2026-07-29 확인) |
 |---|---|---|
 | `docs/ros2/GELLO_UR7E_EEF_MODE.md:380` | P9 "yaml 기본 `v_max=0.08`" | `config/ur7e_gello_eef.yaml:238` = **0.16** (같은 문서 `:7`도 0.16이라 자기모순). **여전히 낡음** |
 | `serl_ur_infra/RL_RECEIVE_SERVER.md:62-70` | state 순서 = "TCP pose 6, TCP velocity 6, TCP force 3, TCP torque 3, gripper 1" | 현재 `observation_schema.py` = **알파벳순, gripper가 index 0**. **여전히 낡음 — 이 문서를 근거로 인덱스를 쓰면 틀린다** |
-| `serl_ur_infra/README.md:59` 현황표 | "워크스페이스 박스 (`ABS_POSE_LIMIT`) … ❌ config만 존재, 미작동" | **낡음.** 구현·배선됐다 → G1. (단 `DefaultUR7eEnvConfig`에서는 실제로 비활성이므로 "반쯤 맞다"는 점이 혼란의 근원이다) |
-| ~~`serl_ur_infra/README.md` TODO "v_max vs ACTION_SCALE 정합"~~ | (07-27 판이 낡았다고 지적한 항목) | **해소됨.** README `:77`이 이제 `[x] 2026-07-28 해결 — 3층을 균일 1.25배로 맞춰 헤드룸 1.20x 유지`로 갱신돼 있다. 이 줄은 더 이상 불일치가 아니다 |
-| `serl_ur_infra/ur_env/envs/ros_backend.py:208` | `VERIFY(hw)` — "퍼블리셔가 best-effort면 구독이 조용히 안 뜬다, 첫 브링업에서 확인할 것" | **확인 완료.** RealSense는 RELIABLE/TRANSIENT_LOCAL → 호환. 주석만 안 지워졌다 → `06_SENSORS.md` §3 |
+| `serl_ur_infra/README.md` "PolicyDeltaController 현황 vs eef_delta 본체" 표 (옛 `:59`) | "워크스페이스 박스 (`ABS_POSE_LIMIT`) … ❌ config만 존재, 미작동" | **이미 고쳐졌다** (2026-07-29~30). 그 표는 지금 🟠 "구현·배선 완료, 단 기본 config에서 비활성"으로 적혀 있고, README 자체가 이 낡은 `:59` 포인터를 경고하는 각주를 달고 있다. **`❌ 미작동`이라고 적힌 README 줄은 없다** → G1 |
+| ~~`serl_ur_infra/README.md` TODO "v_max vs ACTION_SCALE 정합"~~ | (07-27 판이 낡았다고 지적한 항목) | **해소됨.** README "남은 TODO" 절의 그 항목이 `[x] 2026-07-28 해결 — 3층을 균일 1.25배로 맞춰 헤드룸 1.20x 유지`로 갱신돼 있다(옛 `:77`). 이 줄은 더 이상 불일치가 아니다 |
+| `serl_ur_infra/ur_env/envs/ros_backend.py` (`grep -n "VERIFY(hw)"` — 옛 `:208`은 지금 다른 줄이다) | `VERIFY(hw)` — "퍼블리셔가 best-effort면 구독이 조용히 안 뜬다, 첫 브링업에서 확인할 것" | **확인 완료.** RealSense는 RELIABLE/TRANSIENT_LOCAL → 호환. 주석만 안 지워졌다 → `06_SENSORS.md` §3 |
 | `ros2_ur_ws/launch_cameras.sh` 머리말 + 기동 배너 | "cam2 = CLOSE-UP (workspace)" | **cam2는 손목 카메라다** → `06_SENSORS.md` §1.1. 시리얼 자동 해석은 `43ba314`/`fb48100`에서 들어왔지만 **이 문구는 그대로 남았다** |
-| `serl_ur_infra/ur_experiments/cube_in_cup.py:126` | true-TCP 전환 시 z 한계를 `0.0045 .. 0.376`이라고 적음 | **산술이 낡았다.** z 바닥이 `0.1785`→`0.185`로 올라갈 때 안 따라왔다. `0.185 − 0.174 = 0.011`이 맞다 → G1 |
+| ~~`serl_ur_infra/ur_experiments/cube_in_cup.py:126`~~ | true-TCP 전환 시 z 한계를 `0.0045 .. 0.376`이라고 적음 | 🟢 **주석이 이미 고쳐졌다** (📌 2026-07-30 확인: `cube_in_cup.py:126` = `#   z limits -> shifted down by 0.174  (0.011 .. 0.376)`). 이 항목은 닫혔다 → G1 |
 | `ros2_ur_ws/src/gello_policy/config/act_deploy.yaml:35` (및 diffusion/FM 형제) | 키 이름은 `start_pose`이고 값은 `[3.106, -1.817, 1.653, -1.618, -1.628, -3.195]`, 주석은 그냥 "the dataset's start pose" | 그건 **banana-in-pot** 자세다. cube_in_cup과 어깨에서 0.29 rad 차이 = TCP가 13 cm 높고 10 cm 뒤. **HIL에 복사하지 말 것.** cube_in_cup 값은 `[3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331]` (`cube_in_cup.py:90-92`). (07-27 판은 이 키를 `RESET_JOINTS`라고 불렀는데 그건 이 리포 쪽 이름이다) |
 | `docs/ros2/GELLO_UR7E_{ACT,DIFFUSION,FM}_DEPLOY.md`, `ros2_ur_ws/src/gello_{policy,recorder}/README.md` | 카메라 시리얼이 리터럴로 박혀 있음 | 시리얼은 이제 `_resolve_camera_serials.sh`가 live 버스에서 해석한다. 리터럴은 **둘 중 어느 쌍이든 동전 던지기** → `06_SENSORS.md` §1.1 |
