@@ -311,7 +311,7 @@ class CubeInCupConfig:
         "stationary_speed_max": 0.05,  # m/s
         # NOT a random chance -- it is the classifier probability at which the
         # scheduler abandons the interval above and scores EVERY step.  Set
-        # well below DEFAULT_REWARD_THRESHOLD (0.2) on purpose: once the scene
+        # well below DEFAULT_REWARD_THRESHOLD (0.5) on purpose: once the scene
         # merely starts to look like success we want the step that actually
         # crosses the threshold, not one up to interval_steps later.
         "escalate_probability": 0.05,

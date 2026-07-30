@@ -126,8 +126,17 @@ cd $WT/ros2_ur_ws && ./run_hil_gui.sh
 
 - ENGAGE(OFF→ON)는 **두 번 클릭 확인**, DISENGAGE(ON→OFF)는 한 번 클릭
   (`gello_hil_gui_node.py` 모듈 docstring의 ENGAGE/DISENGAGE 규칙).
-- GUI는 **로봇도 GELLO도 브리지도 건드리지 않는다.** 퍼블리셔 하나만 소유한다
+- GUI는 **로봇도 GELLO도 브리지도 직접 건드리지 않는다.** 로봇 제어 출력은
+  `/hil/deadman`뿐이다. 다만 현재는 actor status subscriber와 MANUAL/AUTO,
+  `MARK SUCCESS`, `APPROVE HOME`, `START / NEXT ITERATION`용 ROS service client도 소유한다
   (`gello_hil_gui_node.py` 모듈 docstring).
+
+> ### 2026-07-30 episode/operator 확장
+> 이 절의 ENGAGE/DISENGAGE 의미는 그대로다. 추가된 성공 모드는 개입 액션을 바꾸지 않는다.
+> MANUAL(기본)과 AUTO 모두 Kanu classifier를 계속 실행·표시·기록하고, 차이는 success terminal
+> 권한뿐이다. MANUAL은 GUI `MARK SUCCESS`, AUTO는 strict `p(success) > 0.5`다. terminal 뒤에는
+> `WAIT_HOME_APPROVAL`에서 hold하며 GUI 승인 전에는 HOME으로 가지 않는다. HOME 뒤 장면을
+> 사람이 재배치하고 `START / NEXT ITERATION`을 눌러야 policy가 다시 시작한다.
 
 > ### ⛔ 명시적 DISENGAGE와 하트비트 단절은 다르다
 > 살아 있는 GUI가 `engaged=0`을 보내면 **정책이 즉시 이어받는다**. 그러나 첫 메시지
@@ -179,6 +188,17 @@ self._anchored  = True
 > (`wrappers.py::GelloIntervention.consumed_window_action`)이지 리더가 요구한 양이 아니다.
 > 단 `ACTION_SCALE * HZ`가 거버너 캡을 넘으면 **실행만 잘리고 저장은 안 잘려** 불변식이
 > 깨진다. env 기동 시 위반하면 WARNING을 찍는다 (`ur7e_env.py::UR7eEnv.__init__`의 buffer-correctness invariant 블록).
+>
+> 🔴 **그리고 이 불변식에는 07-30 적대적 검수가 찾아낸 구멍 두 개가 있다 — `dp_ratio` 1.000이
+> 그걸 못 잡는다.** `dp_ratio`는 그 창에서 *명령된* 변위와 *기록된* 액션을 비교하지만, 두
+> 경우에 둘이 **함께** 틀린다:
+> - **G27 (과대, 최대 28x):** 예산은 **요청**을 과금하는데 IK **line search**가 그보다 더 깎는다.
+>   `governed`는 governor가 아니라 joint gate가 물렸으므로 **False**로 남아 **관측 수단이 없다.**
+>   `strict=True` xfail로 못 박혀 있다 → `08` **G27**.
+> - **G28 (과소):** 리더가 창 중간에 죽으면 기록은 `zeros(7)`인데 첫 타깃은 이미
+>   **0.004167 m**(정규화 0.333)를 명령했다. 브레이크는 **미래**만 자른다 → `08` **G28**.
+>
+> 둘 다 **`4197f5b`가 만든 것이 아니다** — 이전 코드도 "클램프된 요청"을 기록했다.
 >
 > 기본 config는 이 불변식을 만족한다: `ACTION_SCALE = [0.0125, 0.0625, 1.0]`,
 > `HZ = 10` → 0.125 m/s · 0.625 rad/s vs `GOVERNOR v_max 0.15 / w_max 0.75`
@@ -935,11 +955,16 @@ python3 tests/run_real_hil.py --arm --scale 1.0 --max-steps 150 \
    run 1은 같은 74.68 cm를 절반 예산으로 따라가려다 23.27 cm에서 51 cm 뒤처졌다.
 4. **`governed`가 536표본 전부 0이다** — 개입 경로에서는 governor보다 **예산이 먼저 묶는다**.
    설계된 성질이다(§9.9).
-   🛑 **다만 이 3 run은 창의 첫 타깃만 집계하던 `governed` 코드로 측정됐다.** 그래서 이 값이
-   증명하는 것은 **"첫 타깃에서 절삭 없음"**뿐이고, 창 안 서브스텝 2회의 절삭은 **관측되지
-   않았다.** 그 뒤 `governed`는 창 전체 **OR**, `governed_scale`은 창 전체 **최솟값**으로
-   바뀌었다(경고 문구는 `run_real_hil.py` docstring (e)) — **"창 전체에서 절삭 없음"은 다음
-   run에서 재측정해야 한다.**
+   🛑 **이것을 "governor 절삭이 없음을 확인했다"로 읽지 말 것 — 애초에 절삭이 불가능하다.**
+   `_paced_request`가 요청을 `ACTION_SCALE/3 = 0.00417 m`로 깎고 서브스텝 governor cap은
+   `v_max/substep_hz = 0.0050 m`다. **요청이 cap에 절대 닿지 않는다** → `governed=0`은 관측
+   결과가 아니라 **산술의 필연**이고 **재측정해도 0이다**(07-30 적대적 검수, `08` G26).
+   개입 경로에서 실기 관측이 가능해지려면 `GOVERNOR`를 `ACTION_SCALE` 대비 조여야 한다.
+   *(별개 사실: 이 3 run은 창의 **첫 타깃만** 집계하던 코드로 측정됐고, 그 뒤 `governed`는 창
+   전체 **OR** / `governed_scale`은 창 전체 **최솟값**으로 고쳐졌다 — `run_real_hil.py`
+   docstring (e). 신호로서는 개선이지만 위 부등식 때문에 값은 바뀌지 않는다.)*
+   🔴 **그리고 governor가 아닌 게이트는 이 컬럼에 안 잡힌다** — joint gate(line search)가
+   물리면 `governed=False`인 채로 저장 액션이 최대 **28x** 과대 진술된다 → `08` **G27**.
 5. **포화가 절반 가까이다** (48~60 %). 이건 고장이 아니라 **사람이 예산보다 빨리 움직인
    것**이고, `held`가 아니다(held-rate 0 %) — 예산이 마르면 그 창은 타깃 갱신을 멈추고
    250 Hz 업샘플러가 스스로 감속한다 (`wrappers.py::GelloIntervention.substep`의
@@ -1058,16 +1083,34 @@ x/y/z = **1.4 / 3.6 / 1.4 cm**로 게이트(축별 2 cm, 표본 20개)를 못 �
 | `governed` | governor rate cap이 그 스텝의 액션을 **줄였는가** (0/1). **지금은 창 전체 OR**(첫 타깃 + 모든 서브스텝) | 1이면 "저장 액션 > 실제 움직임". 07-30 개입 536표본 전부 0 — ⚠️ **단 그때는 첫 타깃만 집계했다**(아래) |
 | `governed_scale` | 줄인 배율 (1.0 = 안 줄임). **지금은 창 전체의 최솟값**(= 가장 센 절삭) | `governed=1`일 때 얼마나 잘렸는지. 07-30 전부 1 — 같은 caveat |
 
-> 🛑 **`governed` 계측 범위가 07-30 실기 이후 바뀌었다.** 3 run 당시 코드는 **창의 첫 타깃만**
-> 집계했다. 그래서 "536표본 전부 0"은 **"첫 타깃에서 절삭 없음"**만 증명하고, 서브스텝 2회의
-> 절삭 여부는 그 CSV로 알 수 없다. 지금 코드는 창 전체 OR / 최솟값이므로 **옛 CSV의
-> `governed` 컬럼과 새 CSV의 `governed` 컬럼은 같은 정의가 아니다** — 비교하지 말 것.
-> (정본 경고는 `run_real_hil.py` docstring (e).)
+> 📌 **`info` 스키마가 분기에 따라 달라지지 않는다 (2026-07-30 수정).** 이전에는 **`held` 창에만
+> `governed`/`governed_scale` 두 키가 아예 없었다.** 지금은 `ur7e_env.py::UR7eEnv.step`의 기본
+> `info`가 `governed: False` / `governed_scale: 1.0`을 항상 담는다 — 같은 주석이 `held`/`clipped`에
+> 대해 "run mode에 의존하면 안 된다"고 적은 규칙과 이제 일치한다. CSV 파서는 두 컬럼이 **항상**
+> 있다고 가정해도 된다.
+
+> 🛑 **`governed`가 개입 경로에서 0인 것은 관측 결과가 아니라 산술이다** (07-30 적대적 검수).
+> `_paced_request`가 요청을 `ACTION_SCALE/3 = 0.00417 m`로 깎고 서브스텝 governor cap은
+> `v_max/substep_hz = 0.0050 m`이므로 **요청이 cap에 절대 닿지 않는다.** 즉 shipped config에서
+> 개입 경로의 governor 절삭은 **반증 불가능**하고, **재측정으로 이 항목이 닫히지 않는다.**
+> 실기 관측을 가능하게 하려면 `GOVERNOR`를 `ACTION_SCALE` 대비 조여야 한다 → `08` **G26**.
+>
+> 별개로 **계측 범위도 07-30 이후 바뀌었다.** 3 run 당시 코드는 창의 **첫 타깃만** 집계했고,
+> 지금은 창 전체 **OR** / **최솟값**이다(`run_real_hil.py` docstring (e)). **옛 CSV와 새 CSV의
+> 같은 이름 컬럼을 비교하지 말 것.** 다만 위 부등식 때문에 개입 창의 값 자체는 안 바뀐다.
+>
+> 🔴 **`governed`가 못 보는 것 — 이게 더 위험하다.** governor가 아니라 **joint gate**(IK line
+> search)가 물리면 `governed`는 **False**로 남는데 저장 액션은 실행을 최대 **28x** 과대
+> 진술한다. **관측 수단이 아예 없다** → `08` **G27**. 그리고 리더가 창 중간에 죽은 창은
+> 반대로 이미 명령한 `0.004167 m`(정규화 0.333)를 **과소** 진술한다 → `08` **G28**.
 
 🛑 **`substeps=0`이면 서브스텝 경로가 아예 돌지 않았다는 뜻이다.** 원인은 셋 중 하나다:
 (a) 정책 스텝이다, (b) 그 창이 `held`였다(`EXTERNAL_HOLD`/`NO_IK`/`STEP_LIMIT`), 또는
-(c) config의 `INTERVENTION.substep_hz`가 `HZ` 이하이거나 `INTERVENTION` 블록이 없어
-**기능이 꺼져 이전 동작(창당 타깃 1회)으로 퇴화**했다
+(c) config의 `INTERVENTION.substep_hz`가 **`1.5 * HZ` 이하**이거나 `INTERVENTION` 블록이 없어
+**기능이 꺼져 이전 동작(창당 타깃 1회)으로 퇴화**했다 — ⚠️ **임계는 `HZ`가 아니라 `1.5 * HZ`다.**
+📌 실측(HZ=10): `substep_hz=12.0` → substeps **0**, `15.0` → **0 또는 1**(창 시작 시각에 따라
+갈리는 float-degenerate), `30.0` → 2. 페이싱 루프의 half-period 가드가 원인이고, 시작 NOTE의
+임계값은 2026-07-30에 `1.5*HZ`로 정정됐다 → `08` **G29**
 (`config.py`의 `INTERVENTION` 블록 + `ur7e_env.py::UR7eEnv.__init__`의 경고).
 개입 스텝에서 0이 보이면 (c)를 먼저 의심하라 — 조용히 퇴화하고 예외를 던지지 않는다.
 
@@ -1075,10 +1118,13 @@ x/y/z = **1.4 / 3.6 / 1.4 cm**로 게이트(축별 2 cm, 표본 20개)를 못 �
 `_paced_request()`가 각 서브스텝 요청을 창 예산의 공정분
 (0.0125 / 3 = **0.00417 m**)으로 먼저 깎고, 그 값이 서브스텝 governor 허용량
 (`v_max / 30` = **0.00500 m**)보다 작다 (`wrappers.py::_paced_request` docstring).
-즉 **개입 경로에서는 예산이 governor보다 먼저 묶는다** → 과금 == 명령 == 기록.
-이것은 **설계 논증**이고 창 전체(첫 타깃 + 서브스텝)에 똑같이 적용된다 — 커밋된 코드는 첫
-타깃도 `dt = 1/substep_hz`로 과금하므로(`ur7e_env.py::UR7eEnv._apply_action`) 세 타깃 모두
-같은 부등식을 본다. **다만 실기로 확인된 것은 첫 타깃분뿐이다**(위 경고).
+즉 **개입 경로에서는 예산이 governor보다 먼저 묶는다.** 이것은 **설계 논증**이고 창 전체
+(첫 타깃 + 서브스텝)에 똑같이 적용된다 — 커밋된 코드는 첫 타깃도 `dt = 1/substep_hz`로
+과금하므로(`ur7e_env.py::UR7eEnv._apply_action`) 세 타깃 모두 같은 부등식을 본다.
+🛑 **하지만 "과금 == 명령 == 기록"은 governor에 대해서만 참이다.** 예산 **아래**에 게이트가
+하나 더 있다 — `PolicyDeltaController`의 IK **line search**다. 그것이 물리면 명령은 더 깎이는데
+과금(=기록)은 요청 그대로다. `_paced_request`의 docstring은 이 등식을 **governor에 대해서만**
+논증하며, line search는 그 논증 밖이다 → `08` **G27**(실측 과대 진술 최대 **28x**).
 그래서 `governed=1`은 주로 **정책 경로**에서 뜨고, 거기서 대각 이동이 상시 절삭되는
 기존 결함이 `08` **G26**이다. 이 3 run은 정책 액션이 항상 zero라 **정책 경로의 절삭은
 실기 미관측**이다.

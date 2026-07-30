@@ -11,7 +11,7 @@ def test_request_round_trip_preserves_id_stamps_and_jpegs():
     assert header["protocol"] == PROTOCOL_VERSION
     assert (header["request_id"], header["cam1_stamp_ns"],
             header["cam2_stamp_ns"]) == ("req-7", 100, 104)
-    assert header["threshold"] == DEFAULT_THRESHOLD == 0.2
+    assert header["threshold"] == DEFAULT_THRESHOLD == 0.5
     assert (cam1, cam2) == (b"cam-one", b"cam-two")
 
 

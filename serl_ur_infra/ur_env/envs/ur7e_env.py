@@ -832,16 +832,22 @@ class UR7eEnv(gym.Env):
         self.terminate = False
         self._hold_next_action_reason = None
 
+        options = kwargs.get("options") or {}
+        operator_approved_home = bool(options.get("operator_approved_home", False))
+
         if not self.fake_env:
-            self.go_to_reset()
+            self.go_to_reset(operator_approved=operator_approved_home)
             self.backend.reset_command_stream()  # next target re-seeds from measured q
             q, _, _ = self.backend.get_joint_state()
             self.controller.reset(q)
+            # After the move, not before: the drop point is then the fixed reset
+            # pose rather than wherever the last episode happened to end.
+            self.open_gripper_for_reset()
 
         self._update_currpos()
         return self._get_obs(), {"succeed": False}
 
-    def go_to_reset(self):
+    def go_to_reset(self, *, operator_approved: bool = False):
         """Stream to the fixed init pose (RESET_JOINTS) between episodes.
 
         Mechanism: reuse the 250 Hz upsampler — set it one far target and let
@@ -909,7 +915,7 @@ class UR7eEnv(gym.Env):
             )
 
         gap = float(np.max(np.abs(q - target)))
-        if gap > self.config.RESET_MAX_DIST_RAD:
+        if gap > self.config.RESET_MAX_DIST_RAD and not operator_approved:
             raise RuntimeError(
                 f"reset distance {gap:.2f} rad exceeds "
                 f"RESET_MAX_DIST_RAD={self.config.RESET_MAX_DIST_RAD} — "
@@ -1060,6 +1066,61 @@ class UR7eEnv(gym.Env):
         elif pos >= 0.5 and self.curr_gripper_pos[0] > 0.15:  # open
             self.backend.send_gripper_percent(0.0)
             self.last_gripper_act = now
+
+    #: position_percent at or below which the gripper counts as OPEN. Same
+    #: 0.15 band _send_gripper_command uses for its "already open" test, so the
+    #: reset confirmation and the policy channel agree on what open means.
+    GRIPPER_OPEN_CONFIRM: float = 0.15
+
+    def open_gripper_for_reset(self, timeout_s: float = 2.0) -> bool:
+        """Open the gripper at the episode boundary. Returns True if confirmed.
+
+        WHY: neither reset() nor go_to_reset() used to touch the gripper, so an
+        episode that ended with the policy holding something started the NEXT
+        episode still closed.  Every offline demo starts from an open gripper,
+        so a closed start is out of distribution before the policy has taken a
+        single action — and `gripper_position` is state[0], the first element
+        the encoder sees.
+
+        Deliberately NOT routed through _send_gripper_command: that one is the
+        POLICY's 3-state channel and carries the GRIPPER_SLEEP debounce plus a
+        "skip if already there" test.  A reset is not a policy action; it must
+        command the open unconditionally and then confirm it happened, because
+        the first observation of the episode is read right after.
+
+        Skipped when the gripper channel is disabled (ACTION_SCALE[2] == 0, e.g.
+        tests/run_real_hil.py without --gripper): that config deliberately
+        isolates the arm path, and opening here would move hardware the
+        operator asked us to leave alone.
+
+        The scale is the robotiq_gripper_modbus_node contract documented on
+        _send_gripper_command: command_percent 0.0 = OPEN .. 1.0 = CLOSED.
+        """
+        if self.fake_env or float(self.action_scale[2]) == 0.0:
+            return True
+
+        self.backend.send_gripper_percent(0.0)  # 0.0 = OPEN
+        # Charge the debounce so the policy's first step cannot immediately
+        # re-close on top of an actuation that is still travelling.
+        self.last_gripper_act = time.time()
+
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            pos, age = self.backend.get_gripper_percent()
+            if pos is not None and age < 1.0 and pos <= self.GRIPPER_OPEN_CONFIRM:
+                return True
+            time.sleep(0.05)
+
+        pos, age = self.backend.get_gripper_percent()
+        # A warning, not a raise: the arm is already at the reset pose and the
+        # episode can still run — but the operator must know the first
+        # observation is off-distribution, because nothing else will say so.
+        print(
+            f"[UR7eEnv] WARNING: gripper did not confirm OPEN within {timeout_s}s "
+            f"(position_percent={pos}, age={age:.2f}s) — this episode starts "
+            "out of distribution (every demo starts open)"
+        )
+        return False
 
     # ------------------------------------------------------------------ #
     # cameras                                                             #

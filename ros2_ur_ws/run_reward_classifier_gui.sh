@@ -5,7 +5,7 @@
 # Optional overrides:
 #   HIL_SERL_ROOT=/path/to/hil-serl
 #   REWARD_CLASSIFIER_CHECKPOINT=/path/to/classifier_ckpt
-#   CLASSIFIER_THRESHOLD=0.2
+#   CLASSIFIER_THRESHOLD=0.5
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,7 @@ export REWARD_CLASSIFIER_CHECKPOINT="${REWARD_CLASSIFIER_CHECKPOINT:-$REPO_ROOT/
 export PYTHONPATH="$HIL_SERL_ROOT/serl_launcher${PYTHONPATH:+:$PYTHONPATH}"
 # Keep in sync with serl_ur_infra/ur_env/rlpd_receive_server.py's
 # DEFAULT_REWARD_THRESHOLD so this display matches the learner's reward.
-CLASSIFIER_THRESHOLD="${CLASSIFIER_THRESHOLD:-0.2}"
+CLASSIFIER_THRESHOLD="${CLASSIFIER_THRESHOLD:-0.5}"
 CLASSIFIER_PYTHON="${REWARD_CLASSIFIER_PYTHON:-python3}"
 
 if [[ ! -e "$REWARD_CLASSIFIER_CHECKPOINT" ]]; then

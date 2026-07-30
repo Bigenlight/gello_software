@@ -166,7 +166,8 @@ Server → Local  :  ACK(D(t)) + TransitionOutcome + A(t+1)
 - 이미지는 **raw lossless numpy 바이트**로 한 번만 보낸다. `O(t)`는 `D(t)` 안에 다시 넣지 않는다.
 - 종단/절단 스텝은 `request_action=false`로 같은 `Step`을 보낸다.
 - **Local은 ACK를 검증하기 전에 절대 reset하지 않는다.**
-- 서버 분류기가 잠정 non-terminal transition을 terminal로 확정할 수 있다.
+- 서버 finalizer가 MANUAL의 one-shot `operator_success`, 또는 AUTO의
+  `classifier_success`를 잠정 non-terminal transition의 terminal 성공으로 확정할 수 있다.
 
 ### 3.1 실패 규칙 (fail-fast, 폴백 없음)
 
@@ -224,11 +225,15 @@ cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`)을 그대로 분류기
 > 통째로 오염시키므로 **핸드셰이크에서 거부**한다 (`grpc_actor_transport.py:551-574`의
 > 동일성 검사). 옛 값을 그대로 넘기면 **첫 inference 전에 죽는다 — 그게 의도다.**
 
-**성긴 분류는 타협이 아니라 설계다.** 대부분의 transition은 sidecar 없이 도착하고,
-그 스텝은 `rewards`가 **0.0으로 확정**되며 `classifier_evaluated=0`,
-probability/threshold/success는 전부 0, `reward_model_id`는 빈 문자열이다
-(`masks`/`dones`/`truncated`는 로컬 제안이 그대로 통과한다 —
-`rlpd_receive_server.py::RewardTransitionFinalizer`). 이유 두 가지:
+**성긴 분류는 타협이 아니라 설계다.** 대부분의 transition은 sidecar 없이 도착한다.
+AUTO에서는 분류 근거가 없으므로 그 스텝의 `rewards`는 **0.0으로 확정**되고,
+`classifier_evaluated=0`, classifier probability/threshold/success는 전부 0,
+`reward_model_id`는 빈 문자열이다. MANUAL의 명시적 one-shot `operator_success`는 예외다.
+sidecar가 없거나 분류기가 negative여도 reward 1 / done / success로 확정할 수 있으며,
+sidecar가 없으면 classifier telemetry만 unevaluated로 남는다. 서버의 권위식은
+`operator_success OR (auto_success AND classifier_success)`이다
+(`rlpd_receive_server.py::RewardTransitionFinalizer`). 성공이 아니면
+`masks`/`dones`/`truncated`는 로컬 제안이 그대로 통과한다. 이유 두 가지:
 큐브를 놓은 뒤 **장면이 가라앉을 시간**을 주고, 10 Hz로 판정이 **깜빡이는 것**을 막는다.
 대역폭 절감은 부수 효과다.
 
@@ -243,7 +248,8 @@ N-of-M 시간 평활(`--success-confirmations`)은 **기본값이 1 = 꺼짐**�
 > **주변 센서 노이즈와 같은 수준**이다 (§5.4). 오프라인에서 **비트 단위**로 강제되는 것은
 > **resize-only 경로**뿐이고, 그것을 `tests/test_classifier_sidecar.py`가 뷰어 출력과 대조한다.
 
-📌 `DEFAULT_REWARD_THRESHOLD`는 **0.2 그대로**다. 바뀌지 않았다.
+📌 현재 `DEFAULT_REWARD_THRESHOLD`와 production wrapper pin은 모두 **0.5**다.
+판정은 `classifier_probability > 0.5`의 strict 비교다.
 
 ---
 
@@ -340,17 +346,18 @@ env -u PYTHONPATH $ACTOR_PY -m pytest \
 
 ---
 
-## 5. 🛑 레이턴시·대역폭 예산 — 스모크 2.0 s vs 실제 0.6 s 함정
+## 5. 🛑 레이턴시·대역폭 예산 — 현재 production 1.5/2.0 s
 
-**스모크 클라이언트의 기본 타임아웃은 프로덕션 기본값보다 3배 이상 느슨하다.**
-스모크가 통과했다고 실제 예산 안에 든다는 뜻이 **전혀 아니다.**
+첫 실기에서 정상 reply가 832.3 ms에 도착했지만 옛 0.6/0.8 s 경계가 이를 거부했다.
+현재 `run_hil_actor.sh`는 RPC timeout `1.5 s`, response-age `2.0 s`를 production 기본으로
+pin한다. 스모크가 통과해도 실제 actor와 같은 값을 쓰지 않았다면 production 판정이 아니다.
 
 | 설정 | 프로덕션 기본 | `run_actor_smoke_client.py` 기본 | `run_rlpd_receive_smoke_client.py` 기본 |
 |---|---|---|---|
-| `timeout_s` | **0.6** | **2.0** | **3.0** |
-| `max_response_age_s` | **0.8** | 3.0 | 4.0 |
+| `timeout_s` | **1.5** | **2.0** | **3.0** |
+| `max_response_age_s` | **2.0** | 3.0 | 4.0 |
 | `retry_count` | 1 (다른 값 금지) | 1 | 1 |
-| 근거 | `grpc_actor_transport.py:384-386`(생성자), `:494-496`(config 로더), `run_remote_rlpd_actor.py:112-114` | `run_actor_smoke_client.py:24`, `:25` | `run_rlpd_receive_smoke_client.py:30`, `:31` |
+| 근거 | `run_hil_actor.sh::TIMEOUT_S/MAX_RESPONSE_AGE_S` | `run_actor_smoke_client.py` | `run_rlpd_receive_smoke_client.py` |
 
 ### 5.1 올바른 확인 방법
 
@@ -361,11 +368,10 @@ PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}" \
 $ACTOR_PY \
   $WT/serl_ur_infra/scripts/run_actor_smoke_client.py \
   --host 127.0.0.1 --port 50052 \
-  --timeout-s 0.6 --max-response-age-s 0.8
+  --timeout-s 1.5 --max-response-age-s 2.0
 ```
 
-- **여기서 실패하면 실제 루프에서도 실패한다.** 통과할 때까지 예산을 늘리지 말고
-  네트워크/서버를 고친다.
+- **여기서 실패하면 실제 루프에서도 실패한다.** Kanu/GPU/tunnel 병목을 먼저 확인한다.
 - 예산을 정말 늘려야 한다면 `NETWORK` config의 `timeout_s`/`max_response_age_s`를
   명시적으로 바꾸고, **왜 늘렸는지 이 문서에 남긴다.**
 
@@ -375,8 +381,9 @@ $ACTOR_PY \
 - `max_response_age_s` = 서버가 찍은 `created_ns` 기준 응답 나이 상한
   (`grpc_actor_transport.py:794-797`). 오래된 응답은 버린다.
 - env 루프는 `HZ = 10.0` (`config.py:32`) → 스텝 주기 100 ms.
-  **`timeout_s=0.6`은 이미 6스텝 분량이다.** 여기에 재시도까지 겹치면 1.2 s가 날아간다.
-  즉 이 예산은 "여유"가 아니라 이미 상당히 관대한 값이다.
+  **`timeout_s=1.5`는 이미 15스텝 분량**이고 재시도까지 가면 더 길어진다. 이는 10 Hz
+  실시간성을 보장하는 수치가 아니라, 측정된 cold/contended path를 성급히 죽이지 않기 위한
+  bounded failure 경계다. 장시간 tail latency 계측과 서버 contention 개선은 계속 필요하다.
 
 ### 5.3 🛑 📌 레이턴시 실측 — **두 세션이 6배 다르다. 저장된 상수를 믿지 마라**
 
@@ -615,10 +622,10 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
 > 바뀌었고, `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임해
 > orbax 디렉터리를 해시한다 → `08` G19.
 
-> ### 🔧 `--threshold`를 빼 놓은 이유 (2026-07-29 정정)
-> 이전 판은 `--threshold 0.5`를 박아 뒀다. **코드 기본값은 이제 `0.2`다**
-> (`DEFAULT_REWARD_THRESHOLD`, `rlpd_receive_server.py:73`; `0.85` → `0.5`(`53d5cf6`) →
-> `0.2`(`1b02857`)). 문서에 리터럴을 두면 또 어긋나므로 **생략해서 코드 기본값을 쓰게 한다.**
+> ### 🔧 `--threshold`를 빼 놓은 이유
+> **현재 코드 기본값은 `0.5`다** (`DEFAULT_REWARD_THRESHOLD`). production
+> `run_hil_server.sh`도 이 값을 `0.5`로 pin하고 원격 기본값까지 검증한다. 위 직접 실행 예제는
+> 리터럴 중복을 피하려고 생략했으며, 따라서 같은 0.5 기본값을 쓴다.
 > 명시해야 하는 경우는 하나뿐이다: **다른 threshold로 학습된 checkpoint를 resume할 때.**
 > threshold는 learner fingerprint에 들어가고(`run_rlpd_learner_server.py:548-550`),
 > 불일치는 fail-closed로 거부된다.

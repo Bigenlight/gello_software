@@ -243,13 +243,48 @@ class RosTopicDeadman(DeadmanSource):
         )
 
     def _on_msg(self, msg):
-        data = list(msg.data)
-        engaged = data[0] if len(data) > 0 else 0.0
-        gain = data[1] if len(data) > 1 else 1.0
+        # Malformed input must not refresh the heartbeat.  In particular, an
+        # empty/NaN/fractional message cannot impersonate the GUI's explicit
+        # ``[0.0, gain]`` policy hand-back.  A transient bad packet leaves the
+        # last valid state intact; a sustained bad stream reaches STALE_S and
+        # fails closed through ``is_engaged``.
+        try:
+            data = list(msg.data)
+            if len(data) != 2:
+                return
+            engaged = float(data[0])
+            gain = float(data[1])
+        except (TypeError, ValueError, OverflowError):
+            return
+        if (
+            not math.isfinite(engaged)
+            or engaged not in (0.0, 1.0)
+            or not math.isfinite(gain)
+            or not 0.10 <= gain <= 1.00
+        ):
+            return
         with self._lock:
-            self._engaged_raw = float(engaged)
-            self._gain = float(gain)
+            self._engaged_raw = engaged
+            self._gain = gain
             self._last_rx = time.monotonic()
+
+    def fresh_engaged(self) -> bool:
+        """Return exact state only after a currently fresh valid heartbeat.
+
+        The scene-ready authorization gate uses this stricter read so the
+        pre-first-message compatibility behavior of ``is_engaged`` cannot be
+        mistaken for an explicit DISENGAGE edge.
+        """
+
+        with self._lock:
+            if self._last_rx is None:
+                raise RuntimeError("/hil/deadman has no valid heartbeat")
+            age_s = time.monotonic() - self._last_rx
+            if age_s > self.STALE_S:
+                raise DeadmanHeartbeatStaleError(
+                    age_s=age_s, stale_s=self.STALE_S
+                )
+            return self._engaged_raw == 1.0
 
     def is_engaged(self) -> bool:
         with self._lock:
@@ -263,7 +298,7 @@ class RosTopicDeadman(DeadmanSource):
                 raise DeadmanHeartbeatStaleError(
                     age_s=age_s, stale_s=self.STALE_S
                 )
-            return self._engaged_raw >= 0.5
+            return self._engaged_raw == 1.0
 
     def gain(self) -> float:
         with self._lock:

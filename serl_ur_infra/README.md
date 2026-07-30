@@ -22,9 +22,27 @@
 > (`3459098d…` — hash는 `CANONICAL_OBSERVATION_SPEC` 문서에서 나오지 wire payload에서 나오지 않는다).
 > 계약은 `ur_env/classifier_sidecar.py`, 전모는
 > [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) §12.1.
-> production actor 배선은 첫 실물 E2E에서 사용됐다. 다만 GUI/영구 JSONL에 per-transition
-> probability가 없어 online verdict 정합은 아직 미확인이다. **팔 가림 병리(`take_21`)도
-> 안 고쳐졌다**; 정지 게이트가 완화할 뿐 진짜 해법은 카메라 배치다.
+> production actor 배선은 첫 실물 E2E에서 사용됐다. 이제 actor status/GUI가 마지막으로
+> 평가된 probability와 threshold를 표시하고 서버 replay provenance에도 verdict를 남긴다.
+> 장시간 online 분포 정합은 더 확인해야 한다. **팔 가림 병리(`take_21`)도 안 고쳐졌다**;
+> 정지 게이트가 완화할 뿐 진짜 해법은 카메라 배치다.
+
+> 🆕 **(2026-07-30) 성공 판정은 protocol 2 / transition schema 3이며 GUI 기본은 MANUAL이다.**
+> canonical observation schema는 여전히 v2/hash `3459098d…`라 서로 혼동하지 않는다.
+> MANUAL에서도 classifier sidecar는 계속 서버에서 평가되고 probability/threshold/verdict가
+> GUI의 **LAST CLASSIFIER**에 표시되며 현재 process의 RAM replay provenance에 저장된다.
+> 다만 자동 종료 권한만 없다. GUI **MARK SUCCESS**는 현재 episode에 one-shot
+> `operator_success`를 찍고, 명시적으로
+> AUTO로 바꾸면 `auto_success AND classifier_success`가 success가 된다. 최종 식은
+> `operator_success OR (auto_success AND classifier_success)`이고 두 mode 신호의 동시 true는
+> 거부된다. 현행 threshold는 **0.5**다.
+>
+> 같은 날 읽기 전용 확인에서 Kanu production learner는 PID `1112465` / GPU 5 / health
+> `ready`, run `cube_in_cup_manual_schema3_thr05_20260730_1715`, replay/intervention `400/225`,
+> learner/gradient/policy `301/602/6`이었다. 옛 process의 RAM replay는 복원하지 않았고,
+> 사람 승인 offline demo **2,037개**는 보존·재로드했다. 정상 3-CLI의 server terminal은
+> `cd /home/laptop3/gello_software/ros2_ur_ws && ./run_hil_server.sh`; 읽기 전용 상태 확인은
+> `./run_hil_server.sh --check`다. 변동 가능한 최신 counter는 상태 문서 §11.5를 재확인한다.
 
 최종 운영 checkout은 `/home/laptop3/gello_software`, branch는 `feat/gello-ur7e-humble-22.04` 하나다.
 2026-07-29 머지 `3f199d4`로 로봇/하드웨어 작업이 이 브랜치에 들어왔다 — **워크트리 분리 시절 서술은
@@ -43,8 +61,8 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 | [HANDOFF_NEXT_SESSION_KO.md](HANDOFF_NEXT_SESSION_KO.md) | 첫 E2E 이전의 하드웨어/classifier 상세 조사 기록. 최신 상태 지침으로 쓰지 않는다 |
 | [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 상태 기록. learner 구현 §1–10 / actor·하드웨어 §11 / reward classifier 조사 §12. 위 문서보다 깊다 |
 | [HIL_SERL_KANU_RUNBOOK_KO.md](HIL_SERL_KANU_RUNBOOK_KO.md) | Kanu에서 learner를 띄우는 절차 (dry-run → bounded run) |
-| [REWARD_CLASSIFIER_THRESHOLD_KO.md](REWARD_CLASSIFIER_THRESHOLD_KO.md) | reward threshold를 0.85 → 0.2로 내린 근거 + 2026-07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해 인용할 것 |
-| [REMOTE_ACTOR_GRPC.md](REMOTE_ACTOR_GRPC.md) | gRPC 액터 전송 계약 v2 — 같은 전송을 쓰는 **서버 entrypoint 3종의 차이**. 영문, 머지 트리 기준 재검증 |
+| [REWARD_CLASSIFIER_THRESHOLD_KO.md](REWARD_CLASSIFIER_THRESHOLD_KO.md) | 0.85 → 0.5 → 0.2 결정의 측정·역사. **현행 실행값은 코드 상수 0.5**이므로 옛 문서 숫자를 CLI에 복사하지 않는다 |
+| [REMOTE_ACTOR_GRPC.md](REMOTE_ACTOR_GRPC.md) | gRPC protocol v2 / transition schema 3 — 같은 전송을 쓰는 **서버 entrypoint 3종의 차이**. canonical observation schema v2와 구별할 것 |
 | [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
 | [REWARD_CLASSIFIER_LIVE_KO.md](REWARD_CLASSIFIER_LIVE_KO.md) | 라이브 reward classifier 뷰어 런북 (랩톱 CPU, 터미널 4개). **2026-07-29 실기 검증됨.** 인터프리터 함정 · 조용한 실패 · 트러블슈팅 |
 | [REWARD_TO_RL_INTEGRATION_KO.md](REWARD_TO_RL_INTEGRATION_KO.md) | **분류기를 개입·학습에 연결하는 사람이 읽을 것.** reward/termination 계약(서버 권위, `next_observations` 기준) · 개입의 **버퍼 이중 기록** · RLPD 50:50 배치 · 연결 순서 6단계 · 감시 지표. 코드에서 직접 추적해 작성 |
@@ -268,11 +286,16 @@ clip`으로 만들어 실행과 저장에 같은 값을 쓰므로 구조적으�
 
 - 예산은 3층 비율을 **바꾸지 않는다.** 다만 개입 창에서는 실효 상한이 governor가 아니라
   **예산**이 된다 — 0.0125 m(예산) < 0.0150 m(`v_max`/HZ)이므로 예산이 먼저 묶는다.
-  2026-07-30 실기 **3 run**(개입 536표본)에서 `governed=0`으로 관측된 것이 이 설계대로의
-  결과다. ⚠️ **단 그 값은 창의 첫 타깃만 집계하던 코드로 측정됐다** — "첫 타깃에서 절삭
-  없음"만 증명하고, 창 전체(서브스텝 2회 포함) 절삭 여부는 아직 **미관측**이다.
-  지금 `governed`는 창 전체 OR / `governed_scale`은 창 전체 최솟값이다
-  (`tests/run_real_hil.py` docstring (e)).
+  2026-07-30 실기 **3 run**(개입 536표본)에서 `governed=0`이었다.
+  🛑 **이것을 "governor 절삭이 없음을 확인했다"로 읽지 말 것 — 개입 경로에서는 절삭이
+  구조적으로 불가능하다.** `_paced_request`가 요청을 `ACTION_SCALE/3 = 0.00417 m`로 깎고
+  서브스텝 governor cap은 `v_max/substep_hz = 0.0050 m`이므로 **요청이 cap에 절대 닿지
+  않는다.** `governed=0`은 관측 결과가 아니라 **산술의 필연**이고 **재측정해도 0이다**
+  → `../docs/testing/08_OPEN_GAPS.md` **G26**. 실기 관측을 가능하게 하려면 `GOVERNOR`를
+  `ACTION_SCALE` 대비 조여야 한다.
+  *(별개 사실: 그 3 run은 창의 **첫 타깃만** 집계하던 코드로 측정됐고, 그 뒤 `governed`는 창
+  전체 **OR** / `governed_scale`은 창 전체 **최솟값**으로 고쳐졌다 — `tests/run_real_hil.py`
+  docstring (e). 신호로서는 개선이지만 위 부등식 때문에 값은 안 바뀐다.)*
 - **예산을 끄거나 완화해도 3층 비율 계약 자체는 깨지지 않는다.** 커밋된 코드는 창의 **첫
   타깃도 `dt = 1/substep_hz`로** 과금하므로(`ur7e_env.py::UR7eEnv._apply_action`) 창 총
   governor 허용량은 `3 × v_max/30 = 0.0150 m` = `v_max/HZ`와 정확히 같다.
@@ -288,8 +311,21 @@ clip`으로 만들어 실행과 저장에 같은 값을 쓰므로 구조적으�
 *줄 번호는 적지 않는다 — 이 파일은 동시 편집으로 계속 밀린다*). `run_real_hil.py` CSV에도
 `substeps`와 함께 컬럼으로 나온다. 이전에는 절삭이 일어나도 어디에도 안 남았다.
 🛑 **계측 범위가 07-30 실기 이후 바뀌었다:** 지금 `governed`는 창 전체 **OR**,
-`governed_scale`은 창 전체 **최솟값**이다. 07-30 3 run은 **첫 타깃만** 집계하던 코드로
-측정됐으므로 옛 CSV와 새 CSV의 같은 이름 컬럼을 **비교하면 안 된다.**
+`governed_scale`은 창 전체 **최솟값**이고, `ur7e_env.py::UR7eEnv.step`의 기본 `info`가 두 키를
+**항상** 담는다(이전에는 `held` 창에만 없어서 스키마가 분기에 따라 달라졌다). 07-30 3 run은
+**첫 타깃만** 집계하던 코드로 측정됐으므로 옛 CSV와 새 CSV의 같은 이름 컬럼을 **비교하면
+안 된다.**
+
+🔴 **`governed`가 못 보는 것 — 저장 액션 불변식의 실제 구멍은 여기다.**
+`InterventionBudget.take`는 **요청**을 과금하는데, 예산 **아래**에 게이트가 하나 더 있다:
+`PolicyDeltaController`의 IK **line search**. 그것이 물리면 명령은 더 깎이는데 기록은 요청
+그대로이고, **`governed`는 governor가 아니라 joint gate가 물렸으므로 `False`로 남는다** —
+관측 수단이 아예 없다. 📌 실측 과대 진술: `dq_step_max` 0.0625(shipped) 1.000x /
+0.01 **5.66x** / 0.002 **28.4x**. `strict=True` xfail로 못 박혀 있다
+(`tests/test_intervention_substeps.py::test_a_line_search_shrink_must_not_be_left_out_of_the_recorded_action`)
+→ `../docs/testing/08_OPEN_GAPS.md` **G27**.
+반대 방향 오염도 있다: 리더가 창 중간에 죽은 창은 기록이 `zeros(7)`인데 첫 타깃은 이미
+**0.004167 m**(정규화 0.333)를 명령했다 → **G28**. 둘 다 `4197f5b`가 만든 것이 아니다.
 
 > ### 🐛 기존 결함이 이때 드러났다 — `ACTION_SCALE` 헤드룸은 **축별로만** 성립한다
 > 헤드룸 1.20x는 **한 축 기준** 계산이다(`0.0150 / 0.0125`). 액션이 여러 축에 동시에 걸리면

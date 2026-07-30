@@ -15,7 +15,8 @@
 # 자동화한다:
 #
 #   1) 사전 점검(읽기 전용): 컨트롤러 상태 / GELLO 스트림 / 충돌 노드 확인
-#   2) 조작자가 "GO"를 타이핑해야만 노드를 띄운다
+#   2) RESET 밖이면 체크리스트 출력 뒤 노드를 띄운다. 기본은 즉시 진행이며,
+#      PREPOSITION_DELAY_S / PREPOSITION_CONFIRM로 대기 또는 GO 입력을 opt-in한다
 #   3) gello_move_to_start(start_mode:=init_align, init_pose:=RESET_JOINTS) 기동
 #   4) GATE 1(~/proceed) 승인 → 팔이 scaled_joint_trajectory_controller 로
 #      RESET_JOINTS 까지 **시간 파라미터화된 부드러운 궤적**으로 이동
@@ -34,7 +35,7 @@
 #     wrist_3 가 한 바퀴(≈2π) 도는 사고가 난다. 이 노드는 그 처리를 한다.
 #     go_to_reset()도 현재 같은 branch-cut 처리를 하지만, 부드러운 사전 배치는
 #     충돌 회피 없는 250 Hz reset stream 대신 JTC의 시간 파라미터 궤적을 쓴다.
-#   * 모든 물리적 동작이 조작자의 명시적 서비스 승인 뒤에만 일어난다.
+#   * 노드의 서비스 gate를 사용하지만 wrapper가 기본값에서 자동 승인한다.
 #
 # 안전 확인 (실행 전에 반드시)
 # ----------------------------
@@ -74,11 +75,21 @@
 #     proof를 받은 run_hil_actor.sh --arm이 publisher/controller 상태를 다시 확인한
 #     뒤 strict switch한다. 수동 ros2 control switch는 proof 계약을 우회하므로 쓰지 않는다.
 #   * GELLO 리더를 건드리지 않는다(GELLO 는 끝까지 수동/passive, 읽기만 한다).
-#   * 그리퍼를 건드리지 않는다.
+#
+# 그리퍼 (2026-07-30 변경 — 이전 판은 "그리퍼를 건드리지 않는다"였다)
+# ------------------------------------------------------------------
+# 이동이 끝난 뒤 그리퍼를 OPEN 한다. 모든 offline demo가 열린 그리퍼에서 시작하므로
+# 닫힌 채 세션을 시작하면 정책이 한 번도 행동하기 전에 이미 out-of-distribution이고,
+# gripper_position 은 state[0] 이다. 이동 "뒤"에 여는 이유는 물체를 물고 있었을 때
+# 낙하 지점을 임의의 중간 자세가 아니라 항상 같은 RESET 자세로 고정하기 위해서다.
+# 그리퍼 노드가 없으면 조용히 건너뛴다. OPEN_GRIPPER=0 으로 끌 수 있다.
+# (같은 이유로 UR7eEnv.reset() 도 매 에피소드 경계에서 연다 — 이건 세션 시작용이다.)
 #
 # 사용법
 # ------
 #   ./run_hil_preposition.sh                 # 기본(궤적 8초, proof만 생성)
+#   PREPOSITION_DELAY_S=5 ./run_hil_preposition.sh  # 이동 전 Ctrl-C 가능한 5초 창
+#   PREPOSITION_CONFIRM=1 ./run_hil_preposition.sh  # 예전 GO 입력을 다시 요구
 #   TRAJ_DUR=15 ./run_hil_preposition.sh     # 더 천천히(멀리 있을 때 권장)
 #   SWITCH_TO_FPC=1 ./run_hil_preposition.sh # 명시적 opt-in: proof 후 즉시 전환
 #   DRY_RUN=1 ./run_hil_preposition.sh       # 자세 검증/proof만; 절대 전환하지 않음
@@ -312,7 +323,7 @@ echo ""
 # 아무 명령도 나가지 않았으므로 Ctrl-C가 정상 동작한다 — 즉 "타이핑 없는 중단 창"이다.
 #
 #   PREPOSITION_CONFIRM=1  -> 예전처럼 GO 타이핑을 요구한다
-#   PREPOSITION_DELAY_S=N  -> 카운트다운 길이 (기본 5)
+#   PREPOSITION_DELAY_S=N  -> 카운트다운 길이 (기본 0 = 즉시 진행)
 #
 # 이 게이트는 애초에 매번 뜨지 않는다. 현재 자세가 PASS 범위(위 [2/6]) 안이면
 # 이동 자체가 생략되므로 여기까지 오지 않는다.
@@ -330,10 +341,10 @@ elif (( $(printf '%.0f' "${PREPOSITION_DELAY_S:-0}") > 0 )); then
     done
     printf '\r  이동 시작.%-60s\n' ""
 else
-    # 기본값: 확인 없이 즉시 이동. 조작자 요청(2026-07-30)이며 근거가 있다 —
-    # 이 이동은 개입 경로가 아니라 JTC 궤적이고, TRAJ_DUR=8s에 걸쳐 최대
-    # RESET_MAX_DIST_RAD=0.9 rad만 움직인다(그 이상이면 [2/6]에서 거부된다).
-    # 즉 "느리고 짧은" 이동이다.
+    # 기본값: 확인 없이 즉시 이동(조작자 요청, 2026-07-30). 이 이동은 개입
+    # 경로가 아니라 TRAJ_DUR=8s JTC 궤적이다. 주의: 위 [2/6]은 0.10 rad PASS
+    # 여부만 판정하며, 이 wrapper 자체에는 RESET_MAX_DIST_RAD=0.9 같은 최대
+    # 거리 거부가 없다. current/target 표에 나온 실제 경로를 조작자가 판단한다.
     #
     # 그래도 남는 것: 관절 공간 직선 보간이라 충돌 회피가 없고, 일단 시작되면
     # Ctrl-C가 듣지 않아 정지 수단은 E-STOP뿐이다. 위 체크리스트는 그대로 출력된다.
@@ -423,6 +434,51 @@ if kill -0 "$NODE_PID" 2>/dev/null; then
     sleep 1
 fi
 NODE_PID=""
+
+# =============================================================================
+# 5b) 그리퍼 OPEN
+# =============================================================================
+# 왜: 모든 offline demo가 열린 그리퍼에서 시작한다. 닫힌 채로 세션을 시작하면
+# 정책이 한 번도 행동하기 전에 이미 out-of-distribution이고, gripper_position은
+# state[0] — 인코더가 보는 첫 원소다.
+#
+# 이동이 끝난 뒤에 여는 이유: 물체를 물고 있었다면 낙하 지점이 임의의 중간 자세가
+# 아니라 항상 같은 RESET 자세가 된다.
+#
+# 스케일 계약(robotiq_gripper_modbus_node): command_percent 0.0 = OPEN .. 1.0 = CLOSED.
+# 그리퍼 노드가 없으면(팔만 검증하는 경우) 조용히 건너뛴다 — 이 스크립트는 팔
+# 사전 배치가 본업이고, 여기서 실패해 proof 생성을 막을 이유가 없다.
+GRIPPER_CMD_TOPIC="${GRIPPER_CMD_TOPIC:-/robotiq_gripper/command_percent}"
+GRIPPER_STATE_TOPIC="${GRIPPER_STATE_TOPIC:-/robotiq_gripper/position_percent}"
+GRIPPER_OPEN_WAIT_S="${GRIPPER_OPEN_WAIT_S:-3}"
+if [[ "${OPEN_GRIPPER:-1}" == "1" ]]; then
+    banner "[5b/6] 그리퍼 OPEN"
+    if timeout 3 ros2 topic info "$GRIPPER_CMD_TOPIC" >/dev/null 2>&1; then
+        timeout 5 ros2 topic pub --once "$GRIPPER_CMD_TOPIC" \
+            std_msgs/msg/Float32 "{data: 0.0}" >/dev/null 2>&1 \
+            && echo "OPEN 명령 발행 ($GRIPPER_CMD_TOPIC = 0.0)" \
+            || echo "!! OPEN 명령 발행 실패 — 그리퍼 상태를 눈으로 확인하라"
+        # Robotiq은 물리적으로 ~0.5s 걸린다. 확인만 하고 실패해도 진행한다.
+        _g_deadline=$(( SECONDS + GRIPPER_OPEN_WAIT_S ))
+        _g_ok=0
+        while (( SECONDS < _g_deadline )); do
+            _g_val="$(timeout 2 ros2 topic echo --once --field data \
+                        "$GRIPPER_STATE_TOPIC" 2>/dev/null | head -1)"
+            if [[ -n "$_g_val" ]] && awk -v v="$_g_val" \
+                   'BEGIN { exit !(v <= 0.15) }' 2>/dev/null; then
+                echo "OPEN 확인 (position_percent=$_g_val)"
+                _g_ok=1
+                break
+            fi
+            sleep 0.3
+        done
+        (( _g_ok == 1 )) || echo "!! ${GRIPPER_OPEN_WAIT_S}s 안에 OPEN 확인 실패 — 눈으로 확인하라"
+    else
+        echo "그리퍼 노드 없음 ($GRIPPER_CMD_TOPIC) — 건너뛴다."
+    fi
+else
+    echo "[5b/6] 그리퍼 OPEN 생략 (OPEN_GRIPPER=0)"
+fi
 
 # =============================================================================
 # 6) 최종 판정

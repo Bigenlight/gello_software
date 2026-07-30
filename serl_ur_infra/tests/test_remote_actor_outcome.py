@@ -37,6 +37,7 @@ from ur_env.remote_actor import (  # noqa: E402
     resolve_camera_frame_source,
     run_remote_actor,
 )
+from ur_env.rlpd_receive_server import ReplayIngress  # noqa: E402
 
 #: The three keys the canonical policy/replay observation is allowed to have.
 #: Anything else in a locally dumped observation makes the pickle unloadable by
@@ -78,8 +79,9 @@ class _ServerSuccessThenLocalDoneEnv:
 
 
 class _InProcessNetwork:
-    def __init__(self, service):
+    def __init__(self, service, *, auto_success=False):
         self._service = service
+        self._auto_success = bool(auto_success)
         self._run_id = ""
         self._session_id = ""
         self._request_id = 1
@@ -125,6 +127,11 @@ class _InProcessNetwork:
         deterministic=False,
     ):
         self._clock += 1
+        # This test double can explicitly emulate the GUI's AUTO mode.  The
+        # real actor obtains the same per-transition value from its operator
+        # session; MANUAL remains the production default.
+        if self._auto_success:
+            data["meta"]["auto_success"] = True
         result = self._service.step(
             StepCommand(
                 PROTOCOL_VERSION,
@@ -133,7 +140,10 @@ class _InProcessNetwork:
                 self._session_id,
                 self._request_id,
                 self._clock,
-                data,
+                # Emulate the gRPC serialization boundary.  The server may
+                # normalize its own copy, but those mutations do not appear in
+                # the actor's local checkpoint object.
+                copy.deepcopy(data),
                 ObservationPacket(
                     next_observation_id,
                     next_timestamp_ns,
@@ -184,7 +194,7 @@ def test_actor_resets_on_server_classifier_success_and_keeps_final_values(
     env = _ServerSuccessThenLocalDoneEnv()
 
     summary = run_remote_actor(
-        _InProcessNetwork(service),
+        _InProcessNetwork(service, auto_success=True),
         env,
         config=SimpleNamespace(max_steps=2, random_steps=0, buffer_period=1),
         actor_id="actor",
@@ -216,6 +226,10 @@ def test_actor_resets_on_server_classifier_success_and_keeps_final_values(
         "cam1",
         "cam2",
     }
+    assert local_backup[0]["transition"]["classifier_success"] is True
+    # A local checkpoint is advertised as replay-ready, including an evaluated
+    # classifier-positive transition received across a real wire boundary.
+    ReplayIngress._convert(local_backup[0], intervened=False)
 
 
 # --------------------------------------------------------------------------- #

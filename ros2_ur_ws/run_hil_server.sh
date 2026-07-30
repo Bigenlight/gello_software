@@ -39,7 +39,7 @@
 #   HIL_START_TIMEOUT_S      default 300
 #   HIL_LOCAL_PORT           default 50153
 #   HIL_REMOTE_PORT          fixed production default 50053
-#   HIL_KANU_REPO            default /home/junhyeong/gello_software_hil
+#   HIL_KANU_REPO            default /home/junhyeong/gello_software_hil_current
 #   HIL_KANU_PYTHON          default /home/junhyeong/miniconda3/envs/il/bin/python
 #   ACTOR_VENV               default /home/laptop3/venvs/gello-hil-actor
 #
@@ -60,7 +60,7 @@ RUN_ID="${HIL_RUN_ID:-}"
 START_TIMEOUT_S="${HIL_START_TIMEOUT_S:-300}"
 LOCAL_PORT="${HIL_LOCAL_PORT:-50153}"
 REMOTE_PORT="${HIL_REMOTE_PORT:-50053}"
-KANU_REPO="${HIL_KANU_REPO:-/home/junhyeong/gello_software_hil}"
+KANU_REPO="${HIL_KANU_REPO:-/home/junhyeong/gello_software_hil_current}"
 KANU_PYTHON="${HIL_KANU_PYTHON:-/home/junhyeong/miniconda3/envs/il/bin/python}"
 REMOTE_RUN_BASE="/home/junhyeong/hil-serl-data/runs"
 ACTOR_VENV="${ACTOR_VENV:-/home/laptop3/venvs/gello-hil-actor}"
@@ -199,7 +199,9 @@ NEW_LINEAGE="$2"
 GPU_INDEX="$3"
 RUN_ID="$4"
 START_TIMEOUT_S="$5"
-KANU_REPO="$6"
+# Canonicalize a stable deployment symlink before building the exact process
+# contract; both fresh starts and reuse checks then compare the same real path.
+KANU_REPO="$(readlink -f "$6")"
 KANU_PYTHON="$7"
 REMOTE_PORT="$8"
 REMOTE_RUN_BASE="$9"
@@ -210,7 +212,7 @@ REAL_DEMO="/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23ta
 REAL_DEMO_SHA256="f97185582401ce7570d44fddc33d1bd64b215d7e32d6384d5fe13e1b405032fa"
 RESNET_SOURCE="$KANU_REPO/third_party/hil-serl/examples/experiments/resnet10_params.pkl"
 RESNET_SHA256="175745d43d30233eb01b5369465d1c24c11b8ee71ccb734cc1c1bca13e07f57b"
-REWARD_THRESHOLD="0.2"
+REWARD_THRESHOLD="0.5"
 REWARD_MODEL_ID="cube-in-cup-all3-ckpt150+sidecar-v1"
 POLICY_MODEL_ID="hil-serl-hybrid-sac-resnet10-trunk-cache-v1"
 OBSERVATION_SCHEMA_HASH="3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903"
@@ -266,7 +268,7 @@ print(DEFAULT_CLASSIFIER_CONFIRMATIONS)
 print(CLASSIFIER_INPUT_ID)
 PY
     )"
-    [[ "$defaults" == $'0.2\n1\nfullframe-jpeg-passthrough-v1' ]] || \
+    [[ "$defaults" == $'0.5\n1\nfullframe-jpeg-passthrough-v1' ]] || \
         remote_die "remote reward defaults no longer match the pinned production contract: $defaults"
 }
 

@@ -11,13 +11,16 @@
 #     Terminal 2 (T4):  python3 serl_ur_infra/tests/run_rviz_hil.py --deadman topic
 #     Terminal 3:       ./run_hil_gui.sh
 #
-# The GUI has ONE big toggle:
+# The GUI has the deadman toggle plus an episode START/NEXT button:
 #   * click while DISENGAGED -> ENGAGE (two-click confirm; the arm WILL follow
 #     the GELLO leader once you also move it).
 #   * click while ENGAGED    -> DISENGAGE (single click; the RL policy resumes).
 #   The sensitivity slider is the gain (0.10 fine .. 1.00 1:1); the env latches
 #   it at the engage edge. The heartbeat publishes every tick (even disengaged)
 #   so the env's staleness watchdog stays fed.
+#   Actor reward/classifier/episode status arrives on /hil/actor_status. At
+#   WAIT_SCENE_READY, START/NEXT releases the deadman and calls
+#   /hil/scene_ready; it does not command the robot directly.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

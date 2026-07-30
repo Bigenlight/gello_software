@@ -137,7 +137,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--reward-threshold", type=float, default=DEFAULT_REWARD_THRESHOLD
     )
     # WHY THE DEFAULT IS 1 (smoothing OFF).  Operator decision, not an accident:
-    # the current checkpoint behaves well at DEFAULT_REWARD_THRESHOLD=0.2, and a
+    # the current checkpoint uses DEFAULT_REWARD_THRESHOLD=0.5, and a
     # server that silently smoothed its decision would disagree with the live
     # classifier viewer (REWARD_CLASSIFIER_LIVE_KO.md), which reports raw
     # per-frame probability.  Anyone comparing the two would be debugging the

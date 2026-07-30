@@ -1,4 +1,16 @@
-# 09 — HIL actor 기동 런북 (Stage A: fake-env / Stage B: 실센서 DRY_RUN)
+# 09 — HIL actor 기동 런북 (3-CLI 실물 HIL-SERL 운영)
+
+> ## 🆕 현재 운영 스냅샷 (2026-07-30)
+>
+> - 실물 UR7e에서 Kanu policy, GELLO intervention, online replay/learner update까지 구동됐다.
+> - 정상 진입점은 `run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh` 세 개다.
+> - actor wire는 protocol 2 / schema 3, reward threshold는 **0.5**다.
+> - 성공 판정 기본값은 **MANUAL**이다. classifier는 계속 실행·표시·저장하지만 GUI
+>   `MARK SUCCESS`만 terminal을 만든다. AUTO에서는 strict `p > 0.5`가 terminal 권한을 가진다.
+> - terminal 뒤 순서는 `WAIT_HOME_APPROVAL`(hold) → `APPROVE HOME` → HOME →
+>   `WAIT_SCENE_READY` → 사람이 장면 재배치 → `START / NEXT ITERATION`이다.
+> - 예전 시작 `GO`/Enter 타이핑은 기본 경로에서 제거됐다. 이것은 타이핑 제거이며
+>   pose/controller proof, fresh ENGAGED heartbeat, episode별 HOME/NEXT 승인은 남아 있다.
 
 > ## 🛑 지금 이 문서를 읽는 사람이 먼저 알아야 할 것 (2026-07-29)
 >
@@ -16,14 +28,15 @@
 >    ~~머지가 크롭 불일치를 들여왔고 Stage B 전에 처리해야 한다~~는 더 이상 맞지 않는다.
 >    actor가 분류기에게 **자기 몫의 무크롭 128×128 JPEG(sidecar)**를 약 2 Hz로 따로 붙여
 >    보내고, 정책은 실측 `IMAGE_CROP`을 그대로 쓴다 (`05` §3.2).
->    이 경로는 첫 실제 actor run에서 production server로 전송됐다. 다만 현재 GUI/JSONL에는
->    per-transition classifier probability가 보이지 않으므로 **online verdict 정합 검증**은
->    아직 남아 있다. `DRY_RUN`이 팔만 막고 보상/종단은 막지 않는다는 사실도 그대로다.
+>    이 경로는 첫 실제 actor run에서 production server로 전송됐다. 2026-07-30부터 GUI에는
+>    마지막 evaluated classifier probability/threshold/verdict가 보인다. 아직 남은 것은
+>    **실물 episode에서 그 숫자의 정합을 관측하는 일과 영구 JSONL 기록**이다.
+>    `DRY_RUN`이 팔만 막고 보상/종단은 막지 않는다는 사실도 그대로다.
 > 5. **actor에 sidecar 플래그 4개, 서버에 `--reward-model-id` 기본값이 생겼다.**
 >    `EXPECTED_REWARD_MODEL_ID`가 **`cube-in-cup-all3-ckpt150+sidecar-v1`**로 바뀌었고,
 >    옛 값 `cube-in-cup-checkpoint-150`은 **핸드셰이크에서 거부된다** (§1.1, §2.2).
-> 6. 첫 E2E learner는 문서 작성 시점 PID `159159`, port 50053에서 아직 살아 있었다.
->    다음 세션에는 이 값을 믿지 말고 `pgrep`/`ss`로 확인한다. 살아 있으면 duplicate를 띄우지 않는다.
+> 6. PID/run root는 고정값이 아니다. `./run_hil_server.sh --check`가 현재 exact learner의
+>    process, schema, buffer와 health를 읽는다. 문서의 과거 PID를 재사용하지 않는다.
 >
 > 현재 상태는 [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md)를 볼 것.
 
@@ -86,8 +99,16 @@ cd /home/laptop3/gello_software/ros2_ur_ws
   local `50153 -> Kanu 50053` tunnel을 유지한다. `Ctrl-C`는 tunnel만 닫는다.
 - B는 UR7e/Robotiq/GELLO만 소유한다. 충돌·연결 해제 뒤 C를 내리고 B의 cleanup 완료 후 B만
   다시 띄울 수 있다.
-- C는 카메라/GUI/preposition/armed preflight/actor를 순서대로 실행한다. 현재는 시작 전 GUI
-  `ENGAGED` 확인이 필요하고, actor 기동 후 `DISENGAGE`해야 policy 제어가 시작된다.
+- C는 카메라/GUI/preposition/armed preflight/actor를 순서대로 실행한다. controller handoff
+  전까지는 GUI `ENGAGED` 확인이 필요하다. handoff 뒤 actor는 HOME에서
+  `WAIT_SCENE_READY`로 멈추며, 장면을 배치하고 GUI의 `START / NEXT ITERATION`을 누르면
+  deadman을 명시적으로 해제한 뒤 fresh observation으로 policy가 첫 action을 시작한다.
+- 시작 자세가 RESET 0.10 rad 밖이면 C가 `run_hil_preposition.sh`를 호출한다. 현재 기본값은
+  체크리스트 출력 뒤 별도 키 입력·카운트다운 없이 JTC 이동이다. 취소 창이 필요하면
+  `PREPOSITION_DELAY_S=5 ./run_hil_session.sh`, 옛 GO 프롬프트가 필요하면
+  `PREPOSITION_CONFIRM=1 ./run_hil_session.sh`로 opt-in한다.
+- episode 중에는 MANUAL/AUTO와 무관하게 classifier 숫자가 계속 갱신된다. MANUAL에서는
+  사람이 성공을 확인했을 때 `MARK SUCCESS`; AUTO에서는 `p(success) > 0.5`가 성공이다.
 
 읽기 전용/무접촉 진단은 다음과 같다.
 
@@ -136,8 +157,8 @@ cd $WT/ros2_ur_ws
 | `EXPECTED_MODEL_ID` | `hil-serl-hybrid-sac-resnet10-trunk-cache-v1` | **서버 종류에 따라 반드시 바꾼다** (§2.3) |
 | `EXPECTED_REWARD_AUTHORITY` | `server_classifier` | |
 | `EXPECTED_REWARD_MODEL_ID` | `cube-in-cup-all3-ckpt150+sidecar-v1` | 서버 `--reward-model-id`와 같아야 함. **id가 체크포인트 + 입력 계약(sidecar)을 둘 다 담는다** — 어긋나면 핸드셰이크에서 거부된다. *(이전 값 `cube-in-cup-checkpoint-150`은 이제 거부된다)* |
-| `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `0.6` / `0.8` | 프로덕션 예산. 늘리지 말 것 (`05` §5) |
-| `HZ_TIMEOUT_S` | `6` | 토픽당 정상 종료형 liveness/rate probe 최대 대기 시간. 5개 fresh·advancing 샘플과 최소 Hz를 검사 |
+| `TIMEOUT_S` / `MAX_RESPONSE_AGE_S` | `1.5` / `2.0` | 2026-07-30 실기 startup에서 정상 transition reply가 832.3 ms에 도착해 기존 0.6/0.8 s 경계를 넘은 뒤 완화. 여전히 bounded이며 무제한 대기는 아니다 |
+| `HZ_TIMEOUT_S` | `12` | session 토픽당 정상 종료형 liveness probe 최대 대기 시간. 5개 fresh·advancing 샘플만 요구하며 시작 순간의 최소 Hz는 차단 조건이 아니다 |
 | `HIL_PREPOSITION_MARKER` | `$XDG_RUNTIME_DIR/hil-preposition.ready` | `run_hil_preposition.sh`와 actor가 공유하는 0600 proof. 보통 직접 지정하지 않는다 |
 | `HIL_PREPOSITION_MARKER_MAX_AGE_S` | `900` | marker 최대 수명. 1~3600초만 허용 |
 | `SKIP_ROS_CHECKS` | (미설정) | `1`이면 [7][8][9] 건너뜀. `--arm`과 같이 쓰면 **즉시 FAIL** |
@@ -176,10 +197,10 @@ cd $WT/ros2_ur_ws
 
 | 플래그 | 기본 | 무엇을 하나 |
 |---|---|---|
-| `--no-classifier-sidecar` | off | **킬 스위치**(config보다 우선). 서버가 채점할 것이 없으므로 **모든 transition이 `classifier_evaluated=false` / reward 0**으로 돌아온다. sidecar의 지연 비용만 분리하거나 sidecar 이전 동작을 재현할 때만 쓴다 |
+| `--no-classifier-sidecar` | off | **킬 스위치**(config보다 우선). 모든 transition이 `classifier_evaluated=false`가 된다. AUTO에서는 classifier reward가 0이지만, MANUAL의 `MARK SUCCESS`는 sidecar 없이도 operator reward/done을 만들 수 있다. sidecar 지연 비용만 분리할 때 쓴다 |
 | `--classifier-sidecar-interval N` | **5** (10 Hz → 약 2 Hz) | N 스텝마다 최대 1회 부착. **성긴 것이 의도다** — 판정 깜빡임을 줄이고 큐브를 놓은 뒤 장면이 가라앉을 시간을 준다. `1`은 매 스텝 채점 = 지연 비용 최대 |
 | `--classifier-stationary-speed-max M/S` | **0.05** ⚠️ | TCP 속도가 이 값 미만일 때만 부착 (움직이는 중의 블러 프레임 차단). **config 주석이 이 값을 PLACEHOLDER로 명시한다** — 녹화 take에서 "팔이 가라앉은 뒤 실제로 머무는 속도"를 재서 정해야 한다 |
-| `--classifier-escalate-probability P` | **0.05** | **확률적 추첨이 아니다.** 분류기 확률이 P 이상이면 interval을 버리고 **매 스텝** 채점한다. 임계(0.2)를 실제로 넘는 스텝을 최대 interval−1 스텝 놓치지 않으려는 것이라 **`DEFAULT_REWARD_THRESHOLD`보다 낮게** 둔다 |
+| `--classifier-escalate-probability P` | **0.05** | **확률적 추첨이 아니다.** 분류기 확률이 P 이상이면 interval을 버리고 **매 스텝** 채점한다. 성공 임계(현재 0.5)를 실제로 넘는 스텝을 최대 interval−1 스텝 놓치지 않으려는 것이라 **`DEFAULT_REWARD_THRESHOLD`보다 낮게** 둔다 |
 
 > 종료 시 actor가 **부착/미부착 왕복을 따로** 찍는다
 > (`sidecar_round_trip_ms_mean/max` vs `plain_round_trip_ms_mean/max`).
@@ -275,11 +296,10 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --require-jax-backend gpu
 ```
 
-> ### 🔧 `--threshold`를 빼 놓은 이유 (2026-07-29 정정)
-> 이전 판들은 `--threshold 0.85`, 그다음 `0.5`를 박아 뒀다. **둘 다 이제 틀리다.**
-> 코드 기본값은 **`0.2`**다 (`DEFAULT_REWARD_THRESHOLD`, `rlpd_receive_server.py:73`;
-> `0.85` → `0.5`(`53d5cf6`) → `0.2`(`1b02857`)).
-> 문서에 리터럴을 두면 또 어긋나므로 **생략해서 코드 기본값을 쓰게 한다.**
+> ### 🔧 threshold production 계약 (2026-07-30)
+> 코드 기본값과 `run_hil_server.sh`의 production pin은 모두 **`0.5`**다.
+> `0.2`는 2026-07-29의 과거 lineage 값이다. 위 수동 진단 CLI는 기본값을 사용하지만,
+> 정상 운용에서는 긴 CLI를 복사하지 말고 wrapper가 exact `0.5` 계약을 검사하게 한다.
 >
 > 명시해야 하는 경우는 하나뿐이다: **다른 threshold로 학습된 checkpoint를 resume할 때.**
 > threshold는 learner fingerprint의 `run_contract`에 들어가고
@@ -543,6 +563,38 @@ ENGAGE/DISENGAGE 버튼 + 감도 슬라이더. 20 Hz 하트비트를 `/hil/deadm
 정상 DISENGAGE 메시지만 정책에 제어를 돌려준다. **스페이스바 데드맨은 쓰지 않는다**
 (워치독이 없어 stuck-ON 위험 — `04_HIL_INTERVENTION.md` §1.1).
 
+GUI는 별도로 `/hil/actor_status` JSON을 읽어 control owner, episode/step,
+classifier의 마지막 `p(success)`/threshold, terminal reason을 표시한다. terminal 뒤
+`WAIT_HOME_APPROVAL`에서는 같은 버튼이 **APPROVE HOME**으로 활성화되고, HOME 뒤
+`WAIT_SCENE_READY`에서는 **START / NEXT ITERATION**으로 바뀐다. START/NEXT는 deadman을
+DISENGAGE한 뒤 `/hil/scene_ready` Trigger를 호출한다. early/ENGAGED/stale 요청은 actor가
+거절한다. WAIT status는 0.5 s마다 재발행하므로 WAIT 중 GUI를 재시작해도 버튼이 복구된다.
+새 actor `run_id`가 보이면 GUI는 이전 비동기 요청을 폐기한다. `/hil/deadman`은 정확히
+두 필드 `[0.0|1.0, gain]`와 gain `[0.10, 1.00]`만 유효 heartbeat로 인정한다. 빈 배열,
+NaN, fractional engaged 같은 malformed 메시지는 freshness를 갱신하지 않는다. 이
+status/service는 `/hil/deadman`의 frozen payload를 변경하지 않는다.
+
+성공 모드는 GUI에서 바꾼다. 시작값은 `MANUAL`이고 actor status가 선택 상태의 권위다.
+MANUAL에서도 Kanu classifier sidecar를 끄지 않는다. 숫자와 verdict는 계속 보이고 replay에도
+classifier 결과가 남지만 classifier-positive만으로 reward/done이 되지 않는다. 사람이
+`MARK SUCCESS`를 누르면 현재 `(run_id, episode_id)`에 한 번만 operator success가 들어간다.
+AUTO로 전환하면 수동 성공 버튼은 비활성화되고 서버의 strict `p(success) > threshold`만
+성공을 만든다. 현재 compact GUI는 classifier headline 16 pt이고 status/value 열을 왼쪽에
+정렬해 이전 900 px급 세로 레이아웃보다 짧다.
+
+공식 `third_party/hil-serl` 원본(`c32939bcc`)도 확인했다. 원본에는 SpaceMouse action
+replacement, task-local reward classifier wrapper, `env.reset()`과 일부 task-specific
+terminal prompt는 있지만, 범용 actor GUI·원격 classifier probability overlay·
+`HOME → WAIT_SCENE_READY → operator resume` 상태기계는 없다. 또한 원본 Agentlace/local
+classifier 흐름은 이 저장소의 Kanu-authoritative gRPC reward/termination 계약과 다르므로
+그 코드를 그대로 끼우지 않고, 원본의 terminal→reset 순서만 현재 환경에 맞춰 유지한다.
+
+> 2026-07-30 현재 infra 전체 `614 passed, 11 skipped, 1 xfailed`, ROS package
+> `461 passed`, clean build, 격리 DDS late-join→WAIT 수신→Trigger 왕복까지 통과했다.
+> 실제 UR7e에서는 episode limit→`WAIT_HOME_APPROVAL`과 classifier 표시, schema-3 online
+> transition/learner update까지 관측했다. MANUAL `MARK SUCCESS`로 끝낸 episode의 one-shot
+> provenance만 다음 실기에서 한 번 재확인한다.
+
 **T0 — 터널** (§2.4)
 
 **T6 — preflight → actor**
@@ -552,7 +604,8 @@ cd $WT/ros2_ur_ws
 
 # 1) actor를 내린 채 RESET 자세를 검증/사전 배치한다.
 #    이미 0.10 rad 안이면 이동 없이 proof만 만들고 종료한다.
-#    멀면 기존 GO gate를 통과한 뒤에만 JTC 궤적이 움직인다.
+#    멀면 기본값은 체크리스트 출력 뒤 즉시 JTC 궤적을 시작한다.
+#    PREPOSITION_DELAY_S=5 또는 PREPOSITION_CONFIRM=1은 명시적 opt-in이다.
 ./run_hil_preposition.sh
 
 # 2) HIL GUI를 먼저 ENGAGE하고 GELLO를 RESET anchor에 고정한다.
@@ -572,8 +625,11 @@ EXPECTED_MODEL_ID=<서버가 광고하는 값> \
 
 `run_hil_actor.sh`는 `run_hil_preposition.sh`를 대신 실행하지 않는다. 즉 `--arm` 한 줄이
 사전 배치 이동을 몰래 시작하는 일은 없다. proof가 없거나 15분이 지났거나, proof 뒤 팔이
-RESET 자세에서 벗어났으면 전환 전에 실패한다. 첫 B3는 아래 §4.4의 정지·ENGAGE 조건을
-포함한 operator-gated smoke이며, 일반 자율 policy run으로 바로 DISENGAGE하는 절차가 아니다.
+RESET 자세에서 벗어났으면 전환 전에 실패한다. handoff 뒤에는 GUI가
+`WAIT_SCENE_READY`를 표시한다. 실제 장면을 배치한 다음 `START / NEXT ITERATION`을 눌러야
+`BeginEpisode`와 첫 policy action이 발생한다. success 또는 episode terminal이면 actor는 먼저
+`WAIT_HOME_APPROVAL`에서 terminal pose를 hold한다. `APPROVE HOME` 뒤에만 HOME으로 이동하고,
+그 다음 `WAIT_SCENE_READY`에 들어간다. 두 WAIT 중에는 Step RPC/transition이 없다.
 
 ### 4.3 실기 모드 preflight의 통과 기준 (2026-07-27 실측 예시)
 
@@ -596,18 +652,21 @@ RESET 자세에서 벗어났으면 전환 전에 실패한다. 첫 B3는 아래 
 
 `[7]`은 `ros2 topic hz`를 timeout 뒤 강제 종료하지 않는다. 각 probe는 5개의 fresh하고
 증가하는 샘플을 받은 즉시 `destroy_node()`/`rclpy.shutdown()`으로 reader를 정상 정리한다.
+여기 표시되는 Hz는 정보값이며 session 시작 시 Qt·DDS·RealSense 부하 때문에 순간적으로
+낮아져도 차단하지 않는다. 정상 steady-state 최소 rate는 Terminal 2 하드웨어 launcher와
+`launch_cameras.sh`가 최초 기동 때 이미 확인한다.
 GUI에 cam1 영상이 보이더라도 `[7]`의 cam1만 실패하면 우회하지 말 것. 기존 GUI reader는
 살아 있으나 **새 actor reader에는 큰 이미지가 전달되지 않는 Fast DDS writer 상태**일 수
 있다. 카메라 터미널에서 `Ctrl-C`로 두 카메라를 정상 종료한 뒤
 `./launch_cameras.sh`를 다시 띄우고 `[7]`을 재검증한다.
 
-### 4.4 🔎 첫 `--arm`의 정지·ENGAGE 구간에서 classifier sidecar를 확인한다
+### 4.4 🔎 실제 `--arm` episode에서 classifier sidecar와 GUI verdict를 확인한다
 
 **이것이 G15 수정의 가장 값싼 실기 증거다.** no-arm actor는 이제 의도적으로
 `BeginEpisode` 뒤 종료하므로 transition/classifier sidecar를 만들지 않는다. 따라서 sidecar의
-실제 gRPC 왕복은 첫 `--arm` smoke 안에서 확인해야 한다. 이때 GUI를 미리 ENGAGE하고 GELLO를
-RESET anchor에서 움직이지 않아 human action이 zero에 가깝게 유지되도록 한다. policy action은
-counterfactual로 기록되지만 로봇에 실행되지 않는다.
+실제 gRPC 왕복은 `--arm` episode 안에서 확인해야 한다. controller handoff를 위해 GUI를 먼저
+ENGAGE하지만, actor가 HOME/WAIT에 들어간 뒤에는 장면을 배치하고 `START / NEXT ITERATION`을
+눌러야 한다. 이 버튼이 fresh DISENGAGED를 확인한 뒤 policy-first episode를 연다.
 
 **원리.** 라이브 뷰어와 서버는 **같은 전처리 함수**를 돈다 —
 뷰어는 `gello_recorder.reward_classifier_runtime.decode_classifier_image()`,
@@ -633,10 +692,11 @@ counterfactual로 기록되지만 로봇에 실행되지 않는다.
    절차 정본은 [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](../../serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md)다
    (랩톱 CPU는 `run_classifier_viewer.sh`, kanu GPU + 터널은 `run_remote_classifier_viewer.sh`).
    두 카메라의 값을 적어 둔다.
-3. HIL GUI를 **먼저 ENGAGE**하고 GELLO를 놓지 말고 RESET anchor에서 정지시킨다. §4.2의
-   preposition과 `--dry-preflight --arm`을 통과한 뒤, 부착을 매 스텝으로 올린 짧은
-   operator-gated `--arm` smoke를 시작한다. 이 명령은 실제 controller를 전환하므로 E-STOP을
-   손에 두고, 확인 표본을 얻으면 Ctrl-C로 종료한다:
+3. HIL GUI를 **먼저 ENGAGE**하고 GELLO를 RESET anchor에서 정지시킨다. §4.2의
+   preposition과 `--dry-preflight --arm`을 통과한 뒤, 부착을 매 스텝으로 올린 `--arm`
+   smoke를 시작한다. GUI가 `WAIT_SCENE_READY`를 표시하면 장면을 확인한 뒤
+   `START / NEXT ITERATION`을 누른다. 이 명령은 실제 controller를 전환하고 policy를
+   움직이므로 E-STOP을 손에 두고, 확인 표본을 얻으면 Ctrl-C로 종료한다:
 
    ```bash
    cd $WT/ros2_ur_ws
@@ -644,7 +704,8 @@ counterfactual로 기록되지만 로봇에 실행되지 않는다.
      ./run_hil_actor.sh --arm --deadman topic --classifier-sidecar-interval 1
    ```
 
-   ENGAGE를 풀지 않는다. heartbeat가 끊기면 actor는 policy fallback 없이 fail-stop해야 한다.
+   policy 동작 중 필요하면 ENGAGE로 GELLO 개입하고, 다시 DISENGAGE하면 policy로 돌려준다.
+   heartbeat가 끊기면 actor는 policy fallback 없이 fail-stop해야 한다.
 
 4. 서버가 광고한 계약을 기동 로그에서 확인한다 — `rlpd_receive_server_ready` 한 줄에
    전부 들어 있다: `reward_model_id`, `checkpoint_sha256`, `threshold`,
@@ -654,23 +715,23 @@ counterfactual로 기록되지만 로봇에 실행되지 않는다.
    경고나 classifier fault가 없어야 한다. 현재 actor는 Ctrl-C 때 summary를 출력하지 않으므로
    `sidecar n=`을 짧은 run의 강한 판독구로 쓸 수 없다(짧은 `max_steps` CLI와 함께 후속).
 
-> ### 🪤 그런데 **서버의 확률을 스텝마다 찍어 주는 곳이 지금 없다** (2026-07-29 코드 확인)
-> 정직하게 적는다. `classifier_probability`는
-> (a) `TransitionOutcome`으로 actor에 돌아가 transition dict에 들어가고
-> (`ur_env/remote_actor.py:494-504`), (b) 서버 replay buffer에 저장된다.
-> **그러나 어느 쪽도 로그로 나오지 않는다.**
+> ### 2026-07-30 변경 — GUI에서 마지막 classifier 결과를 볼 수 있다
+> `classifier_probability`는 `TransitionOutcome`으로 actor에 돌아오며, actor가
+> `/hil/actor_status`로 GUI에 전달한다. GUI는 sparse/unscored 현재 step과 마지막 evaluated
+> `p(success)`/threshold/env step을 구분해 표시한다. 다만 이 UI는 **영구 로그가 아니므로**
+> 장시간 실험의 사후 감사를 대신하지 않는다.
 > 서버가 스스로 말하는 경우는 두 가지뿐이다: **연속 100건이 미분류**일 때, 그리고
 > **한 세션이 단 한 건도 분류되지 않은 채 끝났을 때**
 > (`rlpd_receive_server.py::RewardTransitionFinalizer`의 경고).
 > `--checkpoint-path`의 로컬 pickle도 이 용도로는 못 쓴다 — 아래 §1.2 각주를 볼 것.
 >
-> **그래서 4번까지는 오늘 그대로 실행되지만, "서버 숫자 대 뷰어 숫자" 대조는 판독구가
-> 하나 생겨야 완결된다.** 그 전까지의 대체 판정은 **같은 라이브 프레임 한 쌍에** 두 레시피를
-> 직접 걸어 확률을 비교하는 것이다 —
-> `decode_classifier_image()`(뷰어 경로) vs `build_sidecar()` → `decode_classifier_frames()`
-> (서버가 실제로 도는 경로). 서버는 후자를 **그대로** 부르므로, 이 둘이 맞으면
-> 전처리는 맞은 것이다. 오프라인 등가성은 `tests/test_classifier_sidecar.py`가
-> 이미 강제한다(resize-only 경로는 **비트 단위**, 인코드 왕복은 **측정된 오차 범위**).
+> standalone viewer와 actor GUI를 같은 정지 장면에서 비교하면 server 숫자 대 viewer 숫자의
+> 실기 판독이 가능하다. JPEG 재인코딩 때문에 비트 단위 일치를 요구하지 말고 §4.4의 측정
+> 오차 범위를 적용한다. 오프라인 전처리 등가성은 `tests/test_classifier_sidecar.py`가 강제한다.
+>
+> MANUAL/AUTO는 classifier 실행 여부가 아니라 **누가 success terminal 권한을 갖는가**만
+> 바꾼다. 두 모드 모두 probability/threshold를 계속 전송하고 표시한다. 현재 threshold는
+> 0.5이며 strict 비교이므로 `p == 0.5`는 성공이 아니다.
 
 ---
 
@@ -684,15 +745,18 @@ counterfactual로 기록되지만 로봇에 실행되지 않는다.
 | `… 이 저장소 밖에서 해석됨` | 다른 checkout에 editable 설치된 `serl-ur-infra`가 이기고 있다. 지금 트리에서 스크립트를 실행하고 있는지 확인 |
 | `ur_experiments: 찾을 수 없음` | 지금 checkout에 `serl_ur_infra/ur_experiments/`가 없다 = 브랜치가 틀렸다 |
 | `TCP …:50153 연결 실패` | 터널이 죽었다. §2.4 재실행 → 그래도 안 되면 Kanu에서 서버가 살아 있는지 확인 |
-| `cam1 … 에서 6s 동안 메시지가 없다` | 카메라 노드는 살아 있는데 스트림이 멈춘 상태일 수 있다. `ros2 topic info`의 Publisher count가 1인데 `hz`가 비면 **USB 재연결 후 `launch_cameras.sh` 재기동** |
+| `cam1 … fresh advancing samples … 12.0s` | 순간 Hz 저하는 더 이상 실패가 아니다. 12초 동안 새 timestamp가 실제로 오지 않은 경우이므로 카메라 로그와 `ros2 topic info`를 확인하고 필요할 때만 카메라를 재기동 |
 | `예상 밖 controller 조합` | STJC/FPC가 둘 다 active 또는 둘 다 inactive다. 수동으로 우회하지 말고 driver/이전 actor 종료 상태를 확인 |
 | `arm handoff proof 검증 실패` | actor를 내리고 `./run_hil_preposition.sh`를 실행. 이미 RESET 0.10 rad 안이면 움직이지 않고 새 marker만 만든다 |
 | `퍼블리셔가 N개 있다` (FAIL) | 텔레옵 브리지/다른 러너가 살아 있다. `ros2 topic info -v /forward_position_controller/commands`로 범인을 찾아 끄고 재실행 |
 
 ### 5.1 `RESET_MAX_DIST_RAD` 게이트 (실기에서 자주 만난다)
 
-리셋은 **현재 자세 → `RESET_JOINTS`** 사이를 250 Hz 업샘플러로 그대로 쓸고 지나간다.
-그래서 그 거리가 `RESET_MAX_DIST_RAD`를 넘으면 **에러로 멈춘다 — 그게 의도된 안전 실패다.**
+actor의 승인 없는 일반 리셋은 **현재 자세 → `RESET_JOINTS`** 사이를 250 Hz 업샘플러로
+그대로 쓸고 지나간다. 그래서 그 거리가 `RESET_MAX_DIST_RAD`를 넘으면 에러로 멈춘다.
+다만 terminal 뒤 GUI `APPROVE HOME`을 받은 경로는 `operator_approved_home=True`로 이 거리
+검사를 우회한다. 즉 episode reset에서 0.9 rad가 넘었다고 actor를 죽이는 대신 먼저 사람에게
+HOME 이동 승인을 받고, 승인 뒤 기존 HOME 스트림을 수행한다.
 
 > 🔧 **정정 (2026-07-29): 값이 `0.5`가 아니라 `0.9`다.**
 > `cube_in_cup`의 게이트는 **`RESET_MAX_DIST_RAD = 0.9`**이다
@@ -729,8 +793,10 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 ```
 
 `gello_move_to_start`의 `init_align` 모드를 재사용해 `scaled_joint_trajectory_controller`로
-보간 이동하며, 조작자의 명시적 승인 뒤에만 움직인다. `gello_move_to_start`를 맨손으로
-단독 실행하는 방법은 이 리그에서 검증되지 않았으므로 여기에 적지 않는다.
+보간 이동한다. 현재 wrapper 기본값은 체크리스트 뒤 즉시 진행 서비스를 호출하며 별도 GO
+입력이 없다. 이 preposition wrapper에는 actor의 0.9 rad 거리 제한과 별개인 최대 거리 gate가
+없으므로, 경로가 크면 출력된 current/target 표를 보고 조작자가 중단해야 한다. 취소 가능한
+5초 창은 `PREPOSITION_DELAY_S=5`, 옛 GO 입력은 `PREPOSITION_CONFIRM=1`로만 켠다.
 
 성공 시 스크립트는 현재 사용자만 읽고 쓸 수 있는 proof marker를 만든다. marker는 기본
 15분만 유효하며 RESET 값, ROS domain, 허용오차를 담는다. `run_hil_actor.sh --arm`은 marker만
@@ -754,6 +820,8 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
   예상 밖이면 자동 switch를 거부하고 rc 70으로 끝나므로 `ros2 control list_controllers`와
   `ros2 topic info -v /forward_position_controller/commands`를 직접 확인한다.
 * **DISENGAGE는 정지가 아니다.** 살아 있는 actor에서 누르면 즉시 policy가 제어한다.
+  단 `HOMING/WAIT_SCENE_READY`에서는 독립 episode gate가 우선하므로 DISENGAGE만으로
+  policy가 시작되지 않는다. `START / NEXT ITERATION` 승인이 필요하다.
   actor terminal의 Ctrl-C 또는 필요 시 E-STOP으로 actor/robot을 먼저 멈추고,
   `controller cleanup PASS` 뒤 GUI 상태를 정리한다.
 * 터널이 죽으면 actor는 타임아웃으로 실패한다. §2.4를 다시 띄우고 actor를 재시작한다.
@@ -779,9 +847,10 @@ cd $WT/ros2_ur_ws && ./run_hil_preposition.sh
 | A6 | `--arm` controller handoff + 자동 복귀 | **실기 PASS** | RESET proof 뒤 STJC→FPC strict switch, actor deadline 예외 뒤 publisher-first teardown과 FPC→STJC `controller cleanup PASS`를 실제 controller_manager에서 확인 |
 | B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
-| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **배선 PASS / verdict 관측 미완료** | production sidecar 설정으로 실제 transition이 들어갔다. per-transition `p(success)`를 GUI/영구 로그에서 볼 수 없어 장면별 판정 정합은 아직 미확인 |
-| B3 | actor `--arm` (실제 팔 구동) | **핵심 E2E PASS / continuous PARTIAL** | replay 201, intervention 153, learner 102/gradient 204, policy publish v1/v2. 첫 publish가 5.474 s 걸린 경계에서 actor `Step RPC` 0.6 s timeout. learner publish가 actor에 전달됐다는 증거는 별도 미확인 |
+| B2c | **분류기 sidecar 실기 왕복** (§4.4) | **실기 GUI 관측 PASS / AUTO 정확도 미승인** | production sidecar transition과 GUI의 실제 `p(success)`/threshold/verdict를 관측했다. MANUAL에서도 계속 표시된다. classifier 정확도가 부족해 AUTO는 기본이 아니며 장시간 영구 verdict audit은 남아 있다 |
+| B3 | actor `--arm` (실제 팔 구동) | **핵심 E2E PASS** | Kanu policy 움직임, ENGAGE=GELLO/DISENGAGE=policy, replay/learner update를 관측했다. 옛 0.6/0.8 s stale 경계는 정상 832.3 ms reply를 거부해 1.5/2.0 s로 완화했다. 장시간 tail latency 계측은 계속 필요하다 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
+| B5 | terminal operator state machine | **schema-3 실기 진행 / MARK SUCCESS provenance 재확인** | episode limit 뒤 GUI `WAIT_HOME_APPROVAL`, classifier `p=0.009`, threshold `0.500`, HOME 승인 버튼이 실제 표시됐다. 같은 schema-3 lineage가 replay 400/intervention 225, learner 301까지 진행했다. MANUAL `MARK SUCCESS`로 끝낸 episode의 one-shot provenance만 별도 확인한다 |
 
 ---
 

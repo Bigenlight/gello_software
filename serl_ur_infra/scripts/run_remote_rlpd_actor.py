@@ -15,6 +15,7 @@ import importlib
 import math
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -36,6 +37,7 @@ from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
     assert_actor_environment_state_layout,
 )
+from ur_env.operator_session import RosOperatorSession  # noqa: E402
 from ur_env.remote_actor import (  # noqa: E402
     EnvTimestampAdapter,
     run_remote_actor,
@@ -137,7 +139,7 @@ def _parse_args() -> argparse.Namespace:
             "the scheduler abandons the interval and scores EVERY step, so the "
             "step that actually crosses the reward threshold is not missed by "
             "up to interval-1 steps. Belongs below DEFAULT_REWARD_THRESHOLD "
-            "(0.2). Default: the task config."
+            "(0.5). Default: the task config."
         ),
     )
     parser.add_argument(
@@ -292,7 +294,13 @@ def _mock_policy_transform(sigma: float):
     return transform
 
 
-def _preflight_command_topics(env: Any, robot_config: Any) -> None:
+def _preflight_command_topics(
+    env: Any,
+    robot_config: Any,
+    *,
+    discovery_timeout_s: float = 3.0,
+    poll_interval_s: float = 0.1,
+) -> None:
     """Refuse to arm while another node publishes to the same controller.
 
     ``forward_position_controller`` is a ForwardCommandController: it applies
@@ -320,8 +328,20 @@ def _preflight_command_topics(env: Any, robot_config: Any) -> None:
     topic = ros_config.get(
         "command_topic", "/forward_position_controller/commands"
     )
-    n_pub = node.count_publishers(topic)
-    n_sub = node.count_subscribers(topic)
+    # The backend node is new and can initially see zero remote readers even
+    # after controller_manager has completed the switch.  A one-shot check
+    # caused a false refusal immediately after a successful handoff.  Wait only
+    # for graph discovery; this does not publish a command or relax ownership.
+    deadline = time.monotonic() + max(0.0, float(discovery_timeout_s))
+    while True:
+        n_pub = node.count_publishers(topic)
+        n_sub = node.count_subscribers(topic)
+        if n_pub > 1 or n_sub >= 1:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        time.sleep(min(max(0.0, float(poll_interval_s)), remaining))
     print(
         f"[remote-actor] {topic}: publishers={n_pub} (ours included), "
         f"subscribers={n_sub}",
@@ -514,6 +534,12 @@ def main() -> int:
             f"model={info.model_id} protocol={info.protocol_version}",
             flush=True,
         )
+        operator_session = None
+        if args.deadman == "topic":
+            # Required for the armed topic path: the existing backend node owns
+            # the Trigger service and its already-running executor processes the
+            # GUI edge while the actor main thread waits at HOME.
+            operator_session = RosOperatorSession.from_environment(env)
         summary = run_remote_actor(
             network,
             env,
@@ -526,6 +552,7 @@ def main() -> int:
             sidecar_scheduler=_build_sidecar_scheduler(
                 _sidecar_settings(config, args)
             ),
+            operator_session=operator_session,
         )
         print(
             f"[remote-actor] run={summary.run_id} steps={summary.env_steps} "

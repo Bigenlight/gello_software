@@ -1,5 +1,42 @@
 # HIL-SERL learner Kanu 실행 runbook
 
+> ## 🆕 2026-07-30 현재 정본 — 아래 2026-07-29 스냅샷보다 우선
+>
+> - 정상 명령은 laptop3의 `ros2_ur_ws/run_hil_server.sh` 하나다. Kanu checkout을 손으로
+>   골라 긴 learner CLI를 다시 입력하지 않는다.
+> - Kanu runtime은 stable symlink
+>   `/home/junhyeong/gello_software_hil_current`가 가리키는 clean staging checkout을 쓴다.
+>   staging commit은 `c9c30c3e236a76afdf65e75d9c247ad531031563`, hil-serl submodule은
+>   `c32939bccb65f3b8c43a9f9add3d322d4ab0264a`다. laptop 전체 HEAD와 Kanu staging HEAD는
+>   문서/ROS-local 파일 범위가 달라 같을 필요가 없다. wrapper가 실제 서버 runtime 계약과
+>   checkout cleanliness를 검사한다.
+> - gRPC actor transport는 protocol **2** / schema **3**이다. 이것은 observation schema
+>   v2/hash `3459098d…0352903`과 다른 숫자다. observation schema 자체는 바뀌지 않았다.
+> - reward threshold는 **0.5**, 성공 비교는 strict `p > 0.5`다. 0.2는 이전 lineage의
+>   역사적 값이며 현행 command에 복사하지 않는다.
+> - 성공 모드 기본은 MANUAL이다. classifier는 MANUAL에서도 계속 평가·응답·replay 기록되지만
+>   reward/done은 operator success가 만든다. AUTO에서만 classifier-positive가 terminal 권한을
+>   가진다.
+> - 2026-07-30 새 learner는 GPU 5에서 canonical offline demo **2,037 transition**을 로드하고
+>   health-ready가 됐다. 이 시점의 run root는
+>   `/home/junhyeong/hil-serl-data/runs/cube_in_cup_manual_schema3_thr05_20260730_1715`다.
+>   후속 읽기 전용 스냅샷에서 online replay 400 / intervention 225, learner 301 /
+>   gradient 602 / policy version 6까지 진행했다. PID/counter/run root는 고정 계약이 아니므로
+>   아래 명령으로 현재값을 다시 읽는다.
+> - 이전 schema-2/threshold-0.2 learner의 RAM-only test replay 257, intervention 107,
+>   learner step 158은 checkpoint가 없었고 사용자 판단상 의미 없는 시험값이라 정상 종료 후
+>   폐기했다. canonical offline demo pickle과 SHA는 보존했다.
+>
+> ```bash
+> cd /home/laptop3/gello_software/ros2_ur_ws
+> ./run_hil_server.sh --check  # read-only current learner/contract/health
+> ./run_hil_server.sh          # exact learner 재사용/기동 + local 50153 tunnel 유지
+> ```
+>
+> 아래 본문에 남은 PID `159159`, checkout `gello_software_hil`, threshold 0.2, exact 양쪽
+> HEAD 일치 요구와 `GO` 프롬프트는 2026-07-29 재현 기록이다. 현재 운용 판단에는 이 박스와
+> wrapper 출력을 우선한다.
+
 > 상태: **첫 실물 production-model learning smoke 완료**. 실제 transition 201개와
 > learner 102 step/policy version 2까지 갔지만 첫 publish 경계의 RPC deadline 때문에
 > continuous run은 아직 PARTIAL이다.
@@ -176,7 +213,9 @@ cd /home/laptop3/gello_software/ros2_ur_ws
    ```
 
    `run_hil_preposition.sh`는 이미 RESET 자세 0.10 rad 안이면 팔을 움직이지 않고 proof만
-   만든다. 멀면 기존 `GO` 승인 뒤에만 JTC 궤적이 움직인다. `--dry-preflight --arm`은
+   만든다. 멀면 현재 기본값은 체크리스트 출력 뒤 별도 입력 없이 JTC 궤적을 시작한다
+   (`PREPOSITION_DELAY_S=5` 또는 `PREPOSITION_CONFIRM=1`은 opt-in). 이 wrapper에는 0.9 rad
+   최대 거리 gate가 없으므로 출력된 current/target 표를 조작자가 판단한다. `--dry-preflight --arm`은
    marker/current pose/controller와 연속 ENGAGED heartbeat를 확인할 뿐 controller를
    전환하지 않는다. cam1/cam2는 강제 종료형 `ros2 topic hz`가 아니라 정상 종료형
    production-QoS probe로 신규 actor reader가 fresh frame을 실제 수신하는지 검사한다.
@@ -187,11 +226,12 @@ cd /home/laptop3/gello_software/ros2_ur_ws
    종료하므로 실제 transition smoke를 대신하지 못한다. 같은 server에서 probe한 뒤 깨끗한
    inference RNG/session으로 시작하려면 learner를 정상 종료하고 새 lineage로 다시 띄운다.
 
-4. preflight가 모두 통과하고 operator가 workspace/action scale/controller 상태를 확인한 뒤,
-   ENGAGED 상태를 유지하여 첫 action부터 GELLO intervention이 우선하도록 한다. 실제
-   untrained policy가 거의 포화된 action을 낼 수 있음이 측정됐으므로 이 순서는 권장이 아니라
-   첫 실기 gate다. 실제 controller switch 직전에 launcher가 ENGAGED heartbeat를 다시
-   검사한다. 그다음에만 실제 actor를 시작한다.
+4. preflight가 모두 통과하면 controller handoff까지만 GUI를 ENGAGED로 유지한다. launcher는
+   switch 직전에 fresh ENGAGED heartbeat를 다시 검사하고, actor는 HOME 뒤
+   `WAIT_SCENE_READY`에서 policy action 없이 멈춘다. 장면을 배치한 뒤 GUI의
+   `START / NEXT ITERATION`을 누르면 deadman이 DISENGAGE되고 **policy 첫 action으로** episode가
+   시작한다. 초기 policy가 서툴 수 있으므로 GELLO를 잡고 지켜보다가 필요할 때 ENGAGE하여
+   개입한다. 시작부터 GELLO가 action을 소유하는 것은 현재 정상 절차가 아니다.
 
    ```bash
    cd /home/laptop3/gello_software/ros2_ur_ws
@@ -241,10 +281,11 @@ step 5,000 전에는 production checkpoint가 생기지 않는다. 짧은 smoke�
   입력 계약(classifier sidecar)을 둘 다** 이름에 담고 있어서, sidecar 이전 actor ↔ 이후 server(또는 반대)가
   **조용히 잘못된 reward를 만드는 대신 시끄럽게 실패**하도록 만든 것이다. actor 쪽 짝은
   `ros2_ur_ws/run_hil_actor.sh`의 `EXPECTED_REWARD_MODEL_ID`이고 같은 값이다.
-- ⚠️ **reward threshold 숫자를 이 문서에서 베끼지 마라.** 이틀 사이에 0.85 → 0.5(`53d5cf6`) → **0.2**(`1b02857`)로 두 번 움직였다. 권위 있는 값은 코드 상수 하나뿐이다:
+- ⚠️ **reward threshold 숫자를 과거 실행 기록에서 베끼지 마라.** 0.85 → 0.5 → 0.2를 거쳐
+  2026-07-30 현재는 다시 **0.5**다. 권위 있는 값은 코드 상수 하나뿐이다:
   `serl_ur_infra/ur_env/rlpd_receive_server.py`의 `DEFAULT_REWARD_THRESHOLD`.
   근거와 조건은 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 있다.
-  아래 명령들은 값을 적어 넣지 않고 2.0절에서 코드로부터 읽어온 `$HIL_REWARD_THRESHOLD`를 쓴다(2026-07-29 확인 시점 값은 `0.2`였다).
+  아래 명령들은 값을 적어 넣지 않고 2.0절에서 코드로부터 읽어온 `$HIL_REWARD_THRESHOLD`를 쓴다.
   threshold는 **fingerprint에 포함된다**(`run_rlpd_learner_server.py`의 `run_contract["reward_classifier"]["threshold"]`).
   다른 threshold로 만든 checkpoint는 resume이 fail-closed로 거부된다 — 의도된 동작이다.
 - Kanu learner server는 `127.0.0.1:50053`에만 bind하고 laptop은 SSH local forwarding으로 접속한다.
@@ -255,18 +296,25 @@ step 5,000 전에는 production checkpoint가 생기지 않는다. 짧은 smoke�
 - production bounded/continuous run에는 real canonical robot demo가 필요하다. fake marker를 제거하거나 검사를 우회하지 않는다.
 - production checkpoint는 5,000 learner step마다 약 305 MiB가 추가되며 삭제·덮어쓰기·pruning하지 않는다. synthetic E2E에서만 period 1이며 target을 1..10으로 제한한다. filesystem reserve 기본값은 2 GiB다.
 - replay/intervention buffer는 RAM-only다. process restart와 checkpoint resume가 replay를 복구하지 않는다.
+  2026-07-30에 폐기한 257/107은 이 RAM test buffer이며 offline demo pickle과 다르다.
 - external policy/classifier는 raw `uint8 (1,128,128,3)`를 사용하고, learner replay/demo는 frozen ResNet-10 `stop_gradient` 직후 camera당 `float32 (1,4,4,512)` current/next map을 저장한다. GAP은 없고 augmentation은 `none`이다.
 - trainable `SpatialLearnedEmbeddings/Dropout/Dense256/LayerNorm/tanh`는 sample time에 적용된다. frozen trunk의 online/target exact invariant와 target repin을 유지한다.
 - 기본 50k/10k ring camera tensor는 `7,864,320,000 B = 7.32421875 GiB`다. `--feature-memory-reserve-gib`를 포함한 startup RAM preflight가 fail-closed한다.
-- Kanu GPU actual classifier/agent production 규모 dry-run과 feature CTA smoke는 통과했다. unified schema v2에서 laptop→SSH tunnel→Kanu exact 100 synthetic transition, 실제 CTA step 1, publish/checkpoint full-load roundtrip, fresh-process resume/version 1 inference뿐 아니라 **실제 production policy no-submit gRPC inference**까지 통과했다. production **robot transition** E2E와 continuous learner는 아직 미검증이다.
-- ⚠️ **2026-07-29 18:53 KST 기준 Kanu에는 HIL 프로세스가 하나도 떠 있지 않다.** port 50053 미바인딩. 당시 GPU 0~4는 다른 작업으로 util 100%, GPU 5~7은 유휴였다. 이 값은 바뀌므로 매번 1.0절의 확인 명령으로 직접 본다.
+- Kanu GPU actual classifier/agent dry-run, synthetic CTA/resume, production no-submit inference와
+  실제 robot transition/learner update까지 통과했다. 현재 schema-3/manual-success fresh lineage는
+  health-ready이며 online buffer 0부터 다시 시작했다.
+- ⚠️ 2026-07-29의 "HIL 프로세스 없음" 기록은 역사다. 현재값은
+  `run_hil_server.sh --check`로만 판단한다.
 - ⚠️ **`/home/laptop3/gello_software`는 Kanu에 존재하지 않는다.** 그 경로는 laptop3 전용이다. Kanu 쪽 실제 경로는 1.1절 표에 있다.
-- ✅ **`HIL_KANU_REPO`는 더 이상 "만들어야 하는 값"이 아니다.** 2026-07-29에 영속 checkout `/home/junhyeong/gello_software_hil`을 만들었다(통합 브랜치, submodule 초기화 완료, ResNet asset SHA 일치). 이 문서의 모든 Kanu command는 이 경로를 전제한다. 1.1절.
+- ✅ **`HIL_KANU_REPO`는 더 이상 "만들어야 하는 값"이 아니다.** 현재 wrapper 기본값은
+  `/home/junhyeong/gello_software_hil_current` symlink이며 clean schema-3 staging checkout을
+  가리킨다. 옛 `/home/junhyeong/gello_software_hil`은 현재 production 기본값이 아니다.
 - 🔴 **`/tmp`에 있는 것은 전부 잃어버릴 수 있다.** Kanu는 uptime 157일인데 `systemd-tmpfiles-clean.timer`가 **active**이고 규칙은 `D /tmp 1777 root root 30d`다(2026-07-29 확인). 과거 milestone worktree 두 개와 **재현 불가능한 venv 두 개**가 아직 `/tmp`에 있다. worktree는 commit이 origin에 있으니 안전하지만 venv는 git에 없다 — 1.1절과 1.2.1절에 재생성 명령이 있다.
 - 🟢 **정본 classifier를 gRPC 경로에 물릴 수 있다 (2026-07-29 해소).** ~~`checkpoint_sha256()`이 `os.path.isfile()`을 강제해서 orbax 디렉터리인 정본을 pin할 수 없다~~는 더 이상 맞지 않는다. `checkpoint_sha256()`이 `ur_env.classifier_sidecar.directory_sha256()`에 위임한다 — 디렉터리는 재귀 해시(정렬된 POSIX relpath + 크기 + 내용)하고, **단일 파일은 예전과 완전히 같은 digest**를 내므로 기존 pin도 그대로 유효하다(`08_OPEN_GAPS.md` G19). ZMQ 뷰어 절차는 여전히 [REWARD_CLASSIFIER_LIVE_KO.md](./REWARD_CLASSIFIER_LIVE_KO.md)에 있다.
 - 🟢 **크롭 불일치도 같은 변경에서 닫혔다 — 재학습이 아니라 분리로.** ~~port 50053의 canonical observation이 크롭된 입력인데 classifier는 무크롭으로 학습됐다~~는 이제 사실이 아니다. **classifier는 그 크롭된 관측을 아예 보지 않는다.** actor가 자기 몫의 **무크롭 128×128 JPEG sidecar**를 관측 tensor map의 예약 키(`classifier`)에 얹어 약 2 Hz로, **팔이 정지해 있을 때만** 보내고, 서버는 라이브 뷰어와 같은 레시피로 그것을 푼다. `IMAGE_CROP`은 그대로다(cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`) — 실측값이고 정책이 1차 소비자다.
   > **➡️ 실질적 결과: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)의 무크롭 스윕이 이 경로에 그대로 적용된다.** 재학습을 택했다면 그 수치가 전부 무효가 됐을 것이다. 이것이 분리를 택한 가장 큰 실익이다.
-  > ⚠️ 단 **실기에서 한 번도 안 돌았고**, 팔 가림(occlusion) 문제는 **안 고쳐졌다**(`08_OPEN_GAPS.md` G15 §잔여). 확인 절차는 `docs/testing/09_HIL_ACTOR_RUNBOOK.md` §4.4.
+  > ⚠️ 실기 actor/GUI에서 숫자 표시까지 관측했지만, 팔 가림(occlusion) 문제는 **안 고쳐졌다**
+  > (`08_OPEN_GAPS.md` G15 §잔여). 확인 절차는 `docs/testing/09_HIL_ACTOR_RUNBOOK.md` §4.4.
 - ⚠️ **`--success-confirmations`가 생겼고 기본값은 `1` = 평활 꺼짐이다.** 그래서 서버가 보고하는 `classifier_probability`는 **시간 필터가 없는 순간 sigmoid**이고 라이브 뷰어와 같은 종류의 수치다. **올리지 마라 — 그 등가성이 깨지고, 이 값은 learner fingerprint의 `run_contract`에 들어가므로 resume도 깨진다.** 근거는 CLI 주석에 그대로 있다: 뷰어는 0.9인데 서버가 실패라고 하는 상황을 디버깅하는 비용이 단발 false positive보다 크다.
 - 📌 **learner fingerprint가 이번에 한 번 깨진다 — 의도된 것이다.** classifier SHA · `reward_model_id` · 새 `run_contract` 필드(`input_contract`, `success_confirmations`)가 전부 fingerprint에 들어가므로 **이전 checkpoint의 resume은 fail-closed로 거부된다.** 잃는 것은 없다 — 구 lineage는 recall 0%짜리 폐기 checkpoint 위에 세워져 있었다. `--checkpoint-root`를 새로 하나 만들고, 그다음부터는 다시 안정적이다.
 
@@ -671,7 +719,9 @@ checkpoint 하나의 payload는 약 305 MiB다. schema v1과 최종 v2 Kanu synt
 
 ### 2.0 reward threshold를 코드에서 읽어온다
 
-threshold는 이틀 사이 0.85 → 0.5 → 0.2로 두 번 움직였다. 문서에 적힌 숫자를 베끼지 말고 **run 직전에 코드에서 읽는다.** 아래 값이 4·5·6절 모든 command에서 `--reward-threshold`로 들어간다.
+threshold는 역사적으로 0.85 → 0.5 → 0.2를 거쳤고 2026-07-30 사용자 결정으로 다시
+0.5가 됐다. 과거 숫자를 베끼지 말고 **run 직전에 코드에서 읽는다.** 아래 값이 4·5·6절
+모든 command에서 `--reward-threshold`로 들어간다.
 
 ```bash
 export HIL_REWARD_THRESHOLD=$(
@@ -681,7 +731,8 @@ export HIL_REWARD_THRESHOLD=$(
 echo "reward threshold = $HIL_REWARD_THRESHOLD"
 ```
 
-이 import는 JAX를 끌어오지 않으므로 numpy만 있는 interpreter에서도 된다(2026-07-29 laptop3에서 확인, 값 `0.2`).
+이 import는 JAX를 끌어오지 않으므로 numpy만 있는 interpreter에서도 된다. 2026-07-30
+현재 값은 `0.5`다.
 
 바꿔야 할 이유가 생기면 코드 상수를 먼저 바꾸고 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 근거를 남긴다. run 중간에 CLI 인자만 다른 값으로 주면 fingerprint가 달라져 그 lineage를 다시는 resume할 수 없다.
 
@@ -697,7 +748,7 @@ print('input contract     =', CLASSIFIER_INPUT_ID)
 "
 ```
 
-📌 2026-07-29 laptop3 실측: `0.2` / `1` / `fullframe-jpeg-passthrough-v1`.
+📌 2026-07-30 현재: `0.5` / `1` / `fullframe-jpeg-passthrough-v1`.
 `--reward-model-id`의 코드 기본값은 `run_rlpd_{receive,learner}_server.py`의
 `DEFAULT_REWARD_MODEL_ID`이고 현재 `cube-in-cup-all3-ckpt150+sidecar-v1`이다 —
 **actor 쪽 `run_hil_actor.sh::EXPECTED_REWARD_MODEL_ID`와 문자열이 같아야 하고,

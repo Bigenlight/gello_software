@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from gello_recorder.reward_classifier_runtime import (
+    DEFAULT_THRESHOLD,
     decode_classifier_image,
     make_observation,
     sigmoid_probability,
@@ -19,6 +20,10 @@ def _jpeg(color_bgr):
     ok, encoded = cv2.imencode(".jpg", image)
     assert ok
     return encoded.tobytes()
+
+
+def test_default_threshold_matches_production_reward_contract():
+    assert DEFAULT_THRESHOLD == 0.5
 
 
 def test_decode_matches_checkpoint_contract_and_rgb_order():

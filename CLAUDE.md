@@ -14,16 +14,51 @@ laptop3                                        kanu (GPU 서버)
 ```
 
 laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 kanu에서** 돌리고 gRPC로 실시간
-통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz지만 현재 RPC timeout은 0.6 s이고,
-첫 실물 online-learning run에서 동시 학습/추론 contention 때문에 그 deadline을 넘었다.
+통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz다. 2026-07-30 startup에서 정상
+reply가 832.3 ms에 도착해 옛 0.6/0.8 s 경계를 넘었으므로 현재 RPC timeout/response-age는
+bounded `1.5/2.0 s`로 완화했다.
 분류기는 정책 관측이 아니라 **자기 전용 무크롭 이미지(sidecar)를 약 2 Hz로** 따로 받는다.
 
-**branch `feat/gello-ur7e-humble-22.04`** (origin/HEAD). 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
+**branch `feat/gello-ur7e-humble-22.04`**. 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
 작업을 이 브랜치로 가져왔다. **워크트리 분리는 끝났다** — 로봇 코드와 learner 코드가 **다른
 checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 개 남아 있다). 작업은
 `/home/laptop3/gello_software` 한 곳에서만 한다.
 
 ## 지금 상태 한 줄
+
+**2026-07-30 현재 HIL-SERL 원형은 실물 UR7e에서 구동됐다.** Kanu policy action으로 팔이
+움직이고, GUI `ENGAGE` 중에는 GELLO 개입, 해제 뒤에는 policy 제어로 돌아가며, online
+transition과 learner update까지 관측했다. 현재 정상 운용은 아래 세 terminal뿐이다.
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws
+./run_hil_server.sh    # Terminal 1: Kanu learner 재사용/기동 + tunnel
+./run_hil_hardware.sh  # Terminal 2: UR7e + Robotiq + passive GELLO
+./run_hil_session.sh   # Terminal 3: cameras + GUI + actor
+```
+
+**현재 episode 운영 계약:** 성공 판정은 기본 `MANUAL`이다. Kanu classifier는 MANUAL에서도
+계속 평가·표시·replay 기록되지만 terminal 권한은 GUI `MARK SUCCESS`에 있다. `AUTO`로
+전환하면 strict `p(success) > 0.5`가 성공 권한을 가진다. 성공 또는 episode limit 뒤에는
+`WAIT_HOME_APPROVAL`에서 로봇을 hold하고, GUI `APPROVE HOME` 뒤 HOME, 장면을 사람이
+재배치한 뒤 `START / NEXT ITERATION`을 눌러 다음 policy episode를 연다. classifier headline은
+16 pt의 compact GUI로 표시된다.
+
+**시작 조작 간소화:** `run_hil_preposition.sh`의 예전 대문자 `GO` 입력은 기본 경로에서
+없어졌다. RESET 0.10 rad 밖이면 체크리스트를 출력한 뒤 기본값은 곧바로 JTC 이동을 시작한다
+(`PREPOSITION_DELAY_S=N`으로 취소 가능한 카운트다운, `PREPOSITION_CONFIRM=1`로 옛 GO
+프롬프트를 opt-in할 수 있다). `run_hil_session.sh`의 별도 Enter 프롬프트도 없어졌고 GUI가
+ENGAGED가 될 때까지 폴링한다. 이것은 **타이핑 제거**이지 controller/pose proof나 fresh
+ENGAGED heartbeat 검사를 없앤 것이 아니다.
+
+**Kanu 현재 계약:** actor transport는 protocol 2 / schema 3, reward threshold는 0.5다.
+2026-07-30 새 learner는 GPU 5에서 canonical offline demo 2,037개를 로드해 health-ready가
+됐다. 최신 읽기 전용 스냅샷은 online replay 400 / intervention 225, learner 301 /
+gradient 602 / policy version 6으로 schema-3 실물 전이가 다시 유입되고 학습되는 중이다.
+이 수치는 계속 변한다. 이전 learner RAM에만 있던 테스트 replay 257 / intervention 107 /
+learner step 158은
+checkpoint가 없고 의미 없는 시험값이라는 사용자 판단에 따라 폐기했다. offline demo pickle은
+그대로 보존했다. PID와 run root는 스냅샷이므로 매번 `./run_hil_server.sh --check`로 읽는다.
 
 **2026-07-30 개입 손맛 수정이 실기에서 PASS (`4197f5b`).** 개입 중 팔이 "빳빳"했던 원인은
 10 Hz 자체가 아니라 **타깃 갱신 방식**이었다 — `env.step`이 100 ms 창에서 관절 타깃을 한 번만
@@ -55,18 +90,22 @@ checkout에 있다**고 적힌 문서는 전부 낡은 것이다(아직 여러 �
 **크롭 불일치(G15)는 재학습이 아니라 분리(decoupling)로 해결됐고 실물 actor 경로에도
 들어갔다.** 액터가 분류기에게 **무크롭 원본 JPEG를 sidecar로 따로** 보낸다
 (`ur_env/classifier_sidecar.py`). 정책은 측정된 `IMAGE_CROP`을 그대로 유지한다. 같은 변경에서
-checkpoint 디렉터리 해시(G19)도 고쳤다. 단 이번 run은 per-transition classifier 확률을 GUI나
-영구 로그로 관측하지 못했으므로 **online verdict 정합 검증은 아직 남아 있다.**
+checkpoint 디렉터리 해시(G19)도 고쳤다. GUI에서 실제 episode의 마지막 classifier
+확률/threshold/verdict가 표시되는 것까지 관측했다. MANUAL에서도 이 telemetry는 계속 돈다.
+장시간 사후 감사를 위한 별도 영구 verdict 로그 정리는 여전히 남아 있다.
 
 > **이전 판 문구(보존):** *"안 되는 것 — RL 루프의 reward. 뷰어는 믿어도 되고 RL reward는
 > 믿으면 안 된다."* 이 경고는 sidecar 이전 기준이다. 이제 뷰어와 RL 경로는 **같은 그림**을 본다
 > (같은 무크롭 JPEG, 같은 `decode_classifier_image()` 레시피).
 
-**아직 안 되는 것** — 연속 운용 중 첫 policy publish 경계에서 `Step RPC`가 0.6초를 넘어 actor가
-종료됐다. startup cold-JIT는 해결됐지만, 실제 actor와 함께 돌 때 learner step 중앙값이 약
-1.12초였고 첫 publish는 5.47초였다. 또한 launcher는 commissioning용 `ENGAGED` 시작을 강제하고,
-classifier verdict GUI와 `SUCCESS -> HOME -> scene reset WAIT -> operator RESUME` 상태 기계가 없다.
-sidecar가 고치지 못하는 cam1 **가림(occlusion)**도 남아 있다.
+**아직 남은 것** — 첫 E2E에서 0.6/0.8 s 경계가 정상 832.3 ms reply를 stale로 잘못 거부한
+문제는 현재 1.5/2.0 s bounded 값으로 완화했다. 하지만 장시간 run에서 learner/GPU contention과
+RPC tail latency가 어떻게 변하는지는 계속 계측해야 한다. classifier는 현재 정확도가 충분하지
+않아 MANUAL이 기본이고, AUTO를 production 기본으로 되돌리려면 새 데이터로 재학습·재검증해야
+한다. sidecar가 고치지 못하는 cam1 **가림(occlusion)**과 `08_OPEN_GAPS.md`의 G27/G28
+(실행 액션 기록 정합성)도 남아 있다. 새 schema-3 Kanu lineage의 transition/학습은 실제로
+진행 중이며, MANUAL `MARK SUCCESS` 버튼으로 끝낸 episode의 one-shot provenance만 별도로
+한 번 확인하면 된다.
 
 **개입 쪽에서 남은 것 하나** — 위 2 run은 zero-policy + 사람 개입이라 창 주기가 짧았다.
 연속 운용에서 창이 늘어져(첫 publish 5.47 s, learner step 중앙 1.12 s) **예산이 소진되면 남은
@@ -92,10 +131,10 @@ sidecar가 고치지 못하는 cam1 **가림(occlusion)**도 남아 있다.
 
 | 문서 | 무엇이 들어 있나 |
 | --- | --- |
-| [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) | **최신 정본.** 2026-07-29 실물 E2E 결과와 다음 방향 |
+| [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) | **최신 정본.** 실물 E2E, operator episode 상태기계, 3-CLI와 다음 방향 |
 | [`serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`](serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md) | 첫 E2E 이전의 상세 리그 조사 기록. 최신 상태 지침은 위 문서가 대체 |
 | [`serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md`](serl_ur_infra/HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 기록. learner 구현 §1–10 / actor·하드웨어 §11 / classifier 조사 §12 |
-| [`serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md) | threshold를 0.85 → 0.2로 내린 근거 + 07-29 누출 감사. 07-28 수치와 07-29 수치를 구별해서 인용할 것 |
+| [`serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md) | 0.85 → 0.5 → 0.2의 **역사적** 근거와 07-29 누출 감사. 현재 runtime 기본값은 사용자 결정으로 다시 **0.5**이며 코드 상수가 권위다 |
 | [`docs/testing/README.md`](docs/testing/README.md) | 하드웨어·통신 검증 런북 인덱스(00~09) + 항목별 PASS/미검증 상태표 |
 | [`serl_ur_infra/README.md`](serl_ur_infra/README.md) | env 설계 규약(좌표계·액션 계약·컨트롤러 격차) + `serl_ur_infra/` 문서 인덱스 |
 | [`serl_ur_infra/REMOTE_ACTOR_GRPC.md`](serl_ur_infra/REMOTE_ACTOR_GRPC.md) | gRPC 전송 계약 v2 — 서버 entrypoint 3종의 차이 (영문) |
@@ -168,6 +207,7 @@ serl_ur_infra/
   ur_env/envs/frame_wrappers.py    RelativeFrame, Quat2EulerWrapper
   ur_env/envs/ros_backend.py       rclpy 백엔드, 250 Hz 업샘플러
   ur_env/remote_actor.py           actor 루프, 전이 생성·전송, sidecar 부착 계측
+  ur_env/operator_session.py       GUI 상태/서비스, MANUAL/AUTO·HOME/scene-ready operator gate
   ur_env/classifier_sidecar.py     분류기 sidecar 계약 — build/validate/decode, 정지·2 Hz 게이트,
                                    directory_sha256. **설계 근거가 모듈 docstring에 전부 있다**
   ur_env/rlpd_receive_server.py    서버 ingress + RewardClassifierRuntime + checkpoint_sha256

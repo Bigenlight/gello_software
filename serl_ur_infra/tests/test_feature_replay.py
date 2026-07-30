@@ -64,13 +64,16 @@ def _data(
         "classifier_probability": np.float32(0.1),
         "classifier_threshold": np.float32(0.85),
         "classifier_success": np.uint8(0),
+        "success": np.uint8(0),
         "reward_model_id": "test-classifier",
     }
     if penalty is not None:
         transition["grasp_penalty"] = np.float32(penalty)
     return {
         "meta": {
-            "schema_version": 2,
+            "schema_version": 3,
+            "auto_success": True,
+            "operator_success": False,
             "run_id": "run-0",
             "actor_id": "actor-0",
             "session_id": "session-0",
@@ -230,6 +233,11 @@ def test_ring_wrap_intervention_routing_and_sidecars_are_logically_bounded():
         "transition-1",
         "transition-2",
     ]
+    assert all(record.auto_success for record in ingress.replay_sidecar())
+    assert not any(
+        record.operator_success for record in ingress.replay_sidecar()
+    )
+    assert not any(record.success for record in ingress.replay_sidecar())
     assert [
         record.transition_id for record in ingress.intervention_sidecar()
     ] == ["transition-2"]

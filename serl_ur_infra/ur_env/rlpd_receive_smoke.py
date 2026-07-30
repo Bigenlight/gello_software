@@ -103,6 +103,10 @@ def run_receive_smoke(
             timestamp_ns=source_timestamp,
             policy_version=action.policy_version,
             policy_action=action.action,
+            # This headless receive smoke explicitly covers the automatic
+            # classifier reward contract.  Real operator sessions default to
+            # MANUAL and stamp their live selection instead.
+            auto_success=True,
             episode_id=episode_id,
             step_id=episode_step,
             observation_id=observation_id,

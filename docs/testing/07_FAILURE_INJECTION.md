@@ -41,11 +41,11 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 |---|---|
 | **유발** | (a) GELLO USB를 뽑는다, 또는 (b) `pkill -f gello_publisher` |
 | **기대 (텔레옵 경로)** | 브리지의 leader 워치독(`staleness_timeout_s` 기본 0.5 s, `gello_ur_bridge_node.py:136-137`)이 걸려 **발행 중단 + 재시드 강제**. 컨트롤러는 **마지막 명령 자세를 홀드**. GELLO가 돌아오면 **자동 재개** (`GELLO_UR7E_SETUP_CLI.md:667`) |
-| **기대 (HIL/RL 경로)** | `LEADER_STALE_S = 0.3`(`wrappers.py::GelloIntervention.LEADER_STALE_S`) 초과 → `_disengage()` → **정책이 이어받아 팔을 계속 움직인다** (`wrappers.py::GelloIntervention._disengage`, 검사는 `::action` / `::substep`). **정지가 아니다.** |
+| **기대 (HIL/RL 경로)** | deadman이 ENGAGED인 채 `LEADER_STALE_S = 0.3`을 넘기면 신호 소실로 취급한다. 기존 anchor를 무효화하고 **7-D zero action(팔/그리퍼 HOLD)**을 실행하며 `intervened=1`을 유지한다. 이미 진행 중인 substep window에서 감지하면 backend brake/HOLD를 요청한다. 명시적인 fresh DISENGAGE가 아니므로 **정책으로 넘기지 않는다** (`wrappers.py::GelloIntervention.action` / `::substep`) |
 | **함정 (a)** | USB를 뽑아도 `gello_publisher` **프로세스는 살아 있다.** `get_joint_state()` 실패는 `except`로 잡혀 2초 throttle 경고 후 사이클만 스킵한다 (`gello_publisher_node.py:167-173`). 즉 **`pgrep`으로는 장애를 감지할 수 없다** |
 | **확인** | `ros2 topic hz /gello/joint_states` (멈춤), 러너 로그의 `intervened` 값, `ros2 topic echo /forward_position_controller/commands` |
-| **PASS** | ① 팔이 튀지 않는다(점프 0) ② 텔레옵: 홀드 후 복귀 시 자동 재개, 재개 순간 점프 없음 ③ HIL: 0.3 s 안에 `intervened`가 0으로 떨어진다 |
-| **복구** | USB 재연결 / `gello_publisher` 재기동. 텔레옵은 자동 재개. HIL은 데드맨 재-ENGAGE |
+| **PASS** | ① 팔이 튀지 않는다(점프 0) ② 텔레옵: 홀드 후 복귀 시 자동 재개, 재개 순간 점프 없음 ③ HIL: policy action이 실행되지 않고 zero HOLD transition이 `intervened=1`로 기록되며 팔/그리퍼가 멈춘다 |
+| **복구** | USB 재연결 / `gello_publisher` 재기동. 텔레옵은 자동 재개. HIL은 deadman이 계속 ENGAGED라면 fresh leader에서 재-anchor하고 첫 delta 0으로 재개한다. 정책에 넘기려면 fresh DISENGAGE를 명시적으로 보낸다 |
 
 ---
 
@@ -101,13 +101,13 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 
 | | |
 |---|---|
-| **유발** | (a) SSH 터널 프로세스 kill, (b) `sudo tc qdisc add dev lo root netem delay 800ms` 로 지연 주입 |
+| **유발** | (a) SSH 터널 프로세스 kill, (b) `sudo tc qdisc add dev lo root netem delay 1800ms` 로 지연 주입 |
 | **기대 (a)** | `UNAVAILABLE` = transient → **똑같은 직렬화 요청을 정확히 1회 재시도** (`grpc_actor_transport.py:792-806`, transient 코드 정의는 `:41`) → 실패 시 transition은 **pending**으로 남고 **reset/새 액션이 차단**되며 **Local fails stopped**. **폴백/랜덤 액션은 절대 실행되지 않는다** (`REMOTE_ACTOR_GRPC.md` "Failure rules") |
-| **기대 (b)** | 800 ms 지연 > `timeout_s` 0.6 s + `max_response_age_s` 0.8 s → (a)와 같은 경로 |
+| **기대 (b)** | 1.8 s 지연 > 현재 production `timeout_s` 1.5 s → (a)와 같은 경로. 정상 reply의 age 한계는 2.0 s다 |
 | **확인** | 러너 로그에 재시도 1회 후 fail-stop, `ss -ltnp \| grep 50153` (**로컬 터널 포트는 50153**, 원격이 50053) |
 | **PASS** | ① 재시도가 **정확히 1회** ② 서버에 중복 삽입이 없다(응답 캐싱) ③ 팔이 정지 ④ 임의 액션이 실행되지 않았다 |
 | **복구** | `sudo tc qdisc del dev lo root` / 터널 재수립. 에피소드는 버린다 |
-| **주의** | 스모크 기본 타임아웃(2.0/3.0 s)으로 테스트하면 800 ms 지연을 **통과해버린다.** 반드시 프로덕션 값(0.6/0.8)으로 → `05_COMMS_GRPC.md` §5 |
+| **주의** | 0.8 s는 현재 production 1.5/2.0 s에서 정상 통과할 수 있다. 주입값이 실제 actor timeout보다 큰지 먼저 확인한다 → `05_COMMS_GRPC.md` §5 |
 
 ---
 

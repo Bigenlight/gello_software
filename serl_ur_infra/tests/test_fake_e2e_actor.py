@@ -100,6 +100,8 @@ def test_fake_sender_uses_real_contract_shape_and_requires_ack(monkeypatch):
     assert first_observation["cam1"].shape == (1, 128, 128, 3)
     assert first_observation["cam1"].dtype == np.uint8
     first_data = network.step_calls[0][1]["data"]
+    assert first_data["meta"]["auto_success"] is True
+    assert first_data["meta"]["operator_success"] is False
     assert first_data["transition"]["grasp_penalty"] == pytest.approx(-0.02)
     assert first_data["transition"]["dones"] is True
     assert network.step_calls[0][1]["request_action"] is False

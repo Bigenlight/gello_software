@@ -41,7 +41,7 @@ import numpy as np
 
 
 PROTOCOL_VERSION = "2"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Resolved on first use, never at import time.  ``ur_env.classifier_sidecar``
 # imports ActorProtocolError from this module, so a module-scope import here
@@ -386,6 +386,16 @@ def _values_equal(left: Any, right: Any) -> bool:
     except ActorProtocolError:
         return False
     return left_digest.digest() == right_digest.digest()
+
+
+def _binary_flag(value: Any, *, name: str) -> bool:
+    """Return one bool/0/1 protocol flag without accepting truthy values."""
+
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value not in (False, True, 0, 1):
+        raise ActorProtocolError(f"{name} must be 0 or 1")
+    return bool(value)
 
 
 @dataclass
@@ -874,14 +884,39 @@ class ActorSessionService:
         # The identity finalizer has no classifier, so it ignores the sidecar
         # and reports classifier_evaluated=False for every transition.
         del classifier_sidecar
+        meta = data["meta"]
         transition = data["transition"]
+        auto_success = _binary_flag(
+            meta.get("auto_success", False), name="meta.auto_success"
+        )
+        operator_success = _binary_flag(
+            meta.get("operator_success", False), name="meta.operator_success"
+        )
+        if auto_success and operator_success:
+            raise ActorProtocolError(
+                "meta.operator_success is forbidden while auto_success is enabled"
+            )
+        effective_success = operator_success
+        if effective_success:
+            transition.update(
+                rewards=1.0,
+                masks=0.0,
+                dones=True,
+                truncated=False,
+            )
+        transition["success"] = np.uint8(effective_success)
+        transition["classifier_evaluated"] = np.uint8(0)
+        transition["classifier_probability"] = 0.0
+        transition["classifier_threshold"] = 0.0
+        transition["classifier_success"] = np.uint8(0)
+        transition["reward_model_id"] = ""
         return data, TransitionOutcome(
-            transition_id=str(data["meta"]["transition_id"]),
+            transition_id=str(meta["transition_id"]),
             reward=float(transition["rewards"]),
             mask=float(transition["masks"]),
             done=bool(transition["dones"]),
             truncated=bool(transition["truncated"]),
-            success=False,
+            success=effective_success,
             classifier_evaluated=False,
         )
 
@@ -1057,6 +1092,49 @@ class ActorSessionService:
 
         evaluated = bool(outcome.classifier_evaluated)
         success = bool(outcome.success)
+        transition_evaluated = _binary_flag(
+            transition.get("classifier_evaluated", evaluated),
+            name="transition.classifier_evaluated",
+        )
+        classifier_success = _binary_flag(
+            transition.get(
+                "classifier_success",
+                evaluated and probability > threshold,
+            ),
+            name="transition.classifier_success",
+        )
+        transition_success = _binary_flag(
+            transition.get("success", success), name="transition.success"
+        )
+        transition_probability = float(
+            transition.get("classifier_probability", probability)
+        )
+        transition_threshold = float(
+            transition.get("classifier_threshold", threshold)
+        )
+        transition_reward_model_id = transition.get(
+            "reward_model_id", outcome.reward_model_id
+        )
+        if not isinstance(transition_reward_model_id, str):
+            raise ActorProtocolError(
+                "transition.reward_model_id must be a string"
+            )
+        if not all(
+            math.isfinite(value)
+            for value in (transition_probability, transition_threshold)
+        ):
+            raise ActorProtocolError(
+                "finalized classifier scalars must be finite"
+            )
+        if (
+            transition_evaluated != evaluated
+            or transition_probability != probability
+            or transition_threshold != threshold
+            or transition_reward_model_id != outcome.reward_model_id
+        ):
+            raise ActorProtocolError(
+                "outcome classifier fields do not match finalized data"
+            )
         if evaluated:
             if not 0.0 <= probability <= 1.0:
                 raise ActorProtocolError(
@@ -1074,22 +1152,44 @@ class ActorSessionService:
                 raise ActorProtocolError(
                     "outcome.reward_model_id does not match ServerInfo"
                 )
-            if success != (probability > threshold):
+            if classifier_success != (probability > threshold):
                 raise ActorProtocolError(
-                    "outcome.success must use strict probability > threshold"
+                    "transition.classifier_success must use strict "
+                    "probability > threshold"
                 )
-        elif success or probability != 0.0 or threshold != 0.0:
+        elif classifier_success or probability != 0.0 or threshold != 0.0:
             raise ActorProtocolError(
-                "unevaluated classifier outcome must have no success/scalars"
+                "unevaluated classifier outcome must have no classifier results"
             )
         elif outcome.reward_model_id:
             raise ActorProtocolError(
                 "unevaluated classifier outcome must not name a reward model"
             )
 
+        auto_success = _binary_flag(
+            provisional_meta.get("auto_success", False),
+            name="meta.auto_success",
+        )
+        operator_success = _binary_flag(
+            provisional_meta.get("operator_success", False),
+            name="meta.operator_success",
+        )
+        if auto_success and operator_success:
+            raise ActorProtocolError(
+                "meta.operator_success is forbidden while auto_success is enabled"
+            )
+        effective_success = operator_success or (
+            auto_success and classifier_success
+        )
+        if transition_success != effective_success or success != effective_success:
+            raise ActorProtocolError(
+                "finalized success does not match operator_success OR "
+                "(auto_success AND classifier_success)"
+            )
+
         if success and (reward != 1.0 or not done or truncated or mask != 0.0):
             raise ActorProtocolError(
-                "classifier success must finalize reward=1, done=true, "
+                "effective success must finalize reward=1, done=true, "
                 "truncated=false, mask=0"
             )
         provisional_done = bool(provisional_transition["dones"])
@@ -1231,6 +1331,17 @@ class ActorSessionService:
             intervened = intervened.item()
         if intervened not in (False, True, 0, 1):
             raise ActorProtocolError("meta.intervened must be 0 or 1")
+        auto_success = _binary_flag(
+            meta.get("auto_success", False), name="meta.auto_success"
+        )
+        operator_success = _binary_flag(
+            meta.get("operator_success", False),
+            name="meta.operator_success",
+        )
+        if auto_success and operator_success:
+            raise ActorProtocolError(
+                "meta.operator_success is forbidden while auto_success is enabled"
+            )
 
         episode_id = validate_counter(
             transition.get("episode_id"), name="episode_id"

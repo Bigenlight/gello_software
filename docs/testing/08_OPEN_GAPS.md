@@ -28,15 +28,15 @@
 | G12 | 스페이스바 데드맨 기본값 | 🟢 해결 | 🟢 **해결 확정** — 두 entrypoint 모두 `--deadman` 기본값 `topic` |
 | G13 | 리셋 branch-cut | 🟡 수정·단위검증 | 🟢 preposition과 100-step episode reset 경로를 첫 actor 실기에서 통과 |
 | G14 | 시스템 grpcio 1.30.2 손상 | 🟠 완화만 | 🟠 (📌 07-29 재확인: 여전히 1.30.2) |
-| G15 | 분류기 전처리 ↔ 크롭 불일치 | 🔴 증명됨·미유입 | 🟡 sidecar가 실물 actor에 유입됨. **per-step verdict 관측과 가림**은 남음 |
+| G15 | 분류기 전처리 ↔ 크롭 불일치 | 🔴 증명됨·미유입 | 🟡 sidecar 실물 유입 및 GUI probability/verdict 관측 PASS. **팔 가림**은 남음 |
 | G16 | 10 Hz 레이턴시 예산 소진 | 🟠 | 🔴 첫 실기에서 RPC deadline 발생. 첫 publish 5.474 s + 동시 학습/추론 contention |
 | **G17** | **전역 ESC 리스너** | (미기재) | 🟠 **신규 기재** — 데드맨과 별개, 아무 창의 ESC가 에피소드를 끝낸다 |
 | **G18** | **`ACTION_SCALE`이 learner fingerprint에 없다** | (미발견) | 🟠 **신규** — 스케일이 바뀌어도 경고 없이 resume된다 |
 | **G19** | **`checkpoint_sha256()`가 orbax 디렉터리를 pin 못 한다** | (미발견) | 🟢 **해결.** `directory_sha256()` 위임 + 두 기본 SHA 교체. G15과 **같은 변경**에서 처리됐다 |
 | **G20** | **canonical demo가 없다** | (미발견) | 🟢 **해결(2026-07-29)** — 사용자가 `take_23` 제외 23개를 success로 승인했고 2,037-transition 영구 artifact를 laptop3/Kanu에서 검증 |
-| **G21** | **첫 publish/동시 learner가 actor RPC를 막음** | (미발견) | 🔴 replay 201에서 실제 `DEADLINE_EXCEEDED` — 아래 |
-| **G22** | **commissioning ENGAGED gate가 policy-first 시작을 막음** | (미발견) | 🟠 wrapper는 policy-first 지원, launcher UX 미분리 |
-| **G23** | **success 후 scene reset WAIT/Resume와 verdict GUI 없음** | (미발견) | 🔴 reset 뒤 즉시 새 episode |
+| **G21** | **첫 publish/동시 learner가 actor RPC를 막음** | (미발견) | 🟡 0.6/0.8 s 거부값을 1.5/2.0 s로 완화해 실기 진행. 장시간 tail latency 계측은 남음 |
+| **G22** | **commissioning ENGAGED gate가 policy-first 시작을 막음** | (미발견) | 🟢 handoff 뒤 `WAIT_SCENE_READY`; START/NEXT가 deadman을 해제하고 policy 첫 action으로 시작 |
+| **G23** | **success 후 scene reset WAIT/Resume와 verdict GUI 없음** | (미발견) | 🟢 `WAIT_HOME_APPROVAL → HOME → WAIT_SCENE_READY → START/NEXT`, GUI verdict 구현 |
 | **G24** | **개입 손맛 — 타깃 갱신율이 낮아 매 주기 가속/제동/정지** | (미발견) | 🟡 **코드 조치 커밋 + 실기 3 run PASS (07-30, `4197f5b`)** — 조작자 확인 완료. 남은 것: 예산 소진 후 HOLD는 **G21 종속**, mock 루프 0회, 박스 꺼진 상태로 arm(G1) |
 | **G25** | **`test_env_fake_backend.py`가 pytest에서 0개 수집된다** | (미발견) | 🟠 **신규 (07-30) · 여전히 열림** 10 Hz 페이싱·업샘플러 예산 단언이 **전부 미실행**. 단 신규 `test_intervention_substeps.py`(16)가 서브스텝 경로는 덮었다 |
 | **G26** | **`ACTION_SCALE` 헤드룸이 축별로만 성립 — 대각 이동이 상시 절삭된다** | (미발견) | 🟠 **신규 기재 (07-30)** 기존 결함이고 우리 변경과 무관. 2축 **0.849배**, 3축 **0.693배**. 이제 `info["governed"]`로 보이지만 **실기 미관측** |
@@ -44,6 +44,8 @@
 | **G27** | **line search 축소가 저장 액션에 반영되지 않는다 (최대 28x 과대 진술)** | (미발견) | 🔴 **신규 (07-30 적대적 검수)** 예산은 **요청**을 과금하고 IK line search는 그보다 더 깎는데 `governed`는 **False**로 남는다 → **관측 수단 0**. `strict=True` xfail로 못 박음 |
 | **G28** | **브레이크 창이 이미 실행한 사람 명령을 과소 진술한다** | (미발견) | 🟡 **신규 (07-30)** 리더가 창 중간에 죽으면 기록은 `zeros(7)`인데 첫 타깃은 이미 **0.004167 m**(정규화 0.333)를 명령했다. 의도된 트레이드이고 한 창 예산으로 유계 |
 | **G29** | **`substep_hz ∈ (HZ, 1.5*HZ]`가 조용히 비활성** | (미발견) | 🟢 **NOTE 임계값 정정됨 (07-30).** 실제 임계는 `1.5*HZ`인데 시작 NOTE는 `HZ`에서만 떴다. 도달성 사실상 0(config 30.0 고정, CLI 미노출) |
+| **G30** | **startup preposition의 GO/거리 상한이 기본 경로에 없음** | (미발견) | 🟠 **운영자 결정 기록.** 기본 즉시 JTC 이동; optional delay/confirm만 제공 |
+| **G31** | **자연스러운 global `max_steps` 소진은 HOME 승인 gate를 거치지 않음** | (미발견) | 🟡 기본 1,000,000이라 저빈도. 짧은 실기 CLI와 함께 후속 정리 |
 
 ```bash
 export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
@@ -185,6 +187,10 @@ TCP_OFFSET_XYZ_RPY  = [0, 0, 0, 0, 0, 0]
 | **keepout 존** | ✅ | ❌ |
 | **anti-windup lag 클램프** | ✅ | ❌ |
 | **해석적 line search** | ✅ | ❌ (수치 축소 line search로 대체 — `::step`의 `---- line search ----` 블록) |
+
+> 🔴 **그 수치 축소 line search가 저장 액션 불변식을 깬다 (07-30 적대적 검수).** 예산은
+> **요청**을 과금하는데 line search는 그보다 더 깎고, `info["governed"]`에는 **아무 것도 남지
+> 않는다**(물린 것이 governor가 아니라 joint gate이므로). 실측 과대 진술 최대 **28x** → **G27**.
 | **워크스페이스 박스** | (keepout으로 대체) | ❌ (= G1) |
 
 README의 결론: **"분기 튐 방지가 약함 — 실기 전 교체 필수"**, 그리고 TODO 목록에
@@ -603,7 +609,7 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 
 ---
 
-## G15 — 분류기 크롭 불일치 🟡 sidecar 배선 실기 PASS · verdict 관측 미완료
+## G15 — 분류기 크롭 불일치 🟢 sidecar + 실기 GUI verdict PASS · 가림은 잔여
 
 > ### ✅ 2026-07-29 (후속): **닫혔다 — 분류기에게 무크롭 sidecar를 따로 준다**
 > 액터가 분류기 전용 무크롭 원본 JPEG를 관측에 실어 보낸다(약 2 Hz, 팔 정지 시).
@@ -611,9 +617,10 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 > 상세는 아래 §"✅ 채택된 해결". 같은 변경에서 **G19도 함께** 고쳤다 — 따로 하면
 > 서버가 조용히 뜨고 reward가 영구 0이 된다.
 >
-> **🔴 두 가지를 같이 기억할 것:**
-> 1. 첫 실물 actor가 production sidecar 설정으로 transition을 전송했다. 다만 per-transition
->    probability/verdict가 GUI나 영구 JSONL에 없어 장면별 online 판정 정합은 아직 미확인이다.
+> **두 가지를 같이 기억할 것:**
+> 1. 실물 actor가 production sidecar transition을 전송했고 GUI에서 실제 probability,
+>    threshold 0.500, verdict가 표시되는 것까지 관측했다. MANUAL에서도 classifier는 계속
+>    실행·표시·replay 기록된다. 별도 장시간 영구 verdict JSONL 정리는 남아 있다.
 > 2. **가림(occlusion)은 안 고쳐졌다** — 아래 §잔여. 그건 크롭이 아니라 카메라 배치 문제다.
 >
 > 아래 07-28/29 판의 기록은 **그대로 보존한다.** 이 갭이 왜 최상위 블로커였는지,
@@ -702,8 +709,8 @@ apt 패키지 `python3-grpcio 1.30.2-3build6`으로 gRPC 채널을 만들면 **�
 | 입력 계약 id | `CLASSIFIER_INPUT_ID = "fullframe-jpeg-passthrough-v1"` — **이름은 역사적이다.** 최초 설계(원본 바이트 passthrough)에서 온 문자열인데, 이 id가 기록하려는 의미("전체 화각, 무크롭")는 그대로라서 유지한다 |
 | 부착 주기 | 5스텝(HZ=10 → **약 2 Hz**), **팔이 정지**했을 때만. 종단 예정 스텝은 정지 게이트를 무시하고 무조건 부착 |
 | 정지 판정 | TCP 선속도 ≤ **0.05 m/s** (`stationary_speed_max`) |
-| 에스컬레이션 | 직전 확률 ≥ **0.05**이면 매 스텝 부착으로 전환(threshold 0.2보다 **낮게** 잡아 임계 교차 스텝을 놓치지 않는다) |
-| 프레임당 상한 | **512 KiB** (`MAX_SIDECAR_JPEG_BYTES`) — 초과 시 loud fail |
+| 에스컬레이션 | 직전 확률 ≥ **0.05**이면 매 스텝 부착으로 전환(현재 threshold 0.5보다 **낮게** 잡아 임계 교차 스텝을 놓치지 않는다) |
+| 프레임당 상한 | **64 KiB** (`MAX_SIDECAR_JPEG_BYTES`) — 초과 시 loud fail |
 
 **왜 이것이 맞는가:**
 
@@ -840,7 +847,7 @@ protobuf 프레이밍 포함):
 `success == (probability > threshold)` 불변식이 **두 모드 모두에서 구조적으로 성립한다.**
 기본값 1에서는 창에 방금 분류한 프레임만 있으므로 **보고 확률 = 순간 sigmoid**이고
 **라이브 뷰어 값과 비트 단위로 같다.** 근거는 코드 주석에 있다: 현 체크포인트는
-threshold 0.2에서 잘 동작하고, 평활된 확률이 뷰어와 조용히 달라지면
+현재 threshold 0.5에서 동작하고, 평활된 확률이 뷰어와 조용히 달라지면
 *"뷰어는 0.9인데 서버는 왜 실패라고 하지"* 를 디버깅하는 비용이 더 크다.
 
 ### 🔴 잔여 — 이것은 **안 고쳐졌다**: 팔 가림(occlusion)
@@ -1040,7 +1047,8 @@ classifier sha256, action dtype/shape/range, grasp penalty, 의존성 버전을 
 > **📌 learner fingerprint가 한 번 깨진다 — 의도된 것이다.** 체크포인트 SHA ·
 > `reward_model_id` · 새 `run_contract` 필드가 전부 fingerprint에 들어가므로 **구 체크포인트
 > resume은 fail-closed로 거부된다.** 잃는 것은 없다 — 구 lineage는 recall 0%짜리 폐기
-> 체크포인트 위에 세워져 있었다. `DEFAULT_REWARD_THRESHOLD`는 **0.2 그대로**다.
+> 체크포인트 위에 세워져 있었다. 이 변경 당시 `DEFAULT_REWARD_THRESHOLD`는 `0.2`였고,
+> 2026-07-30 production 계약은 `0.5`다.
 
 아래는 해결 전 기록이다.
 
@@ -1134,7 +1142,16 @@ artifact로 충족됐다. 다만 actor 자체의 주기적 pickle 기록 배선�
 
 ---
 
-## G21 — 첫 publish와 동시 learner가 actor RPC를 막는다 🔴
+## G21 — 첫 publish와 동시 learner가 actor RPC를 막는다 🟠 **운영 완화, 장시간 계측 남음**
+
+> ### 2026-07-30 갱신
+>
+> 최초 경계의 정상 reply가 832.3 ms에 도착했는데 옛 actor `timeout=0.6 s`,
+> `max_response_age=0.8 s`가 이를 거부한 것이 직접 종료 원인이었다. 현재 wrapper 기본값은
+> bounded `1.5/2.0 s`다. 무제한 대기로 바꾼 것이 아니며 실제 actor가 episode limit과
+> operator WAIT까지 진행하는 것을 관측했다. 따라서 "모든 연속 운용이 첫 publish에서
+> 즉사"는 현재 사실이 아니다. 다만 learner/GPU contention의 장시간 tail과 policy-version
+> handoff 지연은 아직 계측 대상이라 이 갭을 완전 종료하지 않는다.
 
 첫 실제 production-model actor run은 replay 201개를 accepted한 뒤
 `Step RPC DEADLINE_EXCEEDED`로 종료됐다. 과거 transition-100 cold JIT 문제는 startup
@@ -1151,8 +1168,8 @@ transition 201은 exactly-once로 replay에 남을 수 있다. server fault나 �
 현재 가장 강한 해석은 첫 publish validation/smoke의 일회성 stall과 같은 GPU/process의
 learner/inference contention이다.
 
-**다음 조치:** transition ID 기준 server phase latency를 계측하고 actor-serving 우선순위를
-정한다. 원인을 숨기기 위해 timeout만 늘리지 않는다. learner-side policy publish와 그 version의
+**다음 조치:** 현 1.5/2.0 s 경계에서 transition ID 기준 server phase latency를 장시간
+계측하고 actor-serving 우선순위를 정한다. learner-side policy publish와 그 version의
 actor/robot 수신을 별도 acceptance로 유지한다.
 
 ### 🔗 교차 참조 (2026-07-30) — **개입 부드러움의 나머지 절반이 이 갭에 종속된다**
@@ -1196,35 +1213,56 @@ G21은 actor를 죽이는 문제로만 기재돼 있었지만, **actor가 죽지
 
 ---
 
-## G22 — commissioning ENGAGED gate와 policy-first HIL이 섞여 있다 🟠
+## G22 — commissioning ENGAGED gate와 policy-first HIL이 섞여 있다 🟢 **해결**
 
-`GelloIntervention`의 정상 의미는 `DISENGAGED=policy`, `ENGAGED=GELLO override`다. 하지만
+> ### 2026-07-30 갱신
+>
+> controller handoff 전 fresh ENGAGED heartbeat 3개는 그대로 두되, handoff 뒤 actor가 HOME에서
+> `WAIT_SCENE_READY`로 멈춘다. 사람이 장면을 배치하고 GUI `START / NEXT ITERATION`을 누르면
+> GUI가 deadman을 DISENGAGE한 뒤 fresh observation으로 첫 policy action을 시작한다. 즉
+> commissioning controller gate와 실제 episode의 policy-first UX가 분리됐다. 실행 중 ENGAGE는
+> 원래 의미대로 GELLO override다.
+
+**구현 전 기록:** `GelloIntervention`의 정상 의미는 `DISENGAGED=policy`,
+`ENGAGED=GELLO override`다. 당시
 `run_hil_actor.sh --arm`은 preflight와 controller switch 직전에 fresh ENGAGED heartbeat 3개를
 강제한다. 초기 untrained action이 거의 포화였던 첫 commissioning에는 타당했지만, “policy가
 먼저 수행하고 필요할 때만 사람이 개입”하는 정상 HIL 시작 UX와는 다르다.
 
-현재 우회 절차는 ENGAGED로 시작한 뒤 actor 기동이 끝나면 operator가 DISENGAGE하는 것이다.
-DISENGAGE는 정지/HOLD가 아니라 즉시 policy handback이므로 중단 수단으로 사용하지 않는다.
-
-**다음 조치:** heartbeat freshness는 유지하면서 `commissioning`과 `policy-first` startup mode를
-분리한다. wrapper의 action routing 자체를 다시 만들 필요는 없다.
+아래의 수동 DISENGAGE 우회 설명은 구현 전 기록이다. 현재는 START/NEXT 버튼이 release와
+scene-ready 요청을 한 동작으로 묶는다. DISENGAGE 자체가 정지/HOLD가 아니라는 계약은 그대로다.
 
 ---
 
-## G23 — terminal verdict와 scene reset WAIT/Resume가 없다 🔴
+## G23 — terminal verdict와 scene reset WAIT/Resume가 없다 🟢 **해결**
 
-현재 classifier success 또는 local 100-step limit은 terminal ACK 뒤 곧바로 다음을 수행한다.
+> ### 2026-07-30 갱신
+>
+> 현재 상태기계는 `POLICY_RUNNING/HUMAN_INTERVENTION/HOLD` → terminal →
+> `WAIT_HOME_APPROVAL` → GUI `APPROVE HOME` → `HOMING` → `WAIT_SCENE_READY` → 사람이
+> 장면 재배치 → `START / NEXT ITERATION` → `POLICY_RUNNING`이다. 두 WAIT에서는 Step RPC와
+> transition을 만들지 않는다. episode-limit 뒤 실제 GUI에 WAIT_HOME_APPROVAL, terminal reason,
+> classifier `p=0.009`/threshold `0.500`이 표시되는 것까지 관측했다.
+>
+> GUI 성공 기본값은 MANUAL이며 `MARK SUCCESS`가 현재 episode의 one-shot success를 만든다.
+> AUTO에서는 strict classifier `p > 0.5`가 성공 권한을 가진다. MANUAL에서도 classifier는
+> 계속 실행·표시·replay 기록된다. schema-3 lineage는 replay 400/intervention 225와 learner
+> 301까지 실물로 진행했다. MARK SUCCESS로 끝낸 episode의 one-shot provenance만 다음 session에서
+> 한 번 재확인한다.
+
+**구현 전 기록:** 당시 classifier success 또는 local 100-step limit은 terminal ACK 뒤
+곧바로 다음을 수행했다.
 
 ```text
 env.reset() -> arm RESET_JOINTS 이동 -> 새 session -> BeginEpisode
 ```
 
-gripper/실제 cube scene은 reset하지 않으며 operator 확인이나 WAIT가 없다. HIL GUI도 deadman/gain만
+당시 gripper/실제 cube scene은 reset하지 않으며 operator 확인이나 WAIT가 없었다. HIL GUI도 deadman/gain만
 보여 주고 actor가 이미 받은 `classifier_probability`, `success`, terminal reason을 표시하지 않는다.
 ENGAGED로 억지 대기하면 intervention transition을 계속 생성하므로 scene-reset gate를 대신하지 못한다.
 
-**다음 조치:** `SUCCESS/TIME_LIMIT -> HOMING -> WAIT_SCENE_READY -> operator START -> POLICY`
-상태 기계를 actor episode 경계에 넣고, GUI에 control owner와 classifier verdict를 노출한다.
+위 "현재"와 "다음 조치" 문단은 구현 전 문제 정의로 보존한다. 현재 남은 작업은 상태기계
+구현이 아니라 classifier 재학습 전까지 MANUAL을 유지하고 새 lineage에서 실물 회귀를 남기는 것이다.
 
 ---
 
@@ -1314,7 +1352,7 @@ lag만 고친다(`04` §9.2). "덜덜거림"과 "뒤처짐"은 다른 증상이�
 | `ur_env/envs/ur7e_env.py` (수정) | 100 ms 창의 **sleep을 서브스텝 페이싱으로 대체**(`_drive_intervention_substeps`). env 스텝 주기와 "1 스텝 = 1 transition"은 그대로. 정책 경로는 `driver is None`으로 갈라져 sleep 한 번 그대로 |
 | **개입 경로 배선 (`wrappers.py`)** | ✅ **완료.** driver 프로토콜 3종(`charge` / `substep` / `consumed_window_action`)이 `GelloIntervention`에 구현되고 `_open_substep_window` → `UR7eEnv.begin_intervention_window`로 설치된다. 호출 순서 전체는 `wrappers.py` 모듈 docstring(정본) / `04` §9.9 |
 | `tests/test_governor_dt.py` · `test_leader_stream.py` · `test_intervention_substeps.py` (신규) | 📌 2026-07-30 실행 **82 passed** (38 + 28 + 16). 세 번째가 가상 시계로 `UR7eEnv.step`의 서브스텝 루프를 실제로 돌린다 → G25 |
-| 전체 테스트 | **인터프리터를 안 적은 passed 수는 무의미하다.** `serl_ur_infra/tests`를 `gello-hil-actor`(numpy 2.2.6)로 돌린 값: 커밋 `4197f5b` 시점 **579 passed / 11 skipped** (07-29 기준선 497에서 +82), 📌 2026-07-30 **작업 트리(미커밋 포함) 재실측 588 passed / 11 skipped**. 같은 코드를 `hilserl`(numpy 1.26.4, jax 0.5.3)로 돌리면 수가 다르다(**619 passed / 4 skipped**) — 두 수를 섞어 인용하지 말 것 |
+| 전체 테스트 | **인터프리터와 범위를 안 적은 passed 수는 무의미하다.** 📌 2026-07-30 실측 기준선 = **595 passed / 11 skipped / 1 xfailed**(`gello-hil-actor`, numpy 2.2.6, **다른 세션 작업 제외**). 계보 `333 → 337(40b99f8) → 429 → 497 → 579(4197f5b) → 595`. ⚠️ **`1 xfailed`를 반드시 같이 적을 것** — G27의 알려진 결함 표식이고, 사라지면 XPASS로 터진다. 참고값: 트리 전체(다른 세션의 `test_operator_session.py`·`test_remote_actor_operator_session.py` 포함) **605 / 11 / 1**, `hilserl`(numpy 1.26.4, jax) 트리 전체 **645 / 4 / 1** — **동시 작업 때문에 트리 전체 수는 변동 중이다** |
 | One-Euro 게인 | `min_cutoff 1.0 / beta 2.0 / d_cutoff 1.0` = `config/ur7e_gello.yaml:43,46,48`과 **일치 확인** |
 | 30 Hz 근거 | `gello_publisher.publish_rate_hz: 30.0` (`ur7e_gello.yaml:26`) — 리더 캐시가 실제로 갱신되는 rate. 그보다 빠르게 서브스텝하면 **같은 샘플을 다시 낸다** |
 
@@ -1398,6 +1436,10 @@ deadband를 "원본에 있으니 같이" 가져가면 검증된 것의 이름으
 2. **변위 예산은 `ACTION_SCALE`에 묶여 있어야 한다.** 실기에서 `dp_ratio` 중앙값 1.000으로
    불변식이 유지됨을 확인했지만, 예산을 늘리면 "저장 액션 == 실행 액션"(`04` §2)이 먼저
    깨진다 → G18. 대각 이동에서는 그 헤드룸이 애초에 없다 → **G26**.
+   🔴 **그리고 `dp_ratio` 1.000이 불변식을 보증하지 않는다** — 예산은 **요청**을 과금하므로
+   예산 아래의 게이트(IK line search)가 깎으면 기록과 실행이 **함께** 틀린다(최대 **28x**,
+   `governed`에 흔적 없음) → **G27**. 반대 방향으로 브레이크 창의 과소 진술 → **G28**.
+   둘 다 `4197f5b`가 만든 것이 아니다.
 3. **검증 순서 (①②③④ 중 ①③④ 완료, ②는 미완):** ① `tests/` 오프라인 회귀 **82 passed** →
    ② mock RViz 개입 루프(`04` §3) — **여전히 0회.** 실기가 먼저 돌았다 →
    ③ DRY_RUN CSV로 저장==실행 불변식 확인 **PASS**(run 1·2) → ④ `--arm` **PASS**(run 3).
@@ -1474,12 +1516,13 @@ flaky해진다. `ur7e_env`와 `wrappers` **양쪽의** `time` 모듈을 가상 �
 passed 총계에 **아무 흔적도 남기지 않는다.** `serl_launcher` 누락으로 skip되는 파일들과
 달리 **경고조차 없다.**
 
-> 📌 기준선이 움직였다 (모두 **`gello-hil-actor` 인터프리터**, numpy 2.2.6): 07-30 오전
-> **497 passed / 11 skipped** → 커밋 `4197f5b` **579 passed / 11 skipped**
-> (+82 = leader_stream 28 / governor_dt 38 / intervention_substeps 16) →
-> 📌 2026-07-30 작업 트리(미커밋 포함) 재실측 **588 passed / 11 skipped**.
-> ⚠️ `hilserl` 인터프리터(numpy 1.26.4, jax 0.5.3)는 같은 코드에서 **619 passed / 4 skipped**다.
-> **인터프리터를 안 적은 passed 수는 판정에 쓸 수 없다.**
+> 📌 기준선이 움직였다 (모두 **`gello-hil-actor`**, numpy 2.2.6): 07-30 오전
+> **497** → 커밋 `4197f5b` **579** (+82 = leader_stream 28 / governor_dt 38 /
+> intervention_substeps 16) → 📌 2026-07-30 실측 **595 passed / 11 skipped / 1 xfailed**(`gello-hil-actor`, numpy 2.2.6, **다른 세션 작업 제외**).
+> ⚠️ **`1 xfailed`를 같이 적어야 한다** — G27의 알려진 결함 표식이다.
+> 트리 전체(다른 세션의 P3 operator 상태 기계 테스트 포함)는 **605 / 11 / 1**이고
+> `hilserl`(numpy 1.26.4, jax)에서는 **645 / 4 / 1**이다 — **동시 작업 때문에 변동 중.**
+> **인터프리터와 범위를 안 적은 passed 수는 판정에 쓸 수 없다.**
 > 어느 쪽 숫자를 인용하든 **`test_env_fake_backend.py`의 4개 단언은 두 총계 모두에
 > 포함되지 않는다** — 그게 이 갭이다.
 
@@ -1531,6 +1574,13 @@ passed 총계에 **아무 흔적도 남기지 않는다.** `serl_launcher` 누�
 
 ### 왜 위험한가 — 저장 액션 불변식이 **대각에서** 깨진다
 
+> 🔗 **같은 종류의 오염이 셋이다. 원인과 관측 가능성이 다르다.**
+> | | 원인 게이트 | 방향 | `governed`에 잡히나 |
+> |---|---|---|---|
+> | **G26** (여기) | governor의 **norm** 캡 | 과대 (2축 0.849 / 3축 0.693) | ✅ (정책 경로에서) |
+> | **G27** | IK **line search**(joint gate) | 과대 (최대 **28x**) | ❌ **전혀** |
+> | **G28** | 창 중간 리더 사망 후 브레이크 | 과소 (0.004167 m) | ❌ (`reject_reason`에만) |
+
 `04` §2의 "저장 액션 == 실행 액션" 불변식은 축 하나를 밀 때만 성립한다. 대각으로 밀면
 **저장은 `[1,1,1]` 그대로, 실행은 69 %**다. 즉 버퍼가 실제 움직임을 **과대**기록한다
 (G18의 "25 % 더 멀리 간다"와 반대 방향의 오염이고, 원인도 다르다).
@@ -1562,11 +1612,20 @@ passed 총계에 **아무 흔적도 남기지 않는다.** `serl_launcher` 누�
 액션을 항상 zero로 보낸다.** 따라서 **정책 경로의 대각 절삭은 아직 한 번도 실기에서
 관측되지 않았다.** actor 경로(`09`)에서 이 필드가 로깅되는지도 **미검증**이다.
 
-🛑 **게다가 그 `governed=0` 자체가 창 전체를 덮지 않는다.** 3 run은 **창의 첫 타깃만
-집계하던 코드**로 측정됐다. 그 뒤 `governed`는 창 전체 **OR**, `governed_scale`은 창 전체
-**최솟값**으로 바뀌었다(`run_real_hil.py` docstring (e)의 경고). 즉 07-30 값은
-**"첫 타깃에서 절삭 없음"**만 증명하고 서브스텝 2회분은 **미관측**이다. 개입 경로에서도
-창 전체 절삭 여부는 **다시 재야 한다.**
+🛑 **개입 경로에서는 `governed`로 절삭을 관측할 수 없다 — 구조적으로 그렇다 (07-30 적대적 검수).**
+`_paced_request`가 요청을 `ACTION_SCALE/3 = 0.00417 m`로 깎고 서브스텝 governor cap이
+`v_max/substep_hz = 0.0050 m`이므로 **요청이 cap에 절대 닿지 않는다.** 따라서 3 run의
+`governed=0`은 관측 결과가 아니라 **산술의 필연**이고, **다시 재도 0이다.** 개입 경로에서
+실기 관측을 가능하게 하려면 `GOVERNOR`를 `ACTION_SCALE` 대비 **조여야** 한다.
+
+> ⚠️ **이전 판(보존):** *"3 run은 창의 첫 타깃만 집계하던 코드로 측정됐으므로 '첫 타깃에서
+> 절삭 없음'만 증명하고 서브스텝 2회분은 미관측이다. 창 전체 절삭 여부는 다시 재야 한다."*
+> — 집계 범위가 첫 타깃만이었던 것은 **사실이고 그 뒤 창 전체 OR / 최솟값으로 고쳐졌다.**
+> 그러나 그것이 `governed=0`의 **원인은 아니었다** — 위 부등식이 원인이다.
+> **재측정으로 이 항목이 닫히지 않는다.**
+
+🔴 **그리고 governor가 아닌 게이트는 이 컬럼에 아예 안 잡힌다** — joint gate(line search)가
+물리는 경로는 `governed=False`로 남으면서 저장 액션을 최대 **28x** 과대 진술한다 → **G27**.
 
 ### 완화책
 
@@ -1719,6 +1778,42 @@ CLI로 노출되지 않는다. **시작 NOTE의 임계값은 `1.5 * HZ`로 정�
 
 `04` §9.9의 진단 규칙 "`substeps=0`이면 (c) 기능이 꺼진 것"에서 **(c)의 조건이 `HZ`가 아니라
 `1.5*HZ`**라는 것이 판독의 전제다. per-task config가 `substep_hz`를 손대는 순간 다시 관련된다.
+
+---
+
+## G30 — startup preposition의 GO/거리 상한이 기본 경로에 없다 🟠 **운영자 결정 기록**
+
+2026-07-30 다른 세션에서 반복 타이핑을 줄이기 위해 `run_hil_preposition.sh` 기본값이
+`PREPOSITION_CONFIRM=0`, `PREPOSITION_DELAY_S=0`이 됐다. 현재 자세가 RESET 0.10 rad 밖이면
+스크립트는 current/target 표와 체크리스트를 출력하고 곧바로
+`gello_move_to_start(start_mode=init_align)`의 JTC 궤적을 승인한다.
+
+정확히 구분할 것:
+
+- actor의 일반 `go_to_reset()`에는 `RESET_MAX_DIST_RAD=0.9`가 남아 있다.
+- terminal 뒤 GUI `APPROVE HOME` 경로는 사람 승인을 근거로 그 0.9 검사를 우회한다.
+- **startup preposition wrapper 자체에는 0.9 또는 별도 최대 거리 거부가 없다.** `[2/6]`은
+  0.10 PASS 여부만 판정하며 그보다 멀다는 이유로 이동을 막지 않는다.
+- controller 조합, command publisher 0개, live pose proof, fresh ENGAGED heartbeat 검사는
+  그대로다. 제거된 것은 GO/Enter 타이핑이지 이 기계적 검증들 전부가 아니다.
+
+현재 제공되는 opt-in은 `PREPOSITION_DELAY_S=5`(이동 전 Ctrl-C 가능한 카운트다운)와
+`PREPOSITION_CONFIRM=1`(옛 GO 입력)이다. 기본 동작을 바꾸지 않는 한 runbook과 session 출력은
+"GO 뒤에만 이동"이라고 쓰면 안 된다. 실제 중단 수단과 현재 자세 표를 보고 시작 여부를
+판단하는 책임은 operator에게 있다.
+
+---
+
+## G31 — global `max_steps` 자연 소진은 HOME 승인 gate를 거치지 않는다 🟡
+
+일반적인 episode terminal(`SUCCESS`, `EPISODE_LIMIT`, `TRUNCATED`)은 서버 ACK 뒤
+`WAIT_HOME_APPROVAL`에서 hold하고 GUI 승인 뒤에만 HOME으로 간다. 다만 terminal이 아닌 채
+actor 전체 `max_steps`가 자연 소진되는 드문 경로는 현재 승인 없이 `env.reset()`으로 HOME을
+시도한다. 기본값이 1,000,000 step이라 현 실기 episode 흐름에서는 사실상 만나기 어렵고,
+사용자가 짧은 실기 검증용 `--max-steps` CLI는 후순위로 두기로 한 상태다.
+
+후속으로 짧은-run CLI를 만들 때 이 경로도 `WAIT_HOME_APPROVAL`과 같은 계약으로 합친다.
+현재 완료됐다고 적으면 안 되지만, 정상 episode reset의 승인 state machine과 혼동해서도 안 된다.
 
 ---
 

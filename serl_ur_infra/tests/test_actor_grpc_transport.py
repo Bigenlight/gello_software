@@ -109,6 +109,8 @@ def _data(
     intervened=False,
     terminal=False,
     truncated=False,
+    auto_success=True,
+    operator_success=False,
 ):
     info = {}
     if intervened:
@@ -117,7 +119,7 @@ def _data(
             "intervene_action": np.full(7, -0.25, dtype=np.float32),
             "grasp_penalty": -0.1,
         }
-    return build_data(
+    data = build_data(
         actor_id="actor",
         run_id="run",
         session_id="session",
@@ -135,6 +137,9 @@ def _data(
         truncated=truncated,
         info=info,
     )
+    data["meta"]["auto_success"] = bool(auto_success)
+    data["meta"]["operator_success"] = bool(operator_success)
+    return data
 
 
 def test_observation_codec_is_lossless_for_images_and_state():
@@ -157,6 +162,8 @@ def test_data_codec_keeps_meta_transition_and_optional_grasp_penalty():
     assert set(decoded) == {"meta", "transition"}
     assert decoded["meta"]["timestamp_ns"] == 1_000
     assert decoded["meta"]["intervened"] == 1
+    assert decoded["meta"]["auto_success"] is True
+    assert decoded["meta"]["operator_success"] is False
     np.testing.assert_array_equal(decoded["meta"]["policy_action"], action)
     np.testing.assert_array_equal(
         decoded["transition"]["actions"], np.full(7, -0.25, np.float32)
@@ -1081,6 +1088,62 @@ def test_grpc_client_rejects_decreasing_policy_version_after_ack():
             next_observation_id="o1",
             next_timestamp_ns=2_000,
             data=_data(action.action, policy_version=2),
+            request_action=True,
+        )
+
+
+def test_grpc_client_rejects_outcome_that_disagrees_with_request_reward_mode():
+    def begin_handler(request, timeout):
+        del timeout
+        return _action_reply(request, np.zeros(7, np.float32))
+
+    def step_handler(request, timeout):
+        del timeout
+        return pb.StepReply(
+            ack=pb.Ack(
+                accepted=True,
+                transition_id=request.data.meta.transition_id,
+                session_id=request.session_id,
+                request_id=request.request_id,
+            ),
+            has_action=True,
+            outcome=_outcome_reply(
+                request,
+                success=False,
+                classifier_evaluated=True,
+                classifier_probability=0.9,
+                classifier_threshold=0.5,
+                reward_model_id="classifier-v1",
+            ),
+            action=_action_reply(request, np.zeros(7, np.float32)),
+        )
+
+    ticks = iter(
+        (1_000_000_000, 1_010_000_000, 1_020_000_000, 1_030_000_000)
+    )
+    client = GrpcActorNetwork(
+        "unused",
+        actor_id="actor",
+        channel=_FakeChannel(begin_handler, step_handler),
+        monotonic_ns=lambda: next(ticks),
+    )
+    action = client.begin_episode(
+        _observation(0),
+        run_id="run",
+        session_id="session",
+        episode_id=0,
+        observation_id="o0",
+        timestamp_ns=1_000,
+    )
+
+    with pytest.raises(
+        ActorProtocolError, match="outcome.success does not match"
+    ):
+        client.step(
+            _observation(1),
+            next_observation_id="o1",
+            next_timestamp_ns=2_000,
+            data=_data(action.action, auto_success=True),
             request_action=True,
         )
 

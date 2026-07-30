@@ -12,7 +12,7 @@ DEFAULT_ENDPOINT = "tcp://127.0.0.1:5594"
 # Mirror of reward_classifier_runtime.DEFAULT_THRESHOLD.  It is duplicated
 # rather than imported so this transport module stays free of cv2/numpy, which
 # the GPU-side server would otherwise need before it decides to load anything.
-DEFAULT_THRESHOLD = 0.2
+DEFAULT_THRESHOLD = 0.5
 
 
 def oldest_pair_receipt_monotonic(cam1_received, cam2_received):

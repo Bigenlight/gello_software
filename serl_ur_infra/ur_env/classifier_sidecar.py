@@ -509,7 +509,7 @@ class SidecarScheduler:
         #: m/s.  Above this the gripper is sweeping and its own occlusion makes
         #: p(success) meaningless (0.005 -> 1.0 swings observed on cam1).
         self.stationary_speed_max = speed_max
-        #: Deliberately well *below* DEFAULT_REWARD_THRESHOLD (0.2): we want to
+        #: Deliberately well *below* DEFAULT_REWARD_THRESHOLD (0.5): we want to
         #: switch to every-step sampling while merely approaching success, so
         #: the step that actually crosses the threshold is not missed by up to
         #: interval_steps.

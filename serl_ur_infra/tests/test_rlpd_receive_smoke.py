@@ -75,3 +75,5 @@ def test_receive_smoke_matches_exact_buffer_counters():
     assert result.replay_insert_delta == 10
     assert result.intervention_insert_delta == 2
     assert result.last_transition_id == "receive-smoke-run:9"
+    assert service.replay_items[0]["meta"]["auto_success"] is True
+    assert service.replay_items[0]["meta"]["operator_success"] is False

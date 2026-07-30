@@ -91,8 +91,12 @@ SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 SERVER_PORT="${SERVER_PORT:-50153}"          # 로컬 터널 입구 → Kanu 50053
 EXP_NAME="${EXP_NAME:-cube_in_cup}"
 UR_CONFIG_MODULE="${UR_CONFIG_MODULE:-ur_experiments.mappings}"
-TIMEOUT_S="${TIMEOUT_S:-0.6}"
-MAX_RESPONSE_AGE_S="${MAX_RESPONSE_AGE_S:-0.8}"
+# Real startup measurements include observation serialization, SSH transport,
+# policy inference, and (periodically) reward-classifier inference.  The old
+# 0.6/0.8 s pair rejected an otherwise healthy fifth transition at 832.3 ms.
+# Keep both waits bounded, but leave enough margin for the measured cold path.
+TIMEOUT_S="${TIMEOUT_S:-1.5}"
+MAX_RESPONSE_AGE_S="${MAX_RESPONSE_AGE_S:-2.0}"
 OBS_SCHEMA_HASH="${OBS_SCHEMA_HASH:-3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903}"
 EXPECTED_MODEL_ID="${EXPECTED_MODEL_ID:-hil-serl-hybrid-sac-resnet10-trunk-cache-v1}"
 EXPECTED_REWARD_AUTHORITY="${EXPECTED_REWARD_AUTHORITY:-server_classifier}"
@@ -123,7 +127,12 @@ GRIPPER_STATE_TOPIC="/robotiq_gripper/position_percent"
 COMMAND_TOPIC="/forward_position_controller/commands"
 ARM_CONTROLLER="forward_position_controller"
 SOURCE_ARM_CONTROLLER="scaled_joint_trajectory_controller"
-HZ_TIMEOUT_S="${HZ_TIMEOUT_S:-6}"
+# Session startup briefly loads DDS, two RealSense processes, Qt, and the actor
+# environment at the same time.  This preflight therefore checks liveness, not
+# a five-frame instantaneous rate.  Give a newly-created reader enough time to
+# be discovered; the hardware launcher has already applied its stricter
+# steady-state readiness checks before this script runs.
+HZ_TIMEOUT_S="${HZ_TIMEOUT_S:-12}"
 # Must match CubeInCupEnvConfig.RESET_JOINTS exactly.  This is checked against
 # the marker and against a fresh /joint_states sample before an automatic switch.
 RESET_JOINTS_CSV="3.1382,-1.5276,1.7168,-1.7592,-1.5216,-3.1331"
@@ -494,25 +503,29 @@ ros_rate_check() {
 }
 
 _say ""
-_say "[7] ROS 실데이터 (읽기 전용 정상 종료형 probe, 각 최대 ${HZ_TIMEOUT_S}s)"
+_say "[7] ROS 실데이터 (fresh-message liveness only; 최소 Hz 제한 없음, 각 최대 ${HZ_TIMEOUT_S}s)"
 if [ "$OVERLAY_OK" -ne 1 ]; then
     p_skip "오버레이를 소스하지 못해 건너뜀"
 elif [ "$SKIP_ROS_CHECKS" = "1" ]; then
     p_skip "SKIP_ROS_CHECKS=1"
 elif [ "$FAKE_ENV" -eq 1 ]; then
     p_info "fake-env 모드 — 센서 스트림은 사용되지 않는다 (경고로만 표시)"
-    ros_rate_check "$JOINT_STATES_TOPIC" "로봇 관절"  joint_state      50 0 || true
-    ros_rate_check "$GELLO_TOPIC"        "GELLO 리더" joint_state      15 0 || true
-    ros_rate_check "$CAM1_TOPIC"         "cam1 장면"  compressed_image 15 0 || true
-    ros_rate_check "$CAM2_TOPIC"         "cam2 손목"  compressed_image 15 0 || true
+    ros_rate_check "$JOINT_STATES_TOPIC" "로봇 관절"  joint_state      0 0 || true
+    ros_rate_check "$GELLO_TOPIC"        "GELLO 리더" joint_state      0 0 || true
+    ros_rate_check "$CAM1_TOPIC"         "cam1 장면"  compressed_image 0 0 || true
+    ros_rate_check "$CAM2_TOPIC"         "cam2 손목"  compressed_image 0 0 || true
 else
-    ros_rate_check "$JOINT_STATES_TOPIC" "로봇 관절"  joint_state      50 1 || true
-    ros_rate_check "$GELLO_TOPIC"        "GELLO 리더" joint_state      15 1 || true
-    ros_rate_check "$CAM1_TOPIC"         "cam1 장면"  compressed_image 15 1 || true
-    ros_rate_check "$CAM2_TOPIC"         "cam2 손목"  compressed_image 15 1 || true
+    # These publishers were already rate-gated by run_hil_hardware.sh and
+    # launch_cameras.sh.  Repeating a strict five-frame Hz gate here produced
+    # false 9--12 Hz failures during startup even though sustained streams were
+    # 30 Hz.  Keep only the fresh/advancing-message requirement.
+    ros_rate_check "$JOINT_STATES_TOPIC" "로봇 관절"  joint_state      0 1 || true
+    ros_rate_check "$GELLO_TOPIC"        "GELLO 리더" joint_state      0 1 || true
+    ros_rate_check "$CAM1_TOPIC"         "cam1 장면"  compressed_image 0 1 || true
+    ros_rate_check "$CAM2_TOPIC"         "cam2 손목"  compressed_image 0 1 || true
     # 그리퍼 위치는 19-D state의 마지막 채널이다. 없으면 관측이 불완전하지만
     # DRY_RUN 배선 확인은 가능하므로 경고로만 낸다.
-    ros_rate_check "$GRIPPER_STATE_TOPIC" "그리퍼 상태" float32 2 0 || true
+    ros_rate_check "$GRIPPER_STATE_TOPIC" "그리퍼 상태" float32 0 0 || true
 fi
 
 _say ""

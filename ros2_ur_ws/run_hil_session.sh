@@ -11,14 +11,16 @@
 #   1. launch_cameras.sh (cam1 scene + cam2 wrist, 기본 viewer 포함)
 #   2. run_hil_gui.sh (/hil/deadman GUI)
 #   3. run_hil_preposition.sh
-#      - RESET 자세 밖이면 기존의 대문자 GO 프롬프트가 그대로 나타나며 팔이 움직인다.
+#      - RESET 0.10 rad 밖이면 기본값은 체크리스트 뒤 즉시 JTC 이동이다.
+#      - PREPOSITION_DELAY_S 또는 PREPOSITION_CONFIRM로 대기/GO 입력을 opt-in한다.
 #   4. run_hil_actor.sh --dry-preflight --arm --deadman topic (읽기 전용)
 #   5. run_hil_actor.sh --arm --deadman topic (실제 controller handoff + actor)
 #
 # 중요:
 #   * actor handoff 전 GUI를 ENGAGED로 둬야 한다. 스크립트가 이를 자동으로 누르지 않는다.
-#   * 실제 actor는 ENGAGED 상태에서 사람 제어로 시작한다. DISENGAGE를 눌러야 policy가
-#     움직이며, 다시 ENGAGE하면 GELLO 개입이다.
+#   * controller handoff까지는 ENGAGED gate를 유지한다. actor가 HOME에서
+#     WAIT_SCENE_READY를 표시하면 GUI의 START/NEXT ITERATION을 누른다. 버튼이
+#     deadman을 DISENGAGE하고 fresh observation으로 policy episode를 시작한다.
 #   * actor가 정상 종료하거나 RPC 오류로 죽거나 이 스크립트를 Ctrl-C 하면, 이 스크립트가
 #     띄운 HIL GUI와 camera launcher도 정리한다.
 #
@@ -54,7 +56,7 @@ Usage:
   ./run_hil_session.sh --no-arm --plan [ACTOR_ARGS...]
 
 Modes:
-  default    cameras + HIL GUI + interactive preposition + read-only armed
+  default    cameras + HIL GUI + preposition + read-only armed
              preflight + actual --arm actor
   --no-arm   cameras + HIL GUI + read-only no-arm preflight, then cleanup/exit
   --plan     print the selected commands without starting any process
@@ -156,7 +158,7 @@ if ((PLAN_ONLY)); then
         echo "[plan] read-only no-arm preflight 후 종료"
         print_command "${PREFLIGHT_CMD[@]}"
     else
-        echo "[plan] interactive preposition (필요하면 GO 입력)"
+        echo "[plan] preposition (기본 즉시 진행; optional delay/GO는 환경변수)"
         print_command "${PREPOSITION_CMD[@]}"
         echo "[plan] read-only armed-readiness preflight"
         print_command "${PREFLIGHT_CMD[@]}"
@@ -306,8 +308,10 @@ echo ""
 echo "[3/5] UR7e preposition"
 cat <<'EOF'
 현재 자세가 RESET 허용범위 밖이면 run_hil_preposition.sh가 안전 확인 뒤
-대문자 GO를 요구한다. 그 입력은 생략하거나 자동 승인하지 않는다.
-GO 이후 팔은 충돌 회피 없는 관절 궤적으로 움직이며, 이동 중 실제 정지는 E-STOP이다.
+기본값에서 별도 입력 없이 JTC 이동을 시작한다. preposition 자체에는 0.9 rad 최대
+거리 gate가 없으므로 위 current/target 표를 확인한다. 이동은 충돌 회피 없는 관절
+궤적이며 시작 뒤 실제 정지는 E-STOP이다. 대기/GO 입력은 각각
+PREPOSITION_DELAY_S=N / PREPOSITION_CONFIRM=1로만 켠다.
 EOF
 "${PREPOSITION_CMD[@]}"
 
@@ -316,8 +320,9 @@ echo "[operator] actor startup ENGAGED gate"
 cat <<'EOF'
 HIL GUI에서 ENGAGE를 두 번 눌러 ENGAGED로 만들고 GELLO를 움직이지 말고 고정하라.
 read-only preflight와 실제 handoff가 각각 fresh ENGAGED heartbeat 3개를 검증한다.
-actor는 ENGAGED 상태(사람 hold)로 시작하며, policy를 움직이려면 기동 후 GUI에서
-DISENGAGE를 명시적으로 눌러야 한다. 다시 ENGAGE하면 GELLO 개입으로 돌아간다.
+controller handoff 뒤 actor는 HOME에서 WAIT_SCENE_READY로 멈춘다. 장면을 배치한 뒤
+GUI의 START / NEXT ITERATION 버튼을 누르면 deadman이 자동 DISENGAGE되고 policy가
+첫 action부터 제어한다. 실행 중 다시 ENGAGE하면 GELLO 개입으로 전환된다.
 EOF
 echo ""
 # 예전에는 여기서 Enter를 받았다. 그 프롬프트는 안전장치가 아니라 알림이었다 —
@@ -354,6 +359,7 @@ echo "[4/5] actor armed-readiness preflight (읽기 전용)"
 echo ""
 echo "[5/5] 실제 actor 기동"
 echo "      이제 같은 preflight를 재검증한 뒤에만 controller를 handoff한다."
+echo "      handoff 뒤 GUI의 WAIT_SCENE_READY에서 장면을 배치하고 START/NEXT를 누른다."
 echo "      Ctrl-C 또는 actor/RPC 종료 시 controller 복귀 후 cameras/GUI도 정리한다."
 set +e
 "${ACTOR_CMD[@]}"

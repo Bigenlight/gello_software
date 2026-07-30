@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import math
 import os
 import pickle
+import sys
 import time
 from typing import Any, Callable, Mapping, Optional
 import uuid
@@ -24,6 +25,21 @@ from ur_env.actor_network import (
     validate_timestamp_ns,
 )
 from ur_env.classifier_sidecar import CLASSIFIER_SIDECAR_KEY, build_sidecar
+from ur_env.operator_session import (
+    ActorStatusTracker,
+    FAULT,
+    HOLD,
+    HOMING,
+    HUMAN_INTERVENTION,
+    OWNER_HOLD,
+    OWNER_HUMAN,
+    OWNER_NONE,
+    OWNER_POLICY,
+    POLICY_RUNNING,
+    STOPPED,
+    WAIT_HOME_APPROVAL,
+    WAIT_SCENE_READY,
+)
 
 
 class EnvTimestampAdapter:
@@ -77,6 +93,8 @@ def build_data(
     policy_version: int,
     policy_action: Any,
     policy_actions_synthetic: bool = False,
+    auto_success: bool = False,
+    operator_success: bool = False,
     episode_id: int,
     step_id: int,
     observation_id: str,
@@ -134,6 +152,16 @@ def build_data(
         raise ActorProtocolError("done and truncated must be bool")
     if bool(done) and bool(truncated):
         raise ActorProtocolError("a transition cannot be done and truncated")
+    if not isinstance(auto_success, (bool, np.bool_)):
+        raise ActorProtocolError("auto_success must be bool")
+    if not isinstance(operator_success, (bool, np.bool_)):
+        raise ActorProtocolError("operator_success must be bool")
+    auto_success = bool(auto_success)
+    operator_success = bool(operator_success)
+    if auto_success and operator_success:
+        raise ActorProtocolError(
+            "operator_success is only valid in MANUAL success mode"
+        )
 
     transition: dict[str, Any] = {
         "episode_id": validate_counter(episode_id, name="episode_id"),
@@ -169,6 +197,11 @@ def build_data(
             ),
             "policy_action": requested_action,
             "intervened": intervened,
+            # MANUAL is the production default.  The server remains the sole
+            # reward authority and combines these protected inputs with its
+            # own classifier result when it finalizes the transition.
+            "auto_success": auto_success,
+            "operator_success": operator_success,
             # Stamped per transition, not just in the run summary: once these
             # pickles leave the process there is nothing else to distinguish a
             # mock-noise action from a real policy action.
@@ -427,6 +460,128 @@ def _dump_data(
         pickle.dump(intervention_data, file)
 
 
+class _OperatorReporter:
+    """Best-effort status reporting around a mandatory scene-ready wait."""
+
+    def __init__(self, session: Optional[Any], run_id: str) -> None:
+        self.session = session
+        self.tracker = ActorStatusTracker(run_id)
+        self.episode_id = 0
+        self.episode_step = 0
+        self.env_step = -1
+        self.success = False
+        self.terminal_reason = ""
+
+    def position(self, *, episode_id: int, episode_step: int, env_step: int) -> None:
+        self.episode_id = int(episode_id)
+        self.episode_step = int(episode_step)
+        self.env_step = int(env_step)
+
+    def status(
+        self,
+        state: str,
+        control_owner: str,
+        *,
+        message: str,
+        outcome: Optional[Any] = None,
+        success: Optional[bool] = None,
+        terminal_reason: Optional[str] = None,
+    ) -> Any:
+        if success is not None:
+            self.success = bool(success)
+        if terminal_reason is not None:
+            self.terminal_reason = str(terminal_reason)
+        evaluated = bool(
+            outcome is not None and outcome.classifier_evaluated
+        )
+        return self.tracker.status(
+            state=state,
+            control_owner=control_owner,
+            episode_id=self.episode_id,
+            episode_step=self.episode_step,
+            env_step=self.env_step,
+            classifier_evaluated=evaluated,
+            classifier_probability=(
+                outcome.classifier_probability if evaluated else None
+            ),
+            classifier_threshold=(
+                outcome.classifier_threshold if evaluated else None
+            ),
+            success=self.success,
+            terminal_reason=self.terminal_reason,
+            message=message,
+        )
+
+    def publish(
+        self,
+        state: str,
+        control_owner: str,
+        *,
+        message: str,
+        outcome: Optional[Any] = None,
+        success: Optional[bool] = None,
+        terminal_reason: Optional[str] = None,
+    ) -> None:
+        if self.session is None:
+            return
+        try:
+            status = self.status(
+                state,
+                control_owner,
+                message=message,
+                outcome=outcome,
+                success=success,
+                terminal_reason=terminal_reason,
+            )
+            self.session.publish(status)
+        except Exception as exc:  # status cannot stop the robot loop
+            print(
+                f"[remote-actor] WARNING: actor status publish failed: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def wait_for_scene_ready(self, *, message: str) -> None:
+        if self.session is None:
+            return
+        # Unlike status publication, failure of this call is fatal: an armed
+        # topic actor may not silently bypass its operator gate.
+        status = self.status(
+            WAIT_SCENE_READY,
+            OWNER_NONE,
+            message=message,
+        )
+        self.session.wait_for_scene_ready(status)
+
+    def wait_for_home_approval(self, *, message: str) -> None:
+        if self.session is None:
+            return
+        status = self.status(
+            WAIT_HOME_APPROVAL,
+            OWNER_HOLD,
+            message=message,
+        )
+        self.session.wait_for_home_approval(status)
+
+
+def _control_state(info: Mapping[str, Any], intervened: bool) -> tuple[str, str]:
+    """Map the action that physically ran to status state/owner."""
+
+    if bool(info.get("held", False)):
+        return HOLD, OWNER_HOLD
+    if intervened:
+        return HUMAN_INTERVENTION, OWNER_HUMAN
+    return POLICY_RUNNING, OWNER_POLICY
+
+
+def _terminal_reason(outcome: Any) -> str:
+    if bool(outcome.success):
+        return "SUCCESS"
+    if bool(outcome.truncated):
+        return "TRUNCATED"
+    return "EPISODE_LIMIT"
+
+
 def run_remote_actor(
     network: ActorNetwork,
     env: Any,
@@ -438,6 +593,57 @@ def run_remote_actor(
     session_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
     policy_action_transform: Optional[Callable[[Any], Any]] = None,
     sidecar_scheduler: Optional[Any] = None,
+    operator_session: Optional[Any] = None,
+) -> ActorRunSummary:
+    """Run the actor, reporting FAULT/STOPPED when an operator session exists."""
+
+    resolved_run_id = run_id or uuid.uuid4().hex
+    reporter = _OperatorReporter(operator_session, resolved_run_id)
+    try:
+        return _run_remote_actor_impl(
+            network,
+            env,
+            config=config,
+            actor_id=actor_id,
+            checkpoint_path=checkpoint_path,
+            run_id=resolved_run_id,
+            session_id_factory=session_id_factory,
+            policy_action_transform=policy_action_transform,
+            sidecar_scheduler=sidecar_scheduler,
+            operator_session=operator_session,
+            reporter=reporter,
+        )
+    except KeyboardInterrupt:
+        reporter.publish(
+            STOPPED,
+            OWNER_NONE,
+            message="actor interrupted by operator",
+        )
+        raise
+    except BaseException as exc:
+        reporter.publish(
+            FAULT,
+            OWNER_NONE,
+            message=f"{type(exc).__name__}: {exc}",
+            success=False,
+            terminal_reason="FAULT",
+        )
+        raise
+
+
+def _run_remote_actor_impl(
+    network: ActorNetwork,
+    env: Any,
+    *,
+    config: Any,
+    actor_id: str,
+    checkpoint_path: Optional[str],
+    run_id: str,
+    session_id_factory: Callable[[], str],
+    policy_action_transform: Optional[Callable[[Any], Any]],
+    sidecar_scheduler: Optional[Any],
+    operator_session: Optional[Any],
+    reporter: _OperatorReporter,
 ) -> ActorRunSummary:
     """Run synchronous remote inference and lossless transition delivery.
 
@@ -468,7 +674,6 @@ def run_remote_actor(
     if buffer_period and not checkpoint_path:
         raise ValueError("checkpoint_path is required when buffer_period > 0")
 
-    run_id = run_id or uuid.uuid4().hex
     if not actor_id or not run_id:
         raise ValueError("actor_id and run_id are required")
     action_shape = tuple(int(dim) for dim in env.action_space.shape)
@@ -500,6 +705,31 @@ def run_remote_actor(
     sidecar_latency = _RoundTripStats()
     plain_latency = _RoundTripStats()
 
+    # A real armed topic actor does not obtain or execute a policy action just
+    # because the launcher handed off the controller.  First HOME, then wait for
+    # a fresh-DISENGAGED /hil/scene_ready edge.  The reset after that edge is
+    # intentional: it gives BeginEpisode camera/state data captured after the
+    # operator changed the scene, rather than the pre-wait HOME observation.
+    reporter.position(episode_id=0, episode_step=0, env_step=-1)
+    if operator_session is not None:
+        reporter.publish(
+            HOMING,
+            OWNER_NONE,
+            message="moving to HOME before the first policy episode",
+            success=False,
+            terminal_reason="",
+        )
+        env.reset()  # HOME result is deliberately discarded (pre-scene-reset)
+        reporter.wait_for_scene_ready(
+            message="HOME; reset the scene, DISENGAGE, then press Start/Resume"
+        )
+        reporter.publish(
+            HOMING,
+            OWNER_NONE,
+            message="scene ready accepted; refreshing HOME observation",
+            success=False,
+            terminal_reason="",
+        )
     observation, reset_info = env.reset()
     if sidecar_scheduler is not None:
         sidecar_scheduler.reset()
@@ -520,6 +750,13 @@ def run_remote_actor(
         timestamp_ns=source_timestamp_ns,
     )
     episodes_started += 1
+    reporter.publish(
+        POLICY_RUNNING,
+        OWNER_POLICY,
+        message="policy episode running",
+        success=False,
+        terminal_reason="",
+    )
 
     for env_step in range(max_steps):
         policy_action = validate_action(
@@ -538,6 +775,20 @@ def run_remote_actor(
         next_observation, reward, done, truncated, info = env.step(policy_action)
         next_timestamp_ns = validate_timestamp_ns(info.get("timestamp_ns"))
         next_observation_id = f"{session_id}:{step_id + 1}"
+        auto_success = bool(
+            getattr(operator_session, "auto_success", False)
+            if operator_session is not None
+            else False
+        )
+        operator_success = False
+        if operator_session is not None and not auto_success:
+            consume_operator_success = getattr(
+                operator_session, "consume_operator_success", None
+            )
+            if callable(consume_operator_success):
+                operator_success = bool(
+                    consume_operator_success(run_id, episode_id)
+                )
         data = build_data(
             actor_id=actor_id,
             run_id=run_id,
@@ -549,6 +800,8 @@ def run_remote_actor(
             policy_version=action_result.policy_version,
             policy_action=policy_action,
             policy_actions_synthetic=policy_action_transform is not None,
+            auto_success=auto_success,
+            operator_success=operator_success,
             episode_id=episode_id,
             step_id=step_id,
             observation_id=observation_id,
@@ -650,15 +903,70 @@ def run_remote_actor(
             transition["classifier_threshold"] = float(
                 outcome.classifier_threshold
             )
+            transition["classifier_success"] = bool(
+                outcome.classifier_probability
+                > outcome.classifier_threshold
+            )
             transition["reward_model_id"] = outcome.reward_model_id
         terminal = bool(outcome.done) or bool(outcome.truncated)
         intervened = data["meta"]["intervened"] == 1
         if intervened:
             total_intervention_steps += 1
+        reason = _terminal_reason(outcome) if terminal else ""
+        reporter.position(
+            episode_id=episode_id,
+            episode_step=step_id,
+            env_step=env_step,
+        )
+        control_state, control_owner = _control_state(info, intervened)
+        reporter.publish(
+            control_state,
+            control_owner,
+            message=(
+                f"terminal transition acknowledged: {reason}"
+                if terminal
+                else "transition acknowledged"
+            ),
+            outcome=outcome,
+            success=bool(outcome.success),
+            terminal_reason=reason,
+        )
+        final_step = terminal and env_step + 1 >= max_steps
+        if terminal:
+            if not final_step:
+                episode_id += 1
+                step_id = 0
+                reporter.position(
+                    episode_id=episode_id,
+                    episode_step=0,
+                    env_step=env_step,
+                )
+            if operator_session is not None:
+                reporter.wait_for_home_approval(
+                    message=(
+                        f"{reason}; robot is holding at the terminal pose. "
+                        "Press APPROVE HOME to allow HOME motion."
+                    )
+                )
+                reporter.publish(
+                    HOMING,
+                    OWNER_NONE,
+                    message=(
+                        f"{reason}; returning HOME before stop"
+                        if final_step
+                        else f"{reason}; returning HOME"
+                    ),
+                )
+                # HOME is a motion-safety operation and therefore precedes all
+                # optional local deepcopy/pickle I/O.  Disk or memory failure
+                # must not strand a successful episode at its terminal pose.
+                env.reset(options={"operator_approved_home": True})
+
         if checkpoint_path:
             # Optional local backup is replay-ready.  This does not resend
             # images: it only materializes the two observations already held
-            # by the laptop before writing the local pickle.
+            # by the laptop before writing the local pickle.  On a terminal
+            # operator run the arm is already HOME before this block executes.
             transition["observations"] = copy.deepcopy(observation)
             transition["next_observations"] = copy.deepcopy(next_observation)
             replay_data.append(copy.deepcopy(data))
@@ -677,10 +985,21 @@ def run_remote_actor(
             intervention_data = []
 
         if terminal:
-            if env_step + 1 >= max_steps:
+            if final_step:
                 break
-            episode_id += 1
-            step_id = 0
+
+            if operator_session is not None:
+                reporter.wait_for_scene_ready(
+                    message=(
+                        f"HOME after {reason}; reset the scene, DISENGAGE, "
+                        "then press Resume"
+                    )
+                )
+                reporter.publish(
+                    HOMING,
+                    OWNER_NONE,
+                    message="scene ready accepted; refreshing HOME observation",
+                )
             observation, reset_info = env.reset()
             if sidecar_scheduler is not None:
                 # Per-episode reset: the interval counter and any escalation
@@ -704,6 +1023,13 @@ def run_remote_actor(
                 timestamp_ns=source_timestamp_ns,
             )
             episodes_started += 1
+            reporter.publish(
+                POLICY_RUNNING,
+                OWNER_POLICY,
+                message="policy episode running",
+                success=False,
+                terminal_reason="",
+            )
             continue
 
         if result.action is None:
@@ -714,6 +1040,20 @@ def run_remote_actor(
         action_result = result.action
         step_id += 1
 
+    else:
+        # Natural max_steps exhaustion is rare in production (default 1M), but
+        # it is still an intentional stop rather than a fault.  Leave an armed
+        # robot at HOME just as the final-terminal path does.
+        if operator_session is not None:
+            reporter.publish(
+                HOMING,
+                OWNER_NONE,
+                message="max_steps reached; returning HOME before stop",
+                success=False,
+                terminal_reason="MAX_STEPS",
+            )
+            env.reset()
+
     if checkpoint_path and replay_data:
         _dump_data(
             checkpoint_path,
@@ -722,6 +1062,11 @@ def run_remote_actor(
             replay_data,
             intervention_data,
         )
+    reporter.publish(
+        STOPPED,
+        OWNER_NONE,
+        message="actor run stopped",
+    )
     return ActorRunSummary(
         run_id=run_id,
         env_steps=max_steps,

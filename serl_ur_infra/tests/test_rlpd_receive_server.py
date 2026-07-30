@@ -88,6 +88,8 @@ def _data(
     next_value: int | None = None,
     transition_id: str | None = None,
     session_id: str = "session-0",
+    auto_success: bool = True,
+    operator_success: bool = False,
 ) -> dict[str, Any]:
     source_value = step if source_value is None else source_value
     next_value = step + 1 if next_value is None else next_value
@@ -99,7 +101,7 @@ def _data(
     )
     return {
         "meta": {
-            "schema_version": 2,
+            "schema_version": 3,
             "run_id": "run-0",
             "actor_id": "actor-0",
             "session_id": session_id,
@@ -109,6 +111,8 @@ def _data(
             "policy_version": 0,
             "policy_action": policy_action,
             "intervened": int(intervened),
+            "auto_success": auto_success,
+            "operator_success": operator_success,
         },
         "transition": {
             "episode_id": 0,
@@ -359,6 +363,80 @@ def test_reward_finalizer_server_authority(
     assert outcome.success is expected_success
     assert outcome.classifier_evaluated is True
     assert outcome.reward_model_id == "cube-in-cup-v1"
+
+
+def test_manual_mode_keeps_classifier_telemetry_but_not_success_authority():
+    classifier = ScriptedRewardClassifierRuntime(
+        [0.9], threshold=0.5, reward_model_id="cube-in-cup-v1"
+    )
+    finalizer = RewardTransitionFinalizer(classifier, warn=_WarningSink())
+
+    data, outcome = finalizer(
+        _data(auto_success=False, operator_success=False), _sidecar()
+    )
+
+    transition = data["transition"]
+    assert classifier.evaluation_count == 1
+    assert outcome.classifier_evaluated is True
+    assert outcome.classifier_probability == pytest.approx(0.9)
+    assert int(transition["classifier_success"]) == 1
+    assert transition["reward_model_id"] == "cube-in-cup-v1"
+    assert outcome.success is False
+    assert int(transition["success"]) == 0
+    assert transition["rewards"] == 0.0
+    assert transition["dones"] is False
+
+    ingress = ReplayIngress(
+        replay_capacity=4,
+        intervention_capacity=4,
+        store_factory=_StoreFactory(),
+    )
+    ingress(data, False)
+    stored = ingress.replay_store.items[0]
+    assert int(stored["auto_success"]) == 0
+    assert int(stored["operator_success"]) == 0
+    assert int(stored["success"]) == 0
+    assert int(stored["classifier_success"]) == 1
+    record = ingress.replay_sidecar()[0]
+    assert record.auto_success is False
+    assert record.operator_success is False
+    assert record.success is False
+
+
+def test_manual_operator_success_is_effective_despite_negative_classifier():
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime(
+            [0.1], threshold=0.5, reward_model_id="cube-in-cup-v1"
+        ),
+        warn=_WarningSink(),
+    )
+
+    data, outcome = finalizer(
+        _data(auto_success=False, operator_success=True), _sidecar()
+    )
+
+    assert outcome.classifier_evaluated is True
+    assert int(data["transition"]["classifier_success"]) == 0
+    assert int(data["transition"]["success"]) == 1
+    assert outcome.success is True
+    assert outcome.reward == 1.0
+    assert outcome.done is True
+    assert outcome.truncated is False
+    assert outcome.mask == 0.0
+
+
+def test_auto_mode_rejects_operator_success_before_classification():
+    classifier = ScriptedRewardClassifierRuntime([0.9], threshold=0.5)
+    finalizer = RewardTransitionFinalizer(classifier, warn=_WarningSink())
+
+    with pytest.raises(
+        ActorProtocolError, match="operator_success is forbidden"
+    ):
+        finalizer(
+            _data(auto_success=True, operator_success=True), _sidecar()
+        )
+
+    assert classifier.evaluation_count == 0
 
 
 def test_reward_finalizer_uses_strict_threshold():
@@ -684,7 +762,7 @@ def test_replay_ingress_duplicate_is_idempotent_and_collision_rejected():
     assert len(ingress.replay_store.items) == 1
     assert len(ingress.intervention_store.items) == 1
     conflicting = copy.deepcopy(original)
-    conflicting["transition"]["rewards"] = 0.5
+    conflicting["transition"]["actions"][0] = -0.5
     with pytest.raises(ActorProtocolError, match="collision"):
         ingress(conflicting, True)
 

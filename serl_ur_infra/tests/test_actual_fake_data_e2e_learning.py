@@ -178,6 +178,9 @@ def _send_transition(
         timestamp_ns=timestamp_ns,
         policy_version=action.policy_version,
         policy_action=action.action,
+        # The synthetic E2E case is explicitly classifier-authoritative; real
+        # GUI sessions default to MANUAL.
+        auto_success=True,
         episode_id=0,
         step_id=step_id,
         observation_id=observation_id,

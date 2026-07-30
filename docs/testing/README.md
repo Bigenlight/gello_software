@@ -10,6 +10,14 @@
 export WT=/home/laptop3/gello_software
 ```
 
+> ### 🆕 현재 운영 요약 (2026-07-30)
+> 실물 HIL-SERL 원형은 구동됐다. 정상 운용은 `run_hil_server.sh` / `run_hil_hardware.sh` /
+> `run_hil_session.sh` 3-CLI다. actor transport는 protocol 2 / schema 3, reward threshold는
+> 0.5다. 성공 기본값은 MANUAL이지만 classifier는 계속 실행·표시·replay 기록된다.
+> terminal 뒤에는 `WAIT_HOME_APPROVAL` → GUI HOME 승인 → `WAIT_SCENE_READY` → 사람이 장면
+> 재배치 → START/NEXT 순서다. startup의 예전 GO/Enter 타이핑은 기본 경로에서 제거됐지만
+> pose/controller proof와 fresh ENGAGED heartbeat는 남아 있다.
+
 > ### 🔧 정정 (2026-07-29) — `WT`가 통합 checkout으로 되돌아왔다
 > 2026-07-27 판은 `WT=/home/laptop3/gello_worktrees/hil-hardware-comms`를 가리켰다.
 > **머지가 끝나서 더 이상 맞지 않는다.** 머지 커밋 `3f199d4`가 `test/hil-hardware-comms`를
@@ -80,13 +88,13 @@ export WT=/home/laptop3/gello_software
    약 2 Hz로, **팔이 정지해 있을 때만** 따로 붙여 보낸다. **`IMAGE_CROP`은 그대로다** —
    실측값이고 정책이 1차 소비자다. proto 변경 0, **observation schema hash 불변**.
    → `08_OPEN_GAPS.md` G15, `05_COMMS_GRPC.md` §3.2
-   첫 production-model actor run에서 sidecar 설정으로 실제 transition이 들어갔다. 다만
-   per-transition verdict를 GUI/영구 로그로 보지 못했고, 팔 가림(occlusion)도 **안 고쳐졌다.**
+   production-model actor에서 sidecar transition과 실제 GUI probability/threshold/verdict를
+   관측했다. 별도 장시간 영구 verdict 로그와 팔 가림(occlusion)은 **안 고쳐졌다.**
    그리고 `reward_model_id`가 **`cube-in-cup-all3-ckpt150+sidecar-v1`**로 바뀌어
    옛 값 `cube-in-cup-checkpoint-150`은 **핸드셰이크에서 거부된다.**
 
-7. **`DEFAULT_REWARD_THRESHOLD`는 `0.2`다** (`rlpd_receive_server.py:73`, commit `1b02857`).
-   문서에 남아 있던 `--threshold 0.85` / `0.5` 예시는 전부 낡았다. threshold는 learner
+7. **`DEFAULT_REWARD_THRESHOLD`는 현재 `0.5`다** (`rlpd_receive_server.py`).
+   0.85/0.2는 과거 lineage 기록이다. threshold는 learner
    fingerprint에 들어가므로 다른 값으로 학습된 checkpoint resume은 fail-closed로 거부된다.
 
 > ### 통합 상태 (2026-07-29)
@@ -113,7 +121,7 @@ export WT=/home/laptop3/gello_software
 | 8 | 타이밍 baseline | **매 실행 재측정** | `test_ur_kin.py`(k)가 매 실행마다 찍는다. 📌 2026-07-29 실측 `worst-case tick = 0.836 ms (generic pose)`, 2026-07-27은 `1.314 ms (near-singular)`. **값도 pose 종류도 실행마다 바뀐다 — 고정값으로 인용하지 말 것.** 판정은 "예산 4.0 ms @250 Hz 미만"이다 |
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
 | 9b | HIL 개입 루프 (**실기, 팔 구동**) | **PASS (2026-07-28, `run_real_hil.py` 경로에 한함)** | `--arm --scale 0.25`, 100스텝 중 개입 64, `held=0`. 개입 불변식 4종(anchor-latch 0 / gain-latch 0 / 저장==실행 1.000 / held-rate 0%) 통과. **frame-map = 단위행렬**(포화 제외 잔차 0.093, 기준 0.15). → `04` §4.5 |
-| 9b′ | 같은 루프를 **actor entrypoint**로 | **핵심 E2E PASS / continuous PARTIAL** | 실제 replay 201, GELLO intervention 153, policy 48. learner 102/gradient 204/policy publish v2. 첫 publish 경계 RPC timeout 뒤 controller cleanup PASS → 최신 상태 문서 |
+| 9b′ | 같은 루프를 **actor entrypoint**로 | **핵심 E2E PASS** | 실제 policy/GELLO 전환, replay 201, intervention 153, learner update를 관측. 정상 832.3 ms reply를 거부하던 옛 0.6/0.8 s 경계는 bounded 1.5/2.0 s로 완화. 장시간 tail 계측은 남음 |
 | 9c | 리더 트리거 → 개입 그리퍼 배선 | **코드 통합·커밋됨, 하드웨어 미검증** | `ros_backend.py`의 `GELLO_TRIGGER_TOPIC`·`GELLO_TRIGGER_STALE_S`·`_on_gello_trigger`, `wrappers.py::GelloIntervention._expert_gripper`, `tests/test_gello_gripper_wiring.py`(📌 2026-07-30 재측정 **24 passed**); commit `6a0b127`. 07-28 실기도 이 채널은 껐다. *(줄 번호 제거 2026-07-30: 옛 판의 `ros_backend.py:81-155` / `wrappers.py:301-328`은 `4197f5b`로 크게 밀렸고 `wrappers.py`는 아직 동시 편집 중이다 — **심볼로 찾을 것.**)* |
 | 9d | 개입 **손맛**(빳빳함/덜덜거림) — 창 안 30 Hz 리더 재샘플링 + One-Euro + 변위 예산 | **PASS (2026-07-30, 실제 UR7e, `4197f5b`)** | `run_real_hil.py` **3 run**(DRY `--scale 0.5` / DRY `--scale 1.0` / ARMED `--scale 1.0`) 중 뒤 두 run PASS, 첫 run은 고친 판정으로 **SKIP**(포화 제외 후 축별 여기 2 cm 미달). **DRY RUN `--scale 1.0`** 300스텝(개입 272): frame-map 잔차 0.016 / alpha 1.005 / 표본 141(포화 131 제외) · action-exec dp_ratio 중앙값 1.000 · held 0 %. **ARMED `--scale 1.0 --max-steps 150`**(개입 120): 잔차 0.130 / alpha 0.983 / 표본 51(포화 69 제외) · dp_ratio 1.000 · held 0 % · **조작자 손맛 확인 양호**. 모든 개입 스텝 `substeps=2`(창당 타깃 3회 갱신), `governed=0`(예산이 governor보다 타이트해 먼저 묶는 설계대로) → `04` §9 |
 | 9d′ | 같은 손맛 수정의 **연속 운용**(창이 늘어질 때) | **미검증 — 코드로는 못 고친다** | 창 0.700 s에서 HOLD 51.5 %, 리더속도 추종 66 %. 예산 소진 후 남는 HOLD는 필터·rate·외삽 어느 것도 못 없앤다 → `08` G21, `04` §9.5 |
@@ -129,8 +137,9 @@ export WT=/home/laptop3/gello_software
 | 12 | `clip_safety_box` (워크스페이스 박스) | **구현·단위검증, 실기 경로에서는 비활성** | `tests/test_clip_safety_box.py` **26 passed**. 실측 박스는 `cube_in_cup`에만 있고, 팔을 구동한 `run_real_hil.py`는 `DefaultUR7eEnvConfig`(0벡터)를 써서 박스가 꺼진 채 돌았다 → `08` G1 |
 | 12b | `go_to_reset` branch-cut | **실기 경로 PASS** | preposition과 실제 actor의 100-step episode reset 경로를 통과. 기존 단위검증도 유지 → `08` G13 |
 | 13 | 장애 주입 매트릭스 | **미검증 (E13 제외)** | → `07_FAILURE_INJECTION.md` |
-| 14 | **RL 정책** 경로로 실기 팔 구동 | **원형 PASS / continuous PARTIAL** | 48 non-intervention transition에서 policy가 실제 action 소유. 첫 publish 5.474 s + 동시 contention으로 0.6 s RPC timeout → `08` G21 |
-| 15 | reward classifier ↔ 크롭 정합 | 🟡 **sidecar 실기 유입 / verdict 관측 미완료** | 분류기는 무크롭 sidecar, 정책은 crop을 유지한다. production server로 실제 transition은 들어갔으나 per-step `p(success)` GUI/영구 로그와 가림 검증이 남음 → `08` G15/G23 |
+| 14 | **RL 정책** 경로로 실기 팔 구동 | **원형 PASS** | policy가 실제 action을 소유하고 ENGAGE로 GELLO 개입, 해제 뒤 policy 복귀를 관측. 장시간 latency는 `08` G21 |
+| 15 | reward classifier ↔ 크롭 정합 | 🟢 **sidecar + GUI 실기 관측 PASS** | 분류기는 무크롭 sidecar, 정책은 crop 유지. 실제 `p(success)`/threshold/verdict 표시 확인. MANUAL에서도 계속 돈다. 영구 audit/가림은 남음 → `08` G15 |
+| 15c | operator episode 상태기계 | **구현·schema-3 실기 진행** | MANUAL/AUTO, MARK SUCCESS, WAIT_HOME_APPROVAL, APPROVE HOME, WAIT_SCENE_READY, START/NEXT 구현. episode-limit GUI와 schema-3 online 학습 관측 완료; MARK SUCCESS episode의 one-shot provenance 재확인만 남음 → `08` G23 |
 | 15b | 분류기 checkpoint SHA pin (orbax 디렉터리) | 🟢 **해결 (2026-07-29)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임. 두 `DEFAULT_*_SHA256`가 폐기된 `e329986b…`(새 도메인 recall 0%)에서 **`512b6575…62846d`**(= `classifier_ckpt/cube_in_cup_all3/checkpoint_150`, 정규 파일 14개)로 교체. **learner fingerprint가 한 번 깨진다 — 의도된 것** → `08` G19 |
 | 16 | canonical offline demo artifact | 🟢 **해결 (2026-07-29)** | 사용자가 `take_23` 제외 23개 take를 success로 승인했고 2,037-transition 영구 pickle을 생성했다. laptop3/Kanu strict-load와 SHA256 일치를 확인했다 → `08` G20 |
 
@@ -156,8 +165,8 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 > ⚠️ **여러 에이전트/사람이 같은 checkout을 동시에 고치고 있다.** 파일이 몇 분 사이에
 > 바뀔 수 있다. 숫자를 인용하기 전에 `git log --oneline -5`로 최신 커밋을 확인할 것 —
 > 실제로 `ABS_POSE_LIMIT_LOW[2]`가 `0.1785` → `0.185`로, `RESET_MAX_DIST_RAD`가
-> `0.5` → `0.9`로(`ee3240e`), `DEFAULT_REWARD_THRESHOLD`가 `0.85` → `0.5` → `0.2`로
-> (`53d5cf6`, `1b02857`) 바뀌었다.
+> `0.5` → `0.9`로(`ee3240e`), `DEFAULT_REWARD_THRESHOLD`가
+> `0.85` → `0.5` → `0.2` → **현재 production `0.5`**로 바뀌었다.
 
 ---
 
@@ -173,7 +182,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, 포트 기본값, schema fail-fast(v2), **분류기 sidecar 전송 계약(§3.2)**, **레이턴시·대역폭 실측(§5.3–5.4)**, Kanu 터널 |
 | [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대(시리얼·크롭·역할), QoS/TRANSIENT_LOCAL 함정, 토픽 유량 점검, 19-D state 계약, F/T 프레임 |
 | [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
-| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전 갭 **G1~G25**와 임시 완화책, 그리고 다른 문서에서 발견된 낡은 서술 목록. G15/G19/G20은 2026-07-29에 닫혔고, **G24(개입 손맛)·G25(`test_env_fake_backend.py` 0개 수집)는 2026-07-30 신규** |
+| [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전·데이터·운영 갭 **G1~G31**과 완화책. G22/G23은 operator 상태기계로 닫혔고 G30은 현재 preposition 기본값, G31은 global max-step 종료 edge를 기록 |
 | [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, Kanu 서버 기동 |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
@@ -228,17 +237,19 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
  F1  SSH 터널 + 스키마 핸드셰이크       -> 05 §6, 09 §2   [PASS 2026-07-27]
  F2  레이턴시 예산 실측                  -> 05 §5.3       [세션마다 재측정 — 값이 6배 흔들린다]
  F3  Stage A actor (fake-env) 왕복       -> 09 §3         [PASS 2026-07-27]
- F3b 분류기 sidecar production 전송       -> 09 §4.4       [배선 PASS / verdict 미확인]
+ F3b 분류기 sidecar + GUI verdict          -> 09 §4.4       [실기 관측 PASS]
  F4  no-arm live-sensor policy probe      -> 09 §4         [PASS, transition 0]
         ↓
-[G] RL 정책 경로 실기 first E2E          [핵심 PASS / continuous PARTIAL]
+[G] RL 정책 경로 실기 first E2E          [핵심 PASS]
  G1  policy/GELLO 실제 action 전환        [PASS]
  G2  replay201 -> learner102 -> publish v2 [PASS, actor의 v1/v2 수신은 미확인]
- G3  첫 publish 경계 RPC deadline          [FAIL — 08 G21]
+ G3  첫 publish 경계 RPC deadline          [1.5/2.0 s bounded 완화 — 장시간 계측 남음]
+ G4  HOME/scene/operator episode GUI       [구현, episode-limit WAIT 실기 관측]
+ G5  schema-3 MANUAL MARK SUCCESS provenance [다음 실기에서 재확인]
 ```
 
-**현재 위치: 실물 HIL-SERL 원형 [G1~G2]까지 도달했다. 다음 blocker는 [G3] 동시
-학습/추론 latency와 policy-first/episode GUI 운영 흐름이다.**
+**현재 위치: 실물 HIL-SERL 원형과 operator episode GUI [G1~G4]까지 도달했다. 다음 확인은
+[G5], 장시간 latency, classifier 재학습, G27/G28 데이터 정합성이다.**
 2026-07-30에 [D′3](개입 손맛)이 추가로 PASS했다 — **[G3]와 독립**이다(learner·gRPC 서버를
 쓰지 않는 zero-policy 경로). 다만 손맛의 **나머지 절반**은 [G3]/G21이 열려 있는 동안
 회수되지 않는다 → 표 9d′.

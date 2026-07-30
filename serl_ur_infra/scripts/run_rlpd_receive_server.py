@@ -81,7 +81,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reward-model-id", default=DEFAULT_REWARD_MODEL_ID)
     parser.add_argument("--threshold", type=float, default=DEFAULT_REWARD_THRESHOLD)
     # WHY THE DEFAULT IS 1 (i.e. smoothing OFF).  Operator decision: the
-    # cube-in-cup checkpoint behaves well at DEFAULT_REWARD_THRESHOLD=0.2, and
+    # cube-in-cup checkpoint uses DEFAULT_REWARD_THRESHOLD=0.5, and
     # an always-on smoothed decision would make the server disagree with the
     # live classifier viewer (REWARD_CLASSIFIER_LIVE_KO.md) for anyone holding
     # the two side by side -- the viewer reports per-frame probability with no

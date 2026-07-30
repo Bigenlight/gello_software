@@ -24,8 +24,8 @@ never move.  (Tracked as G12 in docs/testing/08_OPEN_GAPS.md, which covers the
 These tests pin down three separate things:
   1. the actual resolution of ``deadman=None`` (test_* below assert the real
      class, so a future fix must update them deliberately);
-  2. the ``RosTopicDeadman`` <-> GUI frozen contract (parse, staleness
-     fail-stop, gain clamp) so the GUI side can be trusted once it IS wired;
+  2. the ``RosTopicDeadman`` <-> GUI frozen contract (strict parse, staleness
+     fail-stop) so the GUI side can be trusted once it IS wired;
   3. the intervention bookkeeping the server counts on
      (``intervened`` / ``intervene_action``), including the stuck-ON case.
 
@@ -412,9 +412,9 @@ def test_never_engages_before_the_first_message(ros_node):
 
 @pytest.mark.parametrize(
     "engaged_field, expected",
-    [(1.0, True), (0.0, False), (0.5, True), (0.49, False), (2.0, True)],
+    [(1.0, True), (0.0, False)],
 )
-def test_parses_the_engaged_field(ros_node, engaged_field, expected):
+def test_parses_the_exact_engaged_field(ros_node, engaged_field, expected):
     deadman = RosTopicDeadman(ros_node)
     _publish(deadman, engaged_field, 1.0)
     assert deadman.is_engaged() is expected
@@ -426,28 +426,42 @@ def test_parses_the_gain_field(ros_node):
     assert deadman.gain() == pytest.approx(0.42)
 
 
-@pytest.mark.parametrize(
-    "raw, clamped",
-    [(5.0, 1.00), (1.00, 1.00), (0.10, 0.10), (0.0, 0.10), (-3.0, 0.10)],
-)
-def test_clamps_gain_into_the_published_range(ros_node, raw, clamped):
-    """A GUI bug (or a hand-published topic) must not scale the leader 5x."""
-
+@pytest.mark.parametrize("raw", [1.00, 0.42, 0.10])
+def test_accepts_gain_only_inside_the_published_range(ros_node, raw):
     deadman = RosTopicDeadman(ros_node)
     _publish(deadman, 1.0, raw)
-    assert deadman.gain() == pytest.approx(clamped)
+    assert deadman.gain() == pytest.approx(raw)
 
 
-def test_short_message_degrades_to_safe_defaults(ros_node):
-    """[engaged] with no gain -> gain 1.0; [] -> disengaged."""
-
+@pytest.mark.parametrize(
+    "bad_data",
+    [
+        (),
+        (0.0,),
+        (0.0, 1.0, 7.0),
+        (0.49, 1.0),
+        (2.0, 1.0),
+        (np.nan, 1.0),
+        (0.0, np.nan),
+        (0.0, 0.09),
+        (0.0, 1.01),
+    ],
+)
+def test_malformed_message_never_refreshes_or_authorizes_release(
+    ros_node, bad_data
+):
     deadman = RosTopicDeadman(ros_node)
-    _publish(deadman, 1.0)
-    assert deadman.is_engaged() is True
-    assert deadman.gain() == pytest.approx(1.0)
+    with pytest.raises(RuntimeError, match="no valid heartbeat"):
+        deadman.fresh_engaged()
 
-    _publish(deadman)
-    assert deadman.is_engaged() is False
+    _publish(deadman, 1.0, 0.42)
+    assert deadman.is_engaged() is True
+    valid_rx = deadman._last_rx
+
+    _publish(deadman, *bad_data)
+    assert deadman._last_rx == valid_rx
+    assert deadman.fresh_engaged() is True
+    assert deadman.gain() == pytest.approx(0.42)
 
 
 @pytest.mark.parametrize("engaged_field", [0.0, 1.0])
@@ -612,6 +626,10 @@ def test_deadman_stale_error_exits_actor_and_closes_resources(monkeypatch):
     )
     env = _ActorEnv()
     network = _Network()
+    operator_session = SimpleNamespace(
+        publish=lambda status: None,
+        wait_for_scene_ready=lambda status: None,
+    )
     monkeypatch.setattr(actor_module, "_parse_args", lambda: args)
     monkeypatch.setattr(
         actor_module, "_load_config_mapping", lambda module: {"task": _Config}
@@ -619,6 +637,11 @@ def test_deadman_stale_error_exits_actor_and_closes_resources(monkeypatch):
     monkeypatch.setattr(actor_module, "_build_actor_environment", lambda *_: env)
     monkeypatch.setattr(actor_module, "_preflight_command_topics", lambda *_: None)
     monkeypatch.setattr(actor_module, "create_actor_network", lambda *_, **__: network)
+    monkeypatch.setattr(
+        actor_module.RosOperatorSession,
+        "from_environment",
+        lambda *_: operator_session,
+    )
 
     with pytest.raises(DeadmanHeartbeatStaleError):
         actor_module.main()

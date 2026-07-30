@@ -1,11 +1,13 @@
 # 실물 UR7e HIL-SERL 현재 상태와 다음 단계
 
-> 기준: **2026-07-29 KST**, 첫 실제 production-model actor run 직후
-> · **2026-07-30 KST**, 개입 손맛(intervention feel) 실기 검증 (§3A)
+> 기준: **2026-07-29 KST**, 첫 실제 production-model actor run
+> · **2026-07-30 KST**, 개입 손맛 실기 검증과 schema 3 MANUAL learner 재기동 (§3A, §3B)
 >
-> 실행 코드 기준선: **`ca19652` 이상**. 이후 `f109656`까지는 준비 상태를 기록한 문서
-> descendant다. §3A의 서브스텝 경로는 **`4197f5b` 이상**에서만 존재한다.
-> 다음 실행 전에는 laptop3와 Kanu의 **실행 코드 HEAD**를 다시 대조한다.
+> laptop3 기준선: **이 문서를 포함한 최신 branch tip**. §3A의 30 Hz
+> 개입 서브스텝은 `4197f5b`, 매 세션 Enter/GO 제거는 `e86edd5`에서 들어왔다. Kanu의 현재 schema 3 stage는
+> `/home/junhyeong/gello_software_hil_schema3_stage_20260730` @ `c9c30c3e…`이고, 안정 링크
+> `/home/junhyeong/gello_software_hil_current`가 그 checkout을 가리킨다. 다음 실행 전에는
+> laptop3와 Kanu의 **실행 코드 HEAD와 실제 process argv를 다시 대조한다.**
 >
 > ⚠️ **두 날짜의 숫자를 섞지 마라.** §3은 07-29 E2E(learner·gRPC 포함), §3A는 07-30 개입
 > 경로 격리 검증(learner·gRPC 없음)이다. 리그가 다르므로 한 표에 나란히 놓으면 안 된다.
@@ -25,10 +27,14 @@
 실제 transition 전송, Kanu의 RLPD online update, 새 policy publish, 그리고 actor 예외 후
 controller 자동 복귀까지 확인했다.
 
-다만 **연속 운용은 아직 PASS가 아니다.** replay가 201개 쌓인 시점에 학습과 추론이 같은
-GPU에서 경쟁하면서 `Step RPC`가 0.6초 deadline을 넘었다. 또한 현재 launcher는 최초
-commissioning을 위해 시작 시 `ENGAGED`를 강제하므로, 최종 목표인 **policy-first HIL**의
-운영 UX와는 다르다.
+다만 **장시간 연속 운용은 아직 PASS가 아니다.** 07-29 run은 replay 201개 부근에서 당시
+`Step RPC` 0.6초 deadline을 넘었다. 현 wrapper는 각 RPC deadline을 **1.5초**, 요청 생성부터
+응답 수락까지의 최대 age를 **2.0초**로 제한하지만, 이것은 늦은 action을 거절하는 경계이지
+10 Hz 제어가 매번 100 ms 안에 끝난다는 보장은 아니다.
+
+운영 UX는 이제 policy-first state machine으로 정리됐다. controller handoff까지만 fresh
+`ENGAGED` heartbeat 3개를 요구하고, HOME 뒤 GUI의 `START / NEXT ITERATION`이 deadman을
+해제한 다음 episode를 시작한다. terminal 뒤에는 바로 HOME으로 가지 않고 조작자 승인을 기다린다.
 
 따라서 이 run은 다음처럼 부른다.
 
@@ -57,11 +63,14 @@ laptop3                                             Kanu
 - Kanu는 policy inference, reward classifier, RLPD learner를 담당한다.
 - Kanu server는 `127.0.0.1:50053`, laptop3는 SSH local forwarding
   `127.0.0.1:50153 -> Kanu 127.0.0.1:50053`을 사용한다.
-- 제어 루프는 10 Hz다. actor의 현재 `Step RPC` deadline은 0.6초다.
+- transition/control 목표는 10 Hz다. 현재 각 RPC deadline은 **1.5초**, 응답 최대 age는
+  **2.0초**다. 둘 다 fail boundary이며 10 Hz 달성 증명은 아니다.
 - **`4197f5b` 이후(2026-07-30): 개입 중에는 그 10 Hz 창 *안에서* 관절 타깃이 30 Hz로
   갱신된다.** 전이 생성률은 그대로 10 Hz(1 스텝 = 1 transition)이고 정책 경로는
   bit-identical이다. 액추에이터 층만 바뀐 것이다 — §3A.
-- reward 권위는 Kanu의 classifier다. laptop의 환경 reward는 이 배치에서 사용하지 않는다.
+- reward 권위는 Kanu다. MANUAL에서는 classifier를 계속 계산·표시·기록하되 조작자의
+  `MARK SUCCESS`만 성공 terminal/reward를 승인한다. AUTO에서는 classifier의 엄격한
+  `p > 0.5`가 성공을 승인한다. laptop의 환경 reward는 이 배치에서 사용하지 않는다.
 
 ---
 
@@ -128,11 +137,12 @@ actor로 돌아와 실제 로봇에서 실행됐다는 per-RPC 증거는 없다.
 `learner_step=102`인 이유는 `training_starts=100`에서 replay 201개가 들어왔기 때문이다.
 현재 계약에서는 `201 - 100 + 1 = 102` update가 허용된다.
 
-### 3.3 현재 살아 있는 process는 고정 사실이 아니다
+### 3.3 07-29 종료 직후 process 기록 (현재값 아님)
 
-문서 작성 시점에는 Kanu learner PID `159159`와 port `50053`이 아직 살아 있었다. actor가
+07-29 문서 작성 시점에는 Kanu learner PID `159159`와 port `50053`이 아직 살아 있었다. actor가
 죽은 뒤 learner가 backlog를 step 102까지 따라잡은 상태다. 다음 세션에서 PID가 같다고
-가정하지 말고 아래 명령으로 다시 확인한다.
+가정하지 않는다. 이 process는 §3B의 schema 3 learner와 다르다. 현재값은 아래 명령 또는
+`run_hil_server.sh --check`로 다시 확인한다.
 
 ```bash
 ssh kanu 'pgrep -af "run_rlpd_learner_server.py" || echo "no learner"'
@@ -267,10 +277,15 @@ PYTHONPATH="/home/laptop3/gello_software/ros2_ur_ws/install/ur_gello_bringup/lib
 /home/laptop3/venvs/gello-hil-actor/bin/python -m pytest tests -q -p no:anyio
 ```
 
-📌 실측(2026-07-30): **`579 passed, 11 skipped`**. 07-29 기준선 **497**에서 신규 **82**개
-(`test_leader_stream.py` 28 / `test_governor_dt.py` 38 / `test_intervention_substeps.py` 16).
+📌 최신 실측(2026-07-30): **`614 passed, 11 skipped, 1 xfailed`**. 여기에는 개입
+서브스텝뿐 아니라 operator session/actor episode gate 회귀도 포함된다.
 **passed 수를 볼 것** — `serl_launcher`가 PYTHONPATH에서 빠지면 조용히 줄고 skip 사유가
 거짓말을 한다.
+
+GUI ROS package는 clean build 뒤 **`461 passed`**이며, 격리 `ROS_DOMAIN_ID`에서 actor가
+첫 WAIT를 보낸 뒤 GUI를 늦게 띄워도 0.5 s 재발행을 수신하고 `/hil/scene_ready` Trigger가
+정확히 한 번 승인되는 DDS 왕복까지 통과했다. 이는 로봇 없는 통합 검증이며 실물
+success→HOME→WAIT 연속 동작을 PASS로 승격시키지는 않는다.
 
 ### 3A.5 이 작업이 닫지 **않은** 것
 
@@ -284,8 +299,33 @@ PYTHONPATH="/home/laptop3/gello_software/ros2_ur_ws/install/ur_gello_bringup/lib
    이었다. `scripts/run_remote_rlpd_actor.py`로 서브스텝 경로를 돌린 실기 run은 **아직 없다.**
 3. **mock RViz 개입 루프는 여전히 미실행**(`04` §3). 검증이 오프라인 → 실기로 바로 갔다.
 4. **조작자는 `substeps`/`governed`/포화를 볼 수 없다.** CSV에만 있다 → §8 P3.
-5. 07-29의 미완료 항목(classifier verdict GUI, policy-first startup, scene reset WAIT,
-   장시간 연속 운용)은 이 작업과 무관하게 **그대로**다.
+5. 07-29의 미완료 항목 중 classifier verdict GUI, policy-first episode 시작, scene reset
+   WAIT/Resume는 **코드·headless/DDS 검증까지 구현됐다**. 실물 success 연속 동작과 장시간
+   연속 운용은 아직 남았다(§8 P2~P5).
+
+## 3B. 2026-07-30 schema 3 MANUAL learner 현재 스냅샷
+
+이 절은 2026-07-30 약 19:55 KST의 읽기 전용 관측이다. PID와 카운터는 불변값이 아니므로
+다음 세션에서는 `run_hil_server.sh --check`와 READY 배너를 다시 본다.
+
+| 항목 | 관측값 |
+| --- | --- |
+| learner | PID `1112465`, Kanu `127.0.0.1:50053` |
+| checkout | `/home/junhyeong/gello_software_hil_schema3_stage_20260730` @ `c9c30c3e…` |
+| stable link | `/home/junhyeong/gello_software_hil_current` -> 위 schema 3 stage |
+| run root | `/home/junhyeong/hil-serl-data/runs/cube_in_cup_manual_schema3_thr05_20260730_1715` |
+| 계약 | transport protocol `2`, transition schema `3`, threshold `0.5` |
+| model/reward | `hil-serl-hybrid-sac-resnet10-trunk-cache-v1` / `cube-in-cup-all3-ckpt150+sidecar-v1` |
+| 당시 카운터 | online replay `400`, intervention `225`, learner `301`, gradient `602`, policy version `6` |
+| checkpoint | 아직 없음; checkpoint period 5,000 전이며 `.learner-writer.lock`만 존재 |
+
+이 run은 schema 3 transition을 실제로 수신하고 학습했다. schema 3에서 transition meta는
+`auto_success`와 `operator_success`를 함께 운반한다. 다만 observation은 계속 **canonical
+observation schema v2**이고, `/hil/actor_status` JSON은 별도의 **status schema v2**다. 세 번호를
+하나의 schema로 섞어 말하지 않는다.
+
+옛 `/home/junhyeong/gello_software_hil` checkout은 schema 2/threshold 0.2 코드이며 현재 learner가
+아니다. 현재 `run_hil_server.sh`는 stable link를 canonicalize해 schema 3 stage를 검증한다.
 
 ---
 
@@ -303,86 +343,108 @@ PYTHONPATH="/home/laptop3/gello_software/ros2_ur_ws/install/ur_gello_bringup/lib
 따라서 사용자가 본 “ENGAGE하면 GELLO를 따라오고, 해제하면 자율적으로 움직인다”는 현상은
 의도한 HIL action routing이 실물에서 작동했다는 직접 증거다.
 
-### 4.1 지금 launcher와 최종 목표의 차이
+### 4.1 현재 launcher와 episode state machine
 
-핵심 wrapper는 이미 policy-first를 지원하지만 `run_hil_actor.sh --arm`은 controller switch
-전에 `ENGAGED` heartbeat 3개를 강제한다. 초기 untrained policy의 첫 action이
-`max_abs=0.99894`로 측정됐기 때문에 최초 commissioning에서 사용한 안전 gate다.
-
-현재 실행 가능한 절차는 다음과 같다.
+정상 경로는 terminal 세 개에서 실행하는 **3-CLI**다.
 
 ```text
-ENGAGED로 actor 시작 -> controller handoff 완료 -> operator가 DISENGAGE
-                      -> policy 제어 -> 필요할 때 다시 ENGAGE
+Terminal 1  run_hil_server.sh    Kanu learner 검증/재사용 + SSH tunnel
+Terminal 2  run_hil_hardware.sh  UR7e + gripper + passive GELLO reader
+Terminal 3  run_hil_session.sh   cameras + compact HIL GUI + preposition + actor
 ```
 
-목표로 하는 정상 실험 절차는 다음이다.
+`run_hil_session.sh`가 GUI의 fresh `ENGAGED` heartbeat를 최대 120초 동안 polling한다. 예전처럼
+조작자가 Enter를 눌러 다음 단계로 보내는 프롬프트는 없다. 그래도 실제 gate가 약해진 것은 아니다.
+`run_hil_actor.sh --arm`이 read-only preflight에서 heartbeat 3개를 확인하고 controller switch
+직전에 다시 3개를 확인한다. stale이면 actor는 fail-stop하며 policy로 자동 복귀하지 않는다.
+
+handoff 뒤 첫 episode와 매 terminal 뒤 순서는 다음과 같다.
 
 ```text
-fresh heartbeat + DISENGAGED로 시작 -> policy가 먼저 수행
-                                    -> 필요할 때 사람 ENGAGE
-                                    -> 놓으면 policy로 복귀
+startup: HOMING -> HOME -> WAIT_SCENE_READY
+         -> GUI START / NEXT ITERATION -> BeginEpisode -> POLICY_RUNNING
+
+terminal: SUCCESS / TRUNCATED / EPISODE_LIMIT
+          -> WAIT_HOME_APPROVAL (terminal pose HOLD)
+          -> GUI APPROVE HOME — ROBOT WILL MOVE
+          -> HOMING -> HOME -> WAIT_SCENE_READY
+          -> scene를 정리한 뒤 GUI START / NEXT ITERATION
+          -> BeginEpisode -> POLICY_RUNNING
 ```
 
-즉 **HIL 알고리즘의 action routing은 맞고, startup launcher UX만 commissioning 모드에
-고정돼 있다.** 이 둘을 같은 문제로 취급하지 않는다.
+개입 중에는 `HUMAN_INTERVENTION`, deadman/GELLO/RPC 이상에는 `HOLD` 또는 `FAULT`로 간다.
+즉 commissioning handoff와 policy-first episode가 분리됐고, terminal 뒤 HOME과 scene 재배치도
+각각 별도의 조작자 승인 단계다.
 
 ---
 
 ## 5. Reward classifier와 episode 동작의 현재 사실
 
-### 5.1 classifier는 켜져 있었다
+### 5.1 classifier는 MANUAL에서도 계속 돈다
 
-실행 로그의 다음 줄은 sidecar scheduler가 활성화됐다는 뜻이다.
+sidecar scheduler는 success mode와 독립적이다.
 
 ```text
 classifier sidecar: every 5 steps when TCP speed < 0.05 m/s
 (every step once p >= 0.05)
 ```
 
-- 기본적으로 10 Hz 제어 루프의 5 step마다, 즉 최대 약 2 Hz로 채점한다.
-- TCP speed가 0.05 m/s 미만일 때만 무크롭 cam1/cam2 JPEG sidecar를 보낸다.
-- `p >= 0.05`가 나오면 매 step 채점으로 escalation한다.
-- 현재 success threshold는 0.2, `success_confirmations=1`이다.
-- success이면 server가 `reward=1`, `done=true`, `success=true`를 반환한다.
+- 기본적으로 5 step마다, TCP 선속도 0.05 m/s 미만에서 무크롭 cam1/cam2 JPEG를 채점한다.
+- 직전 `p >= 0.05`이면 매 step으로 올린다. **0.05는 cadence escalation 기준이지 success
+  threshold가 아니다.**
+- success threshold는 **0.5**, 비교는 엄격한 `p > 0.5`, `success_confirmations=1`이다.
+- MANUAL에서도 classifier probability/threshold/verdict를 계속 계산하고 GUI에 표시하며 schema 3
+  transition/replay meta에 저장한다. 단 classifier만으로 reward/terminal을 만들지 않는다.
+- AUTO에서는 `auto_success=true`이고 classifier verdict가 참일 때 server가 success를 승인한다.
 
-다만 이번 run의 영구 JSONL에는 per-transition `classifier_probability`가 남지 않는다.
-learner metric의 batch reward에는 offline demo가 섞이므로 그것만 보고 online classifier가
-몇 번 성공했다고 역산하면 안 된다. 따라서 이번 실기에서 증명된 것은 **sidecar/classifier
-경로가 활성화된 production server로 transition이 들어갔다**까지이며, probability와 verdict의
-시각적 정합은 아직 별도 검증이 필요하다.
-
-### 5.2 현재 GUI에 보이지 않는 것
-
-actor는 server outcome에서 이미 다음 값을 받는다.
-
-- `classifier_evaluated`
-- `classifier_probability`
-- `classifier_threshold`
-- `success`, `done`, `truncated`
-
-하지만 현재 deadman GUI에는 이 값들이 연결돼 있지 않다. 운영자는 현재 GUI만 보고는
-“이번 frame이 채점됐는지”, “성공 확률이 얼마인지”, “왜 episode가 끝났는지”를 알 수 없다.
-
-### 5.3 현재 episode reset은 자동이지만 대기하지 않는다
-
-`cube_in_cup`의 `MAX_EPISODE_LENGTH`는 100 step, 즉 10 Hz에서 10초다. episode는 다음 두
-경로로 terminal이 된다.
-
-- remote classifier success
-- local 100-step episode limit
-
-terminal ACK를 받은 actor는 `env.reset()`을 호출한다. `UR7eEnv.reset()`은 로봇을
-`RESET_JOINTS`로 보내고, 그 직후 새 `BeginEpisode`를 호출한다.
+server가 사용하는 effective success는 다음 한 줄이다.
 
 ```text
-현재: SUCCESS 또는 100-step terminal -> HOME -> 즉시 다음 episode
+operator_success OR (auto_success AND classifier_success)
 ```
 
-사람이 실제 cube/cup scene을 다시 놓을 때까지 기다리는 상태와 GUI의 `Start/Resume` 버튼은
-아직 없다. 현재 classifier도 “성공” 확률을 출력하는 모델이지 별도의 “실패 classifier”가
-아니다. success가 아니면 100-step limit까지 진행되는 것이 현재의 failure/timeout에 가까운
-의미다.
+reward 권위는 계속 server에 있으며 laptop이 임의 reward를 주입하지 않는다. 영구 learner JSONL이
+모든 raw per-transition probability를 보존하는 것은 아니다. 현재 보존 범위는 전송된 transition과
+RAM replay sidecar이고, 장기 사후감사에는 별도 bounded artifact/log가 여전히 필요하다.
+
+### 5.2 compact GUI의 success 제어와 표시
+
+통합 HIL GUI는 compact layout으로 다음을 한 화면에 표시한다.
+
+- control owner와 actor state, episode/step, terminal reason
+- classifier evaluated 여부, 마지막 `p(success)`, threshold, verdict
+- `MANUAL` / `AUTO` mode
+- `MARK SUCCESS (current episode)`
+- 상태에 따라 바뀌는 `APPROVE HOME — ROBOT WILL MOVE` / `START / NEXT ITERATION (policy)`
+
+MANUAL의 `MARK SUCCESS`는 현재 `(run_id, episode_id)`에 묶인 one-shot token을 만들고 다음
+transition에서 `operator_success=true`로 소비된다. AUTO에서는 이 버튼/service가 거절된다.
+반대로 MANUAL의 classifier verdict는 진단값으로 계속 보이지만 스스로 episode를 끝내지 않는다.
+
+### 5.3 terminal 뒤에는 HOME 승인과 scene 준비를 각각 기다린다
+
+`cube_in_cup`의 `MAX_EPISODE_LENGTH`는 100 step이다. terminal 원인은 server success,
+truncated, local episode limit 중 하나다. 현재 actor는 terminal ACK 뒤 다음 순서를 강제한다.
+
+```text
+terminal pose HOLD
+-> WAIT_HOME_APPROVAL
+-> operator APPROVE HOME
+-> HOMING / HOME
+-> WAIT_SCENE_READY
+-> operator가 scene을 재배치
+-> START / NEXT ITERATION
+-> fresh HOME observation -> BeginEpisode -> policy
+```
+
+HOME 이동은 optional local deepcopy/pickle I/O보다 먼저 수행된다. 마지막 `max_steps` terminal은
+HOME 승인 후 종료하고 새 episode를 열지 않는다. WAIT 동안 status는 0.5초마다 재발행되므로 GUI를
+늦게 띄우거나 다시 띄워도 현재 승인 단계를 복구할 수 있다.
+
+실 gripper channel이 활성(`ACTION_SCALE[2] != 0`)이면 각 reset은 HOME 도착 뒤 Robotiq에
+`position_percent=0.0`(OPEN)을 무조건 명령하고 fresh 상태가 open band에 들어왔는지 확인한다.
+2초 안에 확인되지 않으면 WARNING과 reset info `succeed=False`를 남기지만 actor/episode를
+중단하지 않는다. channel disabled/fake env에서는 하드웨어를 건드리지 않는다.
 
 ---
 
@@ -403,10 +465,10 @@ terminal ACK를 받은 actor는 `env.reset()`을 호출한다. `UR7eEnv.reset()`
 | 예외 후 controller 복귀 | **PASS** | FPC -> STJC cleanup 실기 확인 |
 | startup JIT timeout 해소 | **PASS** | transition 100을 지나 steady update까지 진행 |
 | classifier sidecar 활성화 | **PASS(배선)** | production sidecar 설정으로 실제 transition 수신 |
-| online classifier verdict 육안/로그 검증 | **미완료** | GUI와 per-step 영구 로그가 없음 |
-| policy-first startup UX | **미완료** | launcher가 시작 ENGAGED를 강제 |
-| scene reset WAIT/Resume | **미구현** | reset 직후 다음 episode 시작 |
-| 장시간 10 Hz 연속 운용 | **FAIL/PARTIAL** | replay 201 부근에서 0.6 s deadline 초과 |
+| online classifier verdict 육안/로그 검증 | **코드 PASS / 실기 미완료** | MANUAL/AUTO 모두 GUI 표시 + schema 3 transition/replay 기록; durable JSONL은 미완료 |
+| policy-first startup UX | **코드 PASS / 실기 미완료** | handoff ENGAGED 뒤 HOME/WAIT, START가 DISENGAGE 후 policy-first 시작 |
+| scene reset WAIT/Resume | **코드 PASS / 실기 미완료** | terminal -> WAIT_HOME_APPROVAL -> 승인 HOME -> WAIT_SCENE_READY -> START; WAIT 중 Step/Begin 없음 |
+| 장시간 10 Hz 연속 운용 | **FAIL/PARTIAL** | 07-29 replay 201 부근에서 당시 0.6 s deadline 초과 |
 | checkpoint/resume 실물 검증 | **미완료** | learner step 5,000 미도달 |
 
 ### 6.1 2026-07-30 개입 손맛 판정 (§3A)
@@ -423,17 +485,31 @@ terminal ACK를 받은 actor는 `env.reset()`을 호출한다. `UR7eEnv.reset()`
 | 서브스텝이 10 Hz 창을 늘리지 않음 | **PASS** | 스텝 주기 중앙값 101 ms |
 | 예산이 governor보다 먼저 묶음 | **PASS** | `governed=0`이 개입 창 전부 (예산 0.0125 m < 캡 0.0150 m) |
 | 조작자 손맛 | **PASS(주관 보고)** | ARMED 1.0에서 "손맛 양호". **계측이 아니다** |
-| 오프라인 회귀 | **PASS** | `579 passed / 11 skipped` (신규 82) |
+| 오프라인 회귀 | **PASS** | 최신 `614 passed / 11 skipped / 1 xfailed` |
 | actor(gRPC) 경로의 서브스텝 | **미검증** | 07-30 리그에 learner/gRPC가 없다. `run_remote_rlpd_actor.py`로는 아직 안 돌렸다 |
 | mock RViz 개입 루프 | **미실행** | `04` §3 — 오프라인에서 실기로 바로 갔다 |
 | 창 **사이**(RPC 구간) 부드러움 | **FAIL / G21 종속** | 주기 0.700 s에서 HOLD 51.5 %, 리더 속도 추종 66 % (오프라인 실측, `04` §9 표 1) |
 | `substeps`/`governed`/포화의 운영 가시성 | **미구현** | CSV에만 있다 → §8 P3 |
 
+### 6.2 2026-07-30 schema 3 MANUAL 경로
+
+| 기능 | 상태 | 판정 범위 |
+| --- | --- | --- |
+| schema 3 learner ingress/update | **PASS** | online replay 400, learner 301, policy version 6 스냅샷 |
+| MANUAL/AUTO success 분리 | **코드 PASS** | `operator_success` / `auto_success` wire·server 검증 |
+| MANUAL classifier 지속 실행/표시/기록 | **코드 PASS** | mode와 무관한 sidecar scheduler + compact GUI + replay meta |
+| terminal 승인 state machine | **코드/DDS PASS, 실기 연속 미완료** | WAIT 재발행, HOME 승인, scene-ready service 회귀 |
+| production checkpoint | **미완료** | learner step 5,000 전 |
+
 ---
 
 ## 7. 남은 RPC timeout의 해석
 
-이 timeout은 이전의 “transition 100에서 처음 JIT compile이 수십 초 걸린 문제”와 다르다.
+이 절의 201-transition 분석은 **07-29 당시 0.6초 deadline run의 역사 기록**이다. 현재 코드는
+RPC 하나당 **1.5초** deadline과 요청 생성부터 응답 수락까지 **2.0초** maximum response age를
+함께 쓴다. retry가 성공해도 총 age가 2.0초를 넘으면 늦은 action으로 거절한다.
+
+07-29 timeout은 이전의 “transition 100에서 처음 JIT compile이 수십 초 걸린 문제”와 다르다.
 startup update warm-up 덕분에 learner가 transition 100을 통과했고 step 102까지 정상 학습했다.
 
 이번 run의 startup warm-up은 약 `45.89 s -> 38.28 s -> 386 ms`였고, 실제 첫 learner
@@ -455,16 +531,17 @@ transition 201이 server에 남을 수 있다. 현재 증거는 단순 네트워
 - replay finalize/insert
 - learner GPU update와의 scheduler contention
 
-따라서 timeout을 단순히 0.6초보다 크게 늘려 숨기지 않는다. delayed action을 로봇이 뒤늦게
-실행하는 것은 실시간 제어 문제를 해결하지 않는다.
+현재 경계를 1.5/2.0초로 늘린 것은 장애를 무한 대기시키지 않기 위한 fail boundary다. delayed
+action을 로봇이 뒤늦게 실행하는 것은 실시간 제어 문제를 해결하지 않으므로, acceptance는 여전히
+plain/sidecar RPC p99와 실제 `env.step` 간격을 따로 재는 것이다.
 
 ---
 
 ## 8. 다음 개발 방향과 우선순위
 
-> **2026-07-30 재검토 결과: P0~P5 중 닫힌 항목은 없다.** 이날의 개입 손맛 작업(§3A)이 닫은
-> 것은 P 목록에 없던 별개 갭(`08_OPEN_GAPS.md` **G24**)이다. 순서도 그대로 유지한다.
-> 바뀐 것은 두 가지다.
+> **2026-07-30 재검토 결과:** P2와 P3는 코드/headless/DDS 수준에서 완료됐고 실물 연속
+> acceptance가 남았다. P0/P1/P4/P5는 계속 열려 있다. 개입 손맛 작업(§3A)이 닫은 것은
+> 별개 갭(`08_OPEN_GAPS.md` **G24**)이다.
 >
 > - **P1이 더 뾰족해졌다.** 개입 부드러움의 나머지 절반이 G21에 종속됨이 정량화됐고,
 >   그래서 P1은 이제 "actor가 죽지 않게 한다"에 더해 **"조작자 손에 직접 느껴지는 비용"**
@@ -534,33 +611,36 @@ Acceptance는 “평균”이 아니라 live actor의 plain/sidecar `Step RPC` p
 위 표의 판정 축이 바로 그 주기다. 개입 중 `intervention_substeps`와 `reject_reason`
 (`BUDGET_EXHAUSTED` / stale HOLD)을 같이 남기면 그 창이 왜 끊겼는지가 사후에 구분된다.
 
-### P2. commissioning startup과 정상 policy-first startup을 분리한다
+### P2. commissioning handoff와 정상 policy-first episode를 분리한다 — 코드 완료
 
 필요한 의미는 두 개뿐이다.
 
 1. `commissioning`: 지금처럼 ENGAGED로 시작해 사람이 첫 action을 소유한다.
 2. `policy-first`: fresh heartbeat를 요구하되 DISENGAGED 상태로 시작하고 policy가 첫 action을 소유한다.
 
-deadman heartbeat stale 시 fail-stop, GELLO stale 시 HOLD, controller proof 같은 기존 동작은
-그대로 유지한다. 최종 기본값을 무엇으로 둘지는 초기 policy/action scale 검증 후 정하되,
-정상 HIL 실험 자체는 policy-first여야 한다.
+현재 구현은 controller handoff까지만 commissioning ENGAGED를 요구하고, actor가 HOME/WAIT에
+들어간 뒤 GUI START가 명시적으로 DISENGAGE하여 policy-first episode를 연다. deadman
+heartbeat stale 시 fail-stop, GELLO stale 시 HOLD, controller proof는 그대로다. 남은 것은
+실물에서 첫 START와 재시작을 확인하는 일이다.
 
-### P3. operator episode state machine과 GUI를 만든다
+### P3. operator episode state machine과 GUI를 만든다 — 코드 완료
 
-목표 상태는 다음처럼 단순하게 유지한다.
+현재 구현 상태는 다음과 같다.
 
 ```text
-WAIT_SCENE_READY
-   -- operator START --> POLICY_RUNNING
+startup HOMING -> WAIT_SCENE_READY
+WAIT_SCENE_READY -- operator START --> POLICY_RUNNING
 
 POLICY_RUNNING
    -- ENGAGE ---------> HUMAN_INTERVENTION
-   -- SUCCESS --------> HOMING -> WAIT_SCENE_READY
-   -- TIME_LIMIT -----> HOMING -> WAIT_SCENE_READY
+   -- terminal --------> WAIT_HOME_APPROVAL
 
 HUMAN_INTERVENTION
    -- DISENGAGE ------> POLICY_RUNNING
-   -- SUCCESS --------> HOMING -> WAIT_SCENE_READY
+   -- terminal --------> WAIT_HOME_APPROVAL
+
+WAIT_HOME_APPROVAL
+   -- APPROVE HOME ---> HOMING -> WAIT_SCENE_READY
 
 any state
    -- heartbeat/RPC fault --> FAULT + controller cleanup
@@ -572,7 +652,7 @@ GUI에 필요한 최소 표시는 다음이다.
 - current episode/step
 - classifier evaluated 여부, `p(success)`, threshold
 - terminal reason: `SUCCESS / TIME_LIMIT / FAULT`
-- `START/RESUME` 버튼
+- MANUAL/AUTO, `MARK SUCCESS`, HOME 승인, `START / NEXT ITERATION` 버튼
 
 **2026-07-30 추가 후보 — 개입 품질 표시.** `4197f5b` 이후 `info`에 다음이 들어 있지만 조작자는
 볼 수 없다. 실기에서는 CSV를 사후에 열어야만 확인됐다(§3A.3).
@@ -586,9 +666,12 @@ GUI에 필요한 최소 표시는 다음이다.
 우선순위는 위 5개보다 낮다. 다만 이 셋은 **새로 계산할 것이 없고** `info`에서 그대로 읽어
 쓰기만 하면 된다.
 
-actor는 이미 server outcome을 갖고 있으므로 새 classifier를 만들 필요는 없다. actor의 outcome을
-GUI가 읽을 수 있게 노출하고, `env.reset()` 뒤 `BeginEpisode` 전에 operator gate를 두는 것이
-핵심이다.
+구현은 `/hil/actor_status` **status schema v2** JSON, `/hil/manual_success`,
+`/hil/set_auto_success`, `/hil/scene_ready` Trigger를 사용한다. sparse classifier step에서는
+actor가 마지막 evaluated 값과 env step을 유지하고, WAIT status는 0.5초마다 재발행되어 GUI
+late join/restart가 복구된다. 새 `run_id`는 이전 GUI 비동기 요청과 classifier/terminal latch를
+초기화한다. terminal 뒤 HOME은 optional local pickle보다 먼저 실행된다. 현재 남은 acceptance는
+실제 UR7e에서 terminal→WAIT_HOME_APPROVAL→HOME→WAIT_SCENE_READY→START→policy의 연속 확인이다.
 
 ### P4. classifier 실기 정합을 눈으로 검증한다
 
@@ -596,7 +679,8 @@ GUI가 읽을 수 있게 노출하고, `env.reset()` 뒤 `BeginEpisode` 전에 o
 - server outcome과 standalone viewer가 같은 장면에서 대체로 일치하는지 본다.
 - cam1을 팔이 가리는 `take_21` 유형은 sidecar로 해결되지 않는다. false negative가 반복되면
   threshold를 무작정 낮추지 말고 cam1 배치를 먼저 조정한다.
-- per-transition classifier verdict를 JSONL 또는 bounded actor artifact에 남겨 사후 검증 가능하게 한다.
+- schema 3 transition/replay에 저장된 classifier와 operator/auto success를 bounded artifact나
+  durable JSONL에도 남겨 장기 사후 검증 가능하게 한다.
 
 ### P5. 그 다음에 bounded production run과 checkpoint를 검증한다
 
@@ -612,8 +696,8 @@ GUI가 읽을 수 있게 노출하고, `env.reset()` 뒤 `BeginEpisode` 전에 o
 
 ## 9. 다음 세션용 CLI
 
-아래는 **현재 코드 그대로 재현하는 CLI**다. P1~P3가 구현되기 전까지 actor 시작은 여전히
-ENGAGED gate를 요구하며, controller handoff 뒤 operator가 DISENGAGE해야 policy가 제어한다.
+아래는 **현재 코드 그대로의 정상 3-CLI**다. actor 시작 전 fresh ENGAGED gate는 유지되지만
+Enter 입력은 없고, controller handoff 뒤 HOME/WAIT에서 GUI START가 policy-first episode를 연다.
 
 ### 9.1 정상 운용: 터미널 세 개
 
@@ -642,8 +726,8 @@ Terminal 3 — 두 카메라, HIL GUI, preposition, armed-readiness preflight, �
 ./run_hil_session.sh
 ```
 
-순서는 **1 → 2 → 3**이다. 이 세 wrapper는 기존 검증된 개별 명령을 묶을 뿐 controller proof,
-토픽 rate probe, deadman gate, interactive `GO`를 건너뛰지 않는다.
+순서는 **1 → 2 → 3**이다. controller proof, topic rate probe, preflight heartbeat 3개와 switch
+직전 heartbeat 3개는 유지된다. 제거된 것은 반복적인 Enter/GO 입력뿐이다.
 
 ### 9.2 Terminal 1의 소유 범위
 
@@ -696,19 +780,28 @@ Terminal 1의 `Ctrl-C`는 **자기가 만든 SSH tunnel만 닫는다.** Kanu lea
 종료한다. Terminal 2에서 `Ctrl-C` 후 `[cleanup] complete`를 확인한 다음 같은 명령을 다시
 실행한다. 카메라와 learner는 이 재기동에 포함되지 않는다.
 
-### 9.4 Terminal 3의 interactive 절차
+### 9.4 Terminal 3의 operator 절차
 
 `run_hil_session.sh`는 다음 순서로 진행한다.
 
 ```text
-cam1/cam2 READY -> HIL GUI -> preposition(필요하면 operator GO)
--> operator ENGAGED 확인 -> read-only armed preflight -> 실제 actor
+cam1/cam2 READY -> compact HIL GUI -> preposition
+-> ENGAGED heartbeat 자동 대기 -> read-only armed preflight -> 실제 actor
+-> HOME -> WAIT_SCENE_READY -> START / NEXT ITERATION
 ```
 
-현재 commissioning launcher는 controller handoff 전에 fresh `ENGAGED` heartbeat를 요구한다.
-프롬프트가 나오면 GUI를 `ENGAGED`로 만들고 GELLO를 고정한 뒤 Enter를 누른다. actor가 뜬 뒤
-policy 동작을 보려면 `DISENGAGE`, 개입하려면 `ENGAGE`, policy에 돌려주려면 다시
-`DISENGAGE`한다. **DISENGAGE는 정지 명령이 아니라 policy 제어 복귀다.**
+GUI를 `ENGAGED`로 만들고 GELLO를 고정하면 session wrapper가 heartbeat를 자동 감지한다.
+별도 Enter는 누르지 않는다. actor가 HOME 뒤 `WAIT_SCENE_READY`에 오면 scene을 놓고
+`START / NEXT ITERATION`을 누른다. 버튼이 deadman을 DISENGAGE한 뒤 policy episode를 연다.
+개입하려면 `ENGAGE`, policy에 돌려주려면 다시 `DISENGAGE`한다. **DISENGAGE는 정지 명령이
+아니라 policy 제어 복귀다.**
+
+preposition은 현재 자세가 RESET의 0.10 rad 안이면 proof만 새로 쓰고 움직이지 않는다. 밖이면
+기본값은 checklist를 표시한 뒤 **즉시 JTC trajectory를 전송**한다. wrapper 자체에는
+`RESET_MAX_DIST_RAD=0.9` 최대거리 거부가 없고, joint-space 경로에 collision avoidance도 없다.
+이 checklist를 강제 승인 gate로 오해하지 않는다. 과거 GO 입력이 필요하면
+`PREPOSITION_CONFIRM=1`, 취소 가능한 지연이 필요하면 `PREPOSITION_DELAY_S=N`을 명시한다.
+수락된 trajectory의 즉시 정지는 E-STOP이다.
 
 자주 쓰는 진단 옵션은 다음뿐이다.
 
@@ -855,9 +948,11 @@ python3 tests/run_real_hil.py --arm --scale 1.0 --max-steps 150
 
 1. 실제 HIL-SERL 원형은 이미 성공했다. “actor 실기 미실행” 단계로 돌아가지 않는다.
 2. `ENGAGE=GELLO`, `DISENGAGE=policy`가 실물에서 확인됐다.
-3. Kanu는 실제 transition 201개로 learner step 102, policy version 2까지 갔다.
-4. 현재 blocker는 startup JIT가 아니라 **첫 publish stall + 동시 학습/추론 중 Step RPC 0.6초 timeout**이다.
-5. 다음 제품 방향은 **policy-first startup + classifier/episode GUI + scene-reset WAIT/Resume**다.
+3. 현재 Kanu schema 3 MANUAL run은 스냅샷 기준 transition 400, learner 301, policy version 6까지 갔다.
+4. 07-29의 0.6초 timeout은 역사 증거다. 현재 fail boundary는 RPC 1.5초 / response age 2.0초이며,
+   다음 blocker는 이 경계 안이라는 사실이 아니라 **실제 10 Hz p99와 연속 운용 검증**이다.
+5. compact GUI, MANUAL/AUTO, classifier 지속 표시·기록, policy-first와 두 단계 reset 승인은
+   코드/DDS PASS다. 다음 실기는 terminal→WAIT_HOME_APPROVAL→HOME→WAIT_SCENE_READY→START를 확인한다.
 6. 개입 손맛은 **2026-07-30에 실기 PASS**다(§3A, 커밋 `4197f5b`) — 단 정책 zero·gRPC 없는
    **격리 리그**였고, 창 **사이**(RPC 구간)의 부드러움은 여전히 **G21 종속**이다. 그래서
-   **P0~P5는 하나도 닫히지 않았고 P1만 더 뾰족해졌다.**
+   P1(gRPC 지연)과 P4/P5 실기 검증은 여전히 남아 있다.

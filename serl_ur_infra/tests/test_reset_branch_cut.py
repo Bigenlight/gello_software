@@ -168,6 +168,19 @@ def test_refusal_reports_the_branch_safe_distance_not_the_naive_one():
     env.close()
 
 
+def test_explicit_operator_approval_bypasses_only_the_distance_refusal():
+    class Strict(_Config):
+        RESET_MAX_DIST_RAD = 0.5
+
+    env, backend = _env(config=Strict())
+
+    env.go_to_reset(operator_approved=True)
+
+    assert backend.commands
+    assert backend.commands[0][5] == pytest.approx(WRIST3_SHORT_WAY, abs=1e-4)
+    env.close()
+
+
 def test_arrival_is_judged_against_the_commanded_target():
     """The wait loop compares against the branch-mapped target, so a fake robot
     that lands exactly on the command counts as arrived.

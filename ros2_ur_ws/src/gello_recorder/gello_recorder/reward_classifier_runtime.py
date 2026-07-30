@@ -15,7 +15,7 @@ IMAGE_SIZE = (128, 128)  # width, height for cv2.resize
 # serl_ur_infra/ur_env/rlpd_receive_server.py::DEFAULT_REWARD_THRESHOLD so the
 # live viewer shows the same SUCCESS/FAILURE verdict the learner would record.
 # Still overridable via the ``threshold`` ROS parameter or CLASSIFIER_THRESHOLD.
-DEFAULT_THRESHOLD = 0.2
+DEFAULT_THRESHOLD = 0.5
 
 # Canonical cube-in-cup classifier checkpoint.
 #
