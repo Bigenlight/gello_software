@@ -31,6 +31,40 @@
 > ⚠️ 학습된 policy 체크포인트는 **어디에도 없다** — kanu의 run root 8개 전부
 > `checkpoints/`가 비어 있었다(실측). 이유는 위 문서 §4.
 
+> # 🔴 2026-07-31 merge `5e508d3` — **지금 learner를 재기동하지 마라**
+>
+> 서버 이전 작업과 **공유 frozen-trunk feature 작업**(다른 분의 7커밋 `40e8305..a93d330`)이
+> 한 브랜치로 합쳐졌다. 충돌은 0이었고 양쪽 다 온전하다. 그런데 **그 작업은 진행 중이고
+> 순서가 뒤집힌 채로 들어왔다:**
+>
+> ```
+> 안전한 순서:  크롭 기준 재학습 → 체크포인트 교체 → classifier loader 전환
+> 실제 상태:                        (아직 없다)       ✅ 이미 전환됨
+> ```
+>
+> `a93d330`이 production learner의 classifier 입력을 **크롭된 policy 관측에서 나온
+> frozen-trunk feature**로 바꿨다(`run_rlpd_learner_server.py`가 `FeatureReplayIngress` +
+> `FaultGatedReplayIngress`를 쓰고 둘 다 `prime_observation`을 구현하므로 **production
+> 경로는 항상 feature를 받는다.** receive-only 서버는 평범한 `ReplayIngress`라 영향 없다).
+> 그런데 핀으로 박힌 `checkpoint_150`의 classifier는 그 텐서를 **못 먹는다** — CPU 실측:
+> `PIXEL input OK` / `FEATURE input FAILED: shapes=[(128,128,512), (3,)]`.
+>
+> **그래서 merge된 코드로 learner를 새로 띄우면 첫 채점 스텝에서 죽는다**
+> (`RewardClassifierError` → actor 사망). 지금 살아 있는 learner는 merge **이전** 코드라
+> 정상이다 — 옛 sidecar 픽셀 경로를 쓴다.
+>
+> 🛑 **그리고 뻔한 한 줄 수정이 이 시끄러운 실패를 정확히 G15로 바꾼다.**
+> `frozen_trunk.create_frozen_trunk_classifier`가 이미 있고 param tree가 **52 leaf 전부
+> 동일**해서 `checkpoint_150`이 **에러 없이 복원되고 숫자를 뱉는다.** 그러면 무크롭으로
+> 학습된 가중치가 크롭 유래 feature를 채점한다 — 100% → 33.3% recall 실측과 *비슷한* 게
+> 아니라 **산술적으로 같은 실험**이다(두 trunk가 같은 SHA의 `resnet10_params.pkl`, 둘 다
+> `train=False`). **체크포인트 SHA 가드는 통과한다** — 가중치는 안 바뀌었으니까.
+>
+> ⚠️ **재사용 검사도 이걸 못 본다.** merge 전후로 observation schema hash ·
+> policy/reward model ID · `validate_process_contract`가 **전부 byte-identical**이라
+> `--check`의 `healthy`는 프로세스 계약에 대해선 참이지만 **코드 버전에 대해선 침묵**한다.
+> run root 어디에도 기동 시점 커밋이 기록되지 않는다.
+
 ## 이 리포에서 진행 중인 작업
 
 **HIL-SERL(사람 개입 온라인 RL)을 실기 UR7e에서 돌린다.**
@@ -51,6 +85,8 @@ laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 GPU 서�
 손맛 문제의 뿌리다(아래). 2026-07-30 startup에서 정상 reply가 832.3 ms에 도착해 옛 0.6/0.8 s
 경계를 넘었으므로 현재 RPC timeout/response-age는 bounded `1.5/2.0 s`로 완화했다.
 분류기는 정책 관측이 아니라 **자기 전용 무크롭 이미지(sidecar)를 약 2 Hz로** 따로 받는다.
+⚠️ **`5e508d3` merge 이후 production learner는 그 픽셀을 더 이상 채점하지 않는다** — 위 🔴
+박스. sidecar는 여전히 **채점 시점을 정하는 게이트**라 지우면 reward가 통째로 꺼진다.
 
 **branch `feat/gello-ur7e-humble-22.04`**. 2026-07-29 머지 `3f199d4`가 로봇/하드웨어
 작업을 이 브랜치로 가져왔다. **워크트리 분리는 끝났다** — 로봇 코드와 learner 코드가 **다른
@@ -339,15 +375,20 @@ governor(`v_max` 0.15 m/s) + 워크스페이스 박스 + 250 Hz 업샘플러뿐�
 진행했다. actor의 RPC deadline 예외 뒤 controller도 FPC에서 STJC로 자동 복귀했다.
 
 **크롭 불일치(G15)는 재학습이 아니라 분리(decoupling)로 해결됐고 실물 actor 경로에도
-들어갔다.** 액터가 분류기에게 **무크롭 원본 JPEG를 sidecar로 따로** 보낸다
+들어갔다.** 🔴 **단 `5e508d3` merge가 이 전략을 되돌리는 중이다** — `8bd3248`이 recorder
+take를 **선택한 크롭 기준으로** classifier item으로 재export하고
+(`ur_env/learner/classifier_dataset.py` docstring이 "all three must see the same pixels"라고
+명시한다), `b34f49a`가 분류기에 공유 trunk feature를 준다. 즉 방향이 **분리 → 크롭 기준
+재학습**으로 바뀌었다. 재학습된 가중치는 **아직 없다.** 아래 서술은 그 전 기준이다. 액터가 분류기에게 **무크롭 원본 JPEG를 sidecar로 따로** 보낸다
 (`ur_env/classifier_sidecar.py`). 정책은 측정된 `IMAGE_CROP`을 그대로 유지한다. 같은 변경에서
 checkpoint 디렉터리 해시(G19)도 고쳤다. GUI에서 실제 episode의 마지막 classifier
 확률/threshold/verdict가 표시되는 것까지 관측했다. MANUAL에서도 이 telemetry는 계속 돈다.
 장시간 사후 감사를 위한 별도 영구 verdict 로그 정리는 여전히 남아 있다.
 
 > **이전 판 문구(보존):** *"안 되는 것 — RL 루프의 reward. 뷰어는 믿어도 되고 RL reward는
-> 믿으면 안 된다."* 이 경고는 sidecar 이전 기준이다. 이제 뷰어와 RL 경로는 **같은 그림**을 본다
-> (같은 무크롭 JPEG, 같은 `decode_classifier_image()` 레시피).
+> 믿으면 안 된다."* 이 경고는 sidecar 이전 기준이다. sidecar 도입 뒤 뷰어와 RL 경로는 **같은 그림**을 봤다
+> (같은 무크롭 JPEG, 같은 `decode_classifier_image()` 레시피). 🔴 **`5e508d3` merge로 다시
+> 갈라졌다** — 뷰어는 무크롭 픽셀, production RL 경로는 크롭 유래 feature다(위 🔴 박스).
 
 **아직 남은 것** — 첫 E2E에서 0.6/0.8 s 경계가 정상 832.3 ms reply를 stale로 잘못 거부한
 문제는 현재 1.5/2.0 s bounded 값으로 완화했다. 하지만 장시간 run에서 learner/GPU contention과
@@ -555,7 +596,10 @@ ros2_ur_ws/
   (`RuntimeError: rclpy not available` — 2026-07-30 실기에서 발생). pytest 정본 명령은 반대로
   덮어쓰는 게 맞다. 두 규칙의 대비는 [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.4에 표로 있다.
 - **`IMAGE_CROP`을 "분류기가 안 맞으니" 지우지 말 것.** 데이터셋 측정값이고 정책이 1차 소비자다.
-  해결은 **분류기에게 무크롭 sidecar를 따로 주는 것**이다(`ur_env/classifier_sidecar.py`).
+  해결은 **분류기에게 무크롭 sidecar를 따로 주는 것**이었다(`ur_env/classifier_sidecar.py`).
+  🔴 **`5e508d3` merge가 이 방향을 크롭 기준 재학습으로 되돌리는 중이다** — 그래도
+  **`IMAGE_CROP`을 지우지 말라는 규칙은 그대로다.** 오히려 새 방향에서는 크롭이 세 소비자
+  전부의 공통 기준이 되므로 더 중요해졌다.
   *(이전 판은 "해결은 classifier 재학습이다"라고 적었다 — 재학습은 채택되지 않았다. 분리를
   택한 덕분에 `REWARD_CLASSIFIER_THRESHOLD_KO.md`의 측정값이 전부 살아남았다.)*
 - **개입이 빳빳하다는 이유로 가속도 제한 · `target_stale_s` · `soft_start_s`를 되돌리지 말 것.**
@@ -595,13 +639,19 @@ ros2_ur_ws/
   `InterventionBudget`을 개입 **제어** 경로에서 제거했으므로 더 이상 사실이 아니다.
   `follow_mode="in_window"`에서는 여전히 맞다.
 - **테스트는 passed 수를 볼 것 — 그리고 어느 인터프리터인지 같이 적을 것.** PYTHONPATH에서
-  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-30 저녁
-  (조작자 경로 4건) 기준선은 **768 passed / 11 skipped / 1 xfailed** (13.86 s
-  실측, `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6).
+  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-31 merge
+  `5e508d3` 기준선은 **804 passed / 14 skipped / 1 xfailed** (14.27 s 실측,
+  `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6).
   `ur_gello_bringup` 패키지 suite는 **별도로 489 passed**(시스템 `python3` + ROS overlay,
-  7.48 s 실측 — 두 숫자를 합치지 말 것. 인터프리터도 PYTHONPATH도 다르다).
-  > **이전 판(보존):** *"2026-07-30 `d6965a9` 기준선은 **701 passed / 11 skipped / 1 xfailed**
-  > (14.46 s 실측 …)"*, `ur_gello_bringup`은 436.
+  7.70 s 실측 — 두 숫자를 합치지 말 것. 인터프리터도 PYTHONPATH도 다르다).
+  🪤 **`ur_gello_bringup`도 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`이 필수다** — 그게 없으면
+  테스트가 하나도 안 돌고 **collection에서 죽는다**(시스템 pytest 6.2.5 ↔ `~/.local`의
+  anyio 4.13.0이 pytest 7의 `_pytest.scope`를 요구. 그 패키지 `pytest.ini`는
+  `launch_testing` 계열만 끄고 anyio는 안 끈다). 4월부터 그랬으므로 07-30의 489도 이미
+  이 플래그로 측정된 값이고, 기록에만 빠져 있었다.
+  > **이전 판(보존):** *"2026-07-30 저녁(조작자 경로 4건) 기준선은 **768 passed /
+  > 11 skipped / 1 xfailed** (13.86 s 실측 …)"*, 그 이전 `d6965a9`는 701,
+  > `ur_gello_bringup`은 436.
   **`xfailed 1`을 빼고 인용하지 말 것** — 그건 통계 잡음이 아니라 **알려진 결함의 표식**이다
   (`ee8af5e`가 박은 strict xfail: 저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수
   있다. 고치면 XPASS로 터진다). 재현 명령 정본은
@@ -622,9 +672,13 @@ ros2_ur_ws/
   계보: 333 → 337(`40b99f8`) → 429(classifier sidecar) → 497(07-30 오전, `4197f5b` 이전)
   → 579(`4197f5b`) → 595(`ee8af5e`) → 701(`d6965a9`; 배경 추종 스레드 + 컨트롤러
   스레드 안전화 + norm 축소 회귀 — `test_intervention_follower` 신규)
-  → **768**(07-30 저녁; END EPISODE + DISENGAGED gate + 재기동 복구 —
-  `tests/test_operator_abort.py`(26) · `tests/test_actor_abort_lifecycle.py`(23) 신규).
-  옛 문서에 남은 333·337·429·497·579·595·701은 전부 이전 값이다.
+  → 768(07-30 저녁; END EPISODE + DISENGAGED gate + 재기동 복구 —
+  `tests/test_operator_abort.py`(26) · `tests/test_actor_abort_lifecycle.py`(23) 신규)
+  → **804**(`5e508d3` merge; 공유 frozen-trunk feature + 전처리 규칙 일원화 —
+  `test_observation_preprocess.py`(12) · `test_shared_feature_pipeline.py`(7) ·
+  `test_classifier_dataset.py`(8, 2 skip) 신규. skip 11 → 14는 전부 의도된 게이트다:
+  실코퍼스 2개 + `RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1` 1개).
+  옛 문서에 남은 333·337·429·497·579·595·701·768은 전부 이전 값이다.
   🪤 **인터프리터를 안 적은 "passed 개수"는 무의미하다.** 같은 명령을
   `/home/laptop3/venvs/hilserl/bin/python`(jax 0.5.3 있음, numpy 1.26.4)으로 돌리면
   jax 테스트가 더 돌아 **741 passed / 4 skipped / 1 xfailed**가 된다(skipped 11 → 4).
