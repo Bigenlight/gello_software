@@ -276,3 +276,63 @@ def test_real_cached_cta_updates_head_but_not_frozen_trunk(tmp_path):
         },
     )
     assert int(np.asarray(cta_agent.state.step)) == 2
+
+
+def test_real_classifier_reads_the_shared_trunk_feature():
+    """The reward classifier must not own a second image encoder.
+
+    Whether it is handed pixels or the ``(1, 4, 4, 512)`` map the server
+    already computed for replay, the logit has to be the same -- otherwise
+    "critic, actor and classifier share one feature" is not true and the
+    trunk would have to run again just for reward.
+    """
+
+    import jax
+    from serl_launcher.vision.resnet_v1 import resnetv1_configs
+
+    from ur_env.learner.frozen_trunk import create_frozen_trunk_classifier
+
+    image_keys = ("cam1", "cam2")
+    classifier = create_frozen_trunk_classifier(
+        image_keys=image_keys, validate_versions=False
+    )
+
+    encoders = classifier.params["encoder_def"]
+    assert set(encoders) == {f"encoder_{key}" for key in image_keys}
+    # Flax stores a shared submodule under the first user only: one trunk,
+    # two cameras. cam2 carrying its own copy would mean two encoders.
+    assert "pretrained_encoder" in encoders["encoder_cam1"]
+    assert "pretrained_encoder" not in encoders["encoder_cam2"]
+    shared_trunk = encoders["encoder_cam1"]["pretrained_encoder"]
+
+    rng = np.random.default_rng(0)
+    pixels = {
+        key: rng.integers(0, 256, (1, 128, 128, 3), dtype=np.uint8)
+        for key in image_keys
+    }
+    trunk = resnetv1_configs["resnetv1-10-frozen"](
+        pre_pooling=True, name="pretrained_encoder"
+    )
+    features = {}
+    for key in image_keys:
+        value = trunk.apply({"params": shared_trunk}, pixels[key][0], train=False)
+        features[key] = np.asarray(jax.device_get(value), dtype=np.float32)[None]
+        assert features[key].shape == (1, 4, 4, 512)
+
+    def logit(observation):
+        return float(
+            np.asarray(
+                classifier.apply_fn(
+                    {"params": classifier.params}, observation, train=False
+                )
+            ).ravel()[0]
+        )
+
+    from_pixels = logit(pixels)
+    from_features = logit(features)
+    # Same tolerance the agent's raw/cached equivalence uses: XLA may fuse the
+    # trunk into the head on one path and materialise it on the other.
+    assert abs(from_pixels - from_features) < 5e-4, (
+        from_pixels,
+        from_features,
+    )

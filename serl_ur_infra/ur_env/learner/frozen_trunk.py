@@ -392,6 +392,85 @@ def create_frozen_trunk_feature_agent(
     return _load_resnet10_params_from_file(agent, image_keys, cache)
 
 
+def create_frozen_trunk_classifier(
+    *,
+    sample: Mapping[str, Any] | None = None,
+    image_keys: Iterable[str] = ("cam1", "cam2"),
+    seed: int = 0,
+    validate_versions: bool = True,
+) -> Any:
+    """Build the reward classifier on the shared frozen-trunk feature.
+
+    The classifier stops owning an image encoder.  It uses the same dual-input
+    module the policy uses, so it can be applied directly to the
+    ``(1, 4, 4, 512)`` trunk output the server already computes for replay --
+    one trunk forward per camera per step, shared by critic, actor and reward.
+
+    Geometry follows ``serl_launcher.networks.reward_classifier
+    .create_classifier`` (frozen ``resnetv1-10-frozen`` at ``pre_pooling=True``,
+    8 spatial blocks, 256-d bottleneck, ``use_proprio=False``,
+    ``BinaryClassifier``) because that is the architecture the task was tuned
+    around, not because any particular checkpoint has to restore into it.
+    Retraining decides the weights; this decides where the trunk boundary is.
+
+    ``sample`` defaults to a PIXEL observation so the trunk submodule is
+    initialised and the module still accepts raw images.  Passing a feature
+    sample builds a head-only parameter tree.
+    """
+
+    if validate_versions:
+        validate_learner_dependencies(include_logging=False)
+
+    import jax
+    import optax
+    from flax.training.train_state import TrainState
+    from serl_launcher.common.encoding import EncodingWrapper
+    from serl_launcher.networks.reward_classifier import BinaryClassifier
+    from serl_launcher.vision.resnet_v1 import resnetv1_configs
+
+    keys = tuple(image_keys)
+    if not keys:
+        raise ValueError("image_keys must not be empty")
+    observation = dict(sample if sample is not None else _classifier_pixel_sample(keys))
+
+    pretrained_encoder = resnetv1_configs["resnetv1-10-frozen"](
+        pre_pooling=True,
+        name="pretrained_encoder",
+    )
+    encoder_type = _dual_input_encoder_type()
+    encoder_def = EncodingWrapper(
+        encoder={
+            image_key: encoder_type(
+                pretrained_encoder=pretrained_encoder,
+                num_spatial_blocks=8,
+                bottleneck_dim=256,
+                name=f"encoder_{image_key}",
+            )
+            for image_key in keys
+        },
+        use_proprio=False,
+        enable_stacking=True,
+        image_keys=keys,
+    )
+    classifier_def = BinaryClassifier(encoder_def=encoder_def)
+    params = classifier_def.init(jax.random.PRNGKey(seed), observation)["params"]
+    # optax.adam(1e-4) mirrors upstream so a restored TrainState matches.
+    return TrainState.create(
+        apply_fn=classifier_def.apply,
+        params=params,
+        tx=optax.adam(learning_rate=1e-4),
+    )
+
+
+def _classifier_pixel_sample(image_keys: Iterable[str]) -> dict[str, np.ndarray]:
+    """One zero-valued pixel observation shaped like a classifier input."""
+
+    return {
+        image_key: np.zeros(RAW_IMAGE_SHAPE, dtype=np.uint8)
+        for image_key in image_keys
+    }
+
+
 class FrozenResNet10TrunkExtractor:
     """Apply the exact verified trunk weights used by a dual-input agent."""
 
