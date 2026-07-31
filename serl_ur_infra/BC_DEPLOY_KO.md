@@ -31,6 +31,7 @@ laptop3 (production 스크립트 수정 0 — 환경변수 핀만 다르다)
   T1  ./run_bc_server.sh  ──ssh tunnel 50153 → 서버:50054──►  junhyeong_ai
                                                                run_bc_policy_server.py
                                                                (GPU 0, learner와 공존)
+  T4  ./run_bc_rollout_recorder.sh   (선택 — 순수 구독자, 로봇 스트림/카메라 녹화)
 
 production learner(:50053)는 계속 산다 — 무접촉. 우리는 50053도 그 터널도 쓰지 않는다.
 ```
@@ -128,6 +129,34 @@ reward classifier를 끈다 — 이 평가에서 성공 판정은 **사람만** 
 이 세션에서는 **T1(BC 서버)이 죽었거나 아직 안 떴다는 뜻**이다 — production `run_hil_server.sh`를
 띄우지 말고 T1을 다시 확인한다.
 
+### 4.5 (선택) T4 — rollout 상세 녹화
+
+평가 중 **로봇 쪽 원시 데이터**를 native rate로 함께 남기고 싶을 때만 연다. 로봇에 아무 명령도
+보내지 않는 **순수 구독자**라, 띄우지 않아도 평가는 그대로 정상 진행된다.
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws && ./run_bc_rollout_recorder.sh
+```
+
+**시작 시점:** §4.4의 T3가 세션을 연 **뒤**라면 아무 때나 (이미 떠 있는 cam1/cam2를 구독하므로
+T3보다 먼저 띄우지 않는다). **종료:** 평가가 끝나면 이 창에서 `Ctrl-C`. T1~T3보다 먼저 끊어도
+나중에 끊어도 안전하다.
+
+**무엇이 남나** — `ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>/`
+
+- `vectors.h5` — 로봇 스트림: UR 관절 ~100 Hz, bridge command, gripper, wrench, TCP pose
+- 카메라 `mp4` — 이미 떠 있는 cam1/cam2를 구독해 저장
+- `status.jsonl` — `/hil/actor_status` · `/hil/deadman` 타임라인 (에피소드 경계 정렬용)
+
+**성공 표식:** 시작 배너에 rollout 디렉터리 경로가 출력되고, `Ctrl-C` 하면 마지막 줄에
+`[bc-rollout] saved -> …` 가 나온다.
+
+**실패하면:** 이 창만 `Ctrl-C`로 닫고 **평가는 그대로 계속한다** — 녹화는 부가 기능이라 평가를
+막지 않는다. 출력은 담당자에게 전달한다.
+
+> 서버 쪽 기록(episode pickle · `actions.jsonl` · `inference.jsonl`)은 **T4 없이도 항상** 남는다
+> (§7). T4는 거기에 **로봇 원시 데이터와 고주기 신호**를 더하는 것이다.
+
 ---
 
 ## 5. 평가 프로토콜
@@ -186,7 +215,7 @@ reward classifier를 끈다 — 이 평가에서 성공 판정은 **사람만** 
 
 ---
 
-## 7. 종료 절차와 기록물
+## 7. 종료 절차와 기록물, 사후 분석
 
 **끄는 순서를 지킨다 (T3 → T2 → T1).**
 
@@ -197,11 +226,22 @@ reward classifier를 끈다 — 이 평가에서 성공 판정은 **사람만** 
 ```
 
 ③은 **자기가 띄운 BC 서버만** 종료한다. production learner(`:50053`)는 아무 영향도 받지 않는다.
+T4(§4.5)를 띄웠다면 **이 순서에 끼지 않는다** — 순수 구독자라 앞이든 뒤든 아무 때나 `Ctrl-C`.
 
 **기록물 위치 (서버):** `junhyeong_ai:~/hil-serl-data/bc_eval/bc_eval_<타임스탬프>/served/`
-— episode별 pickle + `actions.jsonl`.
+— episode별 pickle + `actions.jsonl` + `inference.jsonl`(모델 출력·추론 지연·입력 state 벡터.
+T4 없이도 **자동으로** 생성된다).
+**기록물 위치 (laptop3, T4를 띄웠을 때만):** `ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>/`.
+
 **회수와 분석은 메인 세션(담당자)이 한다.** 조작자는 서버에 접속하지 않는다. 조작자가
 넘겨야 할 것은 §5의 **기록표**와, 이상이 있었다면 그때의 터미널 출력이다.
+담당자가 `served/`를 회수한 뒤 돌리는 분석기는 다음 하나다.
+
+```bash
+cd /home/laptop3/gello_software && /home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/analyze_bc_rollout.py --served <서버에서 회수한 served 디렉터리> [--robot ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>]
+```
+
+→ `rollout_report.md` / `report.json`이 생성된다. `--robot`은 T4를 띄운 경우에만 붙인다.
 
 **새 artifact로 다시 평가할 때:** T1만 내렸다가 올리면 된다. 코드는 아무것도 바꾸지 않는다.
 

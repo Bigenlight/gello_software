@@ -81,6 +81,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resnet-source")
     parser.add_argument("--resnet-cache")
+    # Logging is ON by default: a rollout whose actions were not recorded
+    # cannot be audited after the fact, and the log lives inside the run
+    # directory so it cannot outlive or be orphaned from its recording.
+    parser.add_argument(
+        "--no-inference-log",
+        action="store_true",
+        help="do not write <record-root>/inference.jsonl",
+    )
     # Empty string means "do not touch CUDA_VISIBLE_DEVICES" -- CPU-only smokes.
     parser.add_argument("--gpu-index", default="0")
     return parser.parse_args()
@@ -129,6 +137,7 @@ def _serve(args: argparse.Namespace) -> int:
     configure_pure_python_protobuf()
 
     from ur_env.actor_network import ActorSessionService
+    from ur_env.bc_inference_log import InferenceLoggingPolicy
     from ur_env.bc_recording_sink import EpisodeRecordingSink
     from ur_env.grpc_actor_transport import create_grpc_server
     from ur_env.learner import (
@@ -217,11 +226,25 @@ def _serve(args: argparse.Namespace) -> int:
     )
     _log(f"recording sink ready root={record_root}")
 
+    # Wrapped here and not earlier: the log path lives under record_root, which
+    # does not exist until the line above, and VersionedPolicyRuntime's
+    # constructor smoke inferences must stay out of the rollout log.
+    if args.no_inference_log:
+        policy = runtime
+        inference_logger = None
+        _log("inference log path=disabled")
+    else:
+        inference_logger = InferenceLoggingPolicy(
+            runtime, record_root / "inference.jsonl"
+        )
+        policy = inference_logger
+        _log(f"inference log path={record_root / 'inference.jsonl'}")
+
     # reward_authority="local": there is no server classifier in this process,
     # so the operator's MARK SUCCESS is the only success authority.  The
     # default identity finalizer keeps that path intact.
     service = ActorSessionService(
-        sample_action=runtime,
+        sample_action=policy,
         model_id=model_id,
         reward_authority="local",
         reward_model_id=reward_model_id,
@@ -255,11 +278,16 @@ def _serve(args: argparse.Namespace) -> int:
         pass
     finally:
         server.stop(grace=5.0).wait()
-    _log(
+    stopped = (
         f"stopped replay_count={sink.replay_count} "
         f"intervention_count={sink.intervention_count} "
         f"record_root={record_root}"
     )
+    if inference_logger is not None:
+        # getattr fallback: a shutdown report must not raise on a wrapper that
+        # never got to count anything.
+        stopped += f" inference_calls={getattr(inference_logger, 'call_count', 0)}"
+    _log(stopped)
     return 0
 
 
