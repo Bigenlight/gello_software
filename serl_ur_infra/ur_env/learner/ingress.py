@@ -120,6 +120,23 @@ class FaultGatedReplayIngress:
         with self._lock:
             return self._ingress.status()
 
+    def prime_observation(self, **kwargs: Any) -> None:
+        """Warm the wrapped ingress's trunk cache under the same lock.
+
+        Unlike ``__call__`` this inserts nothing, so a failure cannot leave a
+        replay-only half of a route behind.  It therefore propagates the
+        exception *without* installing a permanent fault -- latching here would
+        let a transient extractor error retire an otherwise healthy learner.
+        A caller holding an already-faulted ingress is still refused.
+        """
+
+        prime = getattr(self._ingress, "prime_observation", None)
+        if not callable(prime):
+            return
+        with self._lock:
+            self._raise_if_faulted()
+            prime(**kwargs)
+
     def sample_replay(self, batch_size: int, **kwargs: Any) -> Mapping[str, Any]:
         with self._lock:
             self._raise_if_faulted()

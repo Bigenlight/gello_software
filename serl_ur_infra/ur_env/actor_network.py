@@ -578,6 +578,9 @@ class ActorSessionService:
             # silently lose a classification the actor believed it had paid for.
             self._reject_classifier_sidecar(command.observation, rpc="BeginEpisode")
             observation = self._validated_observation(command.observation)
+            self._prime_replay_observation(
+                observation, command.actor_id, command.session_id
+            )
             try:
                 action, version, inference_ms = self._infer(
                     observation.observation, command.deterministic
@@ -1395,6 +1398,29 @@ class ActorSessionService:
             raise ActorProtocolError(
                 "request_action must be false exactly for terminal/truncated steps"
             )
+
+    def _prime_replay_observation(
+        self, observation: Any, actor_id: str, session_id: str
+    ) -> None:
+        """Let a feature-native sink pre-encode O(0) for this episode.
+
+        Optional by design: ``accept_data`` is a plain callable in the
+        receive-only server and in tests, and a sink that stores raw
+        observations has nothing to warm.  Only sinks that advertise
+        ``prime_observation`` are called, and a failure propagates -- see
+        ``FeatureReplayIngress.prime_observation`` for why that is the safe
+        direction here.
+        """
+
+        prime = getattr(self._accept_data, "prime_observation", None)
+        if not callable(prime):
+            return
+        prime(
+            actor_id=actor_id,
+            session_id=session_id,
+            observation_id=observation.observation_id,
+            observation=observation.observation,
+        )
 
     def _infer(
         self, observation: Mapping[str, Any], deterministic: bool
