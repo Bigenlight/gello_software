@@ -36,15 +36,17 @@
 **HIL-SERL(사람 개입 온라인 RL)을 실기 UR7e에서 돌린다.**
 
 ```
-laptop3                                        kanu (GPU 서버)
+laptop3                                  junhyeong_ai (GPU 서버, 2026-07-31~)
   GELLO 리더팔 (USB, EEF teleop)                 정책 추론 (SAC)
   RealSense ×2 (USB)          ──gRPC :50053──►   온라인 학습 (RLPD)
   UR7e (이더넷, ROS2 Humble)  ◄──── 액션 ─────    reward classifier
 ```
 
-laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 kanu에서** 돌리고 gRPC로 실시간
-통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz지만 **production actor 실측은
-1.95 Hz**(주기 512 ms, 최대 854 ms)다 — `env.step`은 100 ms로 자체 페이싱하고 나머지 ~412 ms는
+laptop3의 GPU가 약해 **정책·학습·reward classifier를 전부 GPU 서버에서** 돌리고 gRPC로
+실시간 통신한다. reward 권위는 서버에 있다. 명목 제어 루프는 10 Hz지만 **production actor
+실측은 1.95 Hz**(주기 512 ms, 최대 854 ms)다 — 🗄️ **이 값은 kanu에서 측정했고 새 서버에서
+재측정하지 않았다.** 새 서버는 per-RPC가 더 빠르므로(BeginEpisode tail 372.8 → 82.2 ms)
+루프도 빨라졌을 가능성이 크지만 **측정 전에는 모른다** — `env.step`은 100 ms로 자체 페이싱하고 나머지 ~412 ms는
 블로킹 gRPC Step RPC + 카메라 디코드로 `env.step` **밖**에 있다. 이 격차가 2026-07-30 개입
 손맛 문제의 뿌리다(아래). 2026-07-30 startup에서 정상 reply가 832.3 ms에 도착해 옛 0.6/0.8 s
 경계를 넘었으므로 현재 RPC timeout/response-age는 bounded `1.5/2.0 s`로 완화했다.
@@ -63,12 +65,12 @@ transition과 learner update까지 관측했다. 현재 정상 운용은 아래 
 
 ```bash
 cd /home/laptop3/gello_software/ros2_ur_ws
-./run_hil_server.sh    # Terminal 1: Kanu learner 재사용/기동 + tunnel
+./run_hil_server.sh    # Terminal 1: 서버 learner 재사용/기동 + tunnel (환경변수 0개)
 ./run_hil_hardware.sh  # Terminal 2: UR7e + Robotiq + passive GELLO
 ./run_hil_session.sh   # Terminal 3: cameras + GUI + actor
 ```
 
-**현재 episode 운영 계약:** 성공 판정은 기본 `MANUAL`이다. Kanu classifier는 MANUAL에서도
+**현재 episode 운영 계약:** 성공 판정은 기본 `MANUAL`이다. 서버 classifier는 MANUAL에서도
 계속 평가·표시·replay 기록되지만 terminal 권한은 GUI `MARK SUCCESS`에 있다. `AUTO`로
 전환하면 strict `p(success) > 0.5`가 성공 권한을 가진다. 성공 또는 episode limit 뒤에는
 `WAIT_HOME_APPROVAL`에서 로봇을 hold하고, GUI `APPROVE HOME` 뒤 HOME, 장면을 사람이
@@ -86,14 +88,20 @@ fresh heartbeat 검사를 없앤 것이 아니다.
 > 검사를 없앤 것이 아니다."* 2026-07-30 저녁부터 요구 상태는 **DISENGAGED**다 — 아래
 > "세션은 이제 DISENGAGED로 시작한다" 항목.
 
-**Kanu 현재 계약:** actor transport는 protocol 2 / schema 3, reward threshold는 0.5다.
-2026-07-30 새 learner는 GPU 5에서 canonical offline demo 2,037개를 로드해 health-ready가
-됐다. 최신 읽기 전용 스냅샷은 online replay 400 / intervention 225, learner 301 /
-gradient 602 / policy version 6으로 schema-3 실물 전이가 다시 유입되고 학습되는 중이다.
-이 수치는 계속 변한다. 이전 learner RAM에만 있던 테스트 replay 257 / intervention 107 /
-learner step 158은
-checkpoint가 없고 의미 없는 시험값이라는 사용자 판단에 따라 폐기했다. offline demo pickle은
-그대로 보존했다. PID와 run root는 스냅샷이므로 매번 `./run_hil_server.sh --check`로 읽는다.
+**서버 현재 계약:** actor transport는 protocol 2 / schema 3, reward threshold는 0.5다.
+2026-07-31 `junhyeong_ai`(GPU 0)에서 canonical offline demo 2,037개를 로드해 health-ready가
+됐고, **실기 세션이 PASS했다** — replay 316 / intervention 210 / last_env_step 68이
+`~/hil-serl-data/runs/cube_in_cup_real_20260731_054929`로 유입됐다. `intervention 210`이
+load-bearing이다(합성 run이 증명 못 하던 `intervened=1` ingress와 실제 classifier sidecar를
+닫았다). 이 수치는 계속 변한다. **warm start는 없다** — 물려받은 checkpoint가 없어 lineage는
+깨끗하다(§4 아래 🔴). PID와 run root는 스냅샷이므로 매번 `./run_hil_server.sh --check`로 읽는다.
+
+> 🗄️ **이전 판(kanu 기록, 보존):** *"2026-07-30 새 learner는 GPU 5에서 canonical offline
+> demo 2,037개를 로드해 health-ready가 됐다. 최신 읽기 전용 스냅샷은 online replay 400 /
+> intervention 225, learner 301 / gradient 602 / policy version 6 (…). 이전 learner RAM에만
+> 있던 테스트 replay 257 / intervention 107 / learner step 158은 checkpoint가 없고 의미 없는
+> 시험값이라는 사용자 판단에 따라 폐기했다. offline demo pickle은 그대로 보존했다."*
+> 이 숫자들은 전부 **kanu에서 측정한 kanu의 사실**이다. 새 서버로 옮겨 적지 않는다.
 
 **Kanu repo 배치 (2026-07-31 정리) — 스택당 checkout 하나씩, 그게 전부다.**
 
@@ -345,10 +353,13 @@ checkpoint 디렉터리 해시(G19)도 고쳤다. GUI에서 실제 episode의 �
 문제는 현재 1.5/2.0 s bounded 값으로 완화했다. 하지만 장시간 run에서 learner/GPU contention과
 RPC tail latency가 어떻게 변하는지는 계속 계측해야 한다. classifier는 현재 정확도가 충분하지
 않아 MANUAL이 기본이고, AUTO를 production 기본으로 되돌리려면 새 데이터로 재학습·재검증해야
-한다. sidecar가 고치지 못하는 cam1 **가림(occlusion)**과 `08_OPEN_GAPS.md`의 G27/G28
-(실행 액션 기록 정합성)도 남아 있다. 새 schema-3 Kanu lineage의 transition/학습은 실제로
-진행 중이며, MANUAL `MARK SUCCESS` 버튼으로 끝낸 episode의 one-shot provenance만 별도로
-한 번 확인하면 된다.
+한다. ⚠️ **그 재학습은 이제 데이터가 아니라 도구가 막고 있다** — 코퍼스는
+`junhyeong_ai:~/hil-serl-data/datasets/`로 옮겨졌지만 `cube_classifier_pipeline.py`와 채점용
+`.venv-train`은 kanu의 FM 스택 트리에 있었고 **의도적으로 복사 대상이 아니었다.**
+`third_party/hil-serl`에도 없다. sidecar가 고치지 못하는 cam1 **가림(occlusion)**과
+`08_OPEN_GAPS.md`의 G27/G28 (실행 액션 기록 정합성)도 남아 있다. schema-3 lineage의
+transition/학습은 새 서버에서 실제로 진행 중이며, MANUAL `MARK SUCCESS` 버튼으로 끝낸
+episode의 one-shot provenance만 별도로 한 번 확인하면 된다.
 
 🔴 **그리고 시간 초과가 진짜 종료로 학습되고 있다 — `08_OPEN_GAPS.md` G35.**
 `UR7eEnv.step`이 `truncated`를 **리터럴 `False`**로 반환하고 `MAX_EPISODE_LENGTH` 도달을
@@ -420,7 +431,7 @@ canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
 | --- | --- |
 | 셋업 · 빌드 · 인터프리터 함정 · 비상 정지 | [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) |
 | 실물 HIL 세션 기동 (운영용 3-CLI, preflight, actor) | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) — 정상 운용은 `run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh` 세 terminal |
-| kanu에서 learner 띄우기 | [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) |
+| 서버에서 learner 띄우기 | **`./run_hil_server.sh` 하나가 정상 경로다**(환경변수 0개). 수동 CLI·계약 감사는 🗄️ [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) — **kanu 시절 기록이고 실행 절차가 아니다.** 호스트·GPU·경로는 [`DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md)가 우선 |
 | 녹화 take를 learner용 offline demo로 변환 | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) (`40b99f8`) — **`--outcome success\|truncated`는 사람이 명시한다.** 변환기는 성공을 추측하지 않는다. learner는 offline demo가 0이면 학습을 시작하지 않는다 |
 | 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
 | mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
@@ -512,7 +523,8 @@ serl_ur_infra/
   scripts/run_remote_rlpd_actor.py actor entrypoint
   tests/run_real_hil.py            실기 개입 러너 (파일 상단 주석이 안전 설계를 설명)
 ros2_ur_ws/
-  run_hil_server.sh                Terminal 1: Kanu learner 검증/재사용·기동 + SSH tunnel
+  run_hil_server.sh                Terminal 1: 서버 learner 검증/재사용·기동 + SSH tunnel
+                                   (기본값 junhyeong_ai/GPU 0/HIL_REMOTE_DATA_ROOT — 5594d0e)
   run_hil_hardware.sh              Terminal 2: UR7e + Robotiq + passive GELLO supervisor
   run_hil_session.sh               Terminal 3: cameras + GUI + preposition/preflight + actor
                                    + 하드웨어 재기동 복구 루프: hil_hardware_owner_lines /
@@ -530,7 +542,7 @@ ros2_ur_ws/
   src/ur_gello_bringup/.../gello_hil_gui_node.py   END EPISODE 버튼(2-click, 데드맨 먼저 release)
   src/ur_gello_bringup/.../hil_actor_status.py     abort_episode_enabled(MANUAL/AUTO 공통)
   run_classifier_viewer.sh         라이브 분류기 뷰어 (랩톱 CPU)
-  run_remote_classifier_viewer.sh  라이브 분류기 뷰어 (kanu GPU + SSH 터널)
+  run_remote_classifier_viewer.sh  라이브 분류기 뷰어 (서버 GPU + SSH 터널)
 ```
 
 ## 반드시 지킬 것
