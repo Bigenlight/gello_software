@@ -26,6 +26,7 @@ from ur_env.learner.logging import (  # noqa: E402
     LOGGING_WARN_STREAK,
     JsonlWandbLogger,
     LearnerLoggingError,
+    _flatten_for_wandb,
 )
 
 
@@ -188,3 +189,223 @@ def test_a_closed_logger_still_raises_because_that_is_a_caller_bug(tmp_path):
     with pytest.raises(LearnerLoggingError, match="closed"):
         logger.log("learner_update", learner_step=1)
     assert not logger.degraded
+
+
+# --------------------------------------------------------------------------
+# The W&B mirror is FLATTENED; the JSONL audit trail is NOT.
+#
+# W&B charts one series per top-level key and stores a nested dict as a single
+# opaque value.  The live 2026-07-31 run proved the cost: its whole summary was
+# 18 keys, with every training scalar buried in one `metrics` blob, so the
+# operator asking for critic/actor losses saw nothing.
+# --------------------------------------------------------------------------
+
+
+def _learner_update_metrics():
+    """The nested `metrics` dict `HILSERLLearner.train_once` actually builds.
+
+    Keys copied from `runtime.py`: `_flatten_scalars(critic_info)` under
+    `critic/`, `_flatten_scalars(update_info)` under `update/`, then the
+    `timing/` and `buffer/` scalars.
+    """
+
+    return {
+        "critic/critic/critic_loss": 0.42,
+        "critic/critic/predicted_qs": -1.25,
+        "critic/critic/target_qs": -1.20,
+        "critic/grasp_critic/grasp_critic_loss": 0.11,
+        "critic/actor_lr": 0.0003,
+        "update/actor/actor_loss": -3.5,
+        "update/actor/entropy": 1.75,
+        "update/temperature/temperature_loss": 0.02,
+        "update/actor_lr": 0.0003,
+        "timing/sample_ms": 4.0,
+        "timing/critic_update_ms": 12.0,
+        "timing/full_update_ms": 25.0,
+        "timing/learner_step_ms": 30.0,
+        "buffer/replay_size": 316.0,
+        "buffer/offline_demo_size": 2037.0,
+        "buffer/online_intervention_size": 210.0,
+        "buffer/intervention_ratio": 0.5,
+    }
+
+
+def test_nested_metrics_reach_wandb_as_one_series_per_leaf(tmp_path):
+    warnings: list[str] = []
+    run = _FakeRun()
+    logger = _logger(tmp_path / "learner.jsonl", run, warnings)
+
+    metrics = _learner_update_metrics()
+    logger.log(
+        "learner_update",
+        learner_step=11,
+        gradient_step=22,
+        policy_version=3,
+        metrics=metrics,
+    )
+    logger.close()
+
+    mirrored, step = run.records[0]
+    assert step == 11
+    # No nested value survives: everything W&B is handed is a plottable leaf.
+    assert not any(isinstance(value, dict) for value in mirrored.values())
+    assert "metrics" not in mirrored
+    assert set(mirrored) == {
+        "event",
+        "time_ns",
+        "learner_step",
+        "gradient_step",
+        "policy_version",
+        *(f"metrics/{key}" for key in metrics),
+    }
+    # Values survive the move unchanged, at the flattened key.
+    for key, value in metrics.items():
+        assert mirrored[f"metrics/{key}"] == value
+    assert mirrored["event"] == "learner_update"
+    assert mirrored["policy_version"] == 3
+
+
+def test_the_jsonl_record_is_byte_for_byte_what_it_was_before_flattening(tmp_path):
+    """The audit trail must not move because the dashboard needed a fix.
+
+    `_json_value` shapes this line and other tooling reads it, so the nested
+    `metrics` object stays nested and the file never grows a `metrics/...` key.
+    """
+
+    warnings: list[str] = []
+    run = _FakeRun()
+    path = tmp_path / "learner.jsonl"
+    logger = _logger(path, run, warnings)
+
+    metrics = _learner_update_metrics()
+    logger.log(
+        "learner_update",
+        learner_step=11,
+        gradient_step=22,
+        policy_version=3,
+        metrics=metrics,
+    )
+    logger.close()
+
+    raw = path.read_text()
+    assert "metrics/" not in raw
+    line = raw.splitlines()[0]
+    record = json.loads(line)
+    assert record["metrics"] == metrics  # still one nested object
+    # ...and the line is exactly `json.dumps` of that nested record, i.e. the
+    # pre-flattening serialization, `time_ns` included.
+    assert line == json.dumps(
+        {
+            "event": "learner_update",
+            "time_ns": record["time_ns"],
+            "learner_step": 11,
+            "gradient_step": 22,
+            "policy_version": 3,
+            "metrics": metrics,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def test_flattening_keeps_the_leaf_types_wandb_already_took(tmp_path):
+    warnings: list[str] = []
+    run = _FakeRun()
+    logger = _logger(tmp_path / "learner.jsonl", run, warnings)
+
+    logger.log(
+        "learner_update",
+        learner_step=1,
+        detail="ConnectionResetError",
+        count=7,
+        ratio=0.5,
+        flag=True,
+        missing=None,
+        series=[1.0, 2.0, 3.0],
+        nested={"empty": {}, "deep": {"deeper": {"leaf": 9.0}}},
+    )
+    logger.close()
+
+    mirrored, _ = run.records[0]
+    assert mirrored["detail"] == "ConnectionResetError"
+    assert mirrored["count"] == 7
+    assert mirrored["ratio"] == 0.5
+    assert mirrored["flag"] is True
+    assert mirrored["missing"] is None
+    # A list is a leaf: W&B takes it as-is, and indexing it would invent series
+    # whose shape changes between steps.
+    assert mirrored["series"] == [1.0, 2.0, 3.0]
+    assert mirrored["nested/deep/deeper/leaf"] == 9.0
+    # An empty nested mapping contributes nothing at all -- not a stray key.
+    assert not any(key.startswith("nested/empty") for key in mirrored)
+    assert "nested" not in mirrored
+
+
+def test_a_flat_record_is_handed_to_wandb_unchanged(tmp_path):
+    """Records with no nesting (`policy_published`, `learner_fault`, ...) are
+    untouched, so the flatten cannot regress what already charted."""
+
+    warnings: list[str] = []
+    run = _FakeRun()
+    logger = _logger(tmp_path / "learner.jsonl", run, warnings)
+
+    logger.log(
+        "policy_published", learner_step=50, gradient_step=100, policy_version=1
+    )
+    logger.close()
+
+    mirrored, _ = run.records[0]
+    line = json.loads((tmp_path / "learner.jsonl").read_text().splitlines()[0])
+    assert mirrored == line
+
+
+def test_a_nested_key_colliding_with_a_literal_slash_key_is_last_write_wins():
+    """DOCUMENTED CHOICE, not an accident.
+
+    The parent key is consumed by the prefix, so nesting on its own can never
+    collide.  A collision needs a caller to pass BOTH `{"a": {"b": ...}}` and a
+    literal `"a/b"` in the same record; then the later one in the record's own
+    iteration order wins and the other value is absent from the mirror.  We do
+    not raise: this is the dashboard path, and the JSONL line still carries
+    both values in full.
+    """
+
+    assert _flatten_for_wandb({"a": {"b": 1}, "a/b": 2}) == {"a/b": 2}
+    assert _flatten_for_wandb({"a/b": 2, "a": {"b": 1}}) == {"a/b": 1}
+    # No collision in the shape the learner actually produces: the metric keys
+    # already contain "/" and still land under their own parent.
+    assert _flatten_for_wandb({"metrics": {"critic/critic_loss": 0.5}}) == {
+        "metrics/critic/critic_loss": 0.5
+    }
+
+
+def test_a_record_that_cannot_be_flattened_degrades_only_the_mirror(tmp_path):
+    """Flattening runs inside the mirror's `try`, after the JSONL write.
+
+    In production this is unreachable: `_json_value` rebuilds every mapping as
+    a plain dict before either sink sees it, so the mirror is only ever handed
+    a plain dict tree.  The point of the test is the boundary -- if flattening
+    ever did fail it must mute the dashboard, exactly like a dead W&B socket,
+    and must not raise into `train_once` or be counted against the JSONL sink.
+    """
+
+    warnings: list[str] = []
+    run = _FakeRun()
+    path = tmp_path / "learner.jsonl"
+    logger = _logger(path, run, warnings)
+
+    class _HostileMapping(dict):
+        def items(self):
+            raise RuntimeError("mapping exploded during flatten")
+
+    logger._mirror_to_wandb(_HostileMapping({"event": "learner_update"}), 1)
+
+    assert run.records == []
+    assert logger.wandb_muted
+    assert logger.wandb_fault_count == 1
+    assert "mapping exploded" in logger.last_wandb_fault
+    assert logger.jsonl_fault_count == 0
+    assert path.read_text() == ""
+    assert len(warnings) == 1 and "MUTED" in warnings[0]
+    logger.close()

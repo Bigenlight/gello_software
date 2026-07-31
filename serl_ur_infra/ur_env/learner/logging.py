@@ -67,6 +67,48 @@ def _json_value(value: Any, *, path: str = "value") -> Any:
     )
 
 
+def _flatten_for_wandb(mapping: Mapping[str, Any], *, prefix: str = "") -> dict[str, Any]:
+    """Flatten nested mappings into ``parent/child`` keys, for W&B only.
+
+    W&B charts one series per top-level key it is handed.  A nested dict is not
+    walked: it is stored as ONE opaque value, so every scalar inside it becomes
+    invisible.  Measured on the live 2026-07-31 run
+    (``wandb.Api().run("junhyeong/hil-serl/clpuy7kl")``): the whole summary was
+    18 keys and everything the learner reports per step -- ``critic_loss``,
+    ``actor_loss``, ``entropy``, ``predicted_qs``, ``target_qs``,
+    ``temperature_loss``, the grasp-critic scalars, the buffer sizes and the
+    timings -- sat under a single ``metrics`` blob with no plottable series at
+    all.
+
+    Deliberately generic rather than special-casing the literal key
+    ``"metrics"``: ``HILSERLLearner`` is not the only caller of
+    :meth:`JsonlWandbLogger.log`, and a hardcoded key would silently miss the
+    next nested field somebody adds.
+
+    Leaves are passed through untouched at their flattened key, so anything W&B
+    already accepted (str, int, float, bool, None, list) keeps working.  Lists
+    are NOT walked -- W&B takes them as-is, and turning a list into indexed keys
+    would invent series that change shape between steps.  An empty nested
+    mapping contributes nothing, rather than a stray parent key.
+
+    KEY COLLISIONS: last write wins, in the record's own iteration order.  The
+    prefix is consumed by the parent key, so nesting alone cannot collide;
+    a collision needs a caller to pass BOTH ``{"a": {"b": 1}}`` and a literal
+    ``"a/b"`` key in the same record, in which case one of the two values is
+    dropped from the mirror.  That is chosen over raising: this runs on the
+    dashboard path, and the JSONL audit trail still holds both values in full.
+    """
+
+    flat: dict[str, Any] = {}
+    for key, value in mapping.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, Mapping):
+            flat.update(_flatten_for_wandb(value, prefix=f"{path}/"))
+        else:
+            flat[path] = value
+    return flat
+
+
 def _wandb_text(run: Any, attribute: str) -> str | None:
     """Read one string attribute off a W&B run without ever raising.
 
@@ -97,6 +139,11 @@ def _run_identity(run: Any, *, directory: Path) -> dict[str, Any]:
 
 class JsonlWandbLogger:
     """Write every record to JSONL and mirror it to one W&B run.
+
+    The two sinks do NOT get byte-identical payloads: JSONL gets the nested
+    record verbatim, the W&B mirror gets it through :func:`_flatten_for_wandb`,
+    because W&B charts one series per top-level key and would otherwise store
+    the learner's whole ``metrics`` dict as a single unplottable value.
 
     A DEAD SINK DEGRADES THIS LOGGER, IT DOES NOT STOP TRAINING
     ----------------------------------------------------------
@@ -283,7 +330,15 @@ class JsonlWandbLogger:
         if self._wandb_run is None or self._wandb_muted:
             return
         try:
-            self._wandb_run.log(record, step=learner_step)
+            # Flatten HERE and nowhere else.  The JSONL line above is the audit
+            # trail and other tooling reads its shape, so it keeps the nested
+            # record verbatim; the mirror needs the opposite, because W&B stores
+            # a nested dict as one opaque value and the operator gets no chart
+            # for anything inside it -- which is exactly why the live run showed
+            # `learner_step`/`gradient_step`/`policy_version` and not a single
+            # loss or Q-value.  Inside the try on purpose: a flatten that
+            # somehow fails must degrade the dashboard, not the learner.
+            self._wandb_run.log(_flatten_for_wandb(record), step=learner_step)
         except Exception as exc:
             self._note_wandb_fault(exc, phase="log")
 
