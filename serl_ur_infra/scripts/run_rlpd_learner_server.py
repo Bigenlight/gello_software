@@ -238,10 +238,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--utd-ratio",
         type=int,
-        default=1,
+        default=10,
         help=(
             "outer learner steps permitted per newly accepted online "
-            "transition after replay warm-up; CTA remains independently 2:1"
+            "transition after replay warm-up; CTA remains independently 2:1. "
+            "This paces the learner against robot time, so raising it also "
+            "reaches --target-learner-step proportionally sooner: scale that "
+            "target with this ratio to keep a run the same length in "
+            "transitions"
         ),
     )
     parser.add_argument("--max-workers", type=int, default=4)

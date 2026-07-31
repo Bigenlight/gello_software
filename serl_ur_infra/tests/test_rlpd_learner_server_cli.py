@@ -67,7 +67,7 @@ def test_cli_defaults_to_loopback_and_has_no_penalty_escape_hatch(tmp_path):
     assert args.require_jax_backend == "cpu"
     assert args.wandb_mode == "offline"
     assert args.grasp_penalty == pytest.approx(-0.02)
-    assert args.utd_ratio == 1
+    assert args.utd_ratio == 10
     assert args.feature_memory_reserve_gib == pytest.approx(2.0)
     assert args.memory_preflight_path is None
     assert args.demo_extraction_batch_size == 64
@@ -169,7 +169,7 @@ def test_cli_synthetic_e2e_is_bounded_and_keeps_real_learning_scale(tmp_path):
 
     assert config.batch_size == 256
     assert config.training_starts == 100
-    assert config.utd_ratio == 1
+    assert config.utd_ratio == 10
     assert config.cta_ratio == 2
     assert config.publish_period == 1
     assert config.checkpoint_period == 1

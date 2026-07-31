@@ -701,11 +701,11 @@ number("--intervention-capacity", "10000")
 number("--feature-memory-reserve-gib", "2")
 number("--demo-extraction-batch-size", "64")
 number("--grasp-penalty", "-0.02")
-number("--utd-ratio", "1")
+number("--utd-ratio", "10")
 number("--max-workers", "4")
 number("--max-message-bytes", "16777216")
 exact("--require-jax-backend", "gpu")
-number("--target-learner-step", "5000")
+number("--target-learner-step", "50000")
 number("--poll-interval", "0.1")
 
 checkpoint_root = Path(one("--checkpoint-root"))
@@ -721,7 +721,7 @@ if checkpoint_root.name != "checkpoints":
 for flag, expected in expected_paths.items():
     if Path(one(flag)) != expected:
         raise SystemExit(f"PID {pid}: {flag} is outside the learner run root")
-exact("--run-name", f"{run_root.name}-hil-5000")
+exact("--run-name", f"{run_root.name}-hil-50000")
 
 environment = {}
 for item in (proc / "environ").read_bytes().split(b"\0"):
@@ -1099,7 +1099,7 @@ nohup env \
     --wandb-dir "$wandb_dir" \
     --wandb-mode "$WANDB_MODE" \
     --wandb-project hil-serl \
-    --run-name "$RUN_ID-hil-5000" \
+    --run-name "$RUN_ID-hil-50000" \
     --hil-serl-root "$REMOTE_REPO/third_party/hil-serl" \
     --resnet-source "$RESNET_SOURCE" \
     --resnet-cache "$resnet_cache" \
@@ -1108,11 +1108,11 @@ nohup env \
     --feature-memory-reserve-gib 2 \
     --demo-extraction-batch-size 64 \
     --grasp-penalty -0.02 \
-    --utd-ratio 1 \
+    --utd-ratio 10 \
     --max-workers 4 \
     --max-message-bytes 16777216 \
     --require-jax-backend gpu \
-    --target-learner-step 5000 \
+    --target-learner-step 50000 \
     --poll-interval 0.1 \
     >"$stdout_path" 2>&1 </dev/null 9>&- &
 learner_pid=$!
