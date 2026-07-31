@@ -2,6 +2,28 @@
 
 문서 색인이다. 상태 보고서가 아니다 — 숫자와 근거는 링크된 문서에 있다.
 
+> # 🔴 2026-07-31 — **GPU 서버가 `kanu`에서 `junhyeong_ai`로 이전 중이다**
+>
+> **이 파일을 포함해 이 리포의 거의 모든 문서가 `kanu`를 전제로 쓰여 있다.**
+> 데이터·모델·코드 checkout의 **현재 위치**는 아래 문서가 정본이다:
+>
+> ### 👉 [`serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md)
+>
+> | | 예전 | 지금 |
+> | --- | --- | --- |
+> | ssh 별칭 | `kanu` | **`junhyeong_ai`** (166.104.146.29, hostname `junhyeong`) |
+> | GPU | A4000 ×8 (sm_86), GPU 5 | **RTX 5070 Ti ×1 (sm_120 Blackwell), GPU 0** |
+> | HIL checkout | `~/gello_software_hil_current` | **`~/gello_software_hil`** |
+> | 데이터·모델 | 네 군데 분산 | **전부 `~/hil-serl-data/` 아래** |
+>
+> 이전은 **복사**였고 **kanu에서 지운 것은 없다.** kanu learner는 사용자가 직접 멈출
+> 때까지 살아 있다. ⚠️ **`run_hil_server.sh`의 기본값은 아직 kanu다** — 새 서버로 쓰려면
+> 위 문서 §6의 환경변수를 준다.
+> ⚠️ 새 서버의 **`/home/junhyeong/gello_software`(접미사 없음)는 다른 사람의 작업
+> 트리다.** 읽지도 쓰지도 말 것. HIL이 쓰는 것은 `_hil`이 붙은 쪽이다.
+> ⚠️ 학습된 policy 체크포인트는 **어디에도 없다** — kanu의 run root 8개 전부
+> `checkpoints/`가 비어 있었다(실측). 이유는 위 문서 §4.
+
 ## 이 리포에서 진행 중인 작업
 
 **HIL-SERL(사람 개입 온라인 RL)을 실기 UR7e에서 돌린다.**
