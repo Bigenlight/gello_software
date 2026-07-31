@@ -351,6 +351,7 @@ class FmServedPolicy:
         #: unless an operator deliberately overrides it.
         self._integration_steps = integration_steps
         self._rng: Any = None
+        self._sample_jit: Any = None
         self._lock = threading.Lock()
 
         #: Advertised model identity, read by the server script and sent in
@@ -393,6 +394,37 @@ class FmServedPolicy:
                 self._rng = jax.random.PRNGKey(self._rng_seed)
             self._rng, sample_rng = jax.random.split(self._rng)
             return sample_rng
+
+    def _jitted_sampler(self) -> Any:
+        """Build (once) and return the jitted chunk sampler.
+
+        ``sample_action_chunks`` run eagerly pays op-by-op dispatch for every
+        Euler step -- measured ~500 ms per action on the serving GPU, against
+        a ~100 ms control period.  The observation shapes are fixed by the
+        canonical contract, so one trace serves the whole session; the server
+        startup smoke absorbs the compilation before ready is advertised.
+        """
+
+        with self._lock:
+            if self._sample_jit is None:
+                import jax
+
+                from ur_env.learner.flow_matching import sample_action_chunks
+
+                model = self._model
+                steps = self._integration_steps
+
+                def _sample(params: Any, fm_observation: Any, rng: Any) -> Any:
+                    return sample_action_chunks(
+                        model,
+                        params,
+                        fm_observation,
+                        rng,
+                        integration_steps=steps,
+                    )
+
+                self._sample_jit = jax.jit(_sample)
+            return self._sample_jit
 
     def _fm_observation(self, observation: Mapping[str, Any]) -> dict[str, Any]:
         """Run the frozen trunk and reshape its output for the FM model."""
@@ -439,17 +471,11 @@ class FmServedPolicy:
 
         import jax
 
-        from ur_env.learner.flow_matching import sample_action_chunks
-
         fm_observation = self._fm_observation(observation)
         sample_rng = self._next_rng()
         try:
-            chunk = sample_action_chunks(
-                self._model,
-                self._params,
-                fm_observation,
-                sample_rng,
-                integration_steps=self._integration_steps,
+            chunk = self._jitted_sampler()(
+                self._params, fm_observation, sample_rng
             )
             host_chunk = np.asarray(jax.device_get(chunk))
         except Exception as exc:
