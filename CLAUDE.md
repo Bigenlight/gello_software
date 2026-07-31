@@ -144,6 +144,15 @@ Trigger 발사). 🛑 **그러나 데드맨은 policy 경로를 전혀 게이팅
 갔다. `_OperatorReporter`는 `env_step`을 −1로 시작한다), **1 = arming 자체가 없었음**,
 **70 = controller 복귀 실패**, **>=128 = 신호**. 승격을 끄려면 `HIL_ACTOR_EXIT_MAP=0`.
 
+🔧 **2026-07-31 실기 수정.** Terminal 2를 내리면 controller 복귀가 실패하는 게 당연한데
+그것이 `70`(재시도 금지)으로 잡혀 **세션이 자동 종료됐다** — 복구 루프가 막으려던 바로 그
+상황을 복구 루프가 막았다. `hil_read_controller_states`가 이제 **"스택이 이상하다"(1)와
+"스택이 아예 없다"(2)를 구분**한다. controller_manager 무응답이거나 우리 controller 쌍이
+목록에 하나도 없으면 **번들 사망**이고, 그때는 ros2_control 컨트롤러가 하나도 없으므로 팔을
+몰 수 있는 것도 없다 → `75`. 이 경로만 **진행 증거(`env_step>=0`)를 요구하지 않는다** —
+그 게이트는 결정론적 startup 실패를 막는 것인데, 그런 실패는 controller_manager를 사라지게
+만들지 않기 때문이다.
+
 재시도는 추가로 이 셋을 **전부** 요구한다: 조작자가 번들을 정말 재기동했다는 증거(세
 entrypoint `ur_control.launch.py` / `robotiq_gripper_modbus` / `gello_publisher`가 모두 있고
 **PID 집합이 이전 세대와 하나도 겹치지 않음**), 세 토픽이 `run_hil_hardware.sh` 자신의 READY

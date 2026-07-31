@@ -974,7 +974,16 @@ Terminal 3이 새 번들을 자동 감지하고 `HIL_RETRY_RESUME_DELAY_S`(기�
 | `2` | 래퍼 usage/config 오류 | ✗ |
 | `70` | actor 종료 후 **controller 복귀 실패** — 소유권 불명, 펜던트 확인 필요 | ✗ |
 | `75` | **recoverable** | 후보 |
+| `75` | ↳ **ros2_control 스택 소멸**(= 번들 사망). 진행 증거 없이도 승격 | 후보 |
 | `>=128` | 신호(130 = Ctrl-C) | ✗ |
+
+🔧 **2026-07-31 실기에서 이 표가 한 번 틀렸다.** Terminal 2를 내렸더니 actor가
+`/joint_states stale`로 죽고, 이어진 controller 복귀가 **드라이버가 사라졌으니 당연히 실패**해
+`70`이 나왔다 → 재시도 금지 → 세션 자동 종료. 정확히 복구 루프가 막으려던 상황을 복구 루프가
+막았다. 이제 `hil_read_controller_states`가 **"스택이 이상하다"(1)와 "스택이 아예 없다"(2)를
+구분**한다. controller_manager가 무응답이거나 우리 controller 쌍이 목록에 **하나도** 없으면
+그것은 소유권 불명이 아니라 **번들 사망**이고, 그때는 ros2_control 컨트롤러가 하나도 없으므로
+**팔을 몰 수 있는 것도 없다**(우리 publisher가 0인 것은 그 직전에 이미 확인한다). → `75`.
 
 **`75`는 그냥 "죽었다"가 아니다.** 감시자가 `/hil/actor_status`에서 **`env_step >= 0`을 실제로
 본 경우에만** 승격된다(`_OperatorReporter`는 `env_step`을 −1로 시작하고 `position()`은 전이

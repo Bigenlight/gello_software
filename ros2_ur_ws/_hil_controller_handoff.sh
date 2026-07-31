@@ -39,6 +39,23 @@ hil_invalidate_preposition_marker() {
 
 hil_read_controller_states() {
     # Sets HIL_SOURCE_STATE/HIL_TARGET_STATE/HIL_CONTROLLER_LIST_OUTPUT.
+    #
+    # RETURN CODES -- 2 is not "worse than 1", it is a DIFFERENT DIAGNOSIS:
+    #   0  both controllers found, states are active/inactive
+    #   1  the stack answered, but something about it is wrong (unexpected
+    #      state string).  A human has to look.
+    #   2  THE ros2_control STACK WE ARMED AGAINST IS NOT THERE -- the
+    #      controller_manager does not answer, or it answers with a controller
+    #      set that does not contain our pair (i.e. a different / freshly
+    #      restarted driver).  This is what a hardware-bundle death looks like
+    #      from here, and it is the ONE failure that is recoverable by
+    #      restarting the bundle: with no controller_manager there is no
+    #      ros2_control owner at all, so nothing can be commanding the arm.
+    #      run_hil_actor.sh maps this to the RECOVERABLE exit code instead of
+    #      70; see its exit-code contract.
+    # Every caller on the ARMING path uses `|| return 1` / `if !`, so they
+    # still treat 2 as a plain refusal.  Only the post-actor cleanup path
+    # distinguishes it.
     local source_controller="$1" target_controller="$2" output clean
     local source_states target_states source_count target_count
 
@@ -48,11 +65,11 @@ hil_read_controller_states() {
     if ! output="$(timeout --signal=KILL 15 ros2 control list_controllers 2>&1)"; then
         echo "ERROR: controller_manager did not answer list_controllers" >&2
         printf '%s\n' "$output" >&2
-        return 1
+        return 2
     fi
     if [[ -z "$output" ]]; then
         echo "ERROR: controller_manager returned an empty controller list" >&2
-        return 1
+        return 2
     fi
     clean="$(printf '%s\n' "$output" | sed 's/\x1b\[[0-9;]*m//g')"
     source_states="$(printf '%s\n' "$clean" | awk -v name="$source_controller" '$1 == name {print $NF}')"
@@ -62,6 +79,12 @@ hil_read_controller_states() {
     if [[ "$source_count" -ne 1 || "$target_count" -ne 1 ]]; then
         echo "ERROR: expected exactly one $source_controller and one $target_controller" >&2
         printf '%s\n' "$clean" >&2
+        # Neither controller present at all == a different ros2_control stack
+        # (bundle died / restarted), not a corrupted one.  See the return-code
+        # note at the top of this function.
+        if [[ "$source_count" -eq 0 && "$target_count" -eq 0 ]]; then
+            return 2
+        fi
         return 1
     fi
     HIL_SOURCE_STATE="$(printf '%s\n' "$source_states" | head -n1)"
@@ -342,12 +365,23 @@ hil_restore_controller_after_actor() {
     # Refusing the switch while any command publisher remains is deliberate --
     # a late 250 Hz actor thread and a newly activated controller must never
     # race over the same hardware interfaces.
+    #
+    # Returns 2 (not 1) when the ros2_control stack we armed against is simply
+    # gone -- see hil_read_controller_states.  That is the hardware-bundle
+    # death case: there is nothing left to restore ownership TO, and nothing
+    # left that could be commanding the arm either.  Collapsing it into 1
+    # meant a killed Terminal 2 exited 70 ("ownership unknown, do not retry"),
+    # which is exactly backwards: it is the one failure a bundle restart fixes.
     local source_controller="$1" target_controller="$2" command_topic="$3"
-    local switch_output
+    local switch_output states_rc
 
     echo "controller cleanup: waiting for actor command publisher to disappear"
     hil_wait_no_command_publishers "$command_topic" || return 1
-    hil_read_controller_states "$source_controller" "$target_controller" || return 1
+    hil_read_controller_states "$source_controller" "$target_controller" || {
+        states_rc=$?
+        [[ "$states_rc" -eq 2 ]] && return 2
+        return 1
+    }
 
     if [[ "$HIL_SOURCE_STATE" == active && "$HIL_TARGET_STATE" == inactive ]]; then
         echo "controller cleanup: already restored ($source_controller=active)"

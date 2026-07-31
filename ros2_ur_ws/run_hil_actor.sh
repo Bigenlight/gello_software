@@ -50,6 +50,12 @@
 #   2   래퍼 사용법/설정 오류. 재시도하지 않는다.
 #   70  actor 종료 뒤 **controller 자동 복귀 실패** — controller 소유권이 불명이다.
 #       펜던트를 들고 직접 확인해야 하므로 기본적으로 재시도하지 않는다.
+#       ⚠️ **"스택이 아예 없다"는 여기 해당하지 않는다.** controller_manager가
+#       응답하지 않거나 우리 controller 쌍이 목록에 하나도 없으면 그것은
+#       "소유권 불명"이 아니라 **하드웨어 번들이 죽었다**는 뜻이고, 그때는
+#       ros2_control 컨트롤러가 하나도 없으므로 팔을 몰 수 있는 것도 없다.
+#       그 경우는 아래 75로 간다(2026-07-31 실기에서 Terminal 2를 내렸더니
+#       70이 나와 세션이 자동 종료된 것이 이 구분이 없었기 때문이다).
 #   75  **RECOVERABLE**: actor가 실제로 떴다가 죽었고(0<rc<128), 그 뒤
 #       controller 복귀는 PASS했으며, **actor가 transition 루프까지 실제로
 #       도달했다는 양성 증거**가 있다. 팔은 trajectory controller가 잡고 있고
@@ -63,6 +69,11 @@
 #       126/127까지 "재시도 가능"이 된다. 그것들은 **결정론적**이라 재시도해도
 #       같은 지점에서 같이 죽고, 시도마다 8초짜리 충돌회피 없는 RESET 이동만
 #       한 번씩 더 실행된다. 증거는 아래 "진행 증거" 항목 참조.
+#       ✅ **예외 하나 — ros2_control 스택 소멸.** controller_manager가 아예
+#       없거나 우리 controller 쌍이 목록에 없으면 진행 증거를 **요구하지 않고**
+#       75를 낸다. 그 게이트의 목적은 "결정론적 startup 실패를 반복하지 마라"인데
+#       결정론적 startup 실패는 controller_manager를 사라지게 만들지 않는다.
+#       스택 소멸은 그것과 독립적이고 더 직접적인 환경 실패의 증거다.
 #   >=128  신호로 죽음(130=Ctrl-C 등). 그대로 전파하고 재시도하지 않는다.
 #   재mapping 끄기: HIL_ACTOR_EXIT_MAP=0 (그러면 actor의 raw rc를 그대로 낸다).
 #
@@ -997,8 +1008,32 @@ fi
 
 _say ""
 _say "[ARM] actor 종료(rc=$ACTOR_RC) — controller 자동 복귀"
-if ! hil_restore_controller_after_actor \
-        "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER" "$COMMAND_TOPIC"; then
+RESTORE_RC=0
+hil_restore_controller_after_actor \
+        "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER" "$COMMAND_TOPIC" || RESTORE_RC=$?
+
+if [ "$RESTORE_RC" -eq 2 ]; then
+    # ros2_control 스택 자체가 없다 = 하드웨어 번들이 죽었다.
+    # 이것이 70이 아닌 이유: 70은 "소유권을 모르겠다"이고 그건 controller_manager가
+    # 살아 있는데 전환이 실패했을 때의 진단이다. 여기서는 controller_manager가
+    # 아예 없으므로 **어떤 ros2_control 컨트롤러도 팔을 몰 수 없다** — 팔은 UR
+    # 자체 제어로 자세를 유지한다. 그리고 우리 command publisher가 사라진 것은
+    # hil_restore_controller_after_actor가 이 지점 **전에** 이미 확인했다.
+    # 번들을 다시 켜면 STJC가 active로 올라온다(run_hil_hardware.sh) — 즉 이것은
+    # 재기동으로 고쳐지는 유일한 실패이고, 정확히 복구 루프가 존재하는 이유다.
+    _say " !! ros2_control 스택이 사라졌다 = 하드웨어 번들이 죽었다."
+    _say "    복귀할 대상이 없고, 팔을 몰 수 있는 것도 없다(우리 publisher는 이미 0)."
+    _say "    -> 종료 코드 $RECOVERABLE_EXIT_CODE (RECOVERABLE 후보)."
+    _say "    Terminal 2에서 ./run_hil_hardware.sh 를 다시 실행하면 세션이 이어진다."
+    _say "    재시도는 PID 세대 교체 + 토픽 READY + robot RUNNING/safety NORMAL을"
+    _say "    모두 확인한 뒤에만, 모든 proof를 처음부터 다시 통과해야 일어난다."
+    # 진행 증거(env_step>=0)를 요구하지 않는다. 그 게이트는 "결정론적 startup
+    # 실패를 반복 재시도하지 마라"는 뜻인데, 결정론적 startup 실패는
+    # controller_manager를 사라지게 만들지 않는다. 스택 소멸은 그것과 독립적인,
+    # 그리고 더 직접적인 환경 실패의 증거다.
+    exit "$RECOVERABLE_EXIT_CODE"
+fi
+if [ "$RESTORE_RC" -ne 0 ]; then
     _say " ✗ controller 자동 복귀 실패. 펜던트를 들고 아래 상태를 직접 확인하라:" >&2
     _say "   ros2 control list_controllers" >&2
     _say "   ros2 topic info -v $COMMAND_TOPIC" >&2
