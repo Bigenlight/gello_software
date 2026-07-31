@@ -686,8 +686,23 @@ class ActorSessionService:
                 next_observation.observation
             )
             try:
+                # The sidecar still decides WHEN a step is scored -- its
+                # cadence and stationary gates are a correctness rule about
+                # occlusion, not a bandwidth trick.  WHAT gets scored is now
+                # the step's shared trunk feature, so the reward path no
+                # longer runs an image encoder of its own.  Falls back to the
+                # sidecar's own pixels when nothing encoded this step.
+                classifier_input = (
+                    None
+                    if classifier_sidecar is None
+                    else (
+                        shared_features
+                        if shared_features is not None
+                        else classifier_sidecar
+                    )
+                )
                 finalized = self._finalize_transition(
-                    copy.deepcopy(provisional_data), classifier_sidecar
+                    copy.deepcopy(provisional_data), classifier_input
                 )
                 if not isinstance(finalized, tuple) or len(finalized) != 2:
                     raise ActorProtocolError(

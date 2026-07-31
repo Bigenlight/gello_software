@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import sys
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -180,3 +182,74 @@ def test_a_sink_that_cannot_encode_still_serves_pixels():
 def test_encoder_calls_scale_one_per_step(steps):
     harness = _Harness(steps=steps)
     assert harness.extractor.calls == steps + 1
+
+
+def test_the_classifier_scores_the_shared_feature_not_the_sidecar_pixels():
+    """The reward path must not run an image encoder of its own.
+
+    The sidecar still decides WHEN a step is scored -- its cadence and
+    stationary gates are a correctness rule about occlusion, not a bandwidth
+    trick.  WHAT is scored has to be the feature the step already computed,
+    otherwise the trunk runs a third time just for reward.
+    """
+
+    from ur_env.classifier_sidecar import CLASSIFIER_SIDECAR_KEY, build_sidecar
+
+    received: list[Any] = []
+
+    def recording_finalize(data, classifier_input=None):
+        received.append(classifier_input)
+        return _finalize(data, classifier_input)
+
+    extractor = _FeatureExtractor()
+    ingress = FaultGatedReplayIngress(_ingress(extractor, replay_capacity=16))
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, dtype=np.float32), 0),
+        accept_data=ingress,
+        finalize_transition=recording_finalize,
+    )
+    service.begin_episode(
+        BeginEpisodeCommand(
+            PROTOCOL_VERSION,
+            "actor-0",
+            "run-0",
+            "session-0",
+            0,
+            1,
+            10_000,
+            ObservationPacket("observation-0", _BASE_NS, _observation(0)),
+        )
+    )
+
+    sidecar = build_sidecar(
+        {key: np.zeros((720, 1280, 3), dtype=np.uint8) for key in ("cam1", "cam2")}
+    )
+    next_observation = dict(_observation(1))
+    next_observation[CLASSIFIER_SIDECAR_KEY] = sidecar
+
+    data = _data(0)
+    data["meta"]["policy_action"] = np.zeros(7, dtype=np.float32)
+    data["transition"]["actions"] = np.zeros(7, dtype=np.float32)
+    service.step(
+        StepCommand(
+            PROTOCOL_VERSION,
+            "actor-0",
+            "run-0",
+            "session-0",
+            2,
+            10_000,
+            data,
+            ObservationPacket("observation-1", _BASE_NS + 1, next_observation),
+            True,
+        )
+    )
+
+    assert len(received) == 1
+    classified = received[0]
+    assert classified is not None, "an attached sidecar must still trigger scoring"
+    assert not any(key.endswith("_jpeg") for key in classified), (
+        "the classifier was handed sidecar JPEG bytes, not the shared feature"
+    )
+    assert np.asarray(classified["cam1"]).shape == FROZEN_TRUNK_FEATURE_SHAPE
+    # Still one encode for the step: scoring did not add a forward.
+    assert extractor.calls == 2  # O(0) at begin_episode, O(1) at this step
