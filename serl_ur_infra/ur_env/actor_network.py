@@ -471,6 +471,10 @@ class ActorSessionService:
         self._clock = clock
         self._in_memory_capacity = int(in_memory_capacity)
         self._accept_data = accept_data or self._accept_data_in_memory
+        # Kept alongside the bound callable purely so health() can read the
+        # finalizer's own classification counters; _bind_finalizer may return a
+        # wrapper that hides them.
+        self._finalizer_source = finalize_transition
         self._finalize_transition = self._bind_finalizer(
             finalize_transition or self._finalize_transition_identity
         )
@@ -508,7 +512,38 @@ class ActorSessionService:
 
     def health(self) -> tuple[bool, bool, str]:
         with self._lock:
-            return True, self._ready, "ready" if self._ready else self._fault_detail
+            ready = self._ready
+            fault_detail = self._fault_detail
+        if not ready:
+            return True, False, fault_detail
+        return True, True, self._ready_detail()
+
+    def _ready_detail(self) -> str:
+        """Return the ready detail, noting a degraded classifier if there is one.
+
+        A reward classifier that faults no longer takes the service down with
+        it (``RewardTransitionFinalizer`` degrades the transition to the
+        unclassified state instead), so ``ready`` alone would report a run in
+        which nothing can ever be scored as perfectly healthy.  ``detail`` is a
+        free-form string in ``HealthReply`` and is what ``run_hil_server.sh``
+        prints as ``HIL_SERVER_HEALTH``'s ``health`` field, so surfacing the
+        count here needs no proto change and reaches the operator's --check.
+        """
+
+        finalizer = self._finalizer_source
+        try:
+            faults = int(getattr(finalizer, "classifier_fault_count", 0))
+            last = str(getattr(finalizer, "last_classifier_fault", ""))
+            classifications = int(getattr(finalizer, "classification_count", 0))
+        except Exception:  # a foreign finalizer must never break Health
+            return "ready"
+        if faults <= 0:
+            return "ready"
+        return (
+            f"ready; reward classifier DEGRADED: {faults} faulted "
+            f"classification(s), {classifications} succeeded; transitions are "
+            f"being recorded unclassified with reward 0 (last fault: {last})"
+        )
 
     def get_server_info(self) -> ServerInfo:
         with self._lock:

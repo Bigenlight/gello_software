@@ -711,6 +711,38 @@ class RewardTransitionFinalizer:
     Net effect on learning: an unclassified AUTO transition is an ordinary
     zero-reward sample.  In MANUAL, an operator success may still end it with a
     positive reward; classifier telemetry remains explicitly unevaluated.
+
+    A FAULTED CLASSIFIER LANDS IN THAT SAME STATE, IT DOES NOT END THE SESSION
+    -------------------------------------------------------------------------
+    A :class:`RewardClassifierError` raised while producing the verdict used to
+    propagate all the way into ``ActorSessionService._set_fault``, which clears
+    ``_ready`` FOREVER — nothing sets it back — so one bad scored step killed
+    the whole run and the learner had to be restarted.  The classifier is an
+    opinion about a frame, not part of the transition contract, so its failure
+    is now degraded to exactly the unclassified state above: same zero reward,
+    same ``classifier_evaluated=0``, same empty ``reward_model_id``.  No third
+    reward meaning is introduced.
+
+    It stays loud.  A faulted classification is counted separately from an
+    absent sidecar (``classifier_fault_count`` / ``last_classifier_fault``,
+    surfaced in the ``Health`` detail so ``run_hil_server.sh --check`` shows a
+    degraded classifier), warns by name on the first fault of a streak, and
+    then keeps announcing itself on the ``UNCLASSIFIED_WARN_STREAK`` cadence.
+    "the classifier is broken" and "the arm was moving so we skipped scoring"
+    never render as the same message.
+
+    WHAT DEGRADING COSTS, PER OPERATOR MODE
+    ---------------------------------------
+    ``RewardClassifierRuntime.classify`` latches ``_ready = False`` on its
+    first fault, so in practice the first fault is permanent for that process.
+    In AUTO that means no transition can ever be a classifier success again, so
+    episodes can only end on ``MAX_EPISODE_LENGTH`` (or an operator abort).
+    That is fail-closed — a broken classifier cannot invent a reward — and it
+    is exactly why the fault must remain visible rather than merely survivable.
+    In MANUAL, which is the production default, the operator's one-shot
+    ``MARK SUCCESS`` is carried in ``meta.operator_success`` and is applied
+    below WITHOUT consulting the classifier at all, so episodes still terminate
+    normally with reward 1.0 while the classifier is down.
     """
 
     def __init__(
@@ -739,6 +771,13 @@ class RewardTransitionFinalizer:
         self._unclassified_streak = 0
         self._transition_count = 0
         self._classification_count = 0
+        # Faulted classifications are a STRICT SUBSET of unclassified ones, and
+        # are counted apart from them so a broken classifier can never be read
+        # as a merely sparse sidecar.
+        self._classifier_fault_count = 0
+        self._classifier_fault_streak = 0
+        self._session_classifier_faults = 0
+        self._last_classifier_fault = ""
 
     @property
     def transition_count(self) -> int:
@@ -749,6 +788,23 @@ class RewardTransitionFinalizer:
     def classification_count(self) -> int:
         with self._lock:
             return self._classification_count
+
+    @property
+    def classifier_fault_count(self) -> int:
+        """Transitions degraded to unclassified by a classifier fault."""
+        with self._lock:
+            return self._classifier_fault_count
+
+    @property
+    def last_classifier_fault(self) -> str:
+        """Detail of the most recent classifier fault; "" if never faulted."""
+        with self._lock:
+            return self._last_classifier_fault
+
+    @property
+    def classifier_degraded(self) -> bool:
+        with self._lock:
+            return self._classifier_fault_count > 0
 
     def __call__(
         self,
@@ -790,6 +846,7 @@ class RewardTransitionFinalizer:
         session_id = session_id if isinstance(session_id, str) else ""
         self._begin_transition(session_id)
 
+        fault_detail = ""
         if classifier_sidecar is None:
             probability = 0.0
             threshold = 0.0
@@ -797,14 +854,37 @@ class RewardTransitionFinalizer:
             evaluated = False
             reward_model_id = ""
         else:
+            # DELIBERATELY OUTSIDE THE try: _classifier_frames only fails when
+            # the payload the ACTOR sent is corrupt (undecodable JPEG bytes),
+            # which its own docstring already rules must stop the run.  That is
+            # a transport/protocol fault, not a classifier opinion, and the
+            # same reasoning covers the ValueError family
+            # (FrozenTrunkFeatureSchemaError, validate_classifier_frames) that
+            # `classify` raises from `_classifier_model_input` BEFORE it ever
+            # touches the model: those say the tensors are malformed, and this
+            # except clause is narrow enough not to catch them.
             frames = self._classifier_frames(classifier_sidecar)
-            result = self.classifier.classify(frames)
-            probability, classifier_success = self._confirm(result)
-            threshold = float(result.threshold)
-            evaluated = True
-            reward_model_id = _required_text(
-                result.reward_model_id, name="classifier.reward_model_id"
-            )
+            try:
+                # Everything from here on is the classifier judging its own
+                # input and its own output — the model call, the sigmoid, the
+                # confirmation window, the model id it advertises.  A failure
+                # in any of them means "no verdict for this frame", which is a
+                # state this class already has.
+                result = self.classifier.classify(frames)
+                probability, classifier_success = self._confirm(result)
+                threshold = float(result.threshold)
+                reward_model_id = _required_text(
+                    result.reward_model_id, name="classifier.reward_model_id"
+                )
+            except RewardClassifierError as exc:
+                probability = 0.0
+                threshold = 0.0
+                classifier_success = False
+                evaluated = False
+                reward_model_id = ""
+                fault_detail = f"{type(exc).__name__}: {exc}"
+            else:
+                evaluated = True
 
         # Reward remains server-authoritative.  The server accepts only the
         # protected one-shot operator assertion in MANUAL or its own classifier
@@ -835,7 +915,10 @@ class RewardTransitionFinalizer:
         transition["reward_model_id"] = reward_model_id
 
         self._end_transition(
-            session_id, evaluated=evaluated, terminal=done or truncated
+            session_id,
+            evaluated=evaluated,
+            terminal=done or truncated,
+            fault_detail=fault_detail,
         )
 
         return finalized, TransitionOutcome(
@@ -939,7 +1022,12 @@ class RewardTransitionFinalizer:
             self._warn(message)
 
     def _end_transition(
-        self, session_id: str, *, evaluated: bool, terminal: bool
+        self,
+        session_id: str,
+        *,
+        evaluated: bool,
+        terminal: bool,
+        fault_detail: str = "",
     ) -> None:
         warnings: list[str] = []
         with self._lock:
@@ -947,15 +1035,52 @@ class RewardTransitionFinalizer:
                 self._classification_count += 1
                 self._session_classifications += 1
                 self._unclassified_streak = 0
+                self._classifier_fault_streak = 0
             else:
                 self._unclassified_streak += 1
+                if fault_detail:
+                    self._classifier_fault_count += 1
+                    self._session_classifier_faults += 1
+                    self._classifier_fault_streak += 1
+                    self._last_classifier_fault = fault_detail
+                    # RATE LIMIT.  RewardClassifierRuntime.classify latches
+                    # _ready = False on its first fault, so once this starts,
+                    # every later scored step faults too — at the sidecar's
+                    # ~2 Hz that is a line every 500 ms forever.  Announce the
+                    # first fault of a streak in full (an operator must see the
+                    # exception the moment it happens) and then fall back to
+                    # the same streak cadence the absent-sidecar path uses.
+                    if (
+                        self._classifier_fault_streak == 1
+                        or self._classifier_fault_streak % UNCLASSIFIED_WARN_STREAK
+                        == 0
+                    ):
+                        warnings.append(
+                            "reward classifier FAULTED; this transition was "
+                            "degraded to unclassified (reward 0, no verdict, "
+                            "AUTO cannot declare success) — "
+                            f"{fault_detail} [consecutive faults="
+                            f"{self._classifier_fault_streak}, total="
+                            f"{self._classifier_fault_count}]"
+                        )
                 if self._unclassified_streak % UNCLASSIFIED_WARN_STREAK == 0:
-                    warnings.append(
-                        f"{self._unclassified_streak} consecutive transitions "
-                        "carried no classifier sidecar; no reward can be "
-                        "produced while this continues (is the actor's sidecar "
-                        "scheduler running, and is the arm ever stationary?)"
-                    )
+                    if self._classifier_fault_streak > 0:
+                        # Never render a broken classifier as a missing one.
+                        warnings.append(
+                            f"{self._unclassified_streak} consecutive "
+                            "transitions produced no classifier verdict, and "
+                            f"the last {self._classifier_fault_streak} of them "
+                            "FAULTED rather than merely arriving without a "
+                            f"sidecar (last fault: {self._last_classifier_fault})"
+                            "; no reward can be produced while this continues"
+                        )
+                    else:
+                        warnings.append(
+                            f"{self._unclassified_streak} consecutive transitions "
+                            "carried no classifier sidecar; no reward can be "
+                            "produced while this continues (is the actor's sidecar "
+                            "scheduler running, and is the arm ever stationary?)"
+                        )
             if terminal:
                 # Report at the episode boundary rather than only when the next
                 # session shows up, so an operator sees it while the episode is
@@ -974,8 +1099,20 @@ class RewardTransitionFinalizer:
                 f"{self._session_transitions} transitions and classified NONE "
                 "of them; every reward in it is 0 by default, not by verdict"
             )
+        if self._session_classifier_faults > 0:
+            # Reported even when the session DID classify some steps, because a
+            # partially faulted session is still one whose AUTO verdict cannot
+            # be trusted to have been available when it mattered.
+            messages.append(
+                f"session {self._session_id!r} degraded "
+                f"{self._session_classifier_faults} transitions to unclassified "
+                "because the reward classifier FAULTED (last fault: "
+                f"{self._last_classifier_fault}); in AUTO no success could have "
+                "been declared, in MANUAL only MARK SUCCESS could end it"
+            )
         self._session_transitions = 0
         self._session_classifications = 0
+        self._session_classifier_faults = 0
         return messages
 
     def _reset_window_locked(self) -> None:

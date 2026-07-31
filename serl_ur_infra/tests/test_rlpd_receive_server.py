@@ -25,6 +25,7 @@ from ur_env.classifier_sidecar import (  # noqa: E402
 )
 from ur_env.rlpd_receive_server import (  # noqa: E402
     UNCLASSIFIED_WARN_STREAK,
+    ClassificationResult,
     FakeActionRuntime,
     ReplayIngress,
     RewardClassifierError,
@@ -75,6 +76,51 @@ class _WarningSink:
 
     def __call__(self, message: str) -> None:
         self.messages.append(message)
+
+
+class _FlakyClassifier:
+    """A classifier whose next ``classify`` can be made to raise anything.
+
+    ``ScriptedRewardClassifierRuntime`` latches itself not-ready on its first
+    failure (deliberately, because the real runtime does), which is exactly
+    what the rate-limiting tests want and exactly what a recovery test cannot
+    use.  It also converts every scripted failure into RewardClassifierError,
+    so it cannot express "the input validation rejected these tensors" either.
+    """
+
+    def __init__(
+        self,
+        probabilities: list[float],
+        *,
+        threshold: float = 0.5,
+        reward_model_id: str = "flaky-reward-v0",
+    ) -> None:
+        self._probabilities = list(probabilities)
+        self.threshold = threshold
+        self.reward_model_id = reward_model_id
+        self.fail_with: BaseException | None = None
+        self.evaluation_count = 0
+
+    @property
+    def ready(self) -> bool:
+        return self.fail_with is None
+
+    def classify(self, frames: Any) -> ClassificationResult:
+        # Same input contract the real runtime enforces before the model runs.
+        validate_classifier_frames(frames)
+        if self.fail_with is not None:
+            raise self.fail_with
+        probability = self._probabilities[
+            self.evaluation_count % len(self._probabilities)
+        ]
+        self.evaluation_count += 1
+        return ClassificationResult(
+            probability=probability,
+            threshold=self.threshold,
+            success=probability > self.threshold,
+            reward_model_id=self.reward_model_id,
+            inference_ms=0.0,
+        )
 
 
 def _data(
@@ -462,13 +508,217 @@ def test_reward_finalizer_rejects_provisional_positive_reward_when_negative():
     assert outcome.success is False
 
 
-def test_reward_finalizer_classifier_failure_produces_no_data():
+def test_classifier_fault_degrades_to_unclassified_instead_of_ending_the_run():
+    """The behaviour change: a classifier fault is survivable, not terminal.
+
+    Previously this raised RewardClassifierError, which reached
+    ActorSessionService._set_fault and latched _ready = False forever, so one
+    bad scored step ended the session and the learner had to be restarted.
+    """
+    sink = _WarningSink()
+    classifier = ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")])
+    finalizer = RewardTransitionFinalizer(classifier, warn=sink)
+
+    data, outcome = finalizer(_data(reward=1.0), _sidecar())
+
+    transition = data["transition"]
+    # Exactly the existing unclassified state -- no third reward meaning.
+    assert transition["rewards"] == 0.0
+    assert outcome.reward == 0.0
+    assert int(transition["classifier_evaluated"]) == 0
+    assert float(transition["classifier_probability"]) == 0.0
+    assert float(transition["classifier_threshold"]) == 0.0
+    assert int(transition["classifier_success"]) == 0
+    assert int(transition["success"]) == 0
+    assert transition["reward_model_id"] == ""
+    assert outcome.classifier_evaluated is False
+    assert outcome.success is False
+    assert outcome.reward_model_id == ""
+    # dones/truncated/masks pass through untouched, as when a sidecar is absent.
+    assert transition["dones"] is False
+    assert transition["truncated"] is False
+    assert transition["masks"] == 1.0
+
+    assert finalizer.classification_count == 0
+    assert finalizer.classifier_fault_count == 1
+    assert finalizer.classifier_degraded is True
+    # Loud, and it names the actual exception.
+    assert len(sink.messages) == 1
+    assert "FAULTED" in sink.messages[0]
+    assert "GPU fault" in sink.messages[0]
+    assert "RewardClassifierError" in finalizer.last_classifier_fault
+
+
+def test_classifier_fault_is_never_conflated_with_an_absent_sidecar():
+    sink = _WarningSink()
     finalizer = RewardTransitionFinalizer(
-        ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")])
+        ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")]), warn=sink
     )
 
-    with pytest.raises(RewardClassifierError, match="GPU fault"):
+    finalizer(_data(step=0), None)
+    assert sink.messages == []
+    assert finalizer.classifier_fault_count == 0
+    assert finalizer.classifier_degraded is False
+
+    finalizer(_data(step=1), _sidecar())
+
+    # Both steps are unclassified, but only one of them is a fault.
+    assert finalizer.transition_count == 2
+    assert finalizer.classification_count == 0
+    assert finalizer.classifier_fault_count == 1
+    assert len(sink.messages) == 1
+    assert "no classifier sidecar" not in sink.messages[0]
+
+
+def test_faulted_classifier_warnings_are_rate_limited_by_the_streak():
+    """A latched-broken classifier must not print one line per scored step."""
+    sink = _WarningSink()
+    # A single scripted failure latches the scripted runtime not-ready, exactly
+    # like RewardClassifierRuntime.classify does, so every later call faults.
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")]), warn=sink
+    )
+
+    for step in range(UNCLASSIFIED_WARN_STREAK):
+        finalizer(_data(step=step), _sidecar(step))
+
+    assert finalizer.classifier_fault_count == UNCLASSIFIED_WARN_STREAK
+    # First fault (named), then the streak cadence: the fault line and the
+    # unclassified-streak line, not one line per transition.
+    assert len(sink.messages) == 3
+    assert "GPU fault" in sink.messages[0]
+    assert "consecutive faults=1" in sink.messages[0]
+    assert f"consecutive faults={UNCLASSIFIED_WARN_STREAK}" in sink.messages[1]
+    streak_line = sink.messages[2]
+    assert f"{UNCLASSIFIED_WARN_STREAK} consecutive" in streak_line
+    assert "FAULTED" in streak_line
+    assert "no classifier sidecar" not in streak_line
+
+
+def test_manual_operator_success_still_ends_the_episode_when_classifier_faults():
+    """MANUAL is the production default; MARK SUCCESS must survive a fault."""
+    sink = _WarningSink()
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")]), warn=sink
+    )
+
+    data, outcome = finalizer(
+        _data(auto_success=False, operator_success=True), _sidecar()
+    )
+
+    assert outcome.success is True
+    assert outcome.reward == 1.0
+    assert outcome.done is True
+    assert outcome.truncated is False
+    assert outcome.mask == 0.0
+    assert int(data["transition"]["success"]) == 1
+    # ... while the classifier telemetry stays honestly unevaluated.
+    assert outcome.classifier_evaluated is False
+    assert outcome.reward_model_id == ""
+    assert int(data["transition"]["classifier_success"]) == 0
+    assert finalizer.classifier_fault_count == 1
+
+
+def test_auto_mode_can_never_succeed_while_the_classifier_is_faulted():
+    """Fail-closed, and the episode-boundary report says so out loud."""
+    sink = _WarningSink()
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")]), warn=sink
+    )
+
+    for step in range(3):
+        _, outcome = finalizer(
+            _data(step=step, auto_success=True), _sidecar(step)
+        )
+        assert outcome.success is False
+        assert outcome.reward == 0.0
+    # The step limit is the only remaining way out of an AUTO episode.
+    sink.messages.clear()
+    _, outcome = finalizer(
+        _data(step=3, auto_success=True, truncated=True), _sidecar(3)
+    )
+
+    assert outcome.success is False
+    assert outcome.truncated is True
+    session_report = [
+        message for message in sink.messages if "session" in message
+    ]
+    assert len(session_report) == 2
+    assert "classified NONE" in session_report[0]
+    assert "FAULTED" in session_report[1]
+    assert "in AUTO no success could have been declared" in session_report[1]
+
+
+def test_a_recovered_classification_clears_the_fault_streak_not_the_total():
+    sink = _WarningSink()
+    # Faults, then works: the scripted runtime cannot recover, so drive the
+    # two outcomes from a classifier whose readiness the test controls.
+    classifier = _FlakyClassifier(probabilities=[0.1])
+    finalizer = RewardTransitionFinalizer(classifier, warn=sink)
+
+    classifier.fail_with = RewardClassifierError("transient CUDA fault")
+    finalizer(_data(step=0), _sidecar(0))
+    classifier.fail_with = None
+    _, outcome = finalizer(_data(step=1), _sidecar(1))
+
+    assert outcome.classifier_evaluated is True
+    assert finalizer.classification_count == 1
+    assert finalizer.classifier_fault_count == 1
+    # The streak reset shows up as a fresh "first fault" warning next time.
+    classifier.fail_with = RewardClassifierError("transient CUDA fault")
+    finalizer(_data(step=2), _sidecar(2))
+    assert len([m for m in sink.messages if "consecutive faults=1" in m]) == 2
+
+
+def test_health_detail_shows_a_degraded_classifier_to_run_hil_server_check():
+    """--check prints Health's `detail`; a broken classifier must appear there."""
+    from ur_env.actor_network import ActorSessionService
+
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")]),
+        warn=_WarningSink(),
+    )
+    service = ActorSessionService(
+        lambda observation, deterministic: (np.zeros(7, np.float32), 0),
+        reward_model_id="scripted-reward-v0",
+        finalize_transition=finalizer,
+    )
+    assert service.health() == (True, True, "ready")
+
+    finalizer(_data(), _sidecar())
+
+    alive, ready, detail = service.health()
+    # Still serving: a degraded classifier is not a dead server.
+    assert alive is True and ready is True
+    assert "DEGRADED" in detail
+    assert "GPU fault" in detail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("cam1 is not a frozen trunk feature"),
+        ActorProtocolError("cam1 must be uint8"),
+    ],
+)
+def test_non_classifier_errors_are_still_raised_rather_than_swallowed(error):
+    """The try/except boundary is narrow on purpose.
+
+    ``classify`` validates its input through ``_classifier_model_input``
+    BEFORE it touches the model, and that path raises the ValueError family
+    (``FrozenTrunkFeatureSchemaError``, ``validate_classifier_frames``).  A
+    malformed tensor means the transition itself is wrong, so it must still
+    stop the run instead of being recorded as an ordinary zero-reward sample.
+    """
+    finalizer = RewardTransitionFinalizer(
+        _FlakyClassifier(probabilities=[0.9]), warn=_WarningSink()
+    )
+    finalizer.classifier.fail_with = error
+
+    with pytest.raises(type(error)):
         finalizer(_data(), _sidecar())
+
+    assert finalizer.classifier_fault_count == 0
 
 
 def test_reward_finalizer_reports_the_instantaneous_viewer_probability():
@@ -683,6 +933,12 @@ def test_long_unclassified_streak_warns_even_inside_one_episode():
 
 
 def test_corrupt_sidecar_bytes_fail_the_transition_instead_of_going_silent():
+    """Re-pinned as the OTHER side of the degrade boundary.
+
+    ``_classifier_frames`` sits outside the try that degrades classifier
+    faults: undecodable bytes mean the actor's payload is corrupt, not that
+    the model has an opinion it cannot express, so this must still raise.
+    """
     finalizer = RewardTransitionFinalizer(ScriptedRewardClassifierRuntime([0.9]))
     corrupt = {
         "cam1_jpeg": np.frombuffer(b"not-a-jpeg", dtype=np.uint8),
