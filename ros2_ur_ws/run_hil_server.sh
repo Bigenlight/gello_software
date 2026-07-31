@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_hil_server.sh -- start/reuse the Kanu HIL-SERL learner and hold its tunnel
+# run_hil_server.sh -- start/reuse the remote HIL-SERL learner and hold its tunnel
 # =============================================================================
 #
 # Normal use (this terminal remains the tunnel owner):
@@ -11,61 +11,96 @@
 #
 #   ./run_hil_server.sh --check
 #
-# Select the physical Kanu GPU and the fresh run name used only if no healthy
-# learner already exists:
+# Select the physical GPU on the learner host and the fresh run name used only
+# if no healthy learner already exists:
 #
-#   ./run_hil_server.sh --gpu 6 --run-id cube_in_cup_real_20260729_220000
+#   ./run_hil_server.sh --gpu 0 --run-id cube_in_cup_real_20260729_220000
 #
 # Demand a new lineage instead of reusing a healthy learner.  This never stops
 # the old learner: if one exists, the command refuses and asks the operator to
 # stop it explicitly first.
 #
-#   ./run_hil_server.sh --new-lineage --gpu 6 --run-id my_fresh_run
+#   ./run_hil_server.sh --new-lineage --gpu 0 --run-id my_fresh_run
 #
 # Ownership is intentionally narrow:
 #
-#   * A production learner is server-owned.  It is detached on Kanu and keeps
-#     running when this script exits.
+#   * A production learner is server-owned.  It is detached on the learner
+#     host and keeps running when this script exits.
 #   * This script owns only the SSH process it creates for
-#       laptop 127.0.0.1:50153 -> Kanu 127.0.0.1:50053.
+#       laptop 127.0.0.1:50153 -> learner host 127.0.0.1:50053.
 #   * Ctrl-C, TERM, tunnel failure, and local gRPC-probe failure clean up only
 #     that SSH child.  They never signal a reused or newly started learner.
 #
+# The learner host moved kanu -> junhyeong_ai on 2026-07-31 and the defaults
+# below moved with it.  This script can no longer drive kanu at all, and that
+# is fail-closed rather than an oversight (measured 2026-07-31, not inferred):
+# kanu's artifacts were never under one root -- its classifier sits inside an
+# unrelated stack's dataset directory -- so no HIL_REMOTE_DATA_ROOT satisfies
+# it, and its still-running learner was launched with --run-name
+# "<run>-kanu-5000" and the old classifier path, both of which
+# validate_process_contract compares by exact string equality.  Inspect kanu
+# read-only instead, and never signal anything there:
+#
+#   ssh kanu 'ps -p <pid> -o pid,etime,cmd'
+#   ssh kanu PYTHONPATH=<kanu repo>/serl_ur_infra <kanu python> -c \
+#       'GrpcActorNetwork("127.0.0.1:50053", ...).health()'
+#
+# Reverting this single commit restores the kanu defaults wholesale.
+#
 # Configuration overrides:
 #
-#   HIL_SSH_HOST             default kanu
-#   HIL_GPU_INDEX            default 5 (new starts only; reuse reports actual)
+#   HIL_SSH_HOST             default junhyeong_ai
+#   HIL_GPU_INDEX            default 0 (new starts only; reuse reports actual)
 #   HIL_RUN_ID               default cube_in_cup_real_<UTC timestamp>
 #   HIL_START_TIMEOUT_S      default 300
 #   HIL_LOCAL_PORT           default 50153
 #   HIL_REMOTE_PORT          fixed production default 50053
-#   HIL_KANU_REPO            default /home/junhyeong/gello_software_hil_current
-#   HIL_KANU_PYTHON          default /home/junhyeong/miniconda3/envs/il/bin/python
+#   HIL_REMOTE_REPO          default /home/junhyeong/gello_software_runtime
+#                            (deprecated alias: HIL_KANU_REPO)
+#   HIL_REMOTE_PYTHON        default /home/junhyeong/miniconda3/envs/il/bin/python
+#                            (deprecated alias: HIL_KANU_PYTHON)
+#   HIL_REMOTE_DATA_ROOT     default /home/junhyeong/hil-serl-data -- the single
+#                            root holding runs/, demos/, classifier_ckpt/ and
+#                            the launcher lock
 #   ACTOR_VENV               default /home/laptop3/venvs/gello-hil-actor
 #   HIL_ACCEPT_HEAD_MISMATCH default 0; 1 downgrades the fresh-lineage refusal
-#                            on a Kanu/laptop3 HEAD mismatch to a warning
-#                            (offline emergency only -- see "code identity")
+#                            on a learner-host/laptop3 HEAD mismatch to a
+#                            warning (offline emergency only -- see "code
+#                            identity")
 #
 # The artifact pins, feature-ring sizes, RAM reserve, reward contract and
 # learner options below are the production command from
-# serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md.  Do not turn this into a generic
-# remote-process runner: strict reuse is what prevents an old/synthetic learner
-# from silently receiving real robot transitions.
+# serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md; that runbook is still correct
+# about the learner options and is kanu-worded about hosts and paths, which
+# serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md supersedes.  Do not turn
+# this into a generic remote-process runner: strict reuse is what prevents an
+# old/synthetic learner from silently receiving real robot transitions.
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SSH_HOST="${HIL_SSH_HOST:-kanu}"
-GPU_INDEX="${HIL_GPU_INDEX:-5}"
+SSH_HOST="${HIL_SSH_HOST:-junhyeong_ai}"
+GPU_INDEX="${HIL_GPU_INDEX:-0}"
 RUN_ID="${HIL_RUN_ID:-}"
 START_TIMEOUT_S="${HIL_START_TIMEOUT_S:-300}"
 LOCAL_PORT="${HIL_LOCAL_PORT:-50153}"
 REMOTE_PORT="${HIL_REMOTE_PORT:-50053}"
-KANU_REPO="${HIL_KANU_REPO:-/home/junhyeong/gello_software_hil_current}"
-KANU_PYTHON="${HIL_KANU_PYTHON:-/home/junhyeong/miniconda3/envs/il/bin/python}"
-REMOTE_RUN_BASE="/home/junhyeong/hil-serl-data/runs"
+# HIL_KANU_* survive as fallback aliases -- same shape as
+# DEADMAN_WAIT_S/ENGAGE_WAIT_S -- so an operator shell or a runbook that still
+# exports the old names keeps working across the host move.
+REMOTE_REPO="${HIL_REMOTE_REPO:-${HIL_KANU_REPO:-/home/junhyeong/gello_software_runtime}}"
+REMOTE_PYTHON="${HIL_REMOTE_PYTHON:-${HIL_KANU_PYTHON:-/home/junhyeong/miniconda3/envs/il/bin/python}}"
+# One root for every server-side artifact this launcher touches.  Until
+# 2026-07-31 the run base, the demo pickle, the classifier checkpoint and the
+# launcher lock were four independent hardcoded absolute paths -- one of them
+# buried inside an unrelated stack's dataset directory -- so moving the learner
+# to another machine meant finding them one at a time and missing one silently.
+# The SHA pins below are unchanged: identity is content, not location, which is
+# what lets an artifact move and still prove it arrived intact.
+REMOTE_DATA_ROOT="${HIL_REMOTE_DATA_ROOT:-/home/junhyeong/hil-serl-data}"
+REMOTE_RUN_BASE="$REMOTE_DATA_ROOT/runs"
 ACTOR_VENV="${ACTOR_VENV:-/home/laptop3/venvs/gello-hil-actor}"
 ACTOR_PY="$ACTOR_VENV/bin/python"
 
@@ -139,8 +174,17 @@ for port_name in LOCAL_PORT REMOTE_PORT; do
         die "$port_name must be in [1, 65535]"
 done
 [[ "$REMOTE_PORT" == "50053" ]] || \
-    die "production Kanu learner port is fixed at 50053 (got $REMOTE_PORT)"
+    die "production learner port is fixed at 50053 (got $REMOTE_PORT)"
 [[ -n "$SSH_HOST" ]] || die "HIL_SSH_HOST cannot be empty"
+# The data root becomes four remote paths and is marshalled as a bare
+# positional, so keep it boring: absolute, no trailing slash, no whitespace or
+# shell metacharacters.  A rejected override here is far cheaper than a remote
+# path that expands into something plausible but wrong.
+[[ -n "$REMOTE_DATA_ROOT" ]] || die "HIL_REMOTE_DATA_ROOT cannot be empty"
+[[ "$REMOTE_DATA_ROOT" =~ ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$ ]] || \
+    die "HIL_REMOTE_DATA_ROOT must be an absolute path of [A-Za-z0-9._/-] with no trailing slash (got: $REMOTE_DATA_ROOT)"
+[[ "$REMOTE_DATA_ROOT" != *".."* ]] || \
+    die "HIL_REMOTE_DATA_ROOT must not contain '..'"
 
 if [[ -z "$RUN_ID" ]]; then
     RUN_ID="cube_in_cup_real_$(date -u +%Y%m%d_%H%M%S)"
@@ -173,8 +217,9 @@ PY
 }
 
 # Check before any remote mutation.  A second check after the learner is ready
-# closes the unavoidable race where another local process binds during Kanu's
-# startup warm-up; even in that race the learner remains server-owned.
+# closes the unavoidable race where another local process binds during the
+# learner's startup warm-up; even in that race the learner remains
+# server-owned.
 if [[ "$MODE" == "start" ]] && ! local_port_is_free; then
     die "local port $LOCAL_PORT is occupied; no remote learner operation was attempted"
 fi
@@ -182,29 +227,31 @@ fi
 # ---------------------------------------------------------------------------
 # Cross-host code identity.
 #
-# The defect this exists for: Kanu's HIL checkout had `origin` pointing at a
-# LOCAL PATH instead of GitHub.  `git fetch origin` there returned rc=0 and
-# fetched nothing, so Kanu sat a full day behind laptop3 while every existing
-# check still passed.  Nothing in the stack ever compared Kanu's HEAD to
+# The defect this exists for (kanu, 2026-07-30, back when kanu was the learner
+# host): its HIL checkout had `origin` pointing at a LOCAL PATH instead of
+# GitHub.  `git fetch origin` there returned rc=0 and fetched nothing, so the
+# learner host sat a full day behind laptop3 while every existing check still
+# passed.  Nothing in the stack ever compared the learner host's HEAD to
 # laptop3's, so the staleness was invisible until someone nearly reset the live
 # learner's checkout to that stale FETCH_HEAD.
 #
 # The fix compares the two hosts DIRECTLY over the ssh channel that already
 # connects them, rather than asking GitHub whether either one is current.  The
-# failure mode was Kanu diverging from laptop3, so laptop3 is the reference and
-# network reachability becomes irrelevant to the guard.  The GitHub tip is only
-# a best-effort third opinion (remote-side diagnose_github_tip).
+# failure mode was the learner host diverging from laptop3, so laptop3 is the
+# reference and network reachability becomes irrelevant to the guard.  The
+# GitHub tip is only a best-effort third opinion (remote-side
+# diagnose_github_tip).
 #
 # ACCEPTED LIMITATION, stated so nobody oversells it: this compares committed
 # HEADs only.  laptop3's working tree is routinely dirty -- the entire
 # 2026-07-30 evening operator batch ran uncommitted -- so "HEADs match" does NOT
-# mean Kanu holds the exact bytes the actor is executing.  Shipping the working
-# tree is out of scope by design.
+# mean the learner host holds the exact bytes the actor is executing.  Shipping
+# the working tree is out of scope by design.
 LAPTOP_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
 LAPTOP_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 if [[ ! "$LAPTOP_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
     LAPTOP_HEAD="unknown"
-    echo "WARNING: cannot read laptop3 HEAD from $REPO_ROOT; the Kanu/laptop3 code identity check will report relation=laptop_head_unknown." >&2
+    echo "WARNING: cannot read laptop3 HEAD from $REPO_ROOT; the learner-host/laptop3 code identity check will report relation=laptop_head_unknown." >&2
 fi
 [[ -n "$LAPTOP_BRANCH" ]] || LAPTOP_BRANCH="unknown"
 ACCEPT_HEAD_MISMATCH="${HIL_ACCEPT_HEAD_MISMATCH:-0}"
@@ -223,9 +270,10 @@ set +e
 REMOTE_OUTPUT="$(
     ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" bash -s -- \
         "$MODE" "$NEW_LINEAGE" "$GPU_INDEX" "$RUN_ID" \
-        "$START_TIMEOUT_S" "$KANU_REPO" "$KANU_PYTHON" \
+        "$START_TIMEOUT_S" "$REMOTE_REPO" "$REMOTE_PYTHON" \
         "$REMOTE_PORT" "$REMOTE_RUN_BASE" \
-        "$LAPTOP_HEAD" "$LAPTOP_BRANCH" "$ACCEPT_HEAD_MISMATCH" <<'REMOTE_SCRIPT'
+        "$LAPTOP_HEAD" "$LAPTOP_BRANCH" "$ACCEPT_HEAD_MISMATCH" \
+        "$REMOTE_DATA_ROOT" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 MODE="$1"
@@ -235,8 +283,8 @@ RUN_ID="$4"
 START_TIMEOUT_S="$5"
 # Canonicalize a stable deployment symlink before building the exact process
 # contract; both fresh starts and reuse checks then compare the same real path.
-KANU_REPO="$(readlink -f "$6")"
-KANU_PYTHON="$7"
+REMOTE_REPO="$(readlink -f "$6")"
+REMOTE_PYTHON="$7"
 REMOTE_PORT="$8"
 REMOTE_RUN_BASE="$9"
 # laptop3's committed code identity, measured on the laptop and carried over the
@@ -244,57 +292,68 @@ REMOTE_RUN_BASE="$9"
 LAPTOP_HEAD="${10}"
 LAPTOP_BRANCH="${11}"
 ACCEPT_HEAD_MISMATCH="${12}"
+# The single root every server-side artifact hangs off.  The names below are
+# fixed; only the root is configurable, because the SHA pins -- not the paths --
+# are what identify these files.
+REMOTE_DATA_ROOT="${13}"
 
-CLASSIFIER="/home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150"
+CLASSIFIER="$REMOTE_DATA_ROOT/classifier_ckpt/checkpoint_150"
 CLASSIFIER_SHA256="512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
-REAL_DEMO="/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl"
+REAL_DEMO="$REMOTE_DATA_ROOT/demos/cube_in_cup_20260720_success_23takes.pkl"
 REAL_DEMO_SHA256="f97185582401ce7570d44fddc33d1bd64b215d7e32d6384d5fe13e1b405032fa"
-RESNET_SOURCE="$KANU_REPO/third_party/hil-serl/examples/experiments/resnet10_params.pkl"
+RESNET_SOURCE="$REMOTE_REPO/third_party/hil-serl/examples/experiments/resnet10_params.pkl"
 RESNET_SHA256="175745d43d30233eb01b5369465d1c24c11b8ee71ccb734cc1c1bca13e07f57b"
 REWARD_THRESHOLD="0.5"
 REWARD_MODEL_ID="cube-in-cup-all3-ckpt150+sidecar-v1"
 POLICY_MODEL_ID="hil-serl-hybrid-sac-resnet10-trunk-cache-v1"
 OBSERVATION_SCHEMA_HASH="3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903"
-RUN_LOCK="/home/junhyeong/hil-serl-data/.run_hil_server.lock"
+RUN_LOCK="$REMOTE_DATA_ROOT/.run_hil_server.lock"
 
 remote_die() {
     echo "REMOTE ERROR: $*" >&2
     exit 1
 }
 
+# REMOTE_RUN_BASE arrives as its own positional because the laptop validates the
+# reported run root against it.  Assert the two agree, so a mis-ordered
+# positional dies here instead of quietly pointing a fresh lineage at a
+# plausible-looking wrong directory.
+[[ "$REMOTE_RUN_BASE" == "$REMOTE_DATA_ROOT/runs" ]] || \
+    remote_die "run base '$REMOTE_RUN_BASE' does not derive from data root '$REMOTE_DATA_ROOT'; the launcher arguments are inconsistent"
+
 validate_static_contract() {
-    [[ -d "$KANU_REPO" ]] || remote_die "Kanu repo is missing: $KANU_REPO"
-    [[ -x "$KANU_PYTHON" ]] || remote_die "Kanu Python is missing: $KANU_PYTHON"
-    [[ -f "$KANU_REPO/serl_ur_infra/scripts/run_rlpd_learner_server.py" ]] || \
-        remote_die "learner entrypoint is missing from $KANU_REPO"
+    [[ -d "$REMOTE_REPO" ]] || remote_die "learner-host repo is missing: $REMOTE_REPO"
+    [[ -x "$REMOTE_PYTHON" ]] || remote_die "learner-host Python is missing: $REMOTE_PYTHON"
+    [[ -f "$REMOTE_REPO/serl_ur_infra/scripts/run_rlpd_learner_server.py" ]] || \
+        remote_die "learner entrypoint is missing from $REMOTE_REPO"
 
     # --- repository topology (network-free) ---------------------------------
     # A linked git worktree chains its object store and its refs to ANOTHER
     # local checkout, so what this repo reports can be advanced or rewound by
-    # work done elsewhere on Kanu that nothing here can see.  That is exactly
-    # the defect class this guard exists to eliminate, so refuse the shape
-    # rather than try to audit the checkout it is chained to.
+    # work done elsewhere on the learner host that nothing here can see.  That
+    # is exactly the defect class this guard exists to eliminate, so refuse the
+    # shape rather than try to audit the checkout it is chained to.
     local git_dir git_common_dir origin_url origin_pattern
-    git_dir="$(git -C "$KANU_REPO" rev-parse --git-dir 2>/dev/null)" || \
-        remote_die "Kanu checkout is not a git repository: $KANU_REPO"
-    git_common_dir="$(git -C "$KANU_REPO" rev-parse --git-common-dir 2>/dev/null)" || \
-        remote_die "Kanu checkout is not a git repository: $KANU_REPO"
+    git_dir="$(git -C "$REMOTE_REPO" rev-parse --git-dir 2>/dev/null)" || \
+        remote_die "learner-host checkout is not a git repository: $REMOTE_REPO"
+    git_common_dir="$(git -C "$REMOTE_REPO" rev-parse --git-common-dir 2>/dev/null)" || \
+        remote_die "learner-host checkout is not a git repository: $REMOTE_REPO"
     [[ "$git_dir" == "$git_common_dir" ]] || \
-        remote_die "Kanu checkout is a linked git worktree chained to another local checkout (git-dir=$git_dir, git-common-dir=$git_common_dir): $KANU_REPO"
+        remote_die "learner-host checkout is a linked git worktree chained to another local checkout (git-dir=$git_dir, git-common-dir=$git_common_dir): $REMOTE_REPO"
 
     # `origin` pointing at a LOCAL PATH is the precise 2026-07-30 defect: fetch
     # returned rc=0, transferred nothing, and left this checkout a full day
     # stale while looking healthy.  Pin origin to the canonical GitHub remote so
     # a silent no-op fetch cannot happen again.
-    origin_url="$(git -C "$KANU_REPO" remote get-url origin 2>/dev/null || true)"
+    origin_url="$(git -C "$REMOTE_REPO" remote get-url origin 2>/dev/null || true)"
     origin_pattern='^(https://|ssh://git@|git@)github\.com[:/]Bigenlight/gello_software(\.git)?$'
     [[ "$origin_url" =~ $origin_pattern ]] || \
-        remote_die "Kanu 'origin' is not the canonical GitHub remote (got: ${origin_url:-<none>}); a local-path origin makes 'git fetch origin' a silent no-op"
+        remote_die "learner-host 'origin' is not the canonical GitHub remote (got: ${origin_url:-<none>}); a local-path origin makes 'git fetch origin' a silent no-op"
 
-    git -C "$KANU_REPO" merge-base --is-ancestor ca19652 HEAD || \
-        remote_die "Kanu checkout does not contain required learner baseline ca19652"
+    git -C "$REMOTE_REPO" merge-base --is-ancestor ca19652 HEAD || \
+        remote_die "learner-host checkout does not contain required learner baseline ca19652"
 
-    submodule_state="$(git -C "$KANU_REPO" submodule status third_party/hil-serl)"
+    submodule_state="$(git -C "$REMOTE_REPO" submodule status third_party/hil-serl)"
     [[ "${submodule_state:0:1}" == " " ]] || \
         remote_die "third_party/hil-serl is missing or not at the recorded gitlink: $submodule_state"
 
@@ -307,8 +366,8 @@ validate_static_contract() {
 
     actual_classifier_sha="$(
         PYTHONDONTWRITEBYTECODE=1 \
-        PYTHONPATH="$KANU_REPO/serl_ur_infra" \
-        "$KANU_PYTHON" - "$CLASSIFIER" <<'PY'
+        PYTHONPATH="$REMOTE_REPO/serl_ur_infra" \
+        "$REMOTE_PYTHON" - "$CLASSIFIER" <<'PY'
 import sys
 from ur_env.classifier_sidecar import directory_sha256
 print(directory_sha256(sys.argv[1]))
@@ -319,8 +378,8 @@ PY
 
     defaults="$(
         PYTHONDONTWRITEBYTECODE=1 \
-        PYTHONPATH="$KANU_REPO/serl_ur_infra" \
-        "$KANU_PYTHON" - <<'PY'
+        PYTHONPATH="$REMOTE_REPO/serl_ur_infra" \
+        "$REMOTE_PYTHON" - <<'PY'
 from ur_env.classifier_sidecar import CLASSIFIER_INPUT_ID
 from ur_env.rlpd_receive_server import (
     DEFAULT_CLASSIFIER_CONFIRMATIONS,
@@ -337,15 +396,15 @@ PY
 
 # ---------------------------------------------------------------------------
 # Cross-host code identity.  HEAD_RELATION is one of:
-#   match | kanu_behind | kanu_ahead | diverged | kanu_never_fetched |
+#   match | remote_behind | remote_ahead | diverged | remote_never_fetched |
 #   laptop_head_unknown | unchecked
 # It is only ever FATAL at the fresh-lineage gate further down; every other
 # caller (reuse, --check) gets the banner and proceeds.  See that gate for the
 # rationale of the split.
 # ---------------------------------------------------------------------------
 HEAD_RELATION="unchecked"
-KANU_HEAD=""
-KANU_BRANCH=""
+REMOTE_HEAD=""
+REMOTE_BRANCH=""
 
 # Best-effort third opinion, never fatal.  This deliberately uses ls-remote and
 # NEVER `git fetch`: fetch writes refs into the very checkout being audited and
@@ -354,92 +413,93 @@ KANU_BRANCH=""
 diagnose_github_tip() {
     local ref line github_head
     if [[ "$LAPTOP_BRANCH" == "unknown" || "$LAPTOP_BRANCH" == "HEAD" ]]; then
-        echo "GitHub tip UNVERIFIED: laptop3 is not on a named branch, so there is nothing to look up. The laptop3<->Kanu comparison above is authoritative." >&2
+        echo "GitHub tip UNVERIFIED: laptop3 is not on a named branch, so there is nothing to look up. The laptop3<->learner-host comparison above is authoritative." >&2
         return 0
     fi
     ref="refs/heads/$LAPTOP_BRANCH"
-    if ! line="$(timeout 8 git -C "$KANU_REPO" ls-remote origin "$ref" 2>/dev/null)"; then
-        echo "GitHub tip UNVERIFIED: 'git ls-remote origin $ref' failed or timed out from Kanu (no fetch was attempted). The laptop3<->Kanu comparison above is authoritative." >&2
+    if ! line="$(timeout 8 git -C "$REMOTE_REPO" ls-remote origin "$ref" 2>/dev/null)"; then
+        echo "GitHub tip UNVERIFIED: 'git ls-remote origin $ref' failed or timed out on the learner host (no fetch was attempted). The laptop3<->learner-host comparison above is authoritative." >&2
         return 0
     fi
     github_head="${line%%[[:space:]]*}"
     if [[ -z "$github_head" ]]; then
-        echo "GitHub has no $ref: neither laptop3 nor Kanu has pushed this branch. The laptop3<->Kanu comparison above is authoritative." >&2
+        echo "GitHub has no $ref: neither laptop3 nor the learner host has pushed this branch. The laptop3<->learner-host comparison above is authoritative." >&2
         return 0
     fi
     echo "HIL_SERVER_GITHUB_TIP=branch=$LAPTOP_BRANCH head=$github_head"
     {
-        if [[ "$github_head" == "$LAPTOP_HEAD" && "$github_head" == "$KANU_HEAD" ]]; then
-            echo "Three-way: laptop3, Kanu and GitHub $ref all agree ($github_head)."
-        elif [[ "$LAPTOP_HEAD" == "$KANU_HEAD" ]]; then
-            echo "Three-way: laptop3 and Kanu agree ($LAPTOP_HEAD) but GitHub $ref is $github_head -- the agreeing pair is UNPUSHED (or GitHub carries work neither host has)."
+        if [[ "$github_head" == "$LAPTOP_HEAD" && "$github_head" == "$REMOTE_HEAD" ]]; then
+            echo "Three-way: laptop3, the learner host and GitHub $ref all agree ($github_head)."
+        elif [[ "$LAPTOP_HEAD" == "$REMOTE_HEAD" ]]; then
+            echo "Three-way: laptop3 and the learner host agree ($LAPTOP_HEAD) but GitHub $ref is $github_head -- the agreeing pair is UNPUSHED (or GitHub carries work neither host has)."
         elif [[ "$github_head" == "$LAPTOP_HEAD" ]]; then
-            echo "Three-way: laptop3 matches GitHub $ref; KANU is the stale one."
-        elif [[ "$github_head" == "$KANU_HEAD" ]]; then
-            echo "Three-way: Kanu matches GitHub $ref; LAPTOP3 is the odd one out (unpushed local commits, or laptop3 is behind)."
+            echo "Three-way: laptop3 matches GitHub $ref; THE LEARNER HOST is the stale one."
+        elif [[ "$github_head" == "$REMOTE_HEAD" ]]; then
+            echo "Three-way: the learner host matches GitHub $ref; LAPTOP3 is the odd one out (unpushed local commits, or laptop3 is behind)."
         else
-            echo "Three-way: laptop3, Kanu and GitHub $ref are ALL different."
+            echo "Three-way: laptop3, the learner host and GitHub $ref are ALL different."
         fi
     } >&2
 }
 
 compare_heads() {
-    # A missing or non-git KANU_REPO is reported far more precisely by
+    # A missing or non-git REMOTE_REPO is reported far more precisely by
     # validate_static_contract, which runs immediately after this.  Stay silent
     # rather than pre-empt it with a raw git error.
-    [[ -d "$KANU_REPO" ]] || return 0
-    git -C "$KANU_REPO" rev-parse --git-dir >/dev/null 2>&1 || return 0
-    KANU_HEAD="$(git -C "$KANU_REPO" rev-parse HEAD 2>/dev/null || true)"
-    KANU_BRANCH="$(git -C "$KANU_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    [[ -n "$KANU_HEAD" ]] || return 0
+    [[ -d "$REMOTE_REPO" ]] || return 0
+    git -C "$REMOTE_REPO" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    REMOTE_HEAD="$(git -C "$REMOTE_REPO" rev-parse HEAD 2>/dev/null || true)"
+    REMOTE_BRANCH="$(git -C "$REMOTE_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [[ -n "$REMOTE_HEAD" ]] || return 0
 
     if [[ ! "$LAPTOP_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
         HEAD_RELATION="laptop_head_unknown"
-    elif [[ "$LAPTOP_HEAD" == "$KANU_HEAD" ]]; then
+    elif [[ "$LAPTOP_HEAD" == "$REMOTE_HEAD" ]]; then
         HEAD_RELATION="match"
-    elif ! git -C "$KANU_REPO" cat-file -e "$LAPTOP_HEAD" 2>/dev/null; then
-        # Kanu's object store has never even seen laptop3's commit.  This is the
-        # signature of the incident: a fetch that reports success while
-        # transferring nothing.
-        HEAD_RELATION="kanu_never_fetched"
-    elif git -C "$KANU_REPO" merge-base --is-ancestor "$KANU_HEAD" "$LAPTOP_HEAD" 2>/dev/null; then
-        HEAD_RELATION="kanu_behind"
-    elif git -C "$KANU_REPO" merge-base --is-ancestor "$LAPTOP_HEAD" "$KANU_HEAD" 2>/dev/null; then
-        HEAD_RELATION="kanu_ahead"
+    elif ! git -C "$REMOTE_REPO" cat-file -e "$LAPTOP_HEAD" 2>/dev/null; then
+        # The learner host's object store has never even seen laptop3's commit.
+        # This is the signature of the incident: a fetch that reports success
+        # while transferring nothing.
+        HEAD_RELATION="remote_never_fetched"
+    elif git -C "$REMOTE_REPO" merge-base --is-ancestor "$REMOTE_HEAD" "$LAPTOP_HEAD" 2>/dev/null; then
+        HEAD_RELATION="remote_behind"
+    elif git -C "$REMOTE_REPO" merge-base --is-ancestor "$LAPTOP_HEAD" "$REMOTE_HEAD" 2>/dev/null; then
+        HEAD_RELATION="remote_ahead"
     else
         HEAD_RELATION="diverged"
     fi
 
     if [[ "$HEAD_RELATION" == "match" ]]; then
-        echo "HIL_SERVER_HEAD_MATCH=laptop=$LAPTOP_HEAD kanu=$KANU_HEAD relation=match"
+        echo "HIL_SERVER_HEAD_MATCH=laptop=$LAPTOP_HEAD remote=$REMOTE_HEAD relation=match"
         diagnose_github_tip
         return 0
     fi
 
-    echo "HIL_SERVER_HEAD_MISMATCH=laptop=$LAPTOP_HEAD kanu=$KANU_HEAD relation=$HEAD_RELATION"
+    echo "HIL_SERVER_HEAD_MISMATCH=laptop=$LAPTOP_HEAD remote=$REMOTE_HEAD relation=$HEAD_RELATION"
     {
         echo "=================================================================="
-        echo "  !!  KANU / LAPTOP3 CODE IDENTITY MISMATCH  !!"
+        echo "  !!  LEARNER HOST / LAPTOP3 CODE IDENTITY MISMATCH  !!"
         echo "=================================================================="
         echo "  laptop3 : $LAPTOP_HEAD  (${LAPTOP_BRANCH})"
-        echo "  kanu    : $KANU_HEAD  (${KANU_BRANCH:-unknown})"
-        echo "  kanu repo: $KANU_REPO"
+        echo "  remote  : $REMOTE_HEAD  (${REMOTE_BRANCH:-unknown})"
+        echo "  remote repo: $REMOTE_REPO"
         echo "  relation: $HEAD_RELATION"
         echo "------------------------------------------------------------------"
         case "$HEAD_RELATION" in
-            kanu_never_fetched)
-                echo "  Kanu's object store does not contain laptop3's commit AT ALL."
-                echo "  That is the signature of a fetch that reported success and"
-                echo "  transferred nothing (for example an 'origin' that points at a"
-                echo "  local path).  Kanu has never seen this work."
+            remote_never_fetched)
+                echo "  The learner host's object store does not contain laptop3's"
+                echo "  commit AT ALL.  That is the signature of a fetch that reported"
+                echo "  success and transferred nothing (for example an 'origin' that"
+                echo "  points at a local path).  It has never seen this work."
                 ;;
-            kanu_behind)
-                echo "  Kanu is BEHIND laptop3: it has the commit but has not checked"
-                echo "  it out.  The learner is running older code than the actor."
+            remote_behind)
+                echo "  The learner host is BEHIND laptop3: it has the commit but has"
+                echo "  not checked it out.  The learner is running older code than the"
+                echo "  actor."
                 ;;
-            kanu_ahead)
-                echo "  Kanu is AHEAD of laptop3: laptop3 is running older code than"
-                echo "  the learner, or laptop3 was rewound."
+            remote_ahead)
+                echo "  The learner host is AHEAD of laptop3: laptop3 is running older"
+                echo "  code than the learner, or laptop3 was rewound."
                 ;;
             diverged)
                 echo "  The checkouts have DIVERGED: neither HEAD contains the other."
@@ -457,7 +517,7 @@ compare_heads() {
 }
 
 list_learner_pids() {
-    "$KANU_PYTHON" - <<'PY'
+    "$REMOTE_PYTHON" - <<'PY'
 from pathlib import Path
 
 result = []
@@ -481,7 +541,7 @@ PY
 
 validate_process_contract() {
     local pid="$1"
-    "$KANU_PYTHON" - "$pid" "$KANU_REPO" "$KANU_PYTHON" \
+    "$REMOTE_PYTHON" - "$pid" "$REMOTE_REPO" "$REMOTE_PYTHON" \
         "$REMOTE_PORT" "$CLASSIFIER" "$CLASSIFIER_SHA256" \
         "$REWARD_THRESHOLD" "$REWARD_MODEL_ID" "$REAL_DEMO" \
         "$RESNET_SOURCE" <<'PY'
@@ -601,7 +661,7 @@ if checkpoint_root.name != "checkpoints":
 for flag, expected in expected_paths.items():
     if Path(one(flag)) != expected:
         raise SystemExit(f"PID {pid}: {flag} is outside the learner run root")
-exact("--run-name", f"{run_root.name}-kanu-5000")
+exact("--run-name", f"{run_root.name}-hil-5000")
 
 environment = {}
 for item in (proc / "environ").read_bytes().split(b"\0"):
@@ -633,8 +693,8 @@ PY
 
 probe_server() {
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH="$KANU_REPO/serl_ur_infra" \
-    timeout 12 "$KANU_PYTHON" - "$REMOTE_PORT" \
+    PYTHONPATH="$REMOTE_REPO/serl_ur_infra" \
+    timeout 12 "$REMOTE_PYTHON" - "$REMOTE_PORT" \
         "$POLICY_MODEL_ID" "$REWARD_MODEL_ID" "$OBSERVATION_SCHEMA_HASH" <<'PY'
 from dataclasses import asdict
 import json
@@ -672,7 +732,7 @@ PY
 
 validate_ready_evidence() {
     local run_root="$1"
-    "$KANU_PYTHON" - "$run_root" <<'PY'
+    "$REMOTE_PYTHON" - "$run_root" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -751,7 +811,7 @@ PY
 }
 
 port_is_open() {
-    "$KANU_PYTHON" - "$REMOTE_PORT" <<'PY'
+    "$REMOTE_PYTHON" - "$REMOTE_PORT" <<'PY'
 import socket
 import sys
 try:
@@ -827,7 +887,7 @@ fi
 # also owns a per-lineage writer lock, but it binds gRPC only after expensive
 # JAX warm-up; this outer lock prevents two launchers from doing that warm-up
 # concurrently during the pre-bind window.
-command -v flock >/dev/null 2>&1 || remote_die "flock is required on Kanu"
+command -v flock >/dev/null 2>&1 || remote_die "flock is required on the learner host"
 exec 9>"$RUN_LOCK"
 flock -w 10 9 || remote_die "another run_hil_server launcher holds $RUN_LOCK"
 
@@ -856,7 +916,7 @@ if [[ "$existing_status" -eq 3 ]]; then
     # Never launch a competitor; wait for this one under the launcher lock.
     initializing_pid="$(printf '%s\n' "$existing_output" | sed -n 's/^HIL_SERVER_PID=//p')"
     initializing_run_root="$(printf '%s\n' "$existing_output" | sed -n 's/^HIL_SERVER_RUN_ROOT=//p')"
-    echo "Kanu learner PID $initializing_pid exists and is initializing; waiting for ready..." >&2
+    echo "learner PID $initializing_pid exists and is initializing; waiting for ready..." >&2
     deadline=$(( $(date +%s) + START_TIMEOUT_S ))
     while kill -0 "$initializing_pid" 2>/dev/null; do
         if probe="$(probe_server 2>/dev/null)"; then
@@ -877,14 +937,14 @@ fi
 
 # A fresh lineage is permanent: every transition it will ever learn from is
 # produced by the actor running laptop3's code, and a lineage born from a
-# different Kanu commit cannot be repaired afterwards.  This is therefore the
-# one place where a HEAD mismatch is fatal.
+# different learner-host commit cannot be repaired afterwards.  This is
+# therefore the one place where a HEAD mismatch is fatal.
 #
 # Reuse and --check deliberately do NOT die on a mismatch.  Hard-failing reuse
-# would force one of two worse outcomes: advancing Kanu's checkout underneath a
-# live learner -- which imports modules lazily, so it would then be running a
-# mixture of two versions -- or freezing laptop3 development until the lineage
-# ends.  Cross-version safety for an already-running learner is already enforced
+# would force one of two worse outcomes: advancing the learner host's checkout
+# underneath a live learner -- which imports modules lazily, so it would then be
+# running a mixture of two versions -- or freezing laptop3 development until
+# the lineage ends.  Cross-version safety for a running learner is enforced
 # by the observation-schema hash, the policy/reward model IDs and
 # validate_process_contract.  The defect being cured here is the SILENCE, not
 # the mismatch itself.
@@ -892,13 +952,13 @@ if [[ "$HEAD_RELATION" != "match" ]]; then
     if [[ "$ACCEPT_HEAD_MISMATCH" == "1" ]]; then
         echo "HIL_ACCEPT_HEAD_MISMATCH=1: starting a fresh lineage despite code identity relation '$HEAD_RELATION'." >&2
     else
-        remote_die "refusing to start a fresh lineage while Kanu and laptop3 are not on the same commit (relation=$HEAD_RELATION, laptop=$LAPTOP_HEAD, kanu=${KANU_HEAD:-unknown}); align the checkouts, or set HIL_ACCEPT_HEAD_MISMATCH=1 to accept it deliberately"
+        remote_die "refusing to start a fresh lineage while the learner host and laptop3 are not on the same commit (relation=$HEAD_RELATION, laptop=$LAPTOP_HEAD, remote=${REMOTE_HEAD:-unknown}); align the checkouts, or set HIL_ACCEPT_HEAD_MISMATCH=1 to accept it deliberately"
     fi
 fi
 
-dirty_checkout="$(git -C "$KANU_REPO" status --porcelain --untracked-files=normal)"
+dirty_checkout="$(git -C "$REMOTE_REPO" status --porcelain --untracked-files=normal)"
 [[ -z "$dirty_checkout" ]] || \
-    remote_die "Kanu checkout is dirty; refusing a new production learner: $dirty_checkout"
+    remote_die "learner-host checkout is dirty; refusing a new production learner: $dirty_checkout"
 
 gpu_name="$(nvidia-smi -i "$GPU_INDEX" --query-gpu=name --format=csv,noheader 2>/dev/null)" || \
     remote_die "physical GPU $GPU_INDEX does not exist"
@@ -909,8 +969,8 @@ fi
 
 memory_values="$(
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH="$KANU_REPO/serl_ur_infra" \
-    "$KANU_PYTHON" - <<'PY'
+    PYTHONPATH="$REMOTE_REPO/serl_ur_infra" \
+    "$REMOTE_PYTHON" - <<'PY'
 from ur_env.learner import (
     estimate_feature_demo_memory,
     estimate_feature_replay_memory,
@@ -946,14 +1006,14 @@ stdout_path="$run_root/logs/stdout.log"
 
 echo "Starting production learner on physical GPU $GPU_INDEX ($gpu_name)" >&2
 echo "Fresh lineage: $run_root" >&2
-cd "$KANU_REPO"
+cd "$REMOTE_REPO"
 nohup env \
     CUDA_VISIBLE_DEVICES="$GPU_INDEX" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false \
     WANDB_SILENT=true \
     WANDB_DISABLE_CODE=true \
-    PYTHONPATH="$KANU_REPO/serl_ur_infra:$KANU_REPO/third_party/hil-serl/serl_launcher" \
-    "$KANU_PYTHON" \
+    PYTHONPATH="$REMOTE_REPO/serl_ur_infra:$REMOTE_REPO/third_party/hil-serl/serl_launcher" \
+    "$REMOTE_PYTHON" \
     serl_ur_infra/scripts/run_rlpd_learner_server.py \
     --host 127.0.0.1 \
     --port "$REMOTE_PORT" \
@@ -970,8 +1030,8 @@ nohup env \
     --wandb-dir "$wandb_dir" \
     --wandb-mode offline \
     --wandb-project hil-serl \
-    --run-name "$RUN_ID-kanu-5000" \
-    --hil-serl-root "$KANU_REPO/third_party/hil-serl" \
+    --run-name "$RUN_ID-hil-5000" \
+    --hil-serl-root "$REMOTE_REPO/third_party/hil-serl" \
     --resnet-source "$RESNET_SOURCE" \
     --resnet-cache "$resnet_cache" \
     --replay-capacity 50000 \
@@ -1167,7 +1227,7 @@ echo "  actor   : grpc://127.0.0.1:$LOCAL_PORT"
 echo "  tunnel  : PID $TUNNEL_PID (owned by this launcher)"
 echo "============================================================"
 echo "Keep this terminal open. Ctrl-C closes only the tunnel."
-echo "The Kanu learner keeps running until you stop it explicitly on Kanu."
+echo "The learner on $SSH_HOST keeps running until you stop it explicitly there."
 
 set +e
 wait "$TUNNEL_PID"

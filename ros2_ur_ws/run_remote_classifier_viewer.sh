@@ -8,7 +8,9 @@ python3 -c 'import zmq, rclpy' || {
     echo "Missing python3-zmq/rclpy; install: sudo apt install python3-zmq" >&2
     exit 2
 }
-SSH_HOST="${CLASSIFIER_SSH_HOST:-kanu}"
+# The classifier checkpoint moved to junhyeong_ai with the learner on
+# 2026-07-31; kanu still has its copy, so override to look there.
+SSH_HOST="${CLASSIFIER_SSH_HOST:-junhyeong_ai}"
 LOCAL_PORT="${CLASSIFIER_LOCAL_PORT:-5594}"
 REMOTE_PORT="${CLASSIFIER_REMOTE_PORT:-5594}"
 # Keep in sync with rlpd_receive_server.py's DEFAULT_REWARD_THRESHOLD.

@@ -108,7 +108,7 @@
 # ── 사용법 ───────────────────────────────────────────────────────────────────
 #   ./run_hil_actor.sh --dry-preflight          # 점검만, actor 미기동 (읽기 전용)
 #   ./run_hil_actor.sh --dry-preflight --arm    # arm handoff 준비까지 읽기 전용 검증
-#   ./run_hil_actor.sh --fake-env               # Stage A: fake env로 Kanu 왕복
+#   ./run_hil_actor.sh --fake-env               # Stage A: fake env로 learner 왕복
 #   ./run_hil_actor.sh                          # Stage B: 실센서 actor
 #   ./run_hil_actor.sh --arm --deadman topic    # proof 확인 + FPC 전환 + 실제 actor
 #   ./run_hil_actor.sh --save-video --actor-id foo   # 인자는 그대로 통과
@@ -151,7 +151,7 @@ WS_SETUP="$REPO_ROOT/ros2_ur_ws/install/setup.bash"
 ACTOR_SCRIPT="$REPO_ROOT/serl_ur_infra/scripts/run_remote_rlpd_actor.py"
 
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
-SERVER_PORT="${SERVER_PORT:-50153}"          # 로컬 터널 입구 → Kanu 50053
+SERVER_PORT="${SERVER_PORT:-50153}"          # 로컬 터널 입구 → learner 50053
 EXP_NAME="${EXP_NAME:-cube_in_cup}"
 UR_CONFIG_MODULE="${UR_CONFIG_MODULE:-ur_experiments.mappings}"
 # Real startup measurements include observation serialization, SSH transport,
@@ -668,7 +668,7 @@ PYEOF
         p_ok "TCP $SERVER_HOST:$SERVER_PORT — $PORT_OUT"
     else
         p_fail "TCP $SERVER_HOST:$SERVER_PORT 연결 실패 — $PORT_OUT" \
-               "SSH 터널을 먼저 띄운다: ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:$SERVER_PORT:127.0.0.1:50053 kanu (그리고 Kanu에서 receive server가 떠 있어야 한다)"
+               "터널은 run_hil_server.sh(Terminal 1)가 연다. 직접 열려면: ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:$SERVER_PORT:127.0.0.1:50053 junhyeong_ai (그리고 그 서버에서 learner가 떠 있어야 한다)"
     fi
 fi
 
