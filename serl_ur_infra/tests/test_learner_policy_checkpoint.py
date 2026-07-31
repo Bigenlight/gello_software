@@ -625,3 +625,55 @@ def test_real_wandb_offline_artifact_and_checked_in_protobuf_coexist(
     offline_runs = tuple((tmp_path / "wandb").glob("offline-run-*"))
     assert offline_runs
     assert any(path.is_dir() for path in offline_runs)
+
+
+def test_a_dead_logger_sink_does_not_fault_the_learner_or_stop_training(tmp_path):
+    """The whole point: `train_once` calls `log` inside its fault handler.
+
+    Sink-failure semantics are covered on their own in
+    ``test_learner_logging.py``; what only this module can show is that a
+    logger which no longer raises also no longer latches the permanent learner
+    fault that ends the ``LearnerWorker`` thread.
+    """
+
+    class _DeadRun(_FakeRun):
+        def log(self, record, step):
+            raise ConnectionResetError("Connection lost")
+
+    def _logger_with_run(path, run, warnings):
+        wandb = _FakeWandb()
+        wandb.run = run
+        return JsonlWandbLogger(
+            path,
+            wandb_dir=path.parent,
+            wandb_module=wandb,
+            warn=warnings.append,
+        )
+
+    warnings: list[str] = []
+    config = LearnerConfig(
+        batch_size=4,
+        training_starts=4,
+        publish_period=1,
+        checkpoint_period=100,
+        log_period=1,
+    )
+    agent = _agent()
+    runtime = VersionedPolicyRuntime(agent, sample_action=_sample_action)
+    logger = _logger_with_run(tmp_path / "learner.jsonl", _DeadRun(), warnings)
+    learner = HILSERLLearner(
+        agent=agent,
+        sampler=_sampler(),
+        publisher=runtime,
+        config=config,
+        logger=logger,
+    )
+
+    for _ in range(3):
+        learner.train_once()
+
+    assert learner.fault is None
+    assert learner.learner_step == 3
+    assert learner.policy_version == 3
+    assert logger.wandb_fault_count == 1
+    logger.close()

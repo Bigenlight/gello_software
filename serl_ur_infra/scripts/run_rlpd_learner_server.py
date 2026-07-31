@@ -1084,7 +1084,22 @@ def _run_locked(
         )
 
         learner_fault_reported = False
+        logging_degraded_reported = False
         while not shutdown_event.wait(args.poll_interval):
+            # A degraded logger no longer stops the learner, so this poll is
+            # the only thing that can make it visible while the run is alive:
+            # the JSONL is exactly the sink that may be the broken one, so the
+            # announcement goes to stdout instead.
+            if not logging_degraded_reported and logger.degraded:
+                logging_degraded_reported = True
+                _emit(
+                    "rlpd_learner_logging_degraded",
+                    detail=logger.degraded_detail,
+                    jsonl_fault_count=logger.jsonl_fault_count,
+                    wandb_fault_count=logger.wandb_fault_count,
+                    learner_step=assembly.learner.learner_step,
+                    training_continues=True,
+                )
             if (
                 synthetic_deadline is not None
                 and time.monotonic() >= synthetic_deadline
@@ -1239,6 +1254,17 @@ def _run_locked(
                     error_type=type(exc).__name__,
                     detail=str(exc)[:2_000],
                 )
+        if logger.degraded:
+            # Repeated at teardown on purpose: a run whose metrics have holes
+            # must say so in the last thing it prints, not only in a line
+            # emitted hours earlier at the moment the sink first broke.
+            _emit(
+                "rlpd_learner_logging_degraded_summary",
+                detail=logger.degraded_detail,
+                jsonl_fault_count=logger.jsonl_fault_count,
+                wandb_fault_count=logger.wandb_fault_count,
+                wandb_muted=logger.wandb_muted,
+            )
     if args.synthetic_e2e:
         if synthetic_event_fields is None:
             synthetic_event_fields = {
