@@ -3,8 +3,13 @@
 > # 🔴 먼저 읽어라 — **GPU 서버는 더 이상 `kanu`가 아니다**
 >
 > 2026-07-31에 HIL-SERL learner를 **`kanu` → `junhyeong_ai`** 로 옮겼다.
-> 이 리포의 다른 문서 대부분은 `kanu`를 전제로 쓰여 있고, `run_hil_server.sh`의
-> **기본값도 아직 kanu**다(코드 변경은 이전 작업의 마지막 단계다 — 아래 §6).
+> 이 리포의 다른 문서 대부분은 여전히 `kanu`를 전제로 쓰여 있다. 다만
+> **`run_hil_server.sh`의 기본값은 `5594d0e`에서 이미 이 서버로 전환됐다** —
+> 환경변수 0개로 실기동해 증명했다(아래 §6).
+>
+> > **이전 판(보존):** *"`run_hil_server.sh`의 **기본값도 아직 kanu**다(코드 변경은
+> > 이전 작업의 마지막 단계다 — 아래 §6)."* 이 문장은 `5594d0e` **이전**에 쓴 것이고
+> > 같은 문서 §6과 모순이었다. 정본은 §6이다.
 >
 > | | 예전 | **지금** |
 > | --- | --- | --- |
@@ -13,7 +18,7 @@
 > | hostname | `kanu` | **`junhyeong`** |
 > | 계정 | junhyeong | junhyeong (동일) |
 > | GPU | RTX A4000 **×8** (sm_86), learner는 GPU 5 | **RTX 5070 Ti ×1** (sm_120 Blackwell), **GPU 0** |
-> | 디스크 | 73 GB 여유 (**96% 사용**) | **615 GB 여유** (63% 사용) |
+> | 디스크 | 73 GB 여유 (**96% 사용**) | **593 GB 여유** (64% 사용, 07-31 이전 완료 후 실측) |
 > | RAM | 여유 약 140 GB | **60 GB (여유 약 37 GB)** |
 >
 > `kanu`는 **아직 살아 있고 아무것도 지우지 않았다.** 이전은 전부 **복사**였다.
@@ -321,8 +326,10 @@ ssh kanu 'ps -p 2540183 -o pid,etime,stat'      # 생존 확인
 ## 9. 관련 문서
 
 - [`../CLAUDE.md`](../CLAUDE.md) — 전체 색인
-- [`HIL_SERL_KANU_RUNBOOK_KO.md`](./HIL_SERL_KANU_RUNBOOK_KO.md) — learner 기동 절차.
-  **파일명과 본문이 전부 kanu 기준이다** — 서버 주소·GPU·경로는 이 문서가 우선한다
+- [`HIL_SERL_KANU_RUNBOOK_KO.md`](./HIL_SERL_KANU_RUNBOOK_KO.md) — 🗄️ **kanu 시절 기록이지
+  실행 절차가 아니다.** 정상 기동은 `run_hil_server.sh` 하나다. 그 문서에서 살아 있는 것은
+  계약(§1.4 / §11–13)과 §1.1 origin 사고 기록이고, 나머지 절 제목에는 🗄️/✅ 표시가 붙어 있다.
+  서버 주소·GPU·경로는 이 문서가 우선한다
 - [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](./HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) — 현재 진입점
 - [`RECORDED_TAKE_DEMO_CONVERSION_KO.md`](./RECORDED_TAKE_DEMO_CONVERSION_KO.md) — take → demo 변환
 - [`REWARD_CLASSIFIER_THRESHOLD_KO.md`](./REWARD_CLASSIFIER_THRESHOLD_KO.md) — threshold 근거
