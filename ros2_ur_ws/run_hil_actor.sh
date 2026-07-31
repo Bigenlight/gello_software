@@ -739,7 +739,13 @@ if [ "$OVERLAY_OK" -ne 1 ]; then
 elif [ "$SKIP_ROS_CHECKS" = "1" ]; then
     p_skip "SKIP_ROS_CHECKS=1"
 else
-    if ! hil_read_controller_states "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER"; then
+    # settle = 재시도 포함 읽기.  자동 재활성화(both-inactive -> source hold)는
+    # 실기 --arm에서만 허용한다 -- no-arm preflight는 read-only 계약이다.
+    ALLOW_SETTLE_ACTIVATE=0
+    if [ "$ARM_REQUESTED" -eq 1 ] && [ "$FAKE_ENV" -eq 0 ]; then
+        ALLOW_SETTLE_ACTIVATE=1
+    fi
+    if ! hil_settle_controller_states "$SOURCE_ARM_CONTROLLER" "$ARM_CONTROLLER" "$ALLOW_SETTLE_ACTIVATE"; then
         if [ "$FAKE_ENV" -eq 1 ]; then
             p_info "controller_manager 응답 없음 (fake-env에서는 무관)"
         else

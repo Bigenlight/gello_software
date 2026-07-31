@@ -265,14 +265,97 @@ hil_verify_live_reset_pose() {
 }
 
 hil_assert_preposition_ready() {
+    # 2026-07-31 field failure: the arm ARRIVED at RESET (pose proof PASS) but
+    # this one-shot read then saw source=inactive/target=inactive and killed
+    # the whole session.  The UR driver's controller_stopper deactivates
+    # motion controllers whenever the robot program pauses, so a transient
+    # pause (or a slow list_controllers) shows up here as both-inactive even
+    # though nothing is wrong with the pose or the stack.  Leniency contract:
+    #   * re-read up to HIL_PREPOSITION_PROOF_RETRIES times (default 3);
+    #   * the ONE benign persistent state -- both controllers inactive, i.e.
+    #     nothing at all is driving a stationary arm that just passed the
+    #     pose proof -- earns a single strict re-activation of the source
+    #     controller (a hold, not a motion) unless HIL_PREPOSITION_AUTOACTIVATE=0;
+    #   * every other combination (target active, unexpected strings) still
+    #     fails after the retries -- those mean something else owns the arm.
     local source_controller="$1" target_controller="$2" command_topic="$3"
-    hil_read_controller_states "$source_controller" "$target_controller" || return 1
-    if [[ "$HIL_SOURCE_STATE" != active || "$HIL_TARGET_STATE" != inactive ]]; then
-        echo "ERROR: preposition proof requires $source_controller=active and $target_controller=inactive" >&2
-        echo "       observed: $source_controller=$HIL_SOURCE_STATE, $target_controller=$HIL_TARGET_STATE" >&2
-        return 1
-    fi
-    hil_assert_no_command_publishers "$command_topic"
+    local retries="${HIL_PREPOSITION_PROOF_RETRIES:-3}"
+    local delay_s="${HIL_PREPOSITION_PROOF_RETRY_DELAY_S:-2}"
+    local autoactivate="${HIL_PREPOSITION_AUTOACTIVATE:-1}"
+    local attempt=1 activated=0
+
+    while :; do
+        if hil_read_controller_states "$source_controller" "$target_controller" \
+            && [[ "$HIL_SOURCE_STATE" == active && "$HIL_TARGET_STATE" == inactive ]]; then
+            hil_assert_no_command_publishers "$command_topic"
+            return $?
+        fi
+        echo "preposition proof attempt ${attempt}/${retries}: observed" \
+            "$source_controller=${HIL_SOURCE_STATE:-?}," \
+            "$target_controller=${HIL_TARGET_STATE:-?} (want active/inactive)" >&2
+        if [[ "$HIL_SOURCE_STATE" == inactive && "$HIL_TARGET_STATE" == inactive \
+            && "$autoactivate" == 1 && "$activated" == 0 ]]; then
+            echo "both controllers inactive at a verified RESET pose --" \
+                "re-activating $source_controller (hold only, no motion)" >&2
+            if timeout --signal=KILL 15 ros2 control switch_controllers --strict \
+                --activate "$source_controller" >/dev/null 2>&1; then
+                activated=1
+                continue
+            fi
+            echo "WARNING: re-activation failed -- if the pendant program is" \
+                "stopped, resume it (robot mode must be RUNNING) and retry" >&2
+            activated=1
+        fi
+        if (( attempt >= retries )); then
+            echo "ERROR: preposition proof requires $source_controller=active and $target_controller=inactive" >&2
+            echo "       observed: $source_controller=$HIL_SOURCE_STATE, $target_controller=$HIL_TARGET_STATE" >&2
+            echo "       (after ${retries} reads; auto-activate attempted: ${activated})" >&2
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        sleep "$delay_s"
+    done
+}
+
+hil_settle_controller_states() {
+    # hil_read_controller_states with the same leniency contract as
+    # hil_assert_preposition_ready: transient reads get retried, and the one
+    # benign persistent combo (both inactive -- nothing owns a stationary arm)
+    # may earn a single strict re-activation of the source controller, but
+    # ONLY when the caller says so (allow_activate=1).  Preflight in no-arm
+    # mode is read-only by contract, so it passes 0 and gets retries only.
+    # Return contract is identical to hil_read_controller_states -- 0 means
+    # the states were read (whatever they are), the caller still decides.
+    local source_controller="$1" target_controller="$2" allow_activate="${3:-0}"
+    local retries="${HIL_PREPOSITION_PROOF_RETRIES:-3}"
+    local delay_s="${HIL_PREPOSITION_PROOF_RETRY_DELAY_S:-2}"
+    local attempt=1 activated=0 rc=0
+
+    while :; do
+        if hil_read_controller_states "$source_controller" "$target_controller"; then
+            rc=0
+            case "$HIL_SOURCE_STATE:$HIL_TARGET_STATE" in
+                active:inactive|inactive:active) return 0 ;;
+            esac
+            if [[ "$HIL_SOURCE_STATE" == inactive && "$HIL_TARGET_STATE" == inactive \
+                && "$allow_activate" == 1 && "$activated" == 0 ]]; then
+                echo "both controllers inactive -- re-activating" \
+                    "$source_controller (hold only, no motion)" >&2
+                timeout --signal=KILL 15 ros2 control switch_controllers --strict \
+                    --activate "$source_controller" >/dev/null 2>&1 || \
+                    echo "WARNING: re-activation failed -- pendant program may be stopped" >&2
+                activated=1
+                continue
+            fi
+        else
+            rc=$?
+        fi
+        if (( attempt >= retries )); then
+            return "$rc"
+        fi
+        attempt=$((attempt + 1))
+        sleep "$delay_s"
+    done
 }
 
 _hil_restore_preposition_controller() {
