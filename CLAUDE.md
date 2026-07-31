@@ -31,7 +31,18 @@
 > ⚠️ 학습된 policy 체크포인트는 **어디에도 없다** — kanu의 run root 8개 전부
 > `checkpoints/`가 비어 있었다(실측). 이유는 위 문서 §4.
 
-> # 🔴 2026-07-31 merge `5e508d3` — **지금 learner를 재기동하지 마라**
+> # 🟠 2026-07-31 merge `5e508d3` — **reward classifier는 죽어 있다. 세션은 돈다.**
+>
+> 🔄 **이 박스의 제목은 원래 "지금 learner를 재기동하지 마라"였고, 그 근거는
+> `4a14c30`(+`b67b075`)로 사라졌다.** 재기동해도 된다 — classifier fault는 이제 세션을
+> 끝내지 않고 해당 전이를 **미채점으로 강등**한다. **실기 반증 실측(2026-07-31 저녁,
+> run `cube_in_cup_real_20260731_074751`): 연속 57회 fault가 전부 강등됐고 learner는
+> `learner_step 431 / gradient 862 / policy v8`까지 정상 진행했다.**
+> 아래 크롭·feature 불일치 서술은 **전부 그대로 유효하다** — 바뀐 것은 그 실패의
+> **치명성**뿐이고, 원인은 하나도 고쳐지지 않았다. reward는 여전히 나오지 않으므로
+> **MANUAL `MARK SUCCESS`가 유일한 성공 경로다.**
+> ⚠️ 첫 fault에서 `RewardClassifierRuntime`이 자기 자신을 `_ready=False`로 잠그므로
+> **그 프로세스에서 classifier는 영구히 죽는다.** AUTO는 성공을 영영 선언할 수 없다.
 >
 > 서버 이전 작업과 **공유 frozen-trunk feature 작업**(다른 분의 7커밋 `40e8305..a93d330`)이
 > 한 브랜치로 합쳐졌다. 충돌은 0이었고 양쪽 다 온전하다. 그런데 **그 작업은 진행 중이고
@@ -49,9 +60,21 @@
 > 그런데 핀으로 박힌 `checkpoint_150`의 classifier는 그 텐서를 **못 먹는다** — CPU 실측:
 > `PIXEL input OK` / `FEATURE input FAILED: shapes=[(128,128,512), (3,)]`.
 >
-> **그래서 merge된 코드로 learner를 새로 띄우면 첫 채점 스텝에서 죽는다**
-> (`RewardClassifierError` → actor 사망). 지금 살아 있는 learner는 merge **이전** 코드라
-> 정상이다 — 옛 sidecar 픽셀 경로를 쓴다.
+> **그래서 merge된 코드로 learner를 새로 띄우면 첫 채점 스텝에서 이 오류가 난다**
+> (`RewardClassifierError: inference failed: ValueError: Incompatible shapes for
+> broadcasting: shapes=[(128,128,512), (3,)]`). `4a14c30` 이전에는 이것이 **actor 사망**
+> 이었다 — 예외가 `ActorSessionService._set_fault`까지 올라가 `_ready`를 영구히 내렸고,
+> **learner 프로세스가 `exit_code=3`으로 종료했다**(실측: run `..._070733`,
+> 16:07:35 기동 → 16:34:25 첫 전이에서 사망. 그 뒤 터널만 남아 actor는
+> `UNAVAILABLE ... recvmsg:Connection reset by peer`를 본다 — 이 증상을 보면 서버에
+> learner가 없는 것이지 네트워크 문제가 아니다).
+> **지금은 강등되고 세션은 계속된다.**
+>
+> 🪤 **재기동 시 함정: `run_hil_server.sh`는 살아 있는 learner를 재사용한다**
+> (`HIL_SERVER_RESULT=reused`). 아직 아무 전이도 채점하지 않은 옛 코드 learner는
+> health check를 **멀쩡히 통과**하므로, 수정 후 Terminal 1만 다시 띄우면 그 옛
+> 프로세스에 터널만 다시 연결된다. 코드 수정을 실제로 태우려면 **learner 프로세스가
+> 죽어 있어야 한다.** 출력의 `HIL_SERVER_RESULT=started`를 확인할 것.
 >
 > 🛑 **그리고 뻔한 한 줄 수정이 이 시끄러운 실패를 정확히 G15로 바꾼다.**
 > `frozen_trunk.create_frozen_trunk_classifier`가 이미 있고 param tree가 **52 leaf 전부
@@ -475,6 +498,7 @@ canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
 | 서버에서 learner 띄우기 | **`./run_hil_server.sh` 하나가 정상 경로다**(환경변수 0개). 수동 CLI·계약 감사는 🗄️ [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) — **kanu 시절 기록이고 실행 절차가 아니다.** 호스트·GPU·경로는 [`DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md)가 우선 |
 | 녹화 take를 learner용 offline demo로 변환 | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) (`40b99f8`) — **`--outcome success\|truncated`는 사람이 명시한다.** 변환기는 성공을 추측하지 않는다. learner는 offline demo가 0이면 학습을 시작하지 않는다 |
 | 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
+| wandb에서 학습 곡선(critic/actor loss) 보기 | 기본은 **offline**이라 자동으로 안 올라간다. 세션 뒤 서버에서 `~/miniconda3/envs/il/bin/wandb sync <run_root>/wandb/wandb/offline-run-*`. 실시간이 필요하면 **새 lineage 시작 시에만** `HIL_WANDB_MODE=online` — ⚠️ `wandb.log`에 타임아웃이 없어 sink가 느려지면 학습이 조용히 멈출 수 있다(미해결). 📌 `65fbf18` **이전**에 뜬 learner는 중첩 `metrics` dict를 통째로 넘겨서 **loss가 하나도 플롯되지 않는다** — 그 run은 `logs/learner.jsonl`에서 평탄화해 backfill해야 한다 |
 | mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
 | GELLO 개입 손맛·좌표계 **실기** 검증 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §4.5·§9 — `serl_ur_infra/tests/run_real_hil.py`. 기본 `DRY_RUN`이고 `--arm`을 줄 때만 움직인다. **정책이 zero 고정이라 learner도 gRPC 서버도 필요 없다** — 3-CLI 운영 워크플로우와 혼동하지 말 것(실제로 혼동이 있었다). 컨트롤러 요구도 다르다(FPC) → [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.5 |
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
@@ -639,18 +663,19 @@ ros2_ur_ws/
   `InterventionBudget`을 개입 **제어** 경로에서 제거했으므로 더 이상 사실이 아니다.
   `follow_mode="in_window"`에서는 여전히 맞다.
 - **테스트는 passed 수를 볼 것 — 그리고 어느 인터프리터인지 같이 적을 것.** PYTHONPATH에서
-  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-31 merge
-  `5e508d3` 기준선은 **804 passed / 14 skipped / 1 xfailed** (14.27 s 실측,
+  `serl_launcher`가 빠지면 조용히 떨어지고 skip 사유가 거짓말을 한다. 2026-07-31
+  `65fbf18` 기준선은 **859 passed / 14 skipped / 1 xfailed** (16.19 s 실측,
   `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6).
-  `ur_gello_bringup` 패키지 suite는 **별도로 489 passed**(시스템 `python3` + ROS overlay,
-  7.70 s 실측 — 두 숫자를 합치지 말 것. 인터프리터도 PYTHONPATH도 다르다).
+  `ur_gello_bringup` 패키지 suite는 **별도로 497 passed**(시스템 `python3` + ROS overlay,
+  12.51 s 실측 — 두 숫자를 합치지 말 것. 인터프리터도 PYTHONPATH도 다르다).
   🪤 **`ur_gello_bringup`도 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`이 필수다** — 그게 없으면
   테스트가 하나도 안 돌고 **collection에서 죽는다**(시스템 pytest 6.2.5 ↔ `~/.local`의
   anyio 4.13.0이 pytest 7의 `_pytest.scope`를 요구. 그 패키지 `pytest.ini`는
   `launch_testing` 계열만 끄고 anyio는 안 끈다). 4월부터 그랬으므로 07-30의 489도 이미
   이 플래그로 측정된 값이고, 기록에만 빠져 있었다.
-  > **이전 판(보존):** *"2026-07-30 저녁(조작자 경로 4건) 기준선은 **768 passed /
-  > 11 skipped / 1 xfailed** (13.86 s 실측 …)"*, 그 이전 `d6965a9`는 701,
+  > **이전 판(보존):** *"2026-07-31 merge `5e508d3` 기준선은 **804 passed / 14 skipped /
+  > 1 xfailed** (14.27 s 실측 …), `ur_gello_bringup`은 **489**(7.70 s)"*, 그 이전
+  > 2026-07-30 저녁(조작자 경로 4건)은 **768 / 11 skipped**(13.86 s), `d6965a9`는 701,
   > `ur_gello_bringup`은 436.
   **`xfailed 1`을 빼고 인용하지 말 것** — 그건 통계 잡음이 아니라 **알려진 결함의 표식**이다
   (`ee8af5e`가 박은 strict xfail: 저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수
@@ -674,11 +699,19 @@ ros2_ur_ws/
   스레드 안전화 + norm 축소 회귀 — `test_intervention_follower` 신규)
   → 768(07-30 저녁; END EPISODE + DISENGAGED gate + 재기동 복구 —
   `tests/test_operator_abort.py`(26) · `tests/test_actor_abort_lifecycle.py`(23) 신규)
-  → **804**(`5e508d3` merge; 공유 frozen-trunk feature + 전처리 규칙 일원화 —
+  → 804(`5e508d3` merge; 공유 frozen-trunk feature + 전처리 규칙 일원화 —
   `test_observation_preprocess.py`(12) · `test_shared_feature_pipeline.py`(7) ·
   `test_classifier_dataset.py`(8, 2 skip) 신규. skip 11 → 14는 전부 의도된 게이트다:
-  실코퍼스 2개 + `RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1` 1개).
-  옛 문서에 남은 333·337·429·497·579·595·701·768은 전부 이전 값이다.
+  실코퍼스 2개 + `RUN_HIL_SERL_ACTUAL_FEATURE_AGENT=1` 1개)
+  → 812(`4a14c30`; classifier fault가 세션을 끝내지 않고 전이를 강등)
+  → 829(`fc4ac97`; `HIL_WANDB_MODE`)
+  → 853(`b67b075` + `c86dc54`; degraded를 한 번만 말하고 GUI로 + 로그 sink 내구성 —
+  `test_classifier_degraded_signal.py` · `test_learner_logging.py` 신규)
+  → **859**(`65fbf18`; wandb 미러 평탄화).
+  옛 문서에 남은 333·337·429·497·579·595·701·768·804는 전부 이전 값이다.
+  ⚠️ 이 계보는 **`serl_ur_infra` 것**이다. `ur_gello_bringup`은 별개로 436 → 489 →
+  **497**(`b67b075`, `test_hil_actor_status.py` 확장)이며, 계보 안의 497(07-30 오전
+  `serl_ur_infra` 값)과 **우연히 같은 숫자일 뿐 다른 suite다.**
   🪤 **인터프리터를 안 적은 "passed 개수"는 무의미하다.** 같은 명령을
   `/home/laptop3/venvs/hilserl/bin/python`(jax 0.5.3 있음, numpy 1.26.4)으로 돌리면
   jax 테스트가 더 돌아 **741 passed / 4 skipped / 1 xfailed**가 된다(skipped 11 → 4).
