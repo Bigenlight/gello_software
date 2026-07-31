@@ -1,21 +1,45 @@
-# 05 — 통신 (gRPC actor · 스키마 · 레이턴시 · Kanu 터널)
+# 05 — 통신 (gRPC actor · 스키마 · 레이턴시 · 서버 터널)
 
-**상태: 2026-07-27 실기 세션에서 크게 진전.**
+> # 🔴 2026-07-31 — 서버가 바뀌었다. **엔드포인트는 호스트만 바뀌고 모양은 그대로다.**
+>
+> learner가 **`kanu` → `junhyeong_ai`** (166.104.146.29, hostname `junhyeong`)로
+> 옮겨 갔고, 실기 세션까지 통과했다. proto·`schema_version 2`·스키마 해시·원격 포트는
+> **하나도 안 바뀌었다.** 바뀐 것은 **터널 저쪽 끝에 있는 기계**뿐이다.
+>
+> | | 예전 | **지금** |
+> |---|---|---|
+> | 터널 | laptop3 `127.0.0.1:50153` → **kanu** `127.0.0.1:50053` | laptop3 `127.0.0.1:50153` → **`junhyeong_ai`** `127.0.0.1:50053` |
+> | 원격 포트 | 50053 | 50053 (불변. `run_hil_server.sh`가 이제 이 값을 **고정**한다) |
+> | GPU | RTX A4000 ×8 (sm_86), learner는 GPU 5 | **RTX 5070 Ti ×1** (sm_120), GPU **0** |
+> | 환경변수 | `HIL_KANU_REPO` / `HIL_KANU_PYTHON` | `HIL_REMOTE_REPO` / `HIL_REMOTE_PYTHON` (옛 이름은 **alias로 살아 있다**) + 신설 `HIL_REMOTE_DATA_ROOT` |
+>
+> **이 문서 안의 kanu 측정값은 kanu 것으로 남겨 두었다.** 지우지도, 새 호스트 이름으로
+> 갈아 끼우지도 않았다 — 새 호스트를 비교할 유일한 기준선이기 때문이다. 새 호스트의
+> 실측은 **§5.5**에 따로 있고, 전문은
+> [`../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md)다.
+>
+> ⚠️ **`run_hil_server.sh`는 이제 kanu를 아예 못 몬다 — 의도된 것이다.** kanu의 classifier가
+> `hil-serl-data` 밖에 있어서 **어떤 단일 `HIL_REMOTE_DATA_ROOT`도 kanu를 표현하지 못한다.**
+> kanu는 이제 **읽기 전용으로만** 본다(`ssh kanu 'ps -p <pid> -o pid,etime'`).
+> 아래 절차 중 `kanu`라고 적힌 곳은 전부 **당시 기록**이라는 뜻이지 지금 칠 명령이 아니다.
+
+**상태: 2026-07-27 실기 세션에서 크게 진전. 2026-07-31 서버 이전 후 재수락.**
 
 | 항목 | 상태 |
 |---|---|
 | gRPC 트랜스포트 단위/루프백 | **PASS** — 35 tests (venv python) |
-| 스키마 해시 랩톱↔Kanu 일치 | **PASS** (2026-07-27 왕복에서 확인) |
-| Kanu 왕복 (Stage A, fake-env, 100 스텝) | 📌 **PASS (2026-07-27)** — `replay_insert_count: 100` |
-| 레이턴시 예산 | 📌 **07-27과 07-29 두 세션이 6배 다르다.** 저장된 상수를 믿지 말고 **세션 시작마다 다시 재라** (§5.3) |
-| 분류기 sidecar (무크롭 프레임 첨부) | **코드·단위테스트까지. 실기 미검증.** proto 변경 0, **스키마 해시 불변**, 대역폭 +2.8 % (§3.2, §5.4) |
+| 스키마 해시 랩톱↔서버 일치 | **PASS** — 🗄️ kanu와 2026-07-27 왕복에서 확인, **`junhyeong_ai`와 2026-07-31 수락 시험에서 재확인**(해시는 양쪽 동일, 값 자체가 안 바뀌었다) |
+| 서버 왕복 (로봇 없이) | 🗄️ **kanu PASS (2026-07-27)** — Stage A fake-env 100 스텝, `replay_insert_count: 100` · 📌 **`junhyeong_ai` PASS (2026-07-31)** — 수락 도구 `run_fake_e2e_actor.py`, 200 transition(100×2 run), `replay_insert_delta: 100` ×2. **두 도구는 다르다** |
+| 레이턴시 예산 | 📌 **07-27과 07-29 두 kanu 세션이 6배 달랐다.** 저장된 상수를 믿지 말고 **세션 시작마다 다시 재라** (§5.3). 새 호스트 실측은 §5.5 |
+| 분류기 sidecar (무크롭 프레임 첨부) | **실기 검증됨** (2026-07-29 첫 실물 E2E, 2026-07-31 실기 세션). proto 변경 0, **스키마 해시 불변**, 대역폭 +2.8 % (§3.2, §5.4) |
 | 시스템 python3의 grpcio | 🛑 **손상. 절대 쓰지 말 것** (§1). 📌 2026-07-29 재확인: 여전히 `1.30.2` |
-| 실기 센서를 붙인 Stage B | **미검증** → `09_HIL_ACTOR_RUNBOOK.md` |
-| Kanu 서버 가동 여부 | **지금은 안 떠 있다** — port 50053 미바인딩, GPU 유휴 (2026-07-29). 아래 절차는 서버를 **새로 띄우는 것부터** 시작한다 |
+| 실기 센서를 붙인 Stage B | **PASS** — 2026-07-31 실기 세션(replay 316 / intervention 210 / `last_env_step` 68) → `09_HIL_ACTOR_RUNBOOK.md` |
+| 서버 가동 여부 | **스냅샷이므로 여기 적지 않는다.** `cd ros2_ur_ws && ./run_hil_server.sh --check`로 읽는다 (읽기 전용) |
 
 정본: [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md)(기동 절차·2026-07-27 실측),
-`serl_ur_infra/REMOTE_ACTOR_GRPC.md`, `serl_ur_infra/RL_RECEIVE_SERVER.md`,
-`serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md`.
+`serl_ur_infra/REMOTE_ACTOR_GRPC.md`,
+[`serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md)(새 호스트 실측),
+`serl_ur_infra/RL_RECEIVE_SERVER.md`, `serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md`.
 이 문서는 **계약과 판정 기준**을, 09는 **한 줄 기동 절차**를 담는다.
 
 ```bash
@@ -71,41 +95,111 @@ print(grpc.__version__, numpy.__version__, gymnasium.__version__, cv2.__version_
 # -> 1.74.0 2.2.6 1.2.0 4.13.0 1.15.3 3.20.3
 ```
 
-> 🔧 **정정:** 이전 판은 `/tmp/gello-hil-grpc-venv`를 만들라고 했다. `/tmp`는 재부팅에
-> 날아간다. 지금 정본은 위의 `~/venvs/gello-hil-actor`이고, `run_hil_actor.sh`의
-> `ACTOR_VENV` 기본값도 이 경로다.
+> ### 🔧 정정 — `/tmp/gello-hil-grpc-venv`는 **이제 존재하지 않는다** (2026-07-31 확인)
+>
+> 이전 판은 `/tmp/gello-hil-grpc-venv`를 만들라고 했다. `/tmp`는 재부팅에 날아간다.
+> **그리고 실제로 날아갔다** — laptop3가 재부팅되면서 `/tmp`가 비워졌고, 그 venv는
+> **없다.** git에 들어 있던 적도 없으니 복구할 것도 없다. **찾으러 다니지 말고,
+> `/tmp` 밑에 다시 만들지도 말 것**(다음 재부팅에 또 사라진다).
+> 같은 이유로 `/tmp/gello-hil-grpc-server`, `/tmp/gello-hil-rl-receive-server-v2`,
+> `/tmp/gello-hil-rl-receive-overlay-v2`도 전부 없다.
+>
+> **대신 무엇을 썼고 무엇이 증명됐나.** 2026-07-31 `junhyeong_ai` 수락 시험은
+> `run_fake_e2e_actor.py`를 **위의 `~/venvs/gello-hil-actor`로** 돌렸고 **그대로 됐다** —
+> transition **200개(100×2 run)** 직렬화·전송·ACK·검증 전부 통과(두 run 모두
+> `fake_e2e_actor_passed`, `replay_insert_delta: 100`).
+> 정확히 말하면 그 run이 직접 증명한 것은 **`run_fake_e2e_actor.py` 한 도구**지만,
+> mock 서버·스모크 클라이언트도 **같은 `grpc_actor_transport` 스택**을 쓰므로 인터프리터를
+> 나눌 이유가 없다 — 그리고 나눌 대상이던 `/tmp` venv는 애초에 존재하지도 않는다.
+> 즉 **랩톱의 gRPC 인터프리터는 mock이든 실기든 이 하나뿐**이다.
+> `run_hil_actor.sh`의 `ACTOR_VENV` 기본값도 이 경로다.
+>
+> **lock과 다른 딱 한 가지 — 숨기지 않고 기록해 둔다.**
+>
+> | 패키지 | `requirements-grpc.lock` | actor venv (2026-07-31 실측) | 판정 |
+> |---|---|---|---|
+> | `grpcio` | 1.74.0 | **1.74.0** | 정확히 일치 |
+> | `protobuf` | 3.20.3 | **3.20.3** | 정확히 일치 |
+> | `numpy` | 1.26.4 | **2.2.6** | **다르다 — 그러나 문제가 되지 않는 것이 실측됐다** |
+>
+> wire 동작을 실제로 결정하는 두 패키지는 정확히 일치한다. numpy만 어긋나는데,
+> 위 200 transition이 바로 그 차이가 이 경로에서 무해하다는 증거다 — `float32` state,
+> `uint8` 이미지, JPEG sidecar 버퍼가 `Tensor{path,dtype,shape,data}`를 왕복하며
+> dtype/shape 검사와 canonical 관측 검증을 전부 통과했다. 전송 계층이 dtype을
+> **명시적으로 고정**하고 numpy 기본값을 상속하지 않기 때문에 major 버전 차이가
+> wire까지 오지 않는다.
+>
+> ⚠️ **이건 범위가 좁은 결과다. "numpy 2.x 전면 승인"이 아니다.** gRPC **전송 경로**가
+> numpy 2.x에 무관심하다는 뜻이고, learner 쪽은 애초에 별도의 exact-pin fail-closed
+> 환경이라(`ur_env/learner/agent.py::validate_learner_dependencies`) 이 시험이 건드리지
+> 않았다. lock과 정확히 같은 격리 venv가 굳이 필요하면 **`/tmp` 밖에** 만든다:
+>
+> ```bash
+> python3 -m venv ~/venvs/gello-hil-grpc-lock          # /tmp 밑이 아니다
+> ~/venvs/gello-hil-grpc-lock/bin/python -m pip install \
+>   -r $WT/serl_ur_infra/requirements-grpc.lock
+> ```
+>
+> 📌 `requirements-grpc.lock` 자체의 numpy 핀을 올릴지는 **코드 변경**이라 이 문서의
+> 범위 밖이다. 지금은 "lock은 1.26.4를 말하고, 운영 venv는 2.2.6이며, 그 차이는
+> 측정됐다"까지가 정확한 진술이다.
 
 - `serl_ur_infra` 자체는 `pip install --user -e ... --no-deps`로 설치한다 (`--no-deps` 필수).
 - 실행 시 `PYTHONPATH`는 **덮어쓰지 말고 이어붙인다**:
   `PYTHONPATH="$WT/serl_ur_infra${PYTHONPATH:+:$PYTHONPATH}"` → `00` §3.4(2).
 
-### 1.2 Kanu(서버) 쪽 — 오버레이 venv
+### 1.2 서버 쪽 파이썬 — **지금 운영 learner에는 오버레이가 없다**
 
-Kanu의 공유 conda env `il`을 **수정하지 말 것**. 시스템 사이트 패키지를 읽는 작은 오버레이를
-만든다 (`RL_RECEIVE_SERVER.md`의 "Preferred Kanu runtime"):
+운영 learner(`run_rlpd_learner_server.py`)는 `junhyeong_ai`의 conda env를 **그대로** 쓴다.
+경로는 kanu 시절과 우연히 같다(양쪽 다 계정이 `junhyeong`이다):
 
-```bash
-/home/junhyeong/miniconda3/envs/il/bin/python -m venv \
-  --system-site-packages /tmp/gello-hil-rl-receive-overlay-v2
-/tmp/gello-hil-rl-receive-overlay-v2/bin/python -m pip install --no-deps \
-  -r serl_ur_infra/requirements-rlpd-receive-overlay.txt
+```
+/home/junhyeong/miniconda3/envs/il/bin/python      # py 3.10.20
 ```
 
-`--no-deps`가 **의도적**이다. pip이 `il`에서 상속받은 패키지를 교체하는 것을 막는다.
-오버레이가 더하는 것은 agentlace(upstream replay store의 베이스 클래스), lz4, protobuf 3.20.3뿐.
+이 env는 kanu `il`의 `pip freeze`를 그대로 재현한 것이고, learner가 기동 시
+**exact 검사 + fail-closed**로 확인한다 (`ur_env/learner/agent.py::validate_learner_dependencies`):
+`jax 0.5.3 · jaxlib 0.5.3 · flax 0.10.5 · distrax 0.1.5 · tensorflow_probability 0.25.0 · wandb 0.26.0`.
+✅ GPU가 Blackwell(sm_120)로 바뀌었는데도 이 핀이 그대로 통과한다 — XLA가 PTX 폴백이 아니라
+**네이티브 `.target sm_120a`** 를 낸다(2026-07-31 실측).
 
-> ### 🛑 이 오버레이를 **learner 서버에 재사용하지 말 것**
+**손으로 띄우지 않는다.** `ros2_ur_ws/run_hil_server.sh`가 **환경변수 0개로** 기동하고
+터널까지 연다. `XLA_PYTHON_CLIENT_PREALLOCATE=false`도 그 스크립트가 export한다 —
+빠뜨리면 JAX가 GPU 메모리를 통째로 선점해 **같은 카드의 다른 사람 작업을 죽인다.**
+새 서버는 GPU가 **1장뿐이고 공유**라 이게 kanu 때보다 더 중요하다.
+
+🪤 서버에서 `pip install`을 즉흥적으로 하지 말 것. 검증 중 `pip install flax==0.10.5 optax==0.2.4`가
+jax를 **0.5.3 → 0.6.2로 조용히 올려** learner가 fail-closed로 죽는 상태를 만들었다.
+env 구성은 `pip install --no-deps -r <freeze>` 하나로만 한다.
+
+> ### 🗄️ 아래는 **kanu 시절 receive server(구 마일스톤)** 의 오버레이 절차다 — 지금 치는 명령이 아니다
+>
+> 대상은 `run_rlpd_receive_server.py`(현재 운영 경로가 아니다. `REMOTE_ACTOR_GRPC.md`의
+> entry point 표에서 "historical milestone"으로 분류된 것)이고, 오버레이는
+> `/tmp/gello-hil-rl-receive-overlay-v2`에 만들었다 — **`/tmp`라 재부팅과 함께 사라졌고,
+> 지금 그 경로는 존재하지 않는다.** 기록으로만 남긴다.
+>
+> ```bash
+> # 🗄️ kanu-era. 재현하려면 /tmp 밖에 만들 것.
+> /home/junhyeong/miniconda3/envs/il/bin/python -m venv \
+>   --system-site-packages /tmp/gello-hil-rl-receive-overlay-v2
+> /tmp/gello-hil-rl-receive-overlay-v2/bin/python -m pip install --no-deps \
+>   -r serl_ur_infra/requirements-rlpd-receive-overlay.txt
+> ```
+>
+> `--no-deps`가 **의도적**이다. pip이 `il`에서 상속받은 패키지를 교체하는 것을 막는다.
+> 오버레이가 더하는 것은 agentlace(upstream replay store의 베이스 클래스), lz4, protobuf 3.20.3뿐.
+>
+> #### 🛑 이 오버레이를 **learner 서버에 재사용하지 말 것** (지금도 유효한 경고)
 > 오버레이가 고정하는 **protobuf 3.20.3이 `wandb` import를 깨뜨린다.**
-> receive server(`run_rlpd_receive_server.py`)는 wandb를 쓰지 않아 문제가 없지만,
-> learner(`run_rlpd_learner_server.py`)는 쓴다. learner는 별도 환경에서 띄운다
-> (`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`).
+> receive server는 wandb를 쓰지 않아 문제가 없지만, learner(`run_rlpd_learner_server.py`)는
+> 쓴다. 그래서 위의 `il` env를 **오버레이 없이** 쓰는 것이다.
 >
-> 그리고 `XLA_PYTHON_CLIENT_PREALLOCATE=false`를 반드시 export한다 — 안 하면 JAX가
-> GPU 메모리를 통째로 선점해 같은 카드의 다른 작업을 죽인다.
->
-> ⚠️ Kanu 환경 드리프트(2026-07-29 확인): numpy 2.2.5(lock 1.26.4), orbax 0.11.12(0.11.5),
-> grpcio 1.80.0(1.74.0). 런타임 fail-closed 검사 대상은 jax/flax/distrax/tfp/wandb뿐이라
-> **이 세 개는 자동으로 안 걸린다.**
+> #### ⚠️ 아래 드리프트 수치는 **kanu 것이다** (2026-07-29 확인)
+> kanu의 `il`: numpy 2.2.5(lock 1.26.4), orbax 0.11.12(0.11.5), grpcio 1.80.0(1.74.0).
+> 런타임 fail-closed 검사 대상은 jax/flax/distrax/tfp/wandb뿐이라 **이 세 개는 자동으로 안 걸린다.**
+> 이 구조적 사각지대는 호스트를 옮겨도 그대로다 — `junhyeong_ai`의 `il`에서도 같은 세
+> 패키지는 검사되지 않는다. **다만 위 수치는 kanu에서 잰 값이므로 새 서버 값으로 인용하지 말 것.**
 
 ---
 
@@ -211,8 +305,10 @@ cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`)을 그대로 분류기
 >
 > **실측 확인 (2026-07-29, 이 문서 작성 중 직접 계산):**
 > `CANONICAL_OBSERVATION_SCHEMA_HASH = 3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903`
-> — **§4.2의 값과 같다.** `run_hil_actor.sh`의 `OBS_SCHEMA_HASH`, Kanu 서버,
+> — **§4.2의 값과 같다.** `run_hil_actor.sh`의 `OBS_SCHEMA_HASH`, 서버 쪽 pin,
 > §4.2의 라이브 대조 절차까지 **전부 그대로 유효하다.**
+> 📌 2026-07-31 서버 이전도 이 해시를 바꾸지 않았다 — 스키마 **문서**에서 나오는 값이라
+> 호스트와 무관하다.
 
 **대신 바뀐 것: `reward_model_id`가 입력 계약을 이름에 담는다.**
 서버가 광고하는 값이 `cube-in-cup-checkpoint-150` → **`cube-in-cup-all3-ckpt150+sidecar-v1`**
@@ -321,12 +417,17 @@ grip@ : 0
   tcp_vel      [13:19)
 ```
 
-2026-07-27에 **Kanu 서버가 광고한 값과 동일함이 확인됐다** (`09_HIL_ACTOR_RUNBOOK.md` §2.1).
+🗄️ 2026-07-27에 **kanu 서버가 광고한 값과 동일함이 확인됐다** (`09_HIL_ACTOR_RUNBOOK.md` §2.1).
+📌 2026-07-31 `junhyeong_ai` 수락 시험에서도 핸드셰이크가 통과했다 — **해시 값 자체는
+서버 이전으로 바뀌지 않는다.** 스키마 문서에서 나오는 값이지 호스트에서 나오는 값이 아니다.
+
 그래도 **양쪽에서 이 명령을 돌려 대조한 뒤에** 원격 스모크를 시작한다 — 위 해시를
 복사해서 비교하지 말고, 양쪽 출력을 나란히 본다. 해시가 다르면 어떤 통신도 시도하지 말 것.
+서버 쪽 checkout은 이제 `junhyeong_ai:/home/junhyeong/gello_software_runtime`이다
+(🚫 같은 머신의 `/home/junhyeong/gello_software`는 **다른 사람의 작업 트리**다 — 쓰지 말 것).
 
 > ⚠️ `run_hil_actor.sh`의 `OBS_SCHEMA_HASH` 기본값도 이 해시로 **하드코딩**돼 있다
-> (`:77`). 스키마를 바꾸면 그 줄과 Kanu 쪽을 함께 올려야 한다.
+> (`:77`). 스키마를 바꾸면 그 줄과 서버 쪽 checkout을 함께 올려야 한다.
 
 > ### 📌 2026-07-29 분류기 sidecar가 이 해시를 **바꾸지 않았다**
 > wire에는 관측 키가 하나 늘었지만(§3.2) 해시는 `CANONICAL_OBSERVATION_SPEC` **문서**에서
@@ -371,7 +472,8 @@ $ACTOR_PY \
   --timeout-s 1.5 --max-response-age-s 2.0
 ```
 
-- **여기서 실패하면 실제 루프에서도 실패한다.** Kanu/GPU/tunnel 병목을 먼저 확인한다.
+- **여기서 실패하면 실제 루프에서도 실패한다.** 서버(`junhyeong_ai`)/GPU/tunnel 병목을
+  먼저 확인한다. GPU는 **1장을 다른 사람과 공유**하므로 `nvidia-smi` 점유부터 본다.
 - 예산을 정말 늘려야 한다면 `NETWORK` config의 `timeout_s`/`max_response_age_s`를
   명시적으로 바꾸고, **왜 늘렸는지 이 문서에 남긴다.**
 
@@ -385,13 +487,22 @@ $ACTOR_PY \
   실시간성을 보장하는 수치가 아니라, 측정된 cold/contended path를 성급히 죽이지 않기 위한
   bounded failure 경계다. 장시간 tail latency 계측과 서버 contention 개선은 계속 필요하다.
 
-### 5.3 🛑 📌 레이턴시 실측 — **두 세션이 6배 다르다. 저장된 상수를 믿지 마라**
+### 5.3 🗄️ 🛑 📌 레이턴시 실측 (**kanu-era**) — 두 세션이 6배 다르다. 저장된 상수를 믿지 마라
+
+> ## 🗄️ **이 절(§5.3 전체)의 측정은 laptop3 → `kanu` 링크에서 잰 것이다**
+> 2026-07-31 서버 이전 **이전**의 기록이고, 그대로 **kanu의 것으로** 남겨 둔다.
+> 새 호스트 `junhyeong_ai`의 실측은 **§5.5**에 따로 있다. 두 절을 섞지 말 것 —
+> **그런데 지우지도 말 것이다. 새 호스트를 비교할 유일한 기준선이 여기 있다.**
+>
+> 🔑 그리고 이 절의 핵심 결론은 **호스트를 옮겨도 그대로 유효하다.** 여기서 잰 것은
+> 대부분 **laptop3 쪽 무선 링크**이고 그 링크는 안 바뀌었다 — ICMP RTT가 두 호스트에
+> 사실상 같다는 것이 §5.5에서 실측됐다.
 
 > ## 🛑 이 절에서 숫자를 베껴 쓰지 마라
 > 같은 링크를 잰 값이 리포 안에 **셋 있고 전부 다르다** — 13 / 47.8 / 83 Mbit/s.
 > **셋 다 진짜 관측일 가능성이 높다.** 결론은 "빨라졌다"가 아니라
 > **"이 링크는 세션 간 약 6배 흔들린다"**이다. 그러니 **세션 시작마다 다시 재라 —
-> 07-29 값도 상수가 아니다.**
+> 07-29 값도, §5.5의 07-31 값도 상수가 아니다.**
 
 #### (A) 📌 2026-07-27 기록 — Kanu 왕복 100 스텝, Stage A(fake-env)
 
@@ -565,34 +676,121 @@ q95는 **주변 센서 노이즈와 같은 수준**에 앉는다. 무손실 PNG�
 `sidecar_round_trip_ms_mean/max` vs `plain_round_trip_ms_mean/max`로 **따로** 본다.
 두 계열을 분리해 둔 이유가 이것이다 (`ur_env/remote_actor.py`).
 
+### 5.5 📌 **새 호스트 `junhyeong_ai`의 RPC 실측 (2026-07-31)** — §5.3과 별개다
+
+§5.3이 kanu의 기록이라면 이 절은 **새 링크의 기록**이다. 수락 시험(로봇 없음,
+synthetic learner, transition 100개)에서 `GrpcActorNetwork._call`을 감싸는
+**동작 무변경 계측 shim**으로 쟀다. 전문·방법·플래그 근거는
+[`../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md) §3.
+
+| RPC | n | mean | p50 | p95 | max | min |
+|---|---:|---:|---:|---:|---:|---:|
+| `BeginEpisode` | 100 | **57.7 ms** | 57.0 | 70.3 | **82.2** | 17.7 |
+| `Step` | 100 | **156.1 ms** | 153.2 | 179.6 | **211.0** | 145.5 |
+| `GetServerInfo` | 100 | 3.6 ms | 2.6 | 8.2 | 20.7 | 1.7 |
+| `GetBufferStatus` | 2 | 28.1 ms | — | — | 53.4 | 2.9 |
+| `Health` | 1 | 55.7 ms | — | — | 55.7 | 55.7 |
+| **transition당 합계** (`BeginEpisode`+`Step`) | 100 | **213.8 ms** | 210.8 | 237.9 | **268.7** | 180.0 |
+
+100 transition 벽시계 21,996 ms → **4.55 transition/s**.
+shim 없이 돌린 두 번째 run이 스스로 보고한 `BeginEpisode` mean 58.456 / max 84.562 ms가
+shim의 57.984 / 82.362와 일치한다 → **shim이 값을 왜곡하지 않았다.**
+
+#### kanu와의 비교 — 이 비교가 요점이다
+
+| | 🗄️ **kanu** (기록) | 📌 **junhyeong_ai** (2026-07-31) | 판정 |
+|---|---|---|---|
+| `BeginEpisode` mean / max (schema v1 sender) | 63.29 / 91.16 ms | **57.7 / 82.2 ms** | 약간 빠름 |
+| `BeginEpisode` mean / max (schema v2 sender) | 84.9 / **372.8 ms** | **57.7 / 82.2 ms** | **명확히 빠르고 tail이 약 4.5배 짧다** |
+| `Step` mean / max | (해당 계측 없음) | **156.1 / 211.0 ms** | 새 기준선 |
+
+> ### 📏 **원인은 네트워크가 아니라 서버 연산이다 — 실측으로 갈랐다**
+> ICMP RTT가 두 호스트에 사실상 같다 — `junhyeong_ai` min/avg/max
+> **1.078 / 2.811 / 6.979 ms**, `kanu` **1.272 / 2.518 / 6.314 ms** (각 10패킷).
+> 링크 지연이 3 ms 수준인데 RPC가 57 / 156 ms이므로 위 값은 **거의 전부 서버 연산 +
+> 직렬화**다. **서버를 옮겨도 무선 링크 조건은 하나도 안 바뀌었고**, 그래서 §5.3의
+> 링크 경고(변동 6배, 유선 전환 권고)는 **지금도 그대로 유효하다.**
+
+> ### 🛑 **213.8 ms를 512 ms와 비교하지 마라 — 다른 양이다**
+>
+> 리포 곳곳에 production actor 루프 주기가 **512 ms 평균 / 854 ms 최대 (1.95 Hz)** 로
+> 기록돼 있다. 그 둘을 빼거나 "루프가 2.4배 빨라졌다"고 읽는 것은 **진짜 오류**다.
+>
+> - **213.8 ms** = **gRPC 호출 두 개의 합**. 로봇도, 카메라도, 분류기 sidecar도 없는
+>   수락 시험에서 잰 값이다.
+> - **512 ms** = **로봇 루프 한 바퀴 전체**. `env.step` 자체의 100 ms 페이싱 +
+>   카메라 디코드 + 관측 조립 + 블로킹 `Step` RPC가 전부 들어 있고, 비 RPC 비용의
+>   대부분은 애초에 `env.step` **밖**에 있다.
+>
+> RPC 항은 루프 주기의 **구성 요소**이지 그것과 경쟁하는 측정값이 아니다.
+> 줄을 맞출 수 없는 이유가 둘 더 있다: **512 ms는 kanu-era 값**이고, 위 `Step` 156 ms에는
+> **분류기 추론이 들어 있지 않다**(수락 도구가 sidecar를 안 붙인다) — 실기에서 sidecar가
+> 붙는 약 2 Hz의 Step은 이보다 **느릴 수밖에 없다.**
+>
+> 정직한 결론은 좁은 것 하나뿐이다: **RPC 구간만 놓고 보면 새 서버가 kanu보다 느리지
+> 않고 tail은 뚜렷하게 짧다.** 실기 루프 주기가 실제로 얼마나 나아지는지는
+> **미검증이며 G21과 함께 실기에서 다시 재야 한다.**
+
+⚠️ 이 절도 §5.3과 똑같은 규칙을 받는다 — **상수가 아니다.** 수락 시험 1회의 기록이고,
+카메라 2대 + actor + 조작자가 동시에 붙은 상태에서는 다시 재야 한다.
+
 ---
 
-## 6. Kanu 터널
+## 6. 서버 터널 (`junhyeong_ai`)
 
 서버 gRPC는 **서버 loopback에만** 열어 두고 랩톱에서 포워딩한다.
+외부 노출 경로는 **SSH 터널이 유일**하며, 서버 코드가 loopback bind만 허용한다.
+
+> ### ✅ 정상 운용에서는 이 터널을 **손으로 열지 않는다**
+> `ros2_ur_ws/run_hil_server.sh`(Terminal 1)가 learner 기동/재사용과 터널을 **함께**
+> 소유하고 세션이 끝나면 같이 내린다. 환경변수는 **하나도 넘기지 않는다.**
+>
+> ```bash
+> cd /home/laptop3/gello_software/ros2_ur_ws
+> ./run_hil_server.sh --check     # 읽기 전용 점검
+> ./run_hil_server.sh             # learner 재사용/기동 + 터널
+> ```
+>
+> | 환경변수 | 기본값 |
+> |---|---|
+> | `HIL_SSH_HOST` | **`junhyeong_ai`** |
+> | `HIL_LOCAL_PORT` | `50153` |
+> | `HIL_REMOTE_PORT` | **`50053` 고정** — 다른 값은 production learner에 대해 거부된다 |
+> | `HIL_GPU_INDEX` | `0` (이 서버는 GPU 1장) |
+>
+> 아래 수동 형태는 **스모크·수락 시험용**이다.
 
 ```bash
-# 랩톱 — 2026-07-27에 실제로 쓴 형태 (로컬 50153 -> 원격 50053)
+# 랩톱 — 수동 형태 (로컬 50153 -> junhyeong_ai 원격 50053)
 ssh -N -T -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:50153:127.0.0.1:50053 kanu
+  -L 127.0.0.1:50153:127.0.0.1:50053 junhyeong_ai
 ```
+
+> 🗄️ **이전 판(보존):** 같은 줄이 `-L 127.0.0.1:50153:127.0.0.1:50053 kanu`였다
+> (2026-07-27에 실제로 쓴 형태). **포트는 하나도 안 바뀌었고 호스트만 바뀌었다.**
 
 - `ExitOnForwardFailure=yes`가 **중요하다.** 없으면 포워딩이 실패해도 ssh가 살아 있어서
   "연결됐는데 왜 안 되지"로 시간을 버린다.
+- `run_hil_server.sh`는 여기에 `-o BatchMode=yes`도 붙인다 — 즉 **키 인증이 필수**이고
+  비밀번호 프롬프트는 "물어보기"가 아니라 **즉시 실패**다.
 - 양쪽에서 **비어 있는 것이 확인된 포트**를 쓴다.
 - 🔧 **로컬 쪽이 50053이 아니라 50153인 이유:** 2026-07-27에 로컬 `50053`이 다른
   프로세스에 잡혀 있었다. **터널의 로컬 쪽만 바꾸고 원격 쪽은 50053 그대로** 둔다.
   `run_hil_actor.sh`의 `SERVER_PORT` 기본값도 `50153`이다.
+  (2026-07-31 수락 시험은 수동 기동이라 로컬도 `50053`을 썼다 — 그건 그 시험의 예외이지
+  운영 관례가 아니다. 원격 50053이 하나뿐이라 **수락 시험과 실기 세션은 동시에 못 돈다.**)
 
 ```bash
 # 터널 확인 (로컬 쪽 포트를 본다)
 ss -ltnp | grep 50153
 ```
 
-서버 기동 (Kanu). **정본 절차와 함정은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) §2.2**
-— 여기서는 형태만 보인다:
+서버 기동. **운영 정본은 위의 `run_hil_server.sh`이고**, 수동 형태의 절차와 함정은
+[`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) §2.2에 있다 — 여기서는 형태만 보인다:
 
 ```bash
+# 🗄️ 아래는 kanu-era의 receive server(구 마일스톤) 형태다.
+#    현재 운영 서버는 run_rlpd_learner_server.py이고 run_hil_server.sh가 띄운다.
 CUDA_VISIBLE_DEVICES=<nvidia-smi로 비어 있는 GPU> \
 PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
 <overlay venv>/bin/python \
@@ -603,6 +801,13 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
   --reward-model-id cube-in-cup-all3-ckpt150+sidecar-v1 \
   --require-jax-backend gpu
 ```
+
+> 📌 **새 서버에서 바뀐 것은 경로와 GPU 인덱스뿐이다.** `junhyeong_ai`는 GPU가 1장이라
+> `CUDA_VISIBLE_DEVICES=0`이고, classifier는 `~/hil-serl-data/classifier_ckpt/checkpoint_150`,
+> 인터프리터는 오버레이 없이 `/home/junhyeong/miniconda3/envs/il/bin/python`이다(§1.2).
+> **플래그·SHA·model id는 하나도 안 바뀌었다** — 경로 핀이 아니라 내용 핀이라 이전을
+> 그대로 통과했다. 실제로 돌아간 전체 명령은
+> [`../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md) §1에 있다.
 
 > ### 🔧 `--reward-model-id`는 2026-07-29부터 **기본값이 있다**
 > `cube-in-cup-all3-ckpt150+sidecar-v1` (`run_rlpd_receive_server.py::DEFAULT_REWARD_MODEL_ID`).
@@ -653,7 +858,9 @@ $ACTOR_PY \
 > ### upstream submodule 확인
 > 수신 서버는 upstream replay store를 쓰므로 `serl_launcher`가 필요하다.
 > `git submodule status third_party/hil-serl`에 `-`가 붙으면 `00_SETUP_AND_SAFETY.md` §2.3에
-> 따라 초기화한다. Kanu도 동일한 pinned revision을 사용한다.
+> 따라 초기화한다. **서버(`junhyeong_ai:~/gello_software_runtime`)도 동일한 pinned
+> revision(`c32939b`)을 쓴다** — kanu도 그랬다. 서버 checkout은 worktree가 아니라
+> **독립 clone**이고 전진은 `git pull --ff-only` 하나다.
 
 ---
 
@@ -663,14 +870,20 @@ $ACTOR_PY \
       가 `1.74.0`이어야 한다. `1.30.2`가 보이면 즉시 중단 (§1.0)
 - [x] **시스템 python이 오염되지 않았다** (`python3 -c "import rclpy"`가 여전히 동작)
 - [x] mock 서버 + 스모크 클라이언트가 루프백에서 통과 (기본값)
-- [ ] **같은 스모크가 `--timeout-s 0.6 --max-response-age-s 0.8`에서도 통과** (§5.1)
-- [x] 랩톱과 Kanu의 스키마 해시가 **동일** (§4.2) — 2026-07-27 확인
+- [ ] **같은 스모크가 production 예산 `--timeout-s 1.5 --max-response-age-s 2.0`에서도 통과** (§5.1)
+      ⚠️ 이 줄은 예전에 `0.6 / 0.8`이었다. 그 경계는 **정상 reply 832.3 ms를 stale로 잘못 거부해서**
+      production에서 은퇴했다(§5 머리말). 실제 actor가 쓰는 값으로 재야 production 판정이다
+- [x] 랩톱과 서버의 스키마 해시가 **동일** (§4.2) — 🗄️ kanu 2026-07-27 확인,
+      📌 `junhyeong_ai` 2026-07-31 핸드셰이크 통과 (해시 값 자체는 불변)
 - [x] `test_state_layout_contract.py` 통과 (📌 2026-07-29: 22 passed)
 - [x] SSH 터널이 `ExitOnForwardFailure`로 열리고 `ss -ltnp`에 보인다 (로컬 50153)
 - [x] 수신 스모크의 3가지 fail-fast 검사 통과
 - [ ] 서버 로그에 이미지/액션 값이 찍히지 않는다 (§2.2)
-- [ ] **세션 시작마다 §5.3의 레이턴시를 다시 재고 그날 값을 기록** ← 저장된 상수를 쓰지 않는다
-- [ ] **유선(`enx00e04c3600bd`)으로 옮기고 같은 100스텝 재측정** ← 지금 가장 값싼 개선
+- [ ] **세션 시작마다 §5.1을 다시 돌려 그날 값을 기록** ← 저장된 상수를 쓰지 않는다.
+      기준선은 🗄️ kanu §5.3 / 📌 `junhyeong_ai` §5.5 **둘 다** 본다
+- [ ] **유선(`enx00e04c3600bd`)으로 옮기고 같은 100스텝 재측정** ← 지금 가장 값싼 개선.
+      📌 서버를 옮겨도 이 항목은 그대로다 — ICMP RTT가 두 호스트에 사실상 같아서
+      **무선 링크는 하나도 개선되지 않았다** (§5.5)
 - [x] **서버 checkpoint 기본 SHA가 폐기된 07-24 것이 아니다** — 두 `DEFAULT_*_SHA256`가
       `512b6575…`(orbax 디렉터리 digest)로 교체됐다 (2026-07-29, `08` G19).
       그래도 **기동 로그에서 어느 체크포인트가 로드됐는지 눈으로 확인한다** — 이 실패는 조용하다
@@ -679,6 +892,14 @@ $ACTOR_PY \
 - [ ] **뷰어 `p(success)` == 서버 `classifier_probability`** (평활 꺼짐 기준) → `09` §4.4.
       크롭 불일치가 실제로 고쳐졌는지 확인하는 가장 값싼 증거다
 
-> `[x]`는 2026-07-27 Kanu Stage A(fake-env) 왕복에서 확인된 것이다 (📌 기록).
-> **실기 센서를 붙인 Stage B는 아직 하나도 체크되지 않았다** → `09_HIL_ACTOR_RUNBOOK.md`.
-> 지금은 Kanu에 서버가 떠 있지 않으므로, 다시 하려면 §6의 서버 기동부터 시작한다.
+> `[x]` 중 다수는 🗄️ **2026-07-27 kanu Stage A(fake-env) 왕복**에서 확인된 것이다 (📌 기록).
+> 그 뒤로 두 번 더 진전했다: 2026-07-29 첫 실물 production-model E2E(실기 센서 포함),
+> 그리고 📌 **2026-07-31 `junhyeong_ai` 실기 세션 PASS**(replay 316 / intervention 210 /
+> `last_env_step` 68). **즉 Stage B는 더 이상 "하나도 체크되지 않은" 상태가 아니다**
+> → `09_HIL_ACTOR_RUNBOOK.md`.
+>
+> 다시 하려면 서버부터 띄운다 — 정상 경로는 §6의 `./run_hil_server.sh`이고,
+> 지금 서버가 떠 있는지는 `./run_hil_server.sh --check`로 읽는다(스냅샷이라 문서에 적지 않는다).
+>
+> 🗄️ **이전 판(보존):** *"실기 센서를 붙인 Stage B는 아직 하나도 체크되지 않았다 (…)
+> 지금은 Kanu에 서버가 떠 있지 않으므로, 다시 하려면 §6의 서버 기동부터 시작한다."*

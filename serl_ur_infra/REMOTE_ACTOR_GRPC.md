@@ -4,6 +4,28 @@
 > Every flag, default, port and hash below was checked against the code it
 > invokes.
 
+> ## 🔴 2026-07-31: the server host moved. The transport did not.
+>
+> The learner moved **`kanu` → `junhyeong_ai`** (166.104.146.29, hostname
+> `junhyeong`, user `junhyeong`). Nothing in this contract changed shape — same
+> proto, same `schema_version = 2`, same schema hash, same remote port. What
+> changed is *which machine is on the far end of the tunnel*, and *which laptop3
+> interpreter you use to reach it* (see [Which interpreter](#which-interpreter)).
+>
+> | | before | **now** |
+> | --- | --- | --- |
+> | ssh alias | `kanu` | **`junhyeong_ai`** |
+> | tunnel | laptop3 `127.0.0.1:50153` → kanu `127.0.0.1:50053` | laptop3 `127.0.0.1:50153` → **`junhyeong_ai`** `127.0.0.1:50053` |
+> | remote port | 50053 | 50053 (unchanged, and `run_hil_server.sh` now *fixes* it there) |
+> | laptop3 gRPC interpreter | `/tmp/gello-hil-grpc-venv/bin/python` for mocks/smokes | **`/home/laptop3/venvs/gello-hil-actor/bin/python` for everything** — the `/tmp` venv is gone |
+> | learner env vars | `HIL_KANU_REPO` / `HIL_KANU_PYTHON` | `HIL_REMOTE_REPO` / `HIL_REMOTE_PYTHON` (old names still work as aliases), plus new `HIL_REMOTE_DATA_ROOT` |
+>
+> Measured latencies over the new link are in
+> [`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md).
+> Latency figures elsewhere in the repo that predate 2026-07-31 are **kanu's**,
+> and are kept as kanu's — they are the only baseline the new host has to be
+> compared against.
+
 This adapter keeps robot control and intervention on the laptop while policy
 inference and replay routing live on the server. A server injects its policy,
 reward finalizer, and replay router through `ActorSessionService` callbacks
@@ -22,6 +44,15 @@ they are current:
 `GrpcActorNetwork.from_config()` falls back to port **50052** when `NETWORK` does
 not name one, while `run_remote_rlpd_actor.py` fills in **50053**. Always set the
 port explicitly rather than relying on either default.
+
+> 🗄️ `HIL_SERL_KANU_RUNBOOK_KO.md` still carries `KANU` in its **filename** and
+> most of its body. The learner it describes now runs on `junhyeong_ai`; for
+> host, GPU index, repo path and data root, `DATA_AND_MODELS_JUNHYEONG_AI_KO.md`
+> wins over that runbook. In normal operation you do not launch the learner by
+> hand at all — `ros2_ur_ws/run_hil_server.sh` does it with **zero env
+> overrides** (and it can no longer drive kanu, on purpose: kanu's classifier
+> sits outside `hil-serl-data`, so no single `HIL_REMOTE_DATA_ROOT` describes
+> it). kanu is now inspected read-only.
 
 ## Canonical observation contract
 
@@ -104,8 +135,17 @@ against a 100 ms budget.
 roughly every 5 steps (~2 Hz at HZ=10) and **only while the arm is stationary**
 (TCP linear speed <= 0.05 m/s); a step about to terminate always attaches. If the
 last classifier probability was >= 0.05 the scheduler escalates to every step —
-that bound is deliberately *below* the 0.2 reward threshold so the step that
+that bound is deliberately far *below* the reward threshold, so the step that
 actually crosses it is never missed.
+
+> 📌 The escalation bound is `escalate_probability = 0.05`
+> (`classifier_sidecar.py`, verified 2026-07-31). An earlier revision of this
+> paragraph called the reward threshold `0.2`; the runtime default is
+> **`0.5`** (`DEFAULT_REWARD_THRESHOLD`, strict `p > 0.5`), and `run_hil_server.sh`
+> pins 0.5 as well. The escalation logic is unaffected — 0.05 sits below both —
+> but do not quote `0.2` as the current threshold. The 0.85 → 0.5 → 0.2 → 0.5
+> history is in `REWARD_CLASSIFIER_THRESHOLD_KO.md`; the code constant is the
+> authority.
 
 `BeginEpisode` **must not** carry a sidecar and the server rejects one as a
 protocol error: `O0` is no transition's `next_observations`, so a verdict on it
@@ -154,6 +194,12 @@ nested key path, dtype, and shape. `O(t)` is therefore not resent inside `D(t)`.
 > The two are deliberately different: the policy observation must round-trip
 > bit-for-bit, while the classifier's copy is sized to survive a link whose
 > throughput varies ~6x between sessions.
+>
+> 📌 That ~6x figure is **kanu-era** (13 vs 47.8 vs 83 Mbit/s across three
+> laptop3→kanu sessions, `docs/testing/05_COMMS_GRPC.md` §5.3). It is kept
+> because the constraint it describes is laptop3's shared 2.4 GHz WiFi, which the
+> server move did not touch — ICMP RTT is the same to `junhyeong_ai` as it was to
+> kanu. The sizing decision therefore still stands; the number is still kanu's.
 
 ## Data envelope
 
@@ -264,15 +310,85 @@ Notes verified against `ur_env/grpc_actor_transport.py`:
 max_response_age_s/retry_count` only; the schema hash and the identity pins come
 from `run_remote_rlpd_actor.py` CLI flags, which override the config mapping.
 
+> ⚠️ **The `0.6 / 0.8` above is the config-file value, not the production
+> budget.** `run_hil_actor.sh` passes `--timeout-s 1.5 --max-response-age-s 2.0`
+> on the command line, and CLI beats the config mapping — so a real session runs
+> at **1.5 / 2.0**, not 0.6 / 0.8. The widening was forced by measurement: on the
+> first real E2E a perfectly valid reply arrived at **832.3 ms** and the old
+> 0.6/0.8 pair rejected it as stale. Do not "restore" 0.6/0.8 here thinking you
+> are tightening something; you would only make the two sources disagree.
+
+### What one RPC actually costs on this link
+
+Measured on the **`junhyeong_ai`** link, 2026-07-31, over 100 transitions of the
+synthetic acceptance run — full record and method in
+[`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md) §3:
+
+| RPC | n | mean | p95 | max |
+| --- | ---: | ---: | ---: | ---: |
+| `BeginEpisode` | 100 | **57.7 ms** | 70.3 | **82.2 ms** |
+| `Step` | 100 | **156.1 ms** | 179.6 | **211.0 ms** |
+| `GetServerInfo` | 100 | 3.6 ms | 8.2 | 20.7 ms |
+| sum per transition | 100 | **213.8 ms** | 237.9 | 268.7 ms |
+
+Against the **kanu-era** baseline, which stays labelled as kanu's because that is
+what it measures — `BeginEpisode` **84.9 ms mean / 372.8 ms max** (schema v2
+sender) — the new host is modestly faster in the mean and **~4.5× shorter in the
+tail**. ICMP RTT is effectively identical to both hosts (junhyeong_ai
+1.078/2.811/6.979 ms vs kanu 1.272/2.518/6.314 ms, 10 packets each), so **the
+gain is host compute and serialization, not the network.** Moving the server did
+not change the link.
+
+> ### 🛑 Do not compare 213.8 ms to the 512 ms production loop period
+>
+> Other documents in this repo record the production actor loop at **512 ms mean
+> / 854 ms max (1.95 Hz)**. Subtracting one from the other, or reporting "the
+> loop got 2.4× faster", is a real error — **they are not the same quantity**:
+>
+> - **213.8 ms** is the sum of **two gRPC calls**, measured with no robot, no
+>   cameras, and no classifier sidecar attached.
+> - **512 ms** is the **entire robot loop**: `env.step`'s own 100 ms self-pacing,
+>   camera decode, observation assembly, *and* the blocking `Step` RPC. Most of
+>   the non-RPC cost lives outside `env.step` entirely.
+>
+> The RPC term is a **component** of the loop period, not a competing measurement
+> of it. Two further reasons the numbers cannot be lined up: the 512 ms figure is
+> kanu-era, and the 156 ms `Step` above **excludes classifier inference** — the
+> acceptance tool attaches no sidecar, so the ~2 Hz of real steps that do carry
+> one must be slower than this.
+>
+> The honest conclusion is the narrow one: **on the RPC segment alone the new
+> host is not slower than kanu and its tail is clearly shorter.** How much the
+> real loop period improves is **unverified** and has to be re-measured on the
+> rig, together with G21.
+
 ## Which interpreter
 
-The system `python3` on laptop3 carries ROS Humble's grpcio **1.30.2**, not the
-`1.74.0` this contract locks. Do not run any of this with it.
+> ### 🛑 Never run gRPC code with the system `python3`. This is a hard project rule.
+>
+> The system `python3` on laptop3 carries ROS Humble's grpcio **1.30.2**, not the
+> `1.74.0` this contract locks, and that build is **broken on this machine**:
+> merely constructing a channel **spins at 100% CPU forever, with no error and no
+> log**. It does not time out. It does not raise. It does not come back after 30
+> minutes. There is no partial-success mode to fall back on — you just lose the
+> session and your time.
+>
+> ```bash
+> python3 -c "import grpc; print(grpc.__version__)"   # -> 1.30.2   FORBIDDEN
+> /home/laptop3/venvs/gello-hil-actor/bin/python -c "import grpc; print(grpc.__version__)"
+>                                                     # -> 1.74.0   the only one to use
+> ```
+>
+> Do **not** try to fix it by upgrading the system packages: replacing ROS
+> Humble's grpc/protobuf kills `rclpy` and takes the whole robot laptop with it.
+> The venv exists precisely so that nothing has to be fixed.
+
+**One laptop3 interpreter for every gRPC path, mock or real:**
 
 | task | interpreter | why |
 | --- | --- | --- |
-| mock server, smoke clients, `run_fake_e2e_actor.py` | `/tmp/gello-hil-grpc-venv/bin/python` | grpcio 1.74.0 / numpy 1.26.4 / protobuf 3.20.3 — matches `requirements-grpc.lock` exactly (checked 2026-07-29) |
-| `run_remote_rlpd_actor.py` against a real robot | `/home/laptop3/venvs/gello-hil-actor/bin/python` **with the ROS overlay sourced** | that script pulls in `rclpy`, `ur_gello_bringup`, `cv2`, `pyrealsense2` through `UR7eEnv`; this venv has grpcio 1.74.0 *and* system site-packages |
+| mock server, smoke clients, `run_fake_e2e_actor.py` | `/home/laptop3/venvs/gello-hil-actor/bin/python` | grpcio **1.74.0** and protobuf **3.20.3**, an exact match for `requirements-grpc.lock`; numpy differs, see the caveat below (re-measured 2026-07-31) |
+| `run_remote_rlpd_actor.py` against a real robot | the same venv, **with the ROS overlay sourced** | that script pulls in `rclpy`, `ur_gello_bringup`, `cv2`, `pyrealsense2` through `UR7eEnv`; this venv is `--system-site-packages`, so it has grpcio 1.74.0 *and* the ROS stack |
 
 ```bash
 set +u
@@ -281,19 +397,71 @@ source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
 set -u
 ```
 
+> ### 🔧 Correction (2026-07-31): `/tmp/gello-hil-grpc-venv` **no longer exists**
+>
+> Every earlier revision of the table above sent you to
+> `/tmp/gello-hil-grpc-venv/bin/python` for the mock server, the smoke clients
+> and `run_fake_e2e_actor.py`. **laptop3 rebooted and `/tmp` was cleared with
+> it.** The venv is gone. It is not misplaced, it was never in git, and there is
+> nothing to recover — so do not spend an afternoon hunting for it, and do not
+> recreate it under `/tmp`, where the next reboot deletes it again.
+>
+> **What was used instead, and what that proved.** The 2026-07-31
+> `junhyeong_ai` acceptance run ran `run_fake_e2e_actor.py` on
+> `/home/laptop3/venvs/gello-hil-actor/bin/python` and it worked: **200
+> transitions (100 × 2 runs) serialized, sent, ACKed and validated clean**, both
+> runs reporting `fake_e2e_actor_passed` with `replay_insert_delta = 100`
+> ([`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md)).
+> That is a measurement, not an assumption.
+>
+> Strictly, that run exercised **one** of the three tools in the row above. The
+> mock server and the smoke clients are covered by the same reasoning rather than
+> by the same measurement: they drive the identical `grpc_actor_transport` stack,
+> so there was never a reason to split interpreters — and the interpreter they
+> would have been split onto does not exist. The actor venv is now the only
+> laptop3 interpreter this document names.
+>
+> **The one difference from the lock, recorded rather than papered over.**
+> Measured in that venv on 2026-07-31:
+>
+> | package | `requirements-grpc.lock` | actor venv | verdict |
+> | --- | --- | --- | --- |
+> | `grpcio` | 1.74.0 | **1.74.0** | exact match |
+> | `protobuf` | 3.20.3 | **3.20.3** | exact match |
+> | `numpy` | 1.26.4 | **2.2.6** | **differs — measured not to matter** |
+>
+> The two packages that actually decide wire behaviour are exact. numpy is the
+> outlier, and the acceptance run is the evidence that the gap is inert on this
+> path: 200 transitions of `float32` state, `uint8` images and JPEG sidecar
+> buffers round-tripped through `Tensor{path,dtype,shape,data}` with every
+> dtype/shape assertion and every canonical-observation validation passing. The
+> transport pins dtypes explicitly rather than inheriting whatever numpy
+> defaults to, which is why the major-version bump does not reach the wire.
+>
+> ⚠️ **This is a scoped result, not a blanket clearance.** It says the *gRPC
+> transport* is indifferent to numpy 2.x. It says nothing about numpy 2.x
+> elsewhere, and the learner side is a separate, exact-pinned, fail-closed
+> environment (`ur_env/learner/agent.py::validate_learner_dependencies`) that
+> this run did not touch. If you need a lock-exact isolated venv for some other
+> reason, build it **outside `/tmp`**:
+>
+> ```bash
+> python3 -m venv ~/venvs/gello-hil-grpc-lock          # NOT under /tmp
+> ~/venvs/gello-hil-grpc-lock/bin/python -m pip install \
+>   -r serl_ur_infra/requirements-grpc.lock
+> ```
+
 ## Local contract test
 
-Use an isolated environment so ROS Humble's system grpc/protobuf packages are
-not replaced:
+Everything below runs on the actor venv — never the system `python3`. Export it
+once so the commands stay short:
 
 ```bash
-python3 -m venv /tmp/gello-hil-grpc-venv
-/tmp/gello-hil-grpc-venv/bin/python -m pip install \
-  -r serl_ur_infra/requirements-grpc.lock
+export ACTOR_PY=/home/laptop3/venvs/gello-hil-actor/bin/python
+$ACTOR_PY -c "import grpc; print(grpc.__version__)"     # must print 1.74.0
 
 PYTHONPATH=serl_ur_infra \
-  /tmp/gello-hil-grpc-venv/bin/python \
-  serl_ur_infra/scripts/run_actor_mock_server.py
+  $ACTOR_PY serl_ur_infra/scripts/run_actor_mock_server.py
 ```
 
 For a robot/config-free check, run the standalone smoke client in another
@@ -301,8 +469,7 @@ terminal. It sends one normal transition followed by one terminal intervention
 transition, using two raw 128x128 RGB images per observation:
 
 ```bash
-/tmp/gello-hil-grpc-venv/bin/python \
-  serl_ur_infra/scripts/run_actor_smoke_client.py \
+$ACTOR_PY serl_ur_infra/scripts/run_actor_smoke_client.py \
   --host 127.0.0.1 --port 50052
 ```
 
@@ -312,8 +479,7 @@ the gripper moves — that is what you want against the mock:
 
 ```bash
 PYTHONPATH=serl_ur_infra \
-  /home/laptop3/venvs/gello-hil-actor/bin/python \
-  serl_ur_infra/scripts/run_remote_rlpd_actor.py \
+  $ACTOR_PY serl_ur_infra/scripts/run_remote_rlpd_actor.py \
   --exp-name cube_in_cup \
   --ur-config-module ur_experiments.mappings \
   --server-host 127.0.0.1 --server-port 50052 \
@@ -321,12 +487,24 @@ PYTHONPATH=serl_ur_infra \
 ```
 
 `--fake-env` skips the robot and cameras entirely and exercises only the
-wrapper/network contract. Drop it once you want the real environment, and see
-`HIL_SERL_KANU_RUNBOOK_KO.md` §8 before adding `--arm`.
+wrapper/network contract. Drop it once you want the real environment. For a real
+session do not hand-run this script at all — `ros2_ur_ws/run_hil_actor.sh` wraps
+it with an 11-step preflight and pins the interpreter for you.
 
-> ⚠️ `run_remote_rlpd_actor.py` has **never been run on the real rig**
-> (2026-07-29). Everything that has moved the UR7e so far went through
-> `serl_ur_infra/tests/run_real_hil.py`, which is a different code path.
+> ### 🔧 Superseded (2026-07-31)
+> > **Previous text (preserved):** *"⚠️ `run_remote_rlpd_actor.py` has **never
+> > been run on the real rig** (2026-07-29). Everything that has moved the UR7e
+> > so far went through `serl_ur_infra/tests/run_real_hil.py`, which is a
+> > different code path."*
+>
+> That stopped being true the same day it was written. The first real
+> production-model E2E smoke ran on the actual UR7e on **2026-07-29**, and a full
+> operator session against `junhyeong_ai` **passed on 2026-07-31** (replay 316 /
+> intervention 210 / `last_env_step` 68). Both went through
+> `run_hil_actor.sh` → `run_remote_rlpd_actor.py`. `tests/run_real_hil.py` is
+> still a genuinely different code path — it needs no learner and no gRPC server
+> at all — so do not confuse the two, but it is no longer the *only* thing that
+> has driven the arm.
 
 For an SSH-hosted server, keep the gRPC service on server loopback and forward
 it from the laptop. The remote side is always the server's `--port`; the local
@@ -334,17 +512,25 @@ entry port only has to be free on the laptop:
 
 ```bash
 ssh -N -T -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:50053:127.0.0.1:50053 kanu
+  -L 127.0.0.1:50153:127.0.0.1:50053 junhyeong_ai
 
-/tmp/gello-hil-grpc-venv/bin/python \
-  serl_ur_infra/scripts/run_actor_smoke_client.py \
-  --host 127.0.0.1 --port 50053
+$ACTOR_PY serl_ur_infra/scripts/run_actor_smoke_client.py \
+  --host 127.0.0.1 --port 50153
 ```
 
 > The laptop3 operating convention is local **`50153`** → remote `50053`
 > (`ros2_ur_ws/run_hil_actor.sh` defaults `SERVER_PORT=50153`, because local
 > 50053 was already taken on 2026-07-27). Whichever you use, the local entry
 > port and the client's `--port` / actor's `--server-port` must agree.
+>
+> 📌 In normal operation you do not open this tunnel by hand: `run_hil_server.sh`
+> owns it (`HIL_LOCAL_PORT` default `50153`, `HIL_REMOTE_PORT` **fixed** at
+> `50053` — it refuses any other remote port for a production learner) and tears
+> it down with the session. The hand-rolled form above is for smoke tests and for
+> the bounded synthetic acceptance run, which is launched manually and therefore
+> used local `50053` on 2026-07-31 rather than the production `50153`. Only one
+> of the two can hold the remote port at a time, so an acceptance run and a real
+> session cannot overlap.
 
 The server's mock stdout records only IDs, counters, timestamps, intervention
 labels, tensor dtype/shape, and cumulative routing counts. It does not persist
