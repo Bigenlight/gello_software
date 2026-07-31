@@ -12,7 +12,7 @@
 | F/T wrench 프레임 | **정정됨** — tool0가 맞고 upstream과 일치 (§5.3) |
 | RealSense 2대 동시 스트림 안정성 | **미검증** (§1.2, §2) |
 | 7개 토픽 유량 루프 | **미검증** (§3.1) |
-| 분류기 ↔ 크롭 정합 | 🔴 **깨짐, 머지로 이 브랜치에 유입됨** (§4의 G15 박스) |
+| 분류기 ↔ 크롭 정합 | 🟢 **닫힘 (2026-07-29) — 재학습이 아니라 sidecar 분리로** (§4의 G15 박스) |
 
 ```bash
 export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
@@ -344,10 +344,19 @@ compressed JPEG → cv2.imdecode(BGR) → IMAGE_CROP[key](선택) → resize(128
   (`cube_in_cup.py:211-214`). 크롭이 없으면 1280×720이 1:1로 눌려 **가로가 세로의
   0.5625로 압축**된다.
 
-> ### 🔴 알려진 충돌 (G15): 분류기는 크롭 없이 학습됐다 — **머지로 이 브랜치에 들어왔다**
+> ### 🟢 G15는 2026-07-29에 닫혔다 — **재학습이 아니라 sidecar 분리로**
+> 아래 진단(원인·측정치)은 전부 유효하고 **결론만 바뀌었다.** actor가 분류기에게
+> **무크롭 128×128 JPEG를 sidecar로 따로** 보내고(`ur_env/classifier_sidecar.py`),
+> 정책은 아래 `IMAGE_CROP`을 그대로 쓴다. **`IMAGE_CROP`을 지우는 것은 여전히 해결이 아니다.**
+> 남은 것은 팔 **가림(occlusion)**이다 → `README.md` 15행, `08` G15.
+> 그러므로 이 박스 끝의 *"고칠 위치는 분류기 학습이다"*는 🗄️ **채택되지 않은 이전 판**이다.
+>
+> ### 🔴 (기록) 알려진 충돌 (G15): 분류기는 크롭 없이 학습됐다 — **머지로 이 브랜치에 들어왔다**
 > 학습은 크롭 없이 1280×720 full-frame을 128×128로 찌그러뜨렸다
-> (kanu `hil-serl/examples/cube_classifier_pipeline.py::preprocess_frame`,
-> `export_0724.py`가 `crop=None`을 넘긴다). 그런데 actor의 `ur7e_env.get_im()`은
+> (🗄️ **kanu**의 `hil-serl/examples/cube_classifier_pipeline.py::preprocess_frame`,
+> `export_0724.py`가 `crop=None`을 넘긴다. 그 학습 코드는 **kanu에 그대로 남겨 뒀고**
+> — git에서 복원 가능한 코드라 옮기지 않았다 — **재학습용 데이터셋만**
+> `junhyeong_ai:~/hil-serl-data/datasets/`로 옮겼다). 그런데 actor의 `ur7e_env.get_im()`은
 > **`IMAGE_CROP` 적용 후** 리사이즈한다. 즉 크롭을 켜는 순간 **분류기 입력이 분포 밖으로 나간다.**
 >
 > 증명(2026-07-28): 픽셀 대조 MAE **0.00**(무크롭 가설, 100% 비트 일치) vs **21–35**(우리 크롭),
@@ -421,7 +430,10 @@ dim  : 19 grip@ 0
   tcp_vel      [13:19)
 ```
 
-- 이 해시는 2026-07-27에 **Kanu 서버와 동일함이 확인됐다** (`09_HIL_ACTOR_RUNBOOK.md` §2.1).
+- 🗄️ 이 해시는 2026-07-27에 **당시 서버 `kanu`와 동일함이 확인됐다**
+  (`09_HIL_ACTOR_RUNBOOK.md` §2.1). **서버 이전(2026-07-31 `kanu` → `junhyeong_ai`)으로
+  해시는 바뀌지 않았다** — `run_hil_server.sh`가 이 값을 핀으로 들고 있고 actor 핸드셰이크가
+  exact 비교라, 새 서버의 합성 E2E와 실기 세션이 통과한 것 자체가 양쪽 일치의 증거다.
   그래도 매번 양쪽에서 출력해서 대조한다 — 해시를 문서에서 복사하지 말 것.
 - 회귀 테스트 `serl_ur_infra/tests/test_state_layout_contract.py`(📌 2026-07-29 **22 passed**)가
   **살아 있는 env + 살아 있는 gymnasium**에서 레이아웃을 다시 유도해서 대조한다.
@@ -467,8 +479,9 @@ PY
 
 ### 5.4 아직 남은 위험
 
-- canonical v2 layout과 실제 upstream wrapper 경로는 통합 suite 및 Kanu fake-data E2E에서
-  검증됐다. 실행 전 laptop/Kanu가 같은 schema hash를 광고하는지는 계속 확인한다.
+- canonical v2 layout과 실제 upstream wrapper 경로는 통합 suite 및 🗄️ kanu fake-data E2E
+  (2026-07-27), 그리고 `junhyeong_ai` 합성 acceptance E2E(2026-07-31, 200 transition)에서
+  검증됐다. 실행 전 **laptop3와 학습 서버가 같은 schema hash를 광고하는지**는 계속 확인한다.
 - **F/T 브로드캐스터가 없으면 force/torque 6개가 전부 0으로 들어간다** (§3.2).
   레이아웃은 맞지만 값이 죽어 있는 것 — 스키마 해시로는 절대 잡히지 않는다.
   (이건 **프레임 문제가 아니라 유량 문제**다. §5.3과 혼동하지 말 것.)
@@ -496,4 +509,5 @@ PY
 - [ ] 그리퍼 `position_percent`가 실제 상태를 반영한다 (0.0이 "그냥 없음"이 아님을 확인)
 - [ ] 레이아웃 회귀 테스트 통과 (`00_SETUP_AND_SAFETY.md` §4.2의 명령 형식으로):
       `pytest tests/test_state_layout_contract.py -q -p no:anyio`
-- [ ] 랩톱/Kanu 스키마 해시 일치 (§5.2.1, `05_COMMS_GRPC.md` §4.2)
+- [ ] 랩톱/학습 서버(`junhyeong_ai`) 스키마 해시 일치 (§5.2.1, `05_COMMS_GRPC.md` §4.2).
+      🗄️ 옛 판은 `Kanu`라고 적었다 — 2026-07-31에 서버가 옮겨졌고 해시 자체는 불변이다

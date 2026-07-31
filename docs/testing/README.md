@@ -10,13 +10,38 @@
 export WT=/home/laptop3/gello_software
 ```
 
-> ### 🆕 현재 운영 요약 (2026-07-30)
+> ## 🔴 GPU 서버가 바뀌었다 — `kanu` → `junhyeong_ai` (2026-07-31)
+>
+> learner는 **`junhyeong_ai`**(166.104.146.29, hostname `junhyeong`)에서 돈다.
+> 터널은 laptop3 `127.0.0.1:50153` → junhyeong_ai `127.0.0.1:50053`으로 **변함없다.**
+>
+> 🟢 **이 디렉터리의 절차 중 바뀐 것은 사실상 없다.** `run_hil_hardware.sh`에는 서버 참조가
+> 한 줄도 없고, `run_hil_session.sh`/`run_hil_actor.sh`는 언제나 터널의 **로컬 입구
+> `127.0.0.1:50153`**만 본다 — 반대편이 어느 머신인지 원래부터 몰랐다.
+> 호스트가 바뀐 것은 **Terminal 1의 `run_hil_server.sh` 하나뿐**이고, 그 기본값이 이미
+> 새 서버라 **환경변수를 하나도 줄 필요가 없다**. 옛 이름 `HIL_KANU_REPO` /
+> `HIL_KANU_PYTHON`은 `HIL_REMOTE_REPO` / `HIL_REMOTE_PYTHON`의 alias로 살아 있고,
+> `HIL_REMOTE_DATA_ROOT`(`/home/junhyeong/hil-serl-data`)가 신설됐다.
+>
+> ⚠️ `run_hil_server.sh`는 **kanu를 더 이상 구동하지 못한다(의도된 fail-closed)** — kanu의
+> classifier가 데이터 뿌리 밖에 있어 단일 `HIL_REMOTE_DATA_ROOT`로 기술되지 않는다.
+> kanu는 **읽기 전용**으로만 본다(`ssh kanu 'ps -p <pid> -o pid,etime'`).
+> **거기서 아무것도 종료하지 말 것** — 옛 learner는 아직 살아 있고 사용자 소유다.
+>
+> 📌 **이 문서의 `Kanu` 표기 대부분은 07-27~07-30 기록이다.** 측정값과 PASS 근거는 그날 그
+> 호스트의 사실이므로 지우지 않고 🗄️ 표시만 붙였다 — 새 호스트를 비교할 유일한 기준선이다.
+> 정본: [`serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](../../serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md) ·
+> [`serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md) ·
+> 조작자 절차와 터널 소유권은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) §5.4.
+
+> ### 🆕 현재 운영 요약 (2026-07-30 · 🗄️ **당시 서버는 `kanu`**)
 > 실물 HIL-SERL 원형은 구동됐다. 정상 운용은 `run_hil_server.sh` / `run_hil_hardware.sh` /
 > `run_hil_session.sh` 3-CLI다. actor transport는 protocol 2 / schema 3, reward threshold는
 > 0.5다. 성공 기본값은 MANUAL이지만 classifier는 계속 실행·표시·replay 기록된다.
 > terminal 뒤에는 `WAIT_HOME_APPROVAL` → GUI HOME 승인 → `WAIT_SCENE_READY` → 사람이 장면
 > 재배치 → START/NEXT 순서다. startup의 예전 GO/Enter 타이핑은 기본 경로에서 제거됐지만
-> pose/controller proof와 fresh ENGAGED heartbeat는 남아 있다.
+> pose/controller proof와 fresh deadman heartbeat 3개는 남아 있다
+> (🔧 요구 상태는 07-30 저녁부터 **DISENGAGED**다 — 표 17행, `09` §1.4).
 >
 > **개입 제어 경로가 2026-07-30 저녁에 바뀌었다 (`edbb3f5`).** `UR7eEnv`의 **배경 데몬 추종
 > 스레드**가 ENGAGED 동안 30 Hz로 리더를 따라가고 `env.step`은 관찰자다
@@ -125,8 +150,8 @@ export WT=/home/laptop3/gello_software
 | 4 | GELLO 리더 (Dynamixel) | **PASS** | baud 57600, ID1~6 = model 1200, ID7 = model 1190 전부 응답 |
 | 5 | GELLO 발행 안정성 | **PASS** | 30.004 Hz (std 0.15 ms), 30초 901샘플, 드롭 0, `comm failed` 0회, 트리거 0.000~1.000 전 구간 |
 | 6 | EEF 텔레옵 (실기) | **PASS** (사용자 직접 검증) | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef` + `./run_eef_gui.sh` |
-| 7 | 오프라인 단위 테스트 `ur_gello_bringup` | **PASS** | **436 passed in 7.09s** (2026-07-29 통합 checkout에서 재실행). §4에 재현 명령 |
-| 7b | 오프라인 단위 테스트 `serl_ur_infra` | **PASS** | 📌 2026-07-30 `d6965a9`에서 **`701 passed, 11 skipped, 1 xfailed in 14.46s`** (actor venv `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6). 계보: `333`(07-29 오전) → `337`(`40b99f8`) → `429`(classifier sidecar) → `497`(07-30 오전) → `579`(`4197f5b`) → `595`(`ee8af5e`) → **`701`**(`d6965a9`; 배경 추종 스레드 · 컨트롤러 스레드 안전화 · norm 축소 회귀 = `test_intervention_follower`). 🛑 **`1 xfailed`를 빼고 인용하지 말 것** — 알려진 결함의 못이다(저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수 있다; strict xfail이라 고치면 XPASS로 터진다). ⚠️ **인터프리터를 안 적은 passed 수는 무의미하다** — `venvs/hilserl`(jax 0.5.3, numpy 1.26.4)은 jax skip들이 실제로 돌아 **`741 / 4 / 1`**이 된다. ✅ 한때 여기서 났던 `1 failed`(`test_governor_dt.py::test_env_step_surfaces_governed_in_info`)는 **해소됐다** — numpy 승격 차이가 아니라 허용범위가 float32 산술보다 타이트했던 것(`rel=1e-9` → `1e-6`), 근거는 `00` §4.2. 불변인 것: **actor venv에서 skipped는 정확히 11**, **passed가 *내려가면*** PYTHONPATH에서 `serl_launcher`가 빠진 것이고 그때 **skip 사유가 거짓말을 한다** → `00` §4.2. 🪤 `tests/test_env_fake_backend.py`는 **0개 수집**되어 이 총계에 흔적이 없다 → `08` G25 |
+| 7 | 오프라인 단위 테스트 `ur_gello_bringup` | **PASS** | 📌 **489 passed** (시스템 `python3` + ROS overlay, 7.48 s). **서버 이전으로 바뀌지 않았다 — 2026-07-31 재확인.** 이전 값 `436 passed in 7.09s`(2026-07-29)는 END EPISODE 버튼·operator 경로 추가 이전이다. §4에 재현 명령. 🛑 **7b의 수와 절대 합치지 말 것 — 인터프리터도 PYTHONPATH도 다르다** |
+| 7b | 오프라인 단위 테스트 `serl_ur_infra` | **PASS** | 📌 **`768 passed, 11 skipped, 1 xfailed`** (actor venv `/home/laptop3/venvs/gello-hil-actor/bin/python`, numpy 2.2.6, 13.86 s). **서버 이전으로 바뀌지 않았다 — 2026-07-31 재확인.** 계보: `333`(07-29 오전) → `337`(`40b99f8`) → `429`(classifier sidecar) → `497`(07-30 오전) → `579`(`4197f5b`) → `595`(`ee8af5e`) → `701`(`d6965a9`; 배경 추종 스레드 · 컨트롤러 스레드 안전화 · norm 축소 회귀 = `test_intervention_follower`) → **`768`**(07-30 저녁; END EPISODE + DISENGAGED gate + 재기동 복구 = `test_operator_abort` · `test_actor_abort_lifecycle`). 🛑 **`1 xfailed`를 빼고 인용하지 말 것** — 알려진 결함의 못이다(저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수 있다; strict xfail이라 고치면 XPASS로 터진다). ⚠️ **인터프리터를 안 적은 passed 수는 무의미하다** — `venvs/hilserl`(jax 0.5.3, numpy 1.26.4)은 jax skip들이 실제로 돌아 **`741 / 4 / 1`**이 된다. ✅ 한때 여기서 났던 `1 failed`(`test_governor_dt.py::test_env_step_surfaces_governed_in_info`)는 **해소됐다** — numpy 승격 차이가 아니라 허용범위가 float32 산술보다 타이트했던 것(`rel=1e-9` → `1e-6`), 근거는 `00` §4.2. 불변인 것: **actor venv에서 skipped는 정확히 11**, **passed가 *내려가면*** PYTHONPATH에서 `serl_launcher`가 빠진 것이고 그때 **skip 사유가 거짓말을 한다** → `00` §4.2. 🪤 `tests/test_env_fake_backend.py`는 **0개 수집**되어 이 총계에 흔적이 없다 → `08` G25 |
 | 8 | 타이밍 baseline | **매 실행 재측정** | `test_ur_kin.py`(k)가 매 실행마다 찍는다. 📌 2026-07-29 실측 `worst-case tick = 0.836 ms (generic pose)`, 2026-07-27은 `1.314 ms (near-singular)`. **값도 pose 종류도 실행마다 바뀐다 — 고정값으로 인용하지 말 것.** 판정은 "예산 4.0 ms @250 Hz 미만"이다 |
 | 9 | HIL 개입 루프 (mock + RViz) | **미검증(이 브랜치에서)** | 절차는 `serl_ur_infra/RVIZ_HIL_TEST_CLI.md`에 존재. → `04_HIL_INTERVENTION.md` |
 | 9b | HIL 개입 루프 (**실기, 팔 구동**) | **PASS (2026-07-28, `run_real_hil.py` 경로에 한함)** | `--arm --scale 0.25`, 100스텝 중 개입 64, `held=0`. 개입 불변식 4종(anchor-latch 0 / gain-latch 0 / 저장==실행 1.000 / held-rate 0%) 통과. **frame-map = 단위행렬**(포화 제외 잔차 0.093, 기준 0.15). → `04` §4.5 |
@@ -139,8 +164,8 @@ export WT=/home/laptop3/gello_software
 | 9f | 그리퍼 열기 — 세션 시작 + 매 에피소드 경계 | **코드 통합, 실기 미검증** | `run_hil_preposition.sh` `[5b/6]`(`OPEN_GRIPPER=0`으로 끔, `GRIPPER_OPEN_WAIT_S` 대기)와 `UR7eEnv.open_gripper_for_reset`. 근거: 모든 offline demo가 열린 그리퍼에서 시작하고 `gripper_position`은 `state[0]`이라, 닫힌 채 시작하면 첫 스텝부터 OOD다 |
 | 9e | 개입 서브스텝의 **mock RViz** 확인 | **미검증** | `04` §3 루프는 이번에도 건너뛰었다. 실기 PASS가 mock PASS를 대체하지 않는다(G24 검증 순서 ②) |
 | 10 | gRPC actor 루프백 스모크 | **PASS (오프라인)** | `test_actor_grpc_transport/identity_pinning/smoke/rlpd_receive_smoke` = **35 passed** (venv python). 같은 4개 파일이 **시스템 python3에서는 무한 hang** → §0-1 |
-| 10b | **Kanu 왕복 (Stage A, fake-env)** | 📌 **PASS (2026-07-27 기록)** | 100스텝 acceptance 통과. 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버였다. 절차·수치 정본은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) |
-| 10c | 레이턴시 실측 (Kanu 왕복) | 📌 **두 세션이 약 6배 다르다 — 세션마다 재측정** | 07-27: RTT p50 **58.6** / p95 75.8 / **p99 97.1 ms**, 링크 약 **13 Mbit/s**. 07-29(**유휴 리그**): ssh-실효 **약 83 Mbit/s**(min 75.5/max 98.5), ICMP p50 **1.75** / p99 24.4 ms, 손실 0%. 링크는 **2.4 GHz ch.3 `iptime_709`**(5 GHz SSID 없음), kanu는 **캠퍼스 4홉**이지 WAN이 아니다. 🛑 **"해결됐다"로 읽지 마라** — 07-29는 카메라·actor·조작자가 **전부 꺼진** 상태였다. 유선 NIC `enx00e04c3600bd`가 **있는데 안 꽂혀 있다** → `05` §5.3 |
+| 10b | **학습 서버 왕복 (Stage A, fake-env)** | 📌 **PASS (2026-07-27 기록)** 🗄️ *(서버 = kanu)* | 100스텝 acceptance 통과. 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버였다. 새 호스트에서 이 형태를 다시 돌리지는 않았고 21행의 200-transition 합성 acceptance가 같은 경로를 덮었다. 절차 정본은 [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) |
+| 10c | 레이턴시 실측 (학습 서버 왕복) | 📌 **세션마다 재측정 — 호스트가 바뀌었고 세션 간 편차도 크다** | 🗄️ **kanu 기록:** 07-27 RTT p50 **58.6** / p95 75.8 / **p99 97.1 ms**, 링크 약 **13 Mbit/s**. 07-29(**유휴 리그**) ssh-실효 **약 83 Mbit/s**(min 75.5/max 98.5), ICMP p50 **1.75** / p99 24.4 ms, 손실 0%. 링크는 **2.4 GHz ch.3 `iptime_709`**(5 GHz SSID 없음), kanu는 **캠퍼스 4홉**이지 WAN이 아니다. 🛑 **"해결됐다"로 읽지 마라** — 07-29는 카메라·actor·조작자가 **전부 꺼진** 상태였다. 유선 NIC `enx00e04c3600bd`가 **있는데 안 꽂혀 있다** → `05` §5.3. 🆕 **junhyeong_ai (2026-07-31, 합성 200-transition E2E):** per-RPC BeginEpisode **57.7 ms 평균 / 82.2 최대**, Step **156.1 ms 평균 / 211.0 최대** 🗄️ vs kanu BeginEpisode **84.9 / 372.8** — **tail 약 4.5배 단축**. **ICMP RTT는 두 호스트가 같으므로 이득은 네트워크가 아니라 호스트 연산이다** → 21행 |
 | 10d | 관측·sidecar 대역폭 | 📌 **측정됨 (2026-07-29)** | 관측 **98,888 B = 96.57 KiB/step**(이미지는 **raw uint8**, 장당 48 KiB) → 10 Hz **7.911 Mbit/s**. sidecar q95 쌍 **13.32 KiB** @2 Hz → 합계 **8.129 Mbit/s (+2.8 %)**, 부착 스텝 **+8.4 ms** @13 Mbit/s. 기각된 720p passthrough는 쌍 **400 KiB**, +252 ms → `05` §5.4 |
 | 11 | RealSense 2대 동시 스트림 | **actor 실기 PASS** | preflight와 실제 actor loop에서 cam1/cam2 약 30 Hz 확인 → `06_SENSORS.md` |
 | 11b | RealSense QoS 호환성 | **PASS (해소됨)** | 퍼블리셔가 RELIABLE/TRANSIENT_LOCAL → 백엔드의 기본 reliable 구독과 호환. 이전의 "best-effort면 콜백이 안 뜬다" 우려는 **이 리그에서는 해소**. 단 TRANSIENT_LOCAL 부작용 있음 → `06` §3 |
@@ -149,15 +174,19 @@ export WT=/home/laptop3/gello_software
 | 12 | `clip_safety_box` (워크스페이스 박스) | **구현·단위검증, 실기 경로에서는 비활성** | `tests/test_clip_safety_box.py` **26 passed**. 실측 박스는 `cube_in_cup`에만 있고, 팔을 구동한 `run_real_hil.py`는 `DefaultUR7eEnvConfig`(0벡터)를 써서 박스가 꺼진 채 돌았다 → `08` G1. 🛑 **2026-07-30부터 이게 더 위험해졌다** — 개입 변위 예산이 제거되면서 박스가 **유일한 위치 상한**이 됐다. 즉 `run_real_hil.py --arm`은 production 3-CLI 경로보다 **덜 안전하다** |
 | 12b | `go_to_reset` branch-cut | **실기 경로 PASS** | preposition과 실제 actor의 100-step episode reset 경로를 통과. 기존 단위검증도 유지 → `08` G13 |
 | 13 | 장애 주입 매트릭스 | **미검증 (E13 제외)** | → `07_FAILURE_INJECTION.md` |
-| 14 | **RL 정책** 경로로 실기 팔 구동 | **원형 PASS** | policy가 실제 action을 소유하고 ENGAGE로 GELLO 개입, 해제 뒤 policy 복귀를 관측. 장시간 latency는 `08` G21 |
-| 15 | reward classifier ↔ 크롭 정합 | 🟢 **sidecar + GUI 실기 관측 PASS** | 분류기는 무크롭 sidecar, 정책은 crop 유지. 실제 `p(success)`/threshold/verdict 표시 확인. MANUAL에서도 계속 돈다. 영구 audit/가림은 남음 → `08` G15 |
+| 14 | **RL 정책** 경로로 실기 팔 구동 | **원형 PASS** (🗄️ 07-30 kanu) · 🆕 **junhyeong_ai에서 재현 (07-31)** | policy가 실제 action을 소유하고 ENGAGE로 GELLO 개입, 해제 뒤 policy 복귀를 관측. 07-31 세션은 새 서버 상대로 replay 316 / intervention 210까지 진행했다(21행). 장시간 latency는 `08` G21 |
+| 15 | reward classifier ↔ 크롭 정합 | 🟢 **sidecar + GUI 실기 관측 PASS** · 🆕 **새 서버에서 실 sidecar ingress 확인 (07-31)** | 분류기는 무크롭 sidecar, 정책은 crop 유지. 실제 `p(success)`/threshold/verdict 표시 확인. MANUAL에서도 계속 돈다. checkpoint는 `junhyeong_ai:~/hil-serl-data/classifier_ckpt/checkpoint_150`으로 옮겨졌고 **디렉터리 SHA `512b6575…62846d`는 그대로다**. 영구 audit/가림은 남음 → `08` G15 |
 | 15c | operator episode 상태기계 | **구현·schema-3 실기 진행** | MANUAL/AUTO, MARK SUCCESS, WAIT_HOME_APPROVAL, APPROVE HOME, WAIT_SCENE_READY, START/NEXT 구현. episode-limit GUI와 schema-3 online 학습 관측 완료; MARK SUCCESS episode의 one-shot provenance 재확인만 남음 → `08` G23 |
 | 15b | 분류기 checkpoint SHA pin (orbax 디렉터리) | 🟢 **해결 (2026-07-29)** | `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임. 두 `DEFAULT_*_SHA256`가 폐기된 `e329986b…`(새 도메인 recall 0%)에서 **`512b6575…62846d`**(= `classifier_ckpt/cube_in_cup_all3/checkpoint_150`, 정규 파일 14개)로 교체. **learner fingerprint가 한 번 깨진다 — 의도된 것** → `08` G19 |
-| 16 | canonical offline demo artifact | 🟢 **해결 (2026-07-29)** | 사용자가 `take_23` 제외 23개 take를 success로 승인했고 2,037-transition 영구 pickle을 생성했다. laptop3/Kanu strict-load와 SHA256 일치를 확인했다 → `08` G20 |
+| 16 | canonical offline demo artifact | 🟢 **해결 (2026-07-29)** · 🆕 **서버 이전 후에도 동일 (07-31)** | 사용자가 `take_23` 제외 23개 take를 success로 승인했고 2,037-transition 영구 pickle을 생성했다. 🗄️ 07-29에 laptop3/kanu strict-load와 SHA256 일치를 확인했다. 이제 정본은 `junhyeong_ai:~/hil-serl-data/demos/` (SHA256 `f9718558…032fa`, 195 MB)이고 laptop3·kanu 사본까지 **3벌 전부 같은 해시**다. **SHA 핀은 경로 핀이 아니라 내용 핀이라 이전을 그대로 통과했고, 오히려 전송 정확성을 검사해 줬다** → `08` G20 |
 | 17 | 세션이 **DISENGAGED**로 시작 (시작 ENGAGE 불필요) | **코드 통합, 실기 미검증** | 세 gate 전부(`run_hil_session.sh` 폴링 · preflight `[11]` · `[ARM]` 재검증)가 fresh **DISENGAGED** heartbeat 3개를 요구한다. `_hil_deadman_check.py --require engaged\|disengaged`, `HIL_STARTUP_DEADMAN`(오타는 fail-closed). gate의 의미는 처음부터 intent가 아니라 **데드맨 채널 생존 증명**이었다. 🟡 **알면서 받아들인 trade-off**(사용자 명시 거절): 이제 policy가 팔을 몰기 전에 ENGAGE 전이가 한 번도 실행되지 않는다 — GUI가 `POLICY_RUNNING` 전까지 ENGAGE를 막기 때문. 탈출구 `HIL_STARTUP_DEADMAN=engaged` → `09` §1.4 |
 | 18 | `END EPISODE` 버튼 (`/hil/abort_episode`) | **코드 통합, 실기 미검증** | one-shot 토큰((run_id, episode_id) scope), `ACTIVE_CONTROL_STATES`에서만 합법, `terminal_reason`이 서 있으면 **보이는 거절**. `done=False, truncated=True, masks=1.0, success=False` → 평소 HOME 경로. 🛑 **아무것도 버려지지 않는다** — proto에 cancel RPC가 없고 서버가 Ack 전에 replay에 insert한다 → `09` §5.2, `08` G36. ⏱️ 즉시가 아니다(iteration당 2회 읽기, 최악 한 주기 854 ms) |
 | 19 | 충돌 복구 — 하드웨어 재기동에서 세션 생존 | **코드 통합, 실기 미검증** | 카메라·GUI 유지, 3~5단계만 재시도. rc 계약 75/1/70/`>=128`, **75는 `env_step >= 0` 관측이 있어야만** 승격(결정론적 startup 실패는 재시도 안 함). 재시도 3조건: PID 세대 교체 + 토픽 READY + **dashboard `RUNNING`/`NORMAL`**(토픽 probe는 RTDE 읽기라 PROTECTIVE_STOP을 못 본다). 모든 proof 매번 재실행 → `09` §5.3 |
 | 20 | Qt 폰트 경고 억제 | **코드 통합** | `launch_cameras.sh` · `run_hil_actor.sh`에서 정확히 두 줄만 stderr 필터. `QT_QPA_FONTDIR`(cv2가 import 시 덮어씀)과 scoped `QT_LOGGING_RULES`(카테고리 없는 qWarning) **둘 다 실측 무효** — 다시 시도하지 말 것. 필터는 `trap '' INT TERM` 아래라 Ctrl-C가 actor 종료 stderr를 못 지운다 |
+| 21 | 🆕 **학습 서버 이전 (`kanu` → `junhyeong_ai`)** | 🟢 **실기 PASS (2026-07-31, 조작자 확인)** | 실물 UR7e 세션이 새 서버 learner를 상대로 통과: replay **316** / intervention **210** / last_env_step **68**, run root `~/hil-serl-data/runs/cube_in_cup_real_20260731_054929`. 합성 acceptance가 못 닫던 둘을 닫았다 — **실제 classifier sidecar**와 **`intervened=1` ingress**. 선행 합성 E2E는 200 transition으로 gRPC → finalize → feature replay → CTA → publish → checkpoint → resume 전 구간 통과(수치는 10c행). 🗄️ **kanu에서 학습된 policy 체크포인트는 애초에 하나도 없었다** — run root 8개 전부 `checkpoints/`가 비었고(`checkpoint_period`=5000, 최고 learner step 301) **이전으로 잃은 것이 없다**. 전문 `serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md` |
+| 21b | jax 핀 유지 (sm_86 → **sm_120 Blackwell**) | **PASS (2026-07-31 실측)** | 이전의 최대 위험이었다. jax **0.5.3이 네이티브로 돈다** — XLA가 `.target sm_120a`를 생성하고 구형 아치 PTX 폴백이 **아니다**. **핀 상향 불필요.** warm-up 28.4 / 16.0 / 0.101 s 🗄️ vs kanu 46.83 / 37.22 / 0.466 s(총 1.9배 빠름; **kanu learner도 A4000을 1장만 썼다** — 8장이 아니다) |
+| 21c | 3-CLI 조작자 절차 불변 | **PASS (코드 확인 2026-07-31)** | `run_hil_hardware.sh`에 서버 참조 **0건**. `run_hil_session.sh` / `run_hil_actor.sh`는 `127.0.0.1:50153`(터널 로컬 입구)만 참조하며 반대편 호스트를 모른다. **Terminal 1의 스크립트만 호스트가 바뀌었다** → `09` 상단 박스 |
+| 21d | 터널 소유권 실패 모드 | **문서화됨 — 실기에서 발생 (2026-07-31)** | Terminal 1을 Ctrl-C 하거나 닫으면 **learner는 서버에서 살아남고 터널만 죽는다** → Terminal 3 preflight `[6]` `TCP 127.0.0.1:50153 연결 실패 — ConnectionRefusedError`. 조치는 `./run_hil_server.sh` 재실행 하나(살아 있는 learner 재사용 + 새 터널). 🛑 learner를 재기동하면 그 프로세스 RAM에만 있던 online replay가 사라진다 → `09` **§5.4** |
 
 ---
 
@@ -195,11 +224,11 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`02_GELLO_LEADER.md`](02_GELLO_LEADER.md) | GELLO 리더 검증(**PASS**) + Dynamixel 진단 스캔 + 트리거가 별도 토픽인 이유 |
 | [`03_EEF_MODE.md`](03_EEF_MODE.md) | EEF 텔레옵 단계 상승 P6 → P7 → P8 → P9a → P9b (사용자 검증 완료, 재현 절차) |
 | [`04_HIL_INTERVENTION.md`](04_HIL_INTERVENTION.md) | 데드맨 2종, 앵커/gain 래치, mock RViz 루프, **실기 러너 `run_real_hil.py`**, 좌표계 3×3, 그리퍼 개입, 개입 메타데이터 계약, **§9 손맛 실측 5개 표 + 🛑 되돌리면 안 되는 것 3개(2026-07-30)** |
-| [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, 포트 기본값, schema fail-fast(v2), **분류기 sidecar 전송 계약(§3.2)**, **레이턴시·대역폭 실측(§5.3–5.4)**, Kanu 터널 |
+| [`05_COMMS_GRPC.md`](05_COMMS_GRPC.md) | venv 격리, 루프백 스모크, 포트 기본값, schema fail-fast(v2), **분류기 sidecar 전송 계약(§3.2)**, **레이턴시·대역폭 실측(§5.3–5.4)**, 학습 서버 터널 |
 | [`06_SENSORS.md`](06_SENSORS.md) | RealSense 2대(시리얼·크롭·역할), QoS/TRANSIENT_LOCAL 함정, 토픽 유량 점검, 19-D state 계약, F/T 프레임 |
 | [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
 | [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전·데이터·운영 갭 **G1~G31**과 완화책. G22/G23은 operator 상태기계로 닫혔고 G30은 현재 preposition 기본값, G31은 global max-step 종료 edge를 기록 |
-| [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, Kanu 서버 기동 |
+| [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, 학습 서버(`junhyeong_ai`) 기동. **§5.4 = Terminal 1 터널 소유권 실패 모드** |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
 
@@ -219,8 +248,8 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 ```
 [A] 오프라인 (로봇 불필요, 위험 0)
  A1  ROS2 워크스페이스 빌드             -> 00 §2
- A2  ur_gello_bringup 단위테스트 436개  -> 00 §4.1  [PASS 2026-07-29]
- A3  serl_ur_infra 단위테스트 (개수 변동) -> 00 §4.2  [PASS 2026-07-30, 701p/11s/1xf, actor venv]
+ A2  ur_gello_bringup 단위테스트 489개  -> 00 §4.1  [PASS, 시스템 python3 + overlay]
+ A3  serl_ur_infra 단위테스트 (개수 변동) -> 00 §4.2  [PASS, 768p/11s/1xf, actor venv]
  A4  gRPC 루프백 스모크 (mock 서버)     -> 05 §2    [PASS 오프라인]
         ↓
 [B] 하드웨어 단독 (팔 미동작)
@@ -252,12 +281,13 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
  E1  통신/프로세스 계열 (E1~E5)         -> 07      [미검증]
  E2  로봇 안전 계열 (E6~E11)            -> 07      [미검증]
         ↓
-[F] 원격 통신 (Kanu)
- F1  SSH 터널 + 스키마 핸드셰이크       -> 05 §6, 09 §2   [PASS 2026-07-27]
- F2  레이턴시 예산 실측                  -> 05 §5.3       [세션마다 재측정 — 값이 6배 흔들린다]
- F3  Stage A actor (fake-env) 왕복       -> 09 §3         [PASS 2026-07-27]
+[F] 원격 통신 (학습 서버 — 2026-07-31부터 junhyeong_ai)
+ F1  SSH 터널 + 스키마 핸드셰이크       -> 05 §6, 09 §2   [PASS 2026-07-27, 서버=kanu]
+ F2  레이턴시 예산 실측                  -> 05 §5.3       [세션마다 재측정 — 호스트가 바뀌었다]
+ F3  Stage A actor (fake-env) 왕복       -> 09 §3         [PASS 2026-07-27, 서버=kanu]
  F3b 분류기 sidecar + GUI verdict          -> 09 §4.4       [실기 관측 PASS]
  F4  no-arm live-sensor policy probe      -> 09 §4         [PASS, transition 0]
+ F5  서버 이전 합성 acceptance 200 transition -> 09 §7.1  [PASS 2026-07-31, junhyeong_ai]
         ↓
 [G] RL 정책 경로 실기 first E2E          [핵심 PASS]
  G1  policy/GELLO 실제 action 전환        [PASS]
@@ -265,9 +295,11 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
  G3  첫 publish 경계 RPC deadline          [1.5/2.0 s bounded 완화 — 장시간 계측 남음]
  G4  HOME/scene/operator episode GUI       [구현, episode-limit WAIT 실기 관측]
  G5  schema-3 MANUAL MARK SUCCESS provenance [다음 실기에서 재확인]
+ G6  같은 루프를 junhyeong_ai learner로     [PASS 2026-07-31: replay316/interv210/step68]
 ```
 
-**현재 위치: 실물 HIL-SERL 원형과 operator episode GUI [G1~G4]까지 도달했다. 다음 확인은
+**현재 위치: 실물 HIL-SERL 원형과 operator episode GUI [G1~G4]까지 도달했고, [G6]으로 그
+루프를 새 서버(`junhyeong_ai`)에서 재현했다. 다음 확인은
 [G5], 장시간 latency, classifier 재학습, G27/G28 데이터 정합성이다.**
 2026-07-30 오전에 [D′3](개입 손맛 1차, `in_window`)이 PASS했다 — **[G3]와 독립**이다
 (learner·gRPC 서버를 쓰지 않는 zero-policy 경로). 같은 날 저녁 [D′4](`background` 추종

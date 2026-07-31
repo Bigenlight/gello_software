@@ -1,6 +1,67 @@
 # 09 — HIL actor 기동 런북 (3-CLI 실물 HIL-SERL 운영)
 
-> ## 🆕 현재 운영 스냅샷 (2026-07-30)
+> # 🔴 GPU 서버가 바뀌었다 — `kanu` → `junhyeong_ai` (2026-07-31)
+>
+> learner는 이제 **`junhyeong_ai`**(166.104.146.29, hostname `junhyeong`, 계정 `junhyeong`)에서
+> 돈다. 터널은 laptop3 `127.0.0.1:50153` → junhyeong_ai `127.0.0.1:50053`이다.
+>
+> ## 🟢 조작자 절차는 **바뀌지 않았다** — 이 박스에서 제일 중요한 문장이다
+>
+> | 터미널 | 서버 이전이 미친 영향 |
+> |---|---|
+> | **1** `run_hil_server.sh` | **여기만 바뀌었다.** 기본 호스트·repo·python·데이터 뿌리가 junhyeong_ai로 이동 |
+> | **2** `run_hil_hardware.sh` | **서버 참조가 한 줄도 없다** (2026-07-31 확인). UR7e/Robotiq/GELLO만 소유한다 |
+> | **3** `run_hil_session.sh` / `run_hil_actor.sh` | 언제나 **`127.0.0.1:50153`**(터널의 로컬 입구)만 본다. 반대편이 어느 머신인지 **원래부터 몰랐다** |
+>
+> 그래서 §1의 preflight `[1]`~`[11]`, §4의 손 절차, controller handoff, GUI 버튼은
+> **한 글자도 달라지지 않았다.** 서버가 옮겨간 것을 조작자가 알아차릴 곳은 Terminal 1의
+> READY 배너뿐이다.
+>
+> 환경변수는 **이름만** 바뀌었고 **옛 이름이 alias로 살아 있다**:
+> `HIL_KANU_REPO` → **`HIL_REMOTE_REPO`**(`/home/junhyeong/gello_software_runtime`),
+> `HIL_KANU_PYTHON` → **`HIL_REMOTE_PYTHON`**(`/home/junhyeong/miniconda3/envs/il/bin/python`),
+> 신설 **`HIL_REMOTE_DATA_ROOT`**(`/home/junhyeong/hil-serl-data`).
+> **평상시에는 환경변수를 하나도 주지 않는다** — 기본값이 이 서버다.
+>
+> ⚠️ **`run_hil_server.sh`는 이제 kanu를 구동할 수 없고, 그게 의도된 fail-closed다.**
+> kanu의 classifier는 `hil-serl-data` 밖(`workspace/youngwoong/…`)에 있어서 **어떤 단일
+> `HIL_REMOTE_DATA_ROOT`도 kanu를 만족시키지 못한다.** kanu는 **읽기 전용으로만** 본다
+> (`ssh kanu 'ps -p <pid> -o pid,etime'`). **kanu에서 아무 프로세스도 종료하지 말 것** —
+> 옛 learner는 아직 살아 있고 사용자 소유다.
+>
+> 🗄️ **worktree는 이제 거부된다.** `run_hil_server.sh`가 원격 checkout의
+> `--git-dir == --git-common-dir`를 검사해서 linked worktree면 죽는다. 그래서 이 문서에
+> 남아 있던 `/tmp/gello-hil-rl-receive-server-v2`(옛 "Kanu 전용 worktree")는 **경로도
+> 형태도 은퇴했다** → §2.1 / §2.2.
+>
+> 서버 쪽 경로·데이터·모델 정본은
+> [`serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](../../serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md),
+> 이전 검증 기록은
+> [`serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](../../serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md).
+>
+> 📌 **이 문서에 남은 `Kanu` 표기는 대부분 2026-07-27~07-30의 기록이다.** 측정값과 PASS
+> 근거는 **그날 그 호스트의 사실**이므로 지우지 않고 🗄️ 표시만 붙였다.
+> **사람이 실행하는 명령과 경로는 전부 새 호스트로 고쳤다.**
+
+> ## 🆕 2026-07-31 — 새 서버에서 실기 세션 PASS
+>
+> - **실물 UR7e 세션이 `junhyeong_ai` learner를 상대로 통과했다**(조작자 확인):
+>   replay **316** / intervention **210** / last_env_step **68**, run root
+>   `junhyeong_ai:~/hil-serl-data/runs/cube_in_cup_real_20260731_054929`.
+>   이것이 합성 acceptance가 못 닫던 두 가지를 닫았다 — **실제 classifier sidecar**와
+>   **`intervened=1` ingress**.
+> - 합성 acceptance E2E(200 transition, gRPC → finalize → feature replay → CTA → publish →
+>   checkpoint → resume) per-RPC: BeginEpisode **57.7 ms 평균 / 82.2 최대**,
+>   Step **156.1 ms 평균 / 211.0 최대**. 🗄️ 비교 대상 kanu는 BeginEpisode
+>   **84.9 평균 / 372.8 최대**였다 — tail이 약 4.5배 짧아졌다. ICMP RTT는 두 호스트가
+>   같으므로 **이득은 네트워크가 아니라 호스트 연산**이다.
+> - jax 0.5.3이 sm_120(Blackwell)에서 **네이티브로 돈다**(XLA가 `.target sm_120a` 생성).
+>   핀 상향은 필요 없었다.
+> - 🗄️ **kanu에서 학습된 policy 체크포인트는 애초에 하나도 없었다** — run root 8개 전부
+>   `checkpoints/`가 비어 있었고(`checkpoint_period`=5000, 최고 도달 learner step 301),
+>   이전으로 잃은 것은 없다.
+
+> ## 🆕 현재 운영 스냅샷 (2026-07-30, 🗄️ **당시 서버는 `kanu`**)
 >
 > - 실물 UR7e에서 Kanu policy, GELLO intervention, online replay/learner update까지 구동됐다.
 > - 정상 진입점은 `run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh` 세 개다.
@@ -97,10 +158,10 @@ wrapper로 묶는다.
 ```bash
 cd /home/laptop3/gello_software/ros2_ur_ws
 
-# Terminal A: Kanu learner + SSH tunnel
+# Terminal A: 학습 서버(junhyeong_ai) learner + SSH tunnel
 ./run_hil_server.sh
 
-# Terminal B: UR7e driver + gripper + GELLO reader
+# Terminal B: UR7e driver + gripper + GELLO reader   (서버와 무관 — 로컬 하드웨어 전용)
 ./run_hil_hardware.sh
 
 # Terminal C: cameras + HIL GUI + preposition/preflight + armed actor
@@ -108,7 +169,8 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 ```
 
 - A는 exact production learner를 재사용하거나 없을 때만 RAM/artifact gate 뒤 새로 띄우고,
-  local `50153 -> Kanu 50053` tunnel을 유지한다. `Ctrl-C`는 tunnel만 닫는다.
+  local `50153 -> junhyeong_ai 50053` tunnel을 유지한다. **`Ctrl-C`는 tunnel만 닫는다** —
+  learner는 서버에 detached로 살아남는다. 그 비대칭이 실제로 사람을 물었다 → **§5.4**.
 - B는 UR7e/Robotiq/GELLO만 소유한다. 충돌·연결 해제 뒤 C를 내리고 B의 cleanup 완료 후 B만
   다시 띄울 수 있다.
 - C는 카메라/GUI/preposition/armed preflight/actor를 순서대로 실행한다. **controller handoff
@@ -165,7 +227,7 @@ cd $WT/ros2_ur_ws
 | 변수 | 기본값 | 비고 |
 |---|---|---|
 | `ACTOR_VENV` | `/home/laptop3/venvs/gello-hil-actor` | `--system-site-packages` venv (rclpy 상속). grpcio 1.74.0 |
-| `SERVER_HOST` / `SERVER_PORT` | `127.0.0.1` / `50153` | 로컬 터널 입구. 원격은 Kanu `50053` |
+| `SERVER_HOST` / `SERVER_PORT` | `127.0.0.1` / `50153` | 로컬 터널 입구. 원격 끝은 학습 서버(`junhyeong_ai`) `50053`. 🟢 **이 두 값은 서버 이전으로 바뀌지 않았다** — actor는 터널의 로컬 입구만 알고 반대편 호스트를 모른다 |
 | `EXP_NAME` | `cube_in_cup` | `ur_experiments/mappings.py`의 `CONFIG_MAPPING` 키 |
 | `UR_CONFIG_MODULE` | `ur_experiments.mappings` | |
 | `OBS_SCHEMA_HASH` | `3459098d…0352903` | 양쪽이 같아야 한다 (§2.1) |
@@ -327,60 +389,98 @@ python3 _hil_deadman_check.py --topic /hil/deadman --samples 3 --timeout 2.0 \
 
 ---
 
-## 2. Kanu(서버) 쪽 — Stage A/B 공통 전제
+## 2. 학습 서버(`junhyeong_ai`) 쪽 — Stage A/B 공통 전제
+
+> ### 🟢 정상 운용에서는 이 절을 **읽을 필요가 없다**
+> Terminal 1의 `./run_hil_server.sh`가 exact learner 재사용/기동과 터널을 전부 한다.
+> **환경변수를 하나도 주지 않는다** — 기본값이 `junhyeong_ai`다.
+> 읽기 전용 확인은 `./run_hil_server.sh --check`.
+> 아래는 그 wrapper가 고장났을 때의 수동 진단 경로와, **2026-07-27 kanu 세션의 기록**이다.
 
 ### 2.1 📌 2026-07-27 세션의 **기록** — 재입력용 설정값이 아니다
 
 > ## 🛑 이 표에서 값을 복사하지 마라
-> 아래는 그날 그 세션이 무엇을 썼는지의 **기록**이다. 커밋·GPU·체크포인트 SHA는
-> **전부 그 뒤에 바뀌었거나 바뀔 수 있다.** 각 항목 옆에 "지금은 어떻게 확인하나"를 적었다.
+> 아래는 그날 그 세션이 무엇을 썼는지의 **기록**이고, 그날의 서버는 **`kanu`**였다.
+> 커밋·GPU·체크포인트 SHA는 **전부 그 뒤에 바뀌었거나 바뀔 수 있다.**
+> 각 항목 옆에 "지금은 어떻게 확인하나"를 적었다.
 
-| 항목 | 📌 그날의 값 | 지금은 |
+| 항목 | 📌 그날의 값 (🗄️ kanu) | 지금은 (`junhyeong_ai`) |
 |---|---|---|
-| Kanu worktree | `/tmp/gello-hil-rl-receive-server-v2` @ `5fb716b` | **커밋이 다르다.** 랩톱과 같은 커밋인지 양쪽에서 `git rev-parse --short HEAD`로 대조한다 |
-| overlay venv | `/tmp/gello-hil-rl-receive-overlay-v2` | 경로는 유효하나 **learner에는 재사용 금지** (protobuf 3.20.3이 wandb를 깨뜨린다 → `05` §1.2) |
-| GPU | `CUDA_VISIBLE_DEVICES=7` | **7번 고정이 아니다.** `nvidia-smi`로 비어 있는 카드를 매번 다시 고른다 (2026-07-28 기준 5/6/7 전부 유휴) |
+| 서버 checkout | `/tmp/gello-hil-rl-receive-server-v2` @ `5fb716b` (kanu의 **worktree**) | 🗄️ **그 경로도 그 형태도 은퇴했다.** 현재 HIL checkout은 **`/home/junhyeong/gello_software_runtime`**(독립 clone)이고, `run_hil_server.sh`가 linked worktree를 **거부**한다(`--git-dir == --git-common-dir` 검사). 커밋은 laptop3와 대조한다 — 그 대조를 `run_hil_server.sh`가 ssh로 자동 수행한다 |
+| overlay venv | `/tmp/gello-hil-rl-receive-overlay-v2` | 🗄️ kanu 전용. 지금 learner python은 **`/home/junhyeong/miniconda3/envs/il/bin/python`**(py 3.10.20, jax 0.5.3 exact-pin, fail-closed). 옛 overlay는 **재사용 금지**였다(protobuf 3.20.3이 wandb를 깨뜨린다 → `05` §1.2) |
+| GPU | `CUDA_VISIBLE_DEVICES=7` (kanu는 A4000 **×8**) | **`junhyeong_ai`는 GPU가 1장뿐이다** — RTX 5070 Ti 16 GB, sm_120, **index 0**. `HIL_GPU_INDEX` 기본값도 `0`이다. ⚠️ 그 1장을 **다른 사람과 공유**하므로 `nvidia-smi`로 점유를 먼저 본다 |
 | 서버 포트 | `50053` (loopback bind) | 그대로 (코드 기본값) |
-| 로컬 터널 입구 | `50153` → 원격 `50053` | 그대로 (`run_hil_actor.sh:72`의 `SERVER_PORT` 기본값도 50153) |
-| 분류기 checkpoint SHA-256 | **`512b6575…62846d`** | ✅ `cube_in_cup_all3/checkpoint_150`의 **디렉터리** digest. *(그날 기록된 `e329986b…d7a997`는 recall 0%짜리 폐기 체크포인트였다. 코드 기본값도 07-29에 교체됐다 → `08` G19)* |
-| observation schema hash | `3459098d…0352903` | 📌 2026-07-29 랩톱에서 동일. **그래도 양쪽에서 출력해 대조한다** (`05` §4.2) |
+| 로컬 터널 입구 | `50153` → 원격 `50053` | 그대로 (`run_hil_actor.sh`의 `SERVER_PORT` 기본값도 50153). 🟢 **서버 이전으로 바뀌지 않았다** |
+| 분류기 checkpoint SHA-256 | **`512b6575…62846d`** | ✅ `checkpoint_150`의 **디렉터리** digest. 경로만 옮겨졌다 → `junhyeong_ai:~/hil-serl-data/classifier_ckpt/checkpoint_150`. **SHA 핀은 하나도 안 바뀌었다**(경로 핀이 아니라 내용 핀이라 이전이 정확했는지를 오히려 검사해 줬다). *(그날 기록된 `e329986b…d7a997`는 recall 0%짜리 폐기 체크포인트였다 → `08` G19)* |
+| observation schema hash | `3459098d…0352903` | 📌 불변. `run_hil_server.sh`가 이 값을 핀으로 들고 있고 핸드셰이크가 exact 비교다. **그래도 양쪽에서 출력해 대조한다** (`05` §4.2) |
 
 > 로컬 포트가 50053이 아니라 **50153**인 이유: 그날 로컬 50053이 다른 프로세스에
 > 잡혀 있었다. 터널 로컬 쪽만 바꾸고 원격 쪽은 50053 그대로 둔다. 이 배치가 코드
 > 기본값이 됐으므로 그대로 쓴다.
 
-📌 **Kanu 쪽 실제 경로** (`/home/laptop3/gello_software`는 kanu에 **없다**):
+**학습 서버 쪽 실제 경로** (`/home/laptop3/gello_software`는 서버에 **없다**):
 
-| 무엇 | 경로 |
+| 무엇 | 경로 (`junhyeong_ai`) |
 |---|---|
-| 분류기 학습처 (YWhero/hil-serl fork, `agent/cube-in-cup-classifier` @ `d753571`) | `~/workspace/youngwoong/hil-serl` |
-| 학습 데이터 + 07-27 체크포인트 | `~/workspace/youngwoong/dataset/cube_in_cup_all3/` |
-| ZMQ 뷰어 + 07-24 체크포인트 | `~/workspace/youngwoong/gello_software_remote_classifier` |
-| 이 리포의 Kanu 전용 worktree | `/tmp/gello-hil-rl-receive-server-v2` |
+| HIL checkout (**유일**, 독립 clone) | `/home/junhyeong/gello_software_runtime` |
+| 데이터·모델 뿌리 | `/home/junhyeong/hil-serl-data/` |
+| ↳ canonical offline demo | `~/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl` |
+| ↳ 운영 reward classifier | `~/hil-serl-data/classifier_ckpt/checkpoint_150` |
+| ↳ learner run root | `~/hil-serl-data/runs/<run_id>/` |
+| ↳ classifier 재학습 원재료 | `~/hil-serl-data/datasets/` |
+| ↳ 🗄️ kanu 시절 이력 (읽기 전용) | `~/hil-serl-data/archive/` |
 | python | `/home/junhyeong/miniconda3/envs/il/bin/python` |
 
-### 2.2 Kanu에서 서버 띄우기
+> 🚫 **`/home/junhyeong/gello_software`(뒤에 `_runtime`이 없는 것)는 다른 사람의 작업
+> 트리다.** 읽지도 쓰지도 말 것. HIL이 쓰는 것은 **`gello_software_runtime`**뿐이다.
+
+> ### 🗄️ 2026-07-27 판(보존) — **kanu 쪽 경로. 지금 따라가지 말 것**
+> | 무엇 | 경로 (kanu) |
+> |---|---|
+> | 분류기 학습처 (YWhero/hil-serl fork, `agent/cube-in-cup-classifier` @ `d753571`) | `~/workspace/youngwoong/hil-serl` |
+> | 학습 데이터 + 07-27 체크포인트 | `~/workspace/youngwoong/dataset/cube_in_cup_all3/` |
+> | ZMQ 뷰어 + 07-24 체크포인트 | `~/workspace/youngwoong/gello_software_remote_classifier` |
+> | 이 리포의 Kanu 전용 worktree | `/tmp/gello-hil-rl-receive-server-v2` (**은퇴**) |
+>
+> kanu에서는 **아무것도 지우지 않았다** — 이전은 전부 복사였다. 그래서 위 경로들은
+> 아직 kanu에 실재하지만, **운영 경로가 아니다.** 특히 classifier가 FM/diffusion 스택
+> 디렉터리 안에 있던 것이 **`HIL_REMOTE_DATA_ROOT` 하나로 kanu를 기술할 수 없는 이유**이고,
+> 그래서 `run_hil_server.sh`는 kanu를 아예 구동하지 못한다(의도된 fail-closed).
+
+### 2.2 서버에서 수동으로 receive server 띄우기 (진단 전용)
+
+> 🛑 **정상 운용 경로가 아니다.** 운영은 `./run_hil_server.sh`(learner 서버)다.
+> 아래는 **receive-only 마일스톤 서버**를 손으로 띄우는 진단용 CLI다 — 정책이 없고
+> 항상 zero action을 낸다(§2.2 아래의 "서버 종류가 두 가지다" 박스).
 
 ```bash
-# Kanu에서 — 먼저 확인 3가지
-cd /tmp/gello-hil-rl-receive-server-v2
+# junhyeong_ai에서 — 먼저 확인 3가지
+cd /home/junhyeong/gello_software_runtime
 git rev-parse --short HEAD          # 랩톱의 HEAD와 같은가? (특정 SHA를 기대하지 말 것)
-nvidia-smi                          # 쓰려는 GPU가 비어 있는가? (7번 고정 아님)
+nvidia-smi                          # GPU가 1장뿐이다(index 0). 다른 사람이 쓰고 있지 않은가?
 ss -ltn | grep 50053                # 이미 잡혀 있지 않은가?
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false   # 필수. 안 하면 JAX가 카드를 통째로 선점한다
 
-CUDA_VISIBLE_DEVICES=<위에서 고른 번호> \
+CUDA_VISIBLE_DEVICES=0 \
 PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
-/tmp/gello-hil-rl-receive-overlay-v2/bin/python \
+/home/junhyeong/miniconda3/envs/il/bin/python \
   serl_ur_infra/scripts/run_rlpd_receive_server.py \
   --host 127.0.0.1 \
   --port 50053 \
-  --checkpoint <체크포인트 경로> \
+  --checkpoint /home/junhyeong/hil-serl-data/classifier_ckpt/checkpoint_150 \
   --expected-checkpoint-sha256 <그 체크포인트의 sha256> \
   --reward-model-id cube-in-cup-all3-ckpt150+sidecar-v1 \
   --require-jax-backend gpu
 ```
+
+> ### 🗄️ 이전 판(보존) — kanu 기준. **경로가 전부 은퇴했다**
+> ```
+> cd /tmp/gello-hil-rl-receive-server-v2
+> CUDA_VISIBLE_DEVICES=<비어 있는 카드>            # kanu는 A4000 ×8이었다
+> /tmp/gello-hil-rl-receive-overlay-v2/bin/python
+> ```
+> `/tmp/gello-hil-rl-receive-server-v2`는 worktree였고 지금은 **형태 자체가 거부된다.**
 
 > ### 🔧 threshold production 계약 (2026-07-30)
 > 코드 기본값과 `run_hil_server.sh`의 production pin은 모두 **`0.5`**다.
@@ -415,6 +515,10 @@ PYTHONPATH=serl_ur_infra:third_party/hil-serl/serl_launcher \
 
 근거: `serl_ur_infra/RL_RECEIVE_SERVER.md` §"Preferred Kanu runtime",
 `serl_ur_infra/HIL_RLPD_RECEIVE_SERVER_KO.md` §"Kanu 실행 환경".
+🗄️ **두 문서는 절 제목까지 kanu 기준이고 호스트·경로가 낡았다** — 인자의 *의미*만 근거로
+쓰고, 호스트·경로는
+[`serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](../../serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md)가
+우선한다.
 
 > **주의 — 서버 종류가 두 가지다.**
 > * `run_rlpd_receive_server.py` = **receive-only** 마일스톤. 정책 없음, 항상 zero action,
@@ -443,9 +547,12 @@ EXPECTED_MODEL_ID=fake-zero-action-v0 ./run_hil_actor.sh --fake-env
 
 ### 2.4 SSH 터널 (로컬 터미널 T0, 계속 띄워 둔다)
 
+> 🟢 **정상 운용에서는 손으로 열지 않는다** — Terminal 1의 `run_hil_server.sh`가 같은 터널을
+> 열고 소유한다. 아래는 wrapper 없이 진단할 때만 쓴다. **터널 소유권이 왜 중요한지는 §5.4.**
+
 ```bash
 ssh -N -T -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:50153:127.0.0.1:50053 kanu
+  -L 127.0.0.1:50153:127.0.0.1:50053 junhyeong_ai
 ```
 
 확인 (다른 터미널):
@@ -455,10 +562,21 @@ ss -ltnp | grep 50153      # ssh가 127.0.0.1:50153에 LISTEN 중이어야 한�
 ```
 
 `ExitOnForwardFailure=yes`가 핵심이다 — 포워딩에 실패하면 ssh가 조용히 붙어 있지 않고 죽는다.
+`run_hil_server.sh`는 여기에 `BatchMode=yes`까지 얹으므로 **키 인증이 없으면 비밀번호를
+묻지 않고 즉시 실패**한다.
+
+> 🗄️ **이전 판(보존):** 마지막 인자가 `kanu`였다. 2026-07-31 이전으로 **`junhyeong_ai`**다.
+>
+> 🛑 **옛 명령을 그대로 붙여넣지 마라 — 이 실수는 조용하다.** kanu의 07-30 learner는 아직
+> 살아 있고, 그것도 `run_rlpd_learner_server.py`라 **model_id·reward model id·schema hash가
+> 전부 같다.** 즉 actor 핸드셰이크는 **통과한다.** 두 learner를 갈라 보는 것은
+> `run_hil_server.sh`의 `validate_process_contract`(run 이름 `-hil-5000` vs 옛 `-kanu-5000`
+> 등을 exact 비교)이고, 터널을 손으로 열면 **그 검사를 통째로 건너뛴다.**
+> 그러면 실기 전이가 은퇴한 lineage로 흘러 들어간다. 터널은 Terminal 1이 열게 할 것.
 
 ---
 
-## 3. Stage A — fake-env로 Kanu 왕복 (**로봇 사용 안 함**)
+## 3. Stage A — fake-env로 학습 서버 왕복 (**로봇 사용 안 함**)
 
 목적: **로봇을 전혀 건드리지 않고** wrapper 체인 · 관측 스키마 · gRPC 계약 ·
 버퍼 삽입까지 왕복을 증명한다. `fake_env=True`면 `GelloIntervention` 래퍼가 아예
@@ -468,8 +586,8 @@ ss -ltnp | grep 50153      # ssh가 127.0.0.1:50153에 LISTEN 중이어야 한�
 ### 3.1 절차 (복붙)
 
 ```bash
-# T0 — 터널 (§2.4). 그대로 띄워 둔다.
-ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:50153:127.0.0.1:50053 kanu
+# T0 — 터널 (§2.4). 그대로 띄워 둔다. 평상시에는 Terminal 1이 대신 연다.
+ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:50153:127.0.0.1:50053 junhyeong_ai
 ```
 
 ```bash
@@ -661,7 +779,7 @@ NaN, fractional engaged 같은 malformed 메시지는 freshness를 갱신하지 
 status/service는 `/hil/deadman`의 frozen payload를 변경하지 않는다.
 
 성공 모드는 GUI에서 바꾼다. 시작값은 `MANUAL`이고 actor status가 선택 상태의 권위다.
-MANUAL에서도 Kanu classifier sidecar를 끄지 않는다. 숫자와 verdict는 계속 보이고 replay에도
+MANUAL에서도 서버 classifier sidecar를 끄지 않는다. 숫자와 verdict는 계속 보이고 replay에도
 classifier 결과가 남지만 classifier-positive만으로 reward/done이 되지 않는다. 사람이
 `MARK SUCCESS`를 누르면 현재 `(run_id, episode_id)`에 한 번만 operator success가 들어간다.
 AUTO로 전환하면 수동 성공 버튼은 비활성화되고 서버의 strict `p(success) > threshold`만
@@ -672,11 +790,15 @@ AUTO로 전환하면 수동 성공 버튼은 비활성화되고 서버의 strict
 replacement, task-local reward classifier wrapper, `env.reset()`과 일부 task-specific
 terminal prompt는 있지만, 범용 actor GUI·원격 classifier probability overlay·
 `HOME → WAIT_SCENE_READY → operator resume` 상태기계는 없다. 또한 원본 Agentlace/local
-classifier 흐름은 이 저장소의 Kanu-authoritative gRPC reward/termination 계약과 다르므로
+classifier 흐름은 이 저장소의 **서버 authoritative**(현재 `junhyeong_ai`) gRPC
+reward/termination 계약과 다르므로
 그 코드를 그대로 끼우지 않고, 원본의 terminal→reset 순서만 현재 환경에 맞춰 유지한다.
 
-> 2026-07-30 현재 infra 전체 `614 passed, 11 skipped, 1 xfailed`, ROS package
-> `461 passed`, clean build, 격리 DDS late-join→WAIT 수신→Trigger 왕복까지 통과했다.
+> 현재 기준선은 infra `768 passed, 11 skipped, 1 xfailed`(actor venv), ROS package
+> `489 passed`(시스템 python3 + overlay)다. **두 수를 합치지 말 것 — 인터프리터도
+> PYTHONPATH도 다르다.** 서버 이전으로 바뀌지 않았다(2026-07-31 재확인).
+> 🗄️ 이전 판은 07-30 중간값 `614` / `461`을 적고 있었다.
+> clean build, 격리 DDS late-join→WAIT 수신→Trigger 왕복까지 통과했다.
 > 실제 UR7e에서는 episode limit→`WAIT_HOME_APPROVAL`과 classifier 표시, schema-3 online
 > transition/learner update까지 관측했다. MANUAL `MARK SUCCESS`로 끝낸 episode의 one-shot
 > provenance만 다음 실기에서 한 번 재확인한다.
@@ -776,7 +898,9 @@ ENGAGE하지만, actor가 HOME/WAIT에 들어간 뒤에는 장면을 배치하�
    팔은 **정지**해 있어야 한다. sidecar의 정지 게이트가 안 열리면 서버가 채점할 것이 없다.
 2. 라이브 뷰어를 띄우고 `p(success)`가 안정될 때까지 둔다.
    절차 정본은 [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](../../serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md)다
-   (랩톱 CPU는 `run_classifier_viewer.sh`, kanu GPU + 터널은 `run_remote_classifier_viewer.sh`).
+   (랩톱 CPU는 `run_classifier_viewer.sh`, 서버 GPU + 터널은 `run_remote_classifier_viewer.sh` —
+   그 스크립트의 `CLASSIFIER_SSH_HOST` 기본값도 **`junhyeong_ai`**로 옮겨졌다.
+   kanu 사본을 보려면 `CLASSIFIER_SSH_HOST=kanu`로 override한다).
    두 카메라의 값을 적어 둔다.
 3. HIL GUI를 **먼저 ENGAGE**하고 GELLO를 RESET anchor에서 정지시킨다. §4.2의
    preposition과 `--dry-preflight --arm`을 통과한 뒤, 부착을 매 스텝으로 올린 `--arm`
@@ -830,7 +954,7 @@ ENGAGE하지만, actor가 HOME/WAIT에 들어간 뒤에는 장면을 배치하�
 | `cygrpc.CompletionQueue()가 20초 안에 돌아오지 않았다` | 위와 같은 증상의 직접 증거. grpcio 재설치 |
 | `… 이 저장소 밖에서 해석됨` | 다른 checkout에 editable 설치된 `serl-ur-infra`가 이기고 있다. 지금 트리에서 스크립트를 실행하고 있는지 확인 |
 | `ur_experiments: 찾을 수 없음` | 지금 checkout에 `serl_ur_infra/ur_experiments/`가 없다 = 브랜치가 틀렸다 |
-| `TCP …:50153 연결 실패` | 터널이 죽었다. §2.4 재실행 → 그래도 안 되면 Kanu에서 서버가 살아 있는지 확인 |
+| `TCP 127.0.0.1:50153 연결 실패 — ConnectionRefusedError` (preflight `[6]`) | **터널이 죽었다. learner는 대개 멀쩡하다.** 가장 흔한 원인은 **Terminal 1을 Ctrl-C 했거나 그 창을 닫은 것**이다. 조치는 Terminal 1에서 `./run_hil_server.sh`를 **다시 실행**하는 것 하나뿐이다 — 살아 있는 learner를 재사용하고 새 터널만 연다. 🛑 **learner를 죽이거나 새로 띄우려 하지 말 것.** 전문 → **§5.4** |
 | `cam1 … fresh advancing samples … 12.0s` | 순간 Hz 저하는 더 이상 실패가 아니다. 12초 동안 새 timestamp가 실제로 오지 않은 경우이므로 카메라 로그와 `ros2 topic info`를 확인하고 필요할 때만 카메라를 재기동 |
 | `예상 밖 controller 조합` | STJC/FPC가 둘 다 active 또는 둘 다 inactive다. 수동으로 우회하지 말고 driver/이전 actor 종료 상태를 확인 |
 | `arm handoff proof 검증 실패` | actor를 내리고 `./run_hil_preposition.sh`를 실행. 이미 RESET 0.10 rad 안이면 움직이지 않고 새 marker만 만든다 |
@@ -1027,6 +1151,55 @@ DISENGAGED 20 Hz 발행이라 조작자가 아무것도 안 해도 통과한다.
 
 ---
 
+## 5.4 🆕 Terminal 1을 닫으면 터널만 죽는다 — 📌 2026-07-31 실기에서 실제로 겪었다
+
+**증상.** Terminal 3에서 preflight `[6]`이 이렇게 떨어진다:
+
+```
+TCP 127.0.0.1:50153 연결 실패 — ConnectionRefusedError
+```
+
+**조치 (이것 하나다).** Terminal 1에서 `./run_hil_server.sh`를 다시 실행한다.
+스크립트가 서버의 **살아 있는 exact learner를 재사용**하고 **새 터널만** 연다.
+그다음 Terminal 3을 다시 시작한다. Terminal 2(하드웨어)는 건드리지 않는다.
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws
+./run_hil_server.sh --check   # (선택) 읽기 전용으로 learner 생사부터 확인
+./run_hil_server.sh           # 재사용 + 새 터널
+```
+
+### 왜 헷갈리나 — **소유권이 셋 다 다르다**
+
+| 무엇 | 누가 소유하나 | Terminal 1을 Ctrl-C 하면 |
+|---|---|---|
+| **learner** (서버 프로세스) | **`junhyeong_ai`가 소유. detached다** | 🟢 **살아남는다.** 명시적으로 서버에서 죽여야만 죽는다 |
+| **SSH 터널** (`127.0.0.1:50153`) | **Terminal 1이 소유** | 🔴 **죽는다** |
+| **actor / GUI / 카메라** | Terminal 3 | 영향 없음. 다만 다음 RPC/preflight에서 터널 부재로 실패한다 |
+
+`run_hil_server.sh`는 마지막에 `wait "$TUNNEL_PID"`로 **터널을 붙들고 foreground에서
+블록**한다. 그래서 그 터미널은 "서버 콘솔"처럼 보이지만 **실제로 들고 있는 것은 ssh child
+하나뿐**이다. 스크립트가 READY 배너에서 이미 그렇게 말한다:
+
+```
+  learner : <run> PID <pid> (server-owned)
+  tunnel  : PID <pid> (owned by this launcher)
+Keep this terminal open. Ctrl-C closes only the tunnel.
+The learner on junhyeong_ai keeps running until you stop it explicitly there.
+```
+
+### 🛑 하지 말 것
+
+* **learner를 죽이고 새로 띄우기.** 지금 lineage의 replay·intervention 버퍼는 **그 프로세스의
+  RAM에만** 있다. 재기동하면 그때까지 모은 온라인 전이가 전부 사라지고 offline demo부터
+  다시 시작한다(디스크에 저장되는 것은 로그·wandb이지 replay가 아니다).
+* **터널을 손으로 열어 때우기.** 열리기는 하지만 `run_hil_server.sh`의
+  `validate_process_contract`(exact 문자열 비교)를 건너뛴다 → §2.4의 🛑 박스.
+* **Terminal 2를 재기동하기.** 이건 하드웨어 문제가 아니다. 하드웨어 재기동이 필요한 경우는
+  §5.3이고 증상이 다르다(actor rc 75, `/joint_states stale`).
+
+---
+
 ## 6. 중단 · 복구
 
 * **actor 중단:** T6에서 `Ctrl-C`. armed 래퍼가 신호를 actor에게 전달하고 실제 child 종료까지 기다린다.
@@ -1043,8 +1216,13 @@ DISENGAGED 20 Hz 발행이라 조작자가 아무것도 안 해도 통과한다.
   policy가 시작되지 않는다. `START / NEXT ITERATION` 승인이 필요하다.
   actor terminal의 Ctrl-C 또는 필요 시 E-STOP으로 actor/robot을 먼저 멈추고,
   `controller cleanup PASS` 뒤 GUI 상태를 정리한다.
-* 터널이 죽으면 actor는 타임아웃으로 실패한다. §2.4를 다시 띄우고 actor를 재시작한다.
-* Kanu 세션을 끝낼 때는 서버와 터널을 정상 종료해 **쓰던 GPU와 포트 50053을 반납**한다.
+* 터널이 죽으면 actor는 타임아웃으로 실패한다. **Terminal 1에서 `./run_hil_server.sh`를
+  다시 실행**하면 learner를 재사용하고 새 터널을 연다 → **§5.4**(2026-07-31 실기에서 실제로
+  겪은 경로다). wrapper 없이 진단할 때만 §2.4를 손으로 띄운다.
+* 세션을 끝낼 때는 서버와 터널을 정상 종료해 **쓰던 GPU와 포트 50053을 반납**한다.
+  ⚠️ `junhyeong_ai`는 **GPU가 1장(index 0)뿐이고 다른 사람과 공유**하므로 반납이 예전보다
+  중요하다. 다만 Terminal 1의 `Ctrl-C`는 **터널만** 닫는다 — learner는 서버에서 명시적으로
+  멈춰야 한다(§5.4).
   문서의 PID/GPU 스냅샷을 믿지 말고 `run_hil_server.sh --check`와 Terminal 1 READY 배너에서
   현재 process/run root를 확인한다.
 
@@ -1064,12 +1242,23 @@ DISENGAGED 20 Hz 발행이라 조작자가 아무것도 안 해도 통과한다.
 | A4 | PYTHONPATH 이어붙임 | **PASS** | `PYTHONPATH=/pre/existing`를 미리 잡고 실행해도 `ur_gello_bringup`이 오버레이에서 해석됨 |
 | A5 | 인자 통과 | **PASS** | `--fake-env --save-video --actor-id …`가 최종 argv 끝에 그대로 붙음 |
 | A6 | `--arm` controller handoff + 자동 복귀 | **실기 PASS** | RESET proof 뒤 STJC→FPC strict switch, actor deadline 예외 뒤 publisher-first teardown과 FPC→STJC `controller cleanup PASS`를 실제 controller_manager에서 확인 |
-| B1 | Stage A (fake-env, Kanu 왕복) | **PASS** | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버 |
+| B1 | Stage A (fake-env, 학습 서버 왕복) | **PASS** 🗄️ *(kanu 기록)* | 서버 `replay_insert_count: 100`, `state_shape: [8, 1, 19]`. 상대는 zero-action 서버. **2026-07-27 kanu에서 측정** — 새 호스트에서 이 형태를 다시 돌리지는 않았고, 대신 M1의 200-transition 합성 acceptance가 같은 경로를 덮었다 |
 | B2 | Stage B (실센서 + GELLO 개입, DRY_RUN) | **미검증(TODO)** | 절차는 §4에 있으나 아직 실행되지 않았다. PASS로 승격하지 말 것 |
 | B2c | **분류기 sidecar 실기 왕복** (§4.4) | **실기 GUI 관측 PASS / AUTO 정확도 미승인** | production sidecar transition과 GUI의 실제 `p(success)`/threshold/verdict를 관측했다. MANUAL에서도 계속 표시된다. classifier 정확도가 부족해 AUTO는 기본이 아니며 장시간 영구 verdict audit은 남아 있다 |
-| B3 | actor `--arm` (실제 팔 구동) | **핵심 E2E PASS** | Kanu policy 움직임, ENGAGE=GELLO/DISENGAGE=policy, replay/learner update를 관측했다. 옛 0.6/0.8 s stale 경계는 정상 832.3 ms reply를 거부해 1.5/2.0 s로 완화했다. 장시간 tail latency 계측은 계속 필요하다 |
+| B3 | actor `--arm` (실제 팔 구동) | **핵심 E2E PASS** 🗄️ *(kanu 기록)* | Kanu policy 움직임, ENGAGE=GELLO/DISENGAGE=policy, replay/learner update를 관측했다. 옛 0.6/0.8 s stale 경계는 정상 832.3 ms reply를 거부해 1.5/2.0 s로 완화했다. **2026-07-30, 서버는 kanu.** 새 호스트 재현은 M2 |
 | B4 | 같은 개입 루프를 `run_real_hil.py`로 | **PASS (2026-07-28)** | **다른 코드 경로다.** 이 표의 어느 줄도 승격시키지 않는다 → `04` §4.5 |
-| B5 | terminal operator state machine | **schema-3 실기 진행 / MARK SUCCESS provenance 재확인** | episode limit 뒤 GUI `WAIT_HOME_APPROVAL`, classifier `p=0.009`, threshold `0.500`, HOME 승인 버튼이 실제 표시됐다. 같은 schema-3 lineage가 replay 400/intervention 225, learner 301까지 진행했다. MANUAL `MARK SUCCESS`로 끝낸 episode의 one-shot provenance만 별도 확인한다 |
+| B5 | terminal operator state machine | **schema-3 실기 진행 / MARK SUCCESS provenance 재확인** | episode limit 뒤 GUI `WAIT_HOME_APPROVAL`, classifier `p=0.009`, threshold `0.500`, HOME 승인 버튼이 실제 표시됐다. 🗄️ 그 lineage(replay 400/intervention 225, learner 301)는 **kanu**에서의 값이다. MANUAL `MARK SUCCESS`로 끝낸 episode의 one-shot provenance만 별도 확인한다 |
+
+### 7.1 🆕 서버 이전 (`kanu` → `junhyeong_ai`) — 2026-07-31
+
+| # | 항목 | 상태 | 근거 / 실측치 |
+|---|---|---|---|
+| M1 | 합성 acceptance E2E (200 transition) | **PASS** | gRPC → finalize → feature replay → CTA → publish → checkpoint → resume 전 구간. per-RPC BeginEpisode **57.7 ms 평균 / 82.2 최대**, Step **156.1 ms 평균 / 211.0 최대**. 🗄️ kanu BeginEpisode는 **84.9 / 372.8**이었다 — tail 약 4.5배 단축. ICMP RTT는 두 호스트가 같으므로 **호스트 연산 이득**이다. 전문 `serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md` |
+| M2 | **실물 UR7e 세션** (새 서버 상대) | 🟢 **PASS (조작자 확인)** | replay **316** / intervention **210** / last_env_step **68**, run root `~/hil-serl-data/runs/cube_in_cup_real_20260731_054929`. 합성 run이 못 닫던 둘을 닫았다 — **실제 classifier sidecar**와 **`intervened=1` ingress** |
+| M3 | jax 핀 유지 (sm_86 → sm_120) | **PASS** | jax 0.5.3이 Blackwell에서 **네이티브** 실행(XLA `.target sm_120a`, PTX 폴백 아님). 핀 상향 불필요. warm-up 28.4 / 16.0 / 0.101 s 🗄️ vs kanu 46.83 / 37.22 / 0.466 s(**kanu learner도 A4000을 1장만 썼다**) |
+| M4 | 3-CLI 조작자 절차 불변 | **PASS (코드 확인)** | `run_hil_hardware.sh`에 서버 참조 0건, `run_hil_session.sh`/`run_hil_actor.sh`는 `127.0.0.1:50153`만 참조. **Terminal 1의 스크립트만 호스트가 바뀌었다** |
+| M5 | 터널 소유권 실패 모드 | **문서화됨 (실기 발생)** | Terminal 1을 Ctrl-C/종료하면 learner는 살고 터널만 죽는다 → preflight `[6]` `ConnectionRefusedError`. 조치는 `run_hil_server.sh` 재실행(재사용 + 새 터널) → §5.4 |
+| M6 | 이전으로 잃은 학습 결과 | **없음** | kanu run root 8개 전부 `checkpoints/`가 비어 있었다(`checkpoint_period`=5000, 최고 learner step 301). 옮긴 것은 **복사**였고 kanu에서 지운 것은 없다 |
 
 ---
 
@@ -1080,5 +1269,11 @@ DISENGAGED 20 Hz 발행이라 조작자가 아무것도 안 해도 통과한다.
 * `06_SENSORS.md` — RealSense 2대
 * `08_OPEN_GAPS.md` — `clip_safety_box` 등 실기 투입 전 미해결 갭 (G15/G19는 닫혔다)
 * `serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md` — 라이브 분류기 뷰어 정본. **§4.4가 이걸 쓴다**
-* `serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md` — Kanu learner 서버 전체 런북
+* `serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md` — **학습 서버 경로·데이터·모델 정본.**
+  호스트/경로가 다른 문서와 어긋나면 이쪽이 이긴다
+* `serl_ur_infra/SERVER_MIGRATION_E2E_JUNHYEONG_AI.md` — `kanu` → `junhyeong_ai` 이전 검증 기록
+* `serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md` — learner 서버 전체 런북.
+  🗄️ **파일명과 본문이 kanu 기준이다** — learner 옵션 설명은 유효하고, 호스트·경로는 위 두
+  문서가 대체한다
 * `serl_ur_infra/RL_RECEIVE_SERVER.md` / `HIL_RLPD_RECEIVE_SERVER_KO.md` — receive server 마일스톤
+  (🗄️ 호스트 표기 kanu 기준)
