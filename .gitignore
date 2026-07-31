@@ -15,6 +15,12 @@
 tea_debug.log
 *wandb*
 *wandb_logs*
+# ...but a source file is not a run artifact.  `*wandb*` above exists for W&B
+# run directories and it matches by NAME anywhere in the tree, so a test module
+# about W&B was silently un-addable: `git add` reported it ignored rather than
+# staging it, and a `git commit -a` would simply have left it out.  Re-include
+# tracked Python under the test directory only; run artifacts never live there.
+!serl_ur_infra/tests/*wandb*.py
 outputs/*
 
 # GELLO->UR7e diagnostic recorder output is large binary data (mp4/h5) and is

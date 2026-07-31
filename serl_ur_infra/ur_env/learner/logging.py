@@ -47,6 +47,34 @@ def _json_value(value: Any, *, path: str = "value") -> Any:
     )
 
 
+def _wandb_text(run: Any, attribute: str) -> str | None:
+    """Read one string attribute off a W&B run without ever raising.
+
+    Run identity is diagnostics, not learner state: a W&B client that renames,
+    removes or lazily computes one of these attributes (and raises while doing
+    it) must not be able to take the learner down on the way up.
+    """
+
+    try:
+        value = getattr(run, attribute, None)
+    except Exception:  # pragma: no cover - defensive against client changes
+        return None
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _run_identity(run: Any, *, directory: Path) -> dict[str, Any]:
+    """Describe a live W&B run well enough for an operator to open it."""
+
+    identity: dict[str, Any] = {"dir": str(directory)}
+    for attribute in ("id", "name", "entity", "project", "url"):
+        identity[attribute] = _wandb_text(run, attribute)
+    parts = (identity["entity"], identity["project"], identity["id"])
+    identity["run_path"] = "/".join(parts) if all(parts) else None
+    return identity
+
+
 class JsonlWandbLogger:
     """Write every record to JSONL and mirror it to one W&B run."""
 
@@ -70,6 +98,16 @@ class JsonlWandbLogger:
         self._lock = threading.Lock()
         self._closed = False
         self._wandb_run = None
+        self._wandb_metadata: dict[str, Any] = {
+            "mode": wandb_mode,
+            "dir": None,
+            "id": None,
+            "name": None,
+            "entity": None,
+            "project": None,
+            "url": None,
+            "run_path": None,
+        }
         if enable_wandb and wandb_mode != "disabled":
             try:
                 wandb = wandb_module
@@ -77,6 +115,10 @@ class JsonlWandbLogger:
                     import wandb as imported_wandb
 
                     wandb = imported_wandb
+                # W&B writes its run directory under `dir` in EVERY mode.
+                # "online" adds a sync worker; it does not move the files, so
+                # the run root stays self-contained and `wandb sync` remains
+                # available as the fallback if the network drops.
                 directory = Path(wandb_dir or self.path.parent).expanduser().resolve()
                 directory.mkdir(parents=True, exist_ok=True)
                 self._wandb_run = wandb.init(
@@ -87,6 +129,9 @@ class JsonlWandbLogger:
                     config=_json_value(config or {}, path="config"),
                     reinit=True,
                 )
+                self._wandb_metadata.update(
+                    _run_identity(self._wandb_run, directory=directory)
+                )
             except Exception as exc:
                 self._stream.close()
                 raise LearnerLoggingError(
@@ -96,6 +141,21 @@ class JsonlWandbLogger:
     @property
     def wandb_run(self) -> Any | None:
         return self._wandb_run
+
+    @property
+    def wandb_metadata(self) -> dict[str, Any]:
+        """Return how an operator reaches this run.
+
+        The production learner runs under ``WANDB_SILENT=true``, which
+        suppresses the banner W&B normally prints with the run URL, and it is
+        detached on a remote host where nobody watches stdout anyway.  Online
+        logging is only useful if the URL is discoverable, so the identity is
+        carried in structured output instead of a terminal banner.  Every field
+        except ``mode`` is ``None`` when W&B is disabled, and ``url`` is
+        additionally ``None`` for offline runs, which have no server-side page.
+        """
+
+        return dict(self._wandb_metadata)
 
     def log(self, event: str, *, learner_step: int, **fields: Any) -> None:
         if not isinstance(event, str) or not event:

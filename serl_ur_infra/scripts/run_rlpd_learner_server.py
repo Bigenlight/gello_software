@@ -900,6 +900,12 @@ def _run_locked(
         },
         enable_wandb=args.wandb_mode != "disabled",
     )
+    # Emit the W&B identity the moment it exists rather than only with
+    # learner_process_ready: JAX warm-up sits between the two and takes
+    # 80-150 s, and in --wandb-mode online that is exactly the window an
+    # operator wants the run URL in.
+    wandb_metadata = logger.wandb_metadata
+    _emit("learner_wandb_run", **wandb_metadata)
     worker: LearnerWorker | None = None
     server = None
     service = None
@@ -972,6 +978,12 @@ def _run_locked(
             demo_count=demo_count,
             synthetic_acceptance_demo_count=synthetic_demo_count,
             jax_backend=jax_backend,
+            # Persisted in the run's own JSONL so run_hil_server.sh can report
+            # the live W&B page for a learner it merely REUSED, long after the
+            # launching terminal is gone.  Null for offline/disabled runs.
+            wandb_mode=wandb_metadata["mode"],
+            wandb_url=wandb_metadata["url"],
+            wandb_run_path=wandb_metadata["run_path"],
         )
         if args.dry_run:
             _emit(

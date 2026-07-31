@@ -62,6 +62,17 @@
 #   HIL_REMOTE_DATA_ROOT     default /home/junhyeong/hil-serl-data -- the single
 #                            root holding runs/, demos/, classifier_ckpt/ and
 #                            the launcher lock
+#   HIL_WANDB_MODE           default offline; offline|online|disabled.  "online"
+#                            streams learner metrics to wandb.ai LIVE during the
+#                            session using the learner host's own ~/.netrc
+#                            credentials, and the run URL is printed by this
+#                            script once the learner reports ready.  The default
+#                            is deliberately still offline -- online puts a
+#                            network dependency inside the training loop, and
+#                            whether a W&B failure can kill the learner is not
+#                            settled yet.  The mode is fixed for the LIFETIME of
+#                            a lineage: a running learner is only reusable by a
+#                            launcher asking for the mode it was started with.
 #   ACTOR_VENV               default /home/laptop3/venvs/gello-hil-actor
 #   HIL_ACCEPT_HEAD_MISMATCH default 0; 1 downgrades the fresh-lineage refusal
 #                            on a learner-host/laptop3 HEAD mismatch to a
@@ -101,6 +112,12 @@ REMOTE_PYTHON="${HIL_REMOTE_PYTHON:-${HIL_KANU_PYTHON:-/home/junhyeong/miniconda
 # what lets an artifact move and still prove it arrived intact.
 REMOTE_DATA_ROOT="${HIL_REMOTE_DATA_ROOT:-/home/junhyeong/hil-serl-data}"
 REMOTE_RUN_BASE="$REMOTE_DATA_ROOT/runs"
+# The ONE place the W&B transport is chosen.  It is marshalled to the learner
+# host as a positional and from there feeds BOTH --wandb-mode on the launch
+# command and the exact() comparison in validate_process_contract, so the guard
+# cannot drift from the thing it guards.  See the remote-side WANDB_MODE
+# comment for why that coupling is written the way it is.
+WANDB_MODE="${HIL_WANDB_MODE:-offline}"
 ACTOR_VENV="${ACTOR_VENV:-/home/laptop3/venvs/gello-hil-actor}"
 ACTOR_PY="$ACTOR_VENV/bin/python"
 
@@ -195,6 +212,16 @@ fi
 if [[ "$MODE" == "check" && "$NEW_LINEAGE" == "1" ]]; then
     die "--new-lineage cannot be combined with --check"
 fi
+# Fail closed on a typo, exactly like --gpu and HIL_REMOTE_DATA_ROOT above: an
+# unrecognised value must never fall through to "whatever the learner defaults
+# to", because that silently produces a lineage logging somewhere the operator
+# did not ask for.
+case "$WANDB_MODE" in
+    offline|online|disabled) ;;
+    *)
+        die "HIL_WANDB_MODE must be offline, online or disabled (got: $WANDB_MODE)"
+        ;;
+esac
 
 command -v ssh >/dev/null 2>&1 || die "ssh is not installed"
 if [[ "$MODE" == "start" && ! -x "$ACTOR_PY" ]]; then
@@ -273,7 +300,7 @@ REMOTE_OUTPUT="$(
         "$START_TIMEOUT_S" "$REMOTE_REPO" "$REMOTE_PYTHON" \
         "$REMOTE_PORT" "$REMOTE_RUN_BASE" \
         "$LAPTOP_HEAD" "$LAPTOP_BRANCH" "$ACCEPT_HEAD_MISMATCH" \
-        "$REMOTE_DATA_ROOT" <<'REMOTE_SCRIPT'
+        "$REMOTE_DATA_ROOT" "$WANDB_MODE" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 MODE="$1"
@@ -296,6 +323,14 @@ ACCEPT_HEAD_MISMATCH="${12}"
 # fixed; only the root is configurable, because the SHA pins -- not the paths --
 # are what identify these files.
 REMOTE_DATA_ROOT="${13}"
+# The W&B transport for this lineage.  There is exactly ONE expansion of this
+# variable per role below -- `--wandb-mode "$WANDB_MODE"` on the launch command
+# and `"$WANDB_MODE"` as the positional validate_process_contract compares with
+# exact() -- so the launcher and its own guard cannot disagree.  The failure
+# this shape exists to prevent is not a wrong value; it is a guard that keeps
+# passing while the thing it guards has moved (see the "Cross-host code
+# identity" comment for the day that cost).
+WANDB_MODE="${14}"
 
 CLASSIFIER="$REMOTE_DATA_ROOT/classifier_ckpt/checkpoint_150"
 CLASSIFIER_SHA256="512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
@@ -320,6 +355,17 @@ remote_die() {
 # plausible-looking wrong directory.
 [[ "$REMOTE_RUN_BASE" == "$REMOTE_DATA_ROOT/runs" ]] || \
     remote_die "run base '$REMOTE_RUN_BASE' does not derive from data root '$REMOTE_DATA_ROOT'; the launcher arguments are inconsistent"
+
+# Re-validated here for the same reason as the run base: a mis-ordered
+# positional would otherwise reach --wandb-mode as a plausible string and be
+# rejected far away, by argparse inside a detached process whose stderr nobody
+# is watching.
+case "$WANDB_MODE" in
+    offline|online|disabled) ;;
+    *)
+        remote_die "W&B mode '$WANDB_MODE' is not offline|online|disabled; the launcher arguments are inconsistent"
+        ;;
+esac
 
 validate_static_contract() {
     [[ -d "$REMOTE_REPO" ]] || remote_die "learner-host repo is missing: $REMOTE_REPO"
@@ -544,7 +590,7 @@ validate_process_contract() {
     "$REMOTE_PYTHON" - "$pid" "$REMOTE_REPO" "$REMOTE_PYTHON" \
         "$REMOTE_PORT" "$CLASSIFIER" "$CLASSIFIER_SHA256" \
         "$REWARD_THRESHOLD" "$REWARD_MODEL_ID" "$REAL_DEMO" \
-        "$RESNET_SOURCE" <<'PY'
+        "$RESNET_SOURCE" "$WANDB_MODE" <<'PY'
 import os
 from pathlib import Path
 import sys
@@ -560,6 +606,7 @@ import sys
     reward_model_id,
     demo,
     resnet_source,
+    wandb_mode,
 ) = sys.argv[1:]
 pid = int(pid_text)
 proc = Path("/proc") / str(pid)
@@ -588,11 +635,12 @@ def one(flag):
         raise SystemExit(f"PID {pid}: expected exactly one {flag}, got {found}")
     return found[0]
 
-def exact(flag, expected):
+def exact(flag, expected, hint=""):
     actual = one(flag)
     if actual != expected:
         raise SystemExit(
             f"PID {pid}: {flag}={actual!r}, expected production value {expected!r}"
+            + hint
         )
 
 def number(flag, expected):
@@ -632,7 +680,19 @@ number("--success-confirmations", "1")
 if values("--demo-path") != [demo]:
     raise SystemExit(f"PID {pid}: production demo path mismatch: {values('--demo-path')}")
 number("--checkpoint-reserve-gib", "2")
-exact("--wandb-mode", "offline")
+# The expected value is the SAME shell variable the launch command expands into
+# --wandb-mode; it is never a literal here.  A learner's W&B transport is fixed
+# when the process starts, so this is also what makes the mode part of lineage
+# identity: reuse requires asking for the mode the running learner has.
+exact(
+    "--wandb-mode",
+    wandb_mode,
+    hint=(
+        "; a running learner's W&B mode cannot be changed -- set "
+        "HIL_WANDB_MODE to the value above to reuse this learner, or stop it "
+        "and start a fresh lineage"
+    ),
+)
 exact("--wandb-project", "hil-serl")
 exact("--hil-serl-root", f"{repo}/third_party/hil-serl")
 exact("--resnet-source", resnet_source)
@@ -807,6 +867,15 @@ print("HIL_SERVER_READY_EVIDENCE=" + json.dumps({
     "warmup_gradient_updates": warmup["warmup_gradient_updates"],
     "warmup_outer_steps": warmup["warmup_outer_steps"],
 }, sort_keys=True, separators=(",", ":")))
+
+# W&B identity is REPORTED, never asserted.  It is diagnostics, and a learner
+# started before this field existed -- or one running offline, which has no
+# server-side page -- must still validate as healthy.  Printing "none" rather
+# than omitting the line keeps the laptop-side parse total.
+wandb_url = process_ready.get("wandb_url")
+wandb_mode = process_ready.get("wandb_mode")
+print("HIL_SERVER_WANDB_MODE=" + (wandb_mode if isinstance(wandb_mode, str) else "unknown"))
+print("HIL_SERVER_WANDB_URL=" + (wandb_url if isinstance(wandb_url, str) else "none"))
 PY
 }
 
@@ -1028,7 +1097,7 @@ nohup env \
     --jsonl-path "$jsonl_path" \
     --memory-preflight-path "$memory_path" \
     --wandb-dir "$wandb_dir" \
-    --wandb-mode offline \
+    --wandb-mode "$WANDB_MODE" \
     --wandb-project hil-serl \
     --run-name "$RUN_ID-hil-5000" \
     --hil-serl-root "$REMOTE_REPO/third_party/hil-serl" \
@@ -1111,6 +1180,8 @@ SERVER_RESULT="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^HIL_SERVER_RESULT=/
 SERVER_PID="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^HIL_SERVER_PID=//p' | tail -n1)"
 SERVER_RUN_ROOT="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^HIL_SERVER_RUN_ROOT=//p' | tail -n1)"
 SERVER_GPU="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^HIL_SERVER_GPU=//p' | tail -n1)"
+SERVER_WANDB_MODE="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^HIL_SERVER_WANDB_MODE=//p' | tail -n1)"
+SERVER_WANDB_URL="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^HIL_SERVER_WANDB_URL=//p' | tail -n1)"
 [[ "$SERVER_RESULT" == "started" || "$SERVER_RESULT" == "reused" ]] || \
     die "remote launcher returned an invalid result: $SERVER_RESULT"
 [[ "$SERVER_PID" =~ ^[0-9]+$ ]] || die "remote launcher did not report a learner PID"
@@ -1223,6 +1294,28 @@ echo "HIL server ready"
 echo "  learner : $SERVER_RESULT PID $SERVER_PID (server-owned)"
 echo "  GPU     : physical $SERVER_GPU"
 echo "  run root: $SERVER_RUN_ROOT"
+# Under WANDB_SILENT=true W&B prints no banner, and the learner is detached on
+# another host, so this is the only place an operator is told where the live
+# run is.  Requested vs reported are printed separately on purpose: on reuse
+# the running learner's mode wins, and it is the one that is real.
+case "$SERVER_WANDB_MODE" in
+    online)
+        if [[ -n "$SERVER_WANDB_URL" && "$SERVER_WANDB_URL" != "none" ]]; then
+            echo "  wandb   : LIVE $SERVER_WANDB_URL"
+        else
+            echo "  wandb   : mode online but the learner reported no run URL (inspect $SERVER_RUN_ROOT/logs/learner.jsonl)"
+        fi
+        ;;
+    offline)
+        echo "  wandb   : offline (nothing reaches wandb.ai until 'wandb sync $SERVER_RUN_ROOT/wandb' runs on $SSH_HOST; HIL_WANDB_MODE=online on a FRESH lineage streams it live)"
+        ;;
+    disabled)
+        echo "  wandb   : disabled (JSONL only: $SERVER_RUN_ROOT/logs/learner.jsonl)"
+        ;;
+    *)
+        echo "  wandb   : requested $WANDB_MODE; the learner did not report its mode (started before this field existed)"
+        ;;
+esac
 echo "  actor   : grpc://127.0.0.1:$LOCAL_PORT"
 echo "  tunnel  : PID $TUNNEL_PID (owned by this launcher)"
 echo "============================================================"
