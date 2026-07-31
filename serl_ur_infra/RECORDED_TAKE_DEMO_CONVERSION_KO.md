@@ -15,7 +15,9 @@ python3 serl_ur_infra/scripts/convert_recorded_takes_to_demo.py \
   --outcome success
 ```
 
-출력 pickle은 그대로 Kanu learner의 `--demo-path`에 전달한다. learner는 시작할 때
+출력 pickle은 그대로 learner의 `--demo-path`에 전달한다
+(**learner 호스트는 2026-07-31부터 junhyeong_ai다** — 이전 판은 "Kanu learner"라고 적었다).
+learner는 시작할 때
 raw 128×128 이미지를 frozen ResNet-10으로 **한 번만** encode하고, 장기 demo/replay
 buffer에는 `(1,4,4,512) float32` feature만 보관한다.
 
@@ -49,12 +51,18 @@ def ready(self) -> bool:
 > headless recorder의 `session_<stamp>/`는 **둘 다 같은 `RecordingSession`이 쓰므로 파일
 > 구성이 같고, 이 변환기는 둘 다 받는다.**
 >
-> **그런데도 `take_*/`로 녹화해야 한다.** kanu의 classifier 라벨링 파이프라인
+> **그런데도 `take_*/`로 녹화해야 한다.** classifier 라벨링 파이프라인
 > (`cube_classifier_pipeline.py prepare`)이 **`take_*/` 디렉터리만 읽기 때문이다.**
 > headless `run_recorder.sh`가 만드는 `session_<stamp>/`는 그쪽에 **보이지 않고**, 촬영은
 > 정상 종료되므로 **손실이 라벨링 시점에야 드러난다** — 그때는 이미 세션이 끝나 있다.
 > 기존 학습 take는 전부 GUI에서 나왔다. 근거: `32a193b`,
 > [`../ros2_ur_ws/src/gello_recorder/README.md`](../ros2_ur_ws/src/gello_recorder/README.md) `:153-159`.
+>
+> 🚚 **이전 판은 "kanu의 classifier 라벨링 파이프라인"이라고 적었다.** 2026-07-31 서버 이전에서
+> 라벨링 **코퍼스**는 `junhyeong_ai:~/hil-serl-data/datasets/`로 넘어왔지만
+> **`cube_classifier_pipeline.py` 자체는 넘어오지 않았다** — 그건 kanu의 FM/diffusion 스택
+> 트리(`workspace/youngwoong/hil-serl/examples/`)에 있었고 우리 `third_party/hil-serl`
+> 서브모듈에도 없다(2026-07-31 확인). **`take_*/` 제약은 그 스크립트의 성질이므로 그대로다.**
 
 > **sidecar와 무관하다.** 2026-07-29 reward classifier sidecar 변경은 **gRPC 실시간 경로**의
 > 것이다. 여기서 만드는 offline demo는 `--outcome`으로 **명시 라벨**을 받고 분류기를 전혀
@@ -180,9 +188,10 @@ CLI는 생성 전 각 transition을 production strict loader로 검사하고, �
 절대 덮어쓰지 않는다. 출력 후 learner 환경에서도 다시 확인할 수 있다.
 
 ```bash
+# learner 호스트(junhyeong_ai)에서 — 실제로 이 pickle을 로드하는 인터프리터가 여기 있다
 PYTHONDONTWRITEBYTECODE=1 \
-PYTHONPATH=/home/laptop3/gello_software/serl_ur_infra \
-/tmp/gello-hil-rl-learner-venv/bin/python - <<'PY'
+PYTHONPATH=~/gello_software_runtime/serl_ur_infra \
+~/miniconda3/envs/il/bin/python - <<'PY'
 from ur_env.learner import load_demo_pickle
 
 path = "/path/to/canonical.pkl"
@@ -197,10 +206,22 @@ PY
 호환 처리하며 나머지 pickle 오류는 그대로 실패시킨다. pickle은 기존 계약대로
 **신뢰하는 로컬 artifact에만** 사용한다.
 
-🪤 **`/tmp/gello-hil-rl-learner-venv`는 `/tmp`에 있다 — 리부트하면 사라진다.** 없으면
-`HIL_SERL_KANU_RUNBOOK_KO.md` 절차로 다시 만든다. 변환 CLI 자체는 이 venv가 필요 없다
-(`python3`로 충분하다 — 스크립트가 `sys.path`를 스스로 세운다). 이 venv는 **pinned NumPy
-1.26에서의 재로딩 확인**에만 쓴다.
+> ### 🚚 2026-07-31 — 이 절의 인터프리터 두 개가 모두 바뀌었다
+> **이전 판(보존):** *"🪤 **`/tmp/gello-hil-rl-learner-venv`는 `/tmp`에 있다 — 리부트하면
+> 사라진다.** 없으면 `HIL_SERL_KANU_RUNBOOK_KO.md` 절차로 다시 만든다. 변환 CLI 자체는 이
+> venv가 필요 없다(`python3`로 충분하다 — 스크립트가 `sys.path`를 스스로 세운다).
+> 이 venv는 **pinned NumPy 1.26에서의 재로딩 확인**에만 쓴다."*
+>
+> - 🗑️ **`/tmp/gello-hil-rl-learner-venv`는 실제로 사라졌다.** laptop3가 리부트했고
+>   2026-07-31 기준 `/tmp/gello-hil-*`이 하나도 없다. 그래서 위 명령을 learner 호스트의
+>   실제 인터프리터로 바꿨다.
+> - **변환 CLI 자체는 여전히 laptop3 `python3`로 충분하다** — 녹화 take가 laptop3에 있고
+>   스크립트가 `sys.path`를 스스로 세운다. 바뀐 것은 **재로딩 확인** 쪽뿐이다.
+> - ⚠️ **"pinned learner = NumPy 1.26"은 kanu 시절 이야기다.** junhyeong_ai의
+>   `~/miniconda3/envs/il`은 **Python 3.10.20 / NumPy 2.2.5**다(2026-07-31 읽기 전용 확인).
+>   즉 그 호스트에서는 `numpy._core`가 그대로 존재하므로 `_NumpyCompatibilityUnpickler`의
+>   재시도 경로(`ModuleNotFoundError`일 때만 발동)가 **아예 타지 않는다.** 호환 shim은
+>   NumPy 1.26 환경을 위해 남아 있는 것이고, **위 문단의 설명은 그 조합에 대해 여전히 옳다.**
 
 ## 코드와 대조한 항목 (2026-07-29)
 
@@ -236,11 +257,19 @@ PY
 
 사용자 승인 후 `success`로 만든 영구 artifact는 다음과 같다.
 
-- laptop3: `/home/laptop3/hil-serl-artifacts/demos/cube_in_cup_20260720_success_23takes.pkl`
-- Kanu: `/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl`
+- **junhyeong_ai — learner 정본 (2026-07-31부터):**
+  `/home/junhyeong/hil-serl-data/demos/cube_in_cup_20260720_success_23takes.pkl`
+  (`run_hil_server.sh`가 기동 전에 이 파일의 SHA를 검사한다)
+- **laptop3:** `/home/laptop3/hil-serl-artifacts/demos/cube_in_cup_20260720_success_23takes.pkl`
+- **kanu (은퇴 호스트 · 읽기 전용으로 남아 있다):** `/home/junhyeong/hil-serl-data/demos/`
+  아래 같은 파일명. 🪤 **경로 문자열이 junhyeong_ai와 글자 그대로 같다** — 두 호스트 모두
+  사용자명이 `junhyeong`이다. **`~/hil-serl-data/…`만 적으면 어느 서버인지 알 수 없으니
+  호스트를 반드시 같이 적어라.**
 - 크기: `203,573,172 B`, transitions: `2,037`
 - SHA256: `f97185582401ce7570d44fddc33d1bd64b215d7e32d6384d5fe13e1b405032fa`
-- laptop3와 Kanu learner strict loader 통과, 양쪽 digest 일치
+  — **3벌 모두 이 값이다** (2026-07-31 확인)
+- laptop3와 Kanu learner strict loader 통과, 양쪽 digest 일치 *(2026-07-29 kanu 시절 검증
+  기록 — 그대로 둔다)*
 
 > 🟢 **따라서 G20은 닫혔다.** production learner의 offline-demo 시작 조건을 만족한다.
 >

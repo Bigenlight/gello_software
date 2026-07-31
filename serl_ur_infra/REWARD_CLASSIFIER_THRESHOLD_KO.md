@@ -4,8 +4,9 @@
 > **현재 production 계약 (2026-07-30 KST)**
 >
 > - 서버 기본값과 `run_hil_server.sh` pin은 `0.5`다.
-> - GUI 시작 모드는 `MANUAL`이다. 이 모드에서도 Kanu classifier는 계속 실행되고 확률과 판정이
->   GUI 및 replay에 남지만, 에피소드 성공은 운영자의 `MARK SUCCESS`만 확정한다.
+> - GUI 시작 모드는 `MANUAL`이다. 이 모드에서도 학습 서버의 classifier는 계속 실행되고 확률과
+>   판정이 GUI 및 replay에 남지만, 에피소드 성공은 운영자의 `MARK SUCCESS`만 확정한다.
+>   (그 서버는 **2026-07-31부터 junhyeong_ai**다. 이전 판은 "Kanu classifier"라고 적었다.)
 > - `AUTO (classifier)`로 전환한 경우에만 `p(success) > 0.5`가 성공 권위를 가진다.
 > - `0.2`는 2026-07-29에 채택했다가 실제 로봇 운용 전 폐기한 **역사적 결정**이다. 아래 측정과
 >   감사 기록은 근거 추적을 위해 보존하며, 현재 실행값으로 읽으면 안 된다.
@@ -15,6 +16,15 @@
 > `~/workspace/youngwoong/hil-serl/.venv-train/bin/python` (JAX/JAXLIB 0.5.3, Flax 0.10.5)
 >
 > 코드 반영: `ur_env/rlpd_receive_server.py:73`의 `DEFAULT_REWARD_THRESHOLD`
+
+> 🗄️ **이 문서의 수치는 전부 kanu 실측이다 — 그대로 둔다.**
+> 학습 서버는 2026-07-31에 **kanu → junhyeong_ai**로 옮겨 갔지만, 위 측정 위치·인터프리터
+> 표기와 본문의 모든 확률·recall·FPR·마진은 **kanu에서 그 인터프리터로 잰 값**이므로 한 줄도
+> 다시 쓰지 않았다. 새 호스트에서는 **아무것도 재측정하지 않았다.**
+> 이번 이전에서 바뀐 것은 **채점 재료가 어디 있는가**뿐이고, 그것은
+> [「측정 설계」](#측정-설계--누출을-피하려-했으나-절반은-실패했다)와 [「재현」](#재현) 절에 적었다.
+> ⚠️ 그리고 **`run_hil_server.sh`는 이제 kanu를 몰 수 없다**(의도된 것이다) — kanu는
+> `ssh kanu`로 **읽기만** 한다.
 
 ## 📏 이 문서 모든 수치의 적용 조건 — 먼저 읽을 것
 
@@ -209,6 +219,15 @@ split은 항목마다 표기.
 > **채점 조건(이하 전 절 공통)**: 입력은 **무크롭** — 채점 스크립트가 pkl 프레임을
 > `preprocess_frame(frame, None)`으로 1280×720 그대로 128×128로 resize한다. 크롭 인자를 준 채점은
 > 이 문서에 **없다**. 아래 pkl들은 전부 Kanu `~/workspace/youngwoong/` 이하 경로다.
+>
+> 📦 **2026-07-31: 같은 코퍼스가 학습 서버로 넘어왔다.** 위 경로 표기는 **채점 당시(kanu)
+> 그대로 두되**, 지금 이 pkl들을 다시 열어 보려면 여기서 찾는다:
+> `junhyeong_ai:~/hil-serl-data/datasets/` — `cube_in_cup_all3/` · `cube_in_cup_combined/` ·
+> `cube_in_cup_cv/` · `cube_in_cup_raw_0724/` · `cube_in_cup_reward_classifier_data.tar.gz`
+> 와 라벨된 `success_0724.zip` / `fail_0724.zip` / `take_fail_val.zip`.
+> **kanu의 `dataset/` 상대 레이아웃을 그대로 보존해 복사했으므로 아래 상대 경로가 그대로
+> 유효하다**(`dataset/cube_in_cup_cv/fold_take_0N/classifier_ckpt` → `datasets/cube_in_cup_cv/…`).
+> **kanu에서는 아무것도 지워지지 않았다.**
 
 `cube_in_cup_all3` checkpoint로 `cube_in_cup_0724_success.pkl`을 채점하면 recall이 100%로 나오지만
 이는 누출이다. 그 파일은 `take_03_20260724_213944_success.pkl`과 SHA-256이 동일하고
@@ -644,6 +663,16 @@ fail-closed 가드 추가를 검토할 것.
 *(07-29 감사에서 신규 추가. (c)는 배포 전 필수다. (d)는 머지 이후 추가됐고, 이 문서의 수치가
 실기 경로에 다시 적용되려면 **먼저** 끝나야 하는 항목이다.)*
 
+> 📦 **2026-07-31: 여기서 말하는 재수집·재채점·재학습의 재료가 learner와 같은 호스트에 있다.**
+> `junhyeong_ai:~/hil-serl-data/datasets/`에 kanu의 분류기 학습 코퍼스 전체가 원래 레이아웃으로
+> 들어왔다 — `cube_in_cup_all3/`(**checkpoint_150을 학습시킨 그 데이터**, `train/` 포함) ·
+> `cube_in_cup_combined/`(`evaluate_all.py`) · `cube_in_cup_cv/`(`run_cv.sh` · `eval_fold.py`) ·
+> `cube_in_cup_raw_0724/` · 라벨된 `success_0724.zip` / `fail_0724.zip` / `take_fail_val.zip`.
+> **learner·GPU·학습 데이터가 한 호스트에 모인 것은 이번이 처음이다.**
+> `MANUAL`이 기본인 이유가 분류기 정확도이고 `AUTO` 복귀 조건이 재학습이므로, 그 재료를
+> 은퇴하는 호스트에 두고 오지 않았다.
+> ⚠️ **다만 재료만 왔다 — 채점/학습 인터프리터는 아직 없다**([재현](#재현) 절의 🔴).
+
 ### ✅ (d)는 **취소됐다** — 다르게 해결됐다 (2026-07-29)
 
 > **이전 판의 (d):** *"크롭 정합 classifier를 재학습하고 이 문서의 스윕을 통째로 다시 돌려라. 🔴 최우선"*
@@ -718,23 +747,56 @@ authority로 쓰는 한 이 실패 모드는 남는다. 최소 요건:
 > [후속 권고 (d)](#후속-권고). 어느 쪽이든 **리포트 상단에 크롭 인자를 함께 찍어라.**
 > 07-28·07-29 두 번의 오류는 모두 "무엇을 채점했는지"가 출력에 안 남아서 생겼다.
 
-```bash
-# [권장] 표준 진입점 — 0720 val/test × success/failure 전부 포함
-cd ~/workspace/youngwoong/dataset/cube_in_cup_combined
-CUDA_VISIBLE_DEVICES=<idle gpu> XLA_PYTHON_CLIENT_PREALLOCATE=false \
-PYTHONPATH=/home/junhyeong/workspace/youngwoong/hil-serl/serl_launcher \
-/home/junhyeong/workspace/youngwoong/hil-serl/.venv-train/bin/python evaluate_all.py <ckpt_dir> ...
+**2026-07-31부터 재료는 junhyeong_ai에 있다.** 경로만 옮겼고 절차는 그대로다.
 
-# [비권장 · 기록용] 07-28에 쓴 일회용 스윕 — 0720 val split과 held-out success가 빠져 있다.
-# 이 스크립트만 돌려서 나온 수치가 이 문서의 오류 원인이다. 다시 쓰지 마라.
-CUDA_VISIBLE_DEVICES=<idle gpu> XLA_PYTHON_CLIENT_PREALLOCATE=false \
-PYTHONPATH=/home/junhyeong/workspace/youngwoong/hil-serl/serl_launcher \
-/home/junhyeong/workspace/youngwoong/hil-serl/.venv-train/bin/python /tmp/sweep_thr.py
+```bash
+# 전부 junhyeong_ai에서 (ssh junhyeong_ai)
+
+# [권장] 표준 진입점 — 0720 val/test × success/failure 전부 포함
+cd ~/hil-serl-data/datasets/cube_in_cup_combined     # evaluate_all.py 가 이 안에 있다
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
+PYTHONPATH=~/gello_software_runtime/third_party/hil-serl/serl_launcher \
+<채점 인터프리터> evaluate_all.py <ckpt_dir> ...
 
 # 누출 검증 — 파일명이 아니라 fold가 실제로 로드하는 학습 파일 목록에서 출발할 것
-grep -n "cp\|copy" ~/workspace/youngwoong/hil-serl/.../run_cv.sh   # fold로 복사되는 파일 열거
-sha256sum <열거된 파일 전부> <채점하려는 파일>                       # 그 다음에 해시 비교
+grep -n "cp\|copy" ~/hil-serl-data/datasets/cube_in_cup_cv/run_cv.sh  # fold로 복사되는 파일 열거
+sha256sum <열거된 파일 전부> <채점하려는 파일>                          # 그 다음에 해시 비교
 ```
 
-`nvidia-smi`로 유휴 GPU를 먼저 확인한다. Kanu의 `gello_software` checkout은 dirty detached 상태이므로
-건드리지 않는다.
+🔴 **`<채점 인터프리터>`를 채울 수 없다 — 채점용 venv는 옮겨 오지 않았다.**
+kanu의 `~/workspace/youngwoong/hil-serl/.venv-train/bin/python`은 **FM/diffusion 스택 트리**에
+있었고(CLAUDE.md §E), 이번 이전은 **데이터만** 가져왔다. junhyeong_ai에 그 경로는 **없다**
+(2026-07-31 확인). learner env `~/miniconda3/envs/il/bin/python`이 JAX 0.5.3 / Flax 0.10.5로
+버전은 같지만 **채점 스크립트로 돌려 본 적이 없다** — 쓰려면 먼저 확인해야 하고,
+그 GPU는 **살아 있는 learner와 같은 카드**다(아래).
+
+⚠️ **`CUDA_VISIBLE_DEVICES=<idle gpu>`가 더 이상 성립하지 않는다.** kanu는 A4000 8장이라
+유휴 카드를 골랐지만 junhyeong_ai는 **RTX 5070 Ti 한 장(index 0)뿐**이고 learner가 그것을 쓴다.
+채점을 돌리면 **운영 중인 learner와 같은 GPU를 나눠 쓰게 된다.** `nvidia-smi`로 메모리 여유를
+먼저 보고, 세션 중이면 돌리지 마라.
+
+🚫 **junhyeong_ai의 `~/gello_software`는 다른 사람의 작업 트리다.** HIL checkout은
+`~/gello_software_runtime`이다. 위 `PYTHONPATH`가 그쪽인 이유가 그것이다.
+
+> ### 🗄️ kanu 기준 원본 명령 (보존 — 이 문서의 수치를 낸 바로 그 명령이다)
+> ```bash
+> # [권장] 표준 진입점 — 0720 val/test × success/failure 전부 포함
+> cd ~/workspace/youngwoong/dataset/cube_in_cup_combined
+> CUDA_VISIBLE_DEVICES=<idle gpu> XLA_PYTHON_CLIENT_PREALLOCATE=false \
+> PYTHONPATH=/home/junhyeong/workspace/youngwoong/hil-serl/serl_launcher \
+> /home/junhyeong/workspace/youngwoong/hil-serl/.venv-train/bin/python evaluate_all.py <ckpt_dir> ...
+>
+> # [비권장 · 기록용] 07-28에 쓴 일회용 스윕 — 0720 val split과 held-out success가 빠져 있다.
+> # 이 스크립트만 돌려서 나온 수치가 이 문서의 오류 원인이다. 다시 쓰지 마라.
+> CUDA_VISIBLE_DEVICES=<idle gpu> XLA_PYTHON_CLIENT_PREALLOCATE=false \
+> PYTHONPATH=/home/junhyeong/workspace/youngwoong/hil-serl/serl_launcher \
+> /home/junhyeong/workspace/youngwoong/hil-serl/.venv-train/bin/python /tmp/sweep_thr.py
+>
+> # 누출 검증
+> grep -n "cp\|copy" ~/workspace/youngwoong/hil-serl/.../run_cv.sh
+> sha256sum <열거된 파일 전부> <채점하려는 파일>
+> ```
+> *(`/tmp/sweep_thr.py`는 애초에 다시 쓰지 말라고 적힌 일회용 스크립트이고, kanu의 `/tmp`에도
+> 남아 있다는 보장이 없다. 위 새 블록에 옮기지 않은 이유다.)*
+> `nvidia-smi`로 유휴 GPU를 먼저 확인한다. Kanu의 `gello_software` checkout은 dirty detached
+> 상태이므로 건드리지 않는다. **kanu는 이제 읽기 전용 참조다 — 거기서 무언가를 실행하지 마라.**

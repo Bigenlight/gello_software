@@ -8,6 +8,13 @@
 > 이유와 크기는 [§3 크롭 불일치](#3--크롭-불일치--뷰어가-보는-것은-rl-loop가-보는-것이-아니다)에 있다.
 > 이 절을 읽지 않고 뷰어 수치를 learner의 reward 품질 근거로 인용하지 마라.
 
+> 🚚 **2026-07-31 학습 서버 이전(kanu → junhyeong_ai).** 이 문서에서 실제로 바뀐 것은 셋뿐이다:
+> **체크포인트를 어디서 받아오는가**([§6](#6-체크포인트-스테이징과-무결성)), **§11 원격 변형의 기본
+> 호스트**, 그리고 **재학습 원재료의 위치**([§10](#10-알려진-행동적-한계--정직하게)).
+> 뷰어 자체는 laptop3 CPU에서 도는 모니터라 실행 절차([§1](#1-실행--터미널-4개))는 그대로다.
+> **[§9](#9-성능--실측값)의 대역폭·왕복 수치는 전부 kanu 실측이며 그대로 둔다** — 새 호스트에서
+> 다시 재지 않았다.
+
 ---
 
 ## 0. 무엇이 검증됐고 무엇이 아닌가
@@ -20,7 +27,7 @@
 | observation 계약(무크롭 · RGB · uint8) | ✅ 코드 대조 + 학습 텐서 bit-exact 대조 | `reward_classifier_runtime.py:81-97` |
 | 파라미터 수 7,267,649 / 백본 공유 | ✅ 재측정 | [§8](#8-모델--입출력-계약) |
 | all-zeros 입력의 p = 0.5957 | ✅ 재측정 | [§12 트러블슈팅](#12-트러블슈팅) |
-| 체크포인트가 kanu 원본과 동일 | 🟡 **미재현** — 운영자 rsync 시점 대조만 있음 | [§6](#6-체크포인트-스테이징과-무결성) |
+| 체크포인트가 서버 원본과 동일 | ✅ **재현됨 (2026-07-31)** — junhyeong_ai · kanu · laptop3 **3벌이 같은 `directory_sha256`** | [§6](#6-체크포인트-스테이징과-무결성) |
 | 이 checkpoint의 실기 분류 성능(recall/FPR) | ❌ **미측정** — held-out 데이터셋 채점값만 있다 | [§10](#10-알려진-행동적-한계--정직하게) |
 | ~~크롭 적용 시 실기 성능~~ | **해당 없음이 됐다 (2026-07-29)** — RL 경로가 이제 **무크롭 sidecar**를 쓴다. 분류기는 크롭된 그림을 아예 안 본다 | [§3](#3--뷰어와-rl-loop는-이제-같은-그림을-본다-2026-07-29부터) |
 | 뷰어 확률 == 서버 확률 (같은 장면) | 🟡 **코드상 그래야 함 · 실기 미검증** — 기본 설정에서 서버도 순간 sigmoid를 보고한다. **이것이 크롭 수정의 값싼 현장 점검이다** | [§3](#3--뷰어와-rl-loop는-이제-같은-그림을-본다-2026-07-29부터) |
@@ -53,7 +60,7 @@ cd ~/gello_software/ros2_ur_ws && ./run_eef_gui.sh
 **GUI에서 보는 것**
 
 - 파란 배너 `MONITOR ONLY — no policy execution and no robot commands from this UI`
-- 배지 `LOCAL` (로컬 경로) / `REMOTE ...` ([§11](#11-원격kanu-gpu-변형--존재하지만-비권장)의 원격 경로일 때만)
+- 배지 `LOCAL` (로컬 경로) / `REMOTE ...` ([§11](#11-원격서버-gpu-변형--존재하지만-비권장)의 원격 경로일 때만)
 - 판정: `SUCCESS`(초록, `p > threshold`) / `FAILURE`(빨강) / `WAIT / INVALID`(주황) / `OFFLINE / STALE`(회색)
 - 진단 문자열: `threshold=... | camera skew=... ms | inference=... ms | status age=... s`
 
@@ -85,7 +92,7 @@ status JSON은 `status_json()`(`reward_classifier_runtime.py:118`)이 만드는 
 
 ```json
 {"cam_skew_ms":4.2,"inference_ms":7.1,"message":"ok","probability":0.912,
- "ready":true,"success":true,"threshold":0.2}
+ "ready":true,"success":true,"threshold":0.5}
 ```
 
 | 키 | 의미 |
@@ -97,7 +104,7 @@ status JSON은 `status_json()`(`reward_classifier_runtime.py:118`)이 만드는 
 | `cam_skew_ms` | cam1/cam2 ROS 헤더 stamp 차이 |
 | `inference_ms` | JPEG 디코드 + forward pass 합계 (`_infer_tick` 내부 구간) |
 | `message` | `ok` 또는 거절 사유 문자열 |
-| `remote` | 원격 경로에서만 `true`([§11](#11-원격kanu-gpu-변형--존재하지만-비권장)) |
+| `remote` | 원격 경로에서만 `true`([§11](#11-원격서버-gpu-변형--존재하지만-비권장)) |
 
 ---
 
@@ -175,7 +182,7 @@ status JSON은 `status_json()`(`reward_classifier_runtime.py:118`)이 만드는 
 | --- | --- | --- |
 | `REWARD_CLASSIFIER_PYTHON` | `python3` | classifier 노드를 실행할 인터프리터. **실기에서는 반드시 지정한다** ([§5](#5-인터프리터--system-site-packages-없이-만든-이유)) |
 | `REWARD_CLASSIFIER_CHECKPOINT` | `<repo>/classifier_ckpt/cube_in_cup_all3` | orbax **디렉터리**. 없으면 스크립트가 exit 2 + 스테이징 명령 출력 |
-| `CLASSIFIER_THRESHOLD` | `0.2` | `threshold` ROS 파라미터로 전달. `[0,1]` 밖이면 preflight에서 실패 |
+| `CLASSIFIER_THRESHOLD` | `0.5` | `threshold` ROS 파라미터로 전달. `[0,1]` 밖이면 preflight에서 실패 |
 | `HIL_SERL_ROOT` | `<repo>/third_party/hil-serl` | `serl_launcher`를 `sys.path`에 넣는 데 사용 |
 
 스크립트는 이 넷만 읽는다. **GUI(`classifier_view_gui`)는 별도로 `CAM1_NAME`/`CAM2_NAME`
@@ -200,7 +207,7 @@ status JSON은 `status_json()`(`reward_classifier_runtime.py:118`)이 만드는 
 | `cam2_topic` | `/cam2/cam2/color/image_raw/compressed` | **손목(그리퍼 장착)** 카메라 |
 | `checkpoint_path` | `""` → env → `<repo>/classifier_ckpt/cube_in_cup_all3` | `resolve_checkpoint_path()` 우선순위 |
 | `hil_serl_root` | `""` → `HIL_SERL_ROOT` env | `serl_launcher` 경로 |
-| `threshold` | `default_threshold()` = `CLASSIFIER_THRESHOLD` env, 없으면 `0.2` | `success` 판정 경계 |
+| `threshold` | `default_threshold()` = `CLASSIFIER_THRESHOLD` env, 없으면 `0.5` | `success` 판정 경계 |
 | `inference_hz` | `10.0` | 추론 타이머. `max(hz, 0.1)`로 하한 클램프 |
 | `max_camera_age_s` | `0.5` | 프레임 수신 후 경과가 이보다 크면 거절(`camera frame stale`) |
 | `max_camera_skew_s` | `0.10` | cam1/cam2 stamp 차이가 이보다 크면 거절(`camera timestamp skew too large`) |
@@ -299,12 +306,33 @@ classifier_ckpt/cube_in_cup_all3/
 
 ```bash
 mkdir -p /home/laptop3/gello_software/classifier_ckpt/cube_in_cup_all3
-rsync -a kanu:'~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150' \
+rsync -a junhyeong_ai:'~/hil-serl-data/classifier_ckpt/checkpoint_150' \
       /home/laptop3/gello_software/classifier_ckpt/cube_in_cup_all3/
 ```
 
 (스크립트 오류 메시지는 `.../classifier_ckpt/` 전체를 받는 변형을 안내한다. 둘 다
 `cube_in_cup_all3/checkpoint_150/`으로 떨어지면 된다.)
+
+> ### 🚚 이 명령은 2026-07-31에 바뀌었다 — **다른 스택 디렉터리에서 꺼내 왔다**
+> **이전 판(보존):**
+> ```bash
+> rsync -a kanu:'~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150' \
+>       /home/laptop3/gello_software/classifier_ckpt/cube_in_cup_all3/
+> ```
+> 옛 경로는 **FM/diffusion 스택의 디렉터리 안**이었다(CLAUDE.md §E가 "섞지 말 것"이라고 적은
+> 바로 그 트리다). 학습 서버 이전(kanu → junhyeong_ai)에서 이 체크포인트를 HIL 데이터 뿌리
+> `~/hil-serl-data/` 밑으로 꺼냈다. **경로 한 층이 줄었다** — 새 원본에는
+> `cube_in_cup_all3/` 중간 디렉터리가 없고 `classifier_ckpt/checkpoint_150`이 바로 있다.
+> 받는 쪽 laptop3 레이아웃(`classifier_ckpt/cube_in_cup_all3/checkpoint_150`)은 **그대로다**
+> — 스크립트 기본값(`REWARD_CLASSIFIER_CHECKPOINT`)이 그 경로를 보기 때문이다.
+>
+> **kanu 사본은 지워지지 않았다.** `kanu:~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/`도
+> 그대로 있고 같은 digest다(아래 3벌 대조). 다만 kanu는 이제 **읽기 전용 참조**이고
+> 새로 받을 때는 junhyeong_ai에서 받는다.
+>
+> ℹ️ 이전 중 새 호스트에 잠깐 있던 **호환용 심볼릭 링크는 2026-07-31에 제거됐다.**
+> 지금 `~/hil-serl-data/` 아래에는 심링크가 없다(같은 날 확인). 옛 경로 이름으로 접근을
+> 시도하지 말고 위 실경로를 쓴다.
 
 **ResNet-10 사전학습 가중치도 필요하다.** 없으면 upstream `create_classifier()`가 실행 중에
 GitHub에서 다운로드를 시도한다(`third_party/hil-serl/.../reward_classifier.py:91-107`).
@@ -319,6 +347,33 @@ sha256sum ~/.serl/resnet10_params.pkl
 
 단일 파일이 아니라 `sha256sum` 한 줄로 끝나지 않는다. **digest를 인용할 때는 반드시
 계산식을 같이 적는다** — 식이 다르면 값도 다르다.
+
+#### 정본 계산식 — 프로젝트 자체 함수 `ur_env.classifier_sidecar.directory_sha256`
+
+**`sha256sum`도, 아래 임시 스크립트도 아니다.** 서버가 체크포인트를 pin할 때 실제로 부르는
+함수가 이것이므로(`rlpd_receive_server.checkpoint_sha256()` → `directory_sha256()`),
+**스테이징한 사본을 검증한다면 이 식으로 계산한 값만 비교 대상이 된다.**
+
+```bash
+cd /home/laptop3/gello_software
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD/serl_ur_infra \
+  /home/laptop3/venvs/gello-hil-actor/bin/python -c \
+  "from ur_env.classifier_sidecar import directory_sha256; \
+   print(directory_sha256('$PWD/classifier_ckpt/cube_in_cup_all3/checkpoint_150'))"
+# 512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d
+```
+
+✅ **3벌 대조 (2026-07-31):** `junhyeong_ai:~/hil-serl-data/classifier_ckpt/checkpoint_150` ·
+`kanu:~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150` ·
+`laptop3:gello_software/classifier_ckpt/cube_in_cup_all3/checkpoint_150` — **셋 다 위 값**이다.
+laptop3 값은 이 문서를 갱신하면서 직접 다시 계산했다. 이로써 [§0](#0-무엇이-검증됐고-무엇이-아닌가)의
+"체크포인트가 서버 원본과 동일"이 🟡 미재현에서 ✅로 바뀌었다.
+
+#### 🗄️ 2026-07-29에 쓴 임시 계산식 (보존 — **다른 값이 나오는 게 정상이다**)
+
+아래는 정본 함수가 디렉터리를 받기 전에 손으로 짠 walk 스크립트다. **식이 다르므로 값도
+다르다** — 위 `512b6575…`와 아래 `4e9c8149…`가 어긋나는 것은 불일치가 아니다.
+파일 개수(14개)를 눈으로 확인하는 용도로만 남긴다.
 
 ```bash
 cd /home/laptop3/gello_software/classifier_ckpt/cube_in_cup_all3
@@ -346,11 +401,20 @@ PY
 > 재현되지 않았다(2026-07-29 확인). **어느 쪽이 맞는지가 아니라 "식 없는 digest는 쓸 수 없다"는
 > 것이 결론이다.** 위 값은 이 트리에서 실제로 계산한 값이고, kanu 원본과의 대조는
 > 이 문서에서 **재현하지 않았다**(운영자 rsync 시점 대조만 존재).
+>
+> 🔧 **2026-07-31 후속:** 마지막 문장의 "kanu 원본과의 대조는 재현하지 않았다"는 이제
+> 옛말이다 — 위 정본 식으로 **3벌 전부 대조했다.** 문단의 결론("식 없는 digest는 쓸 수
+> 없다")은 그대로 유효하고, `6185796c…`는 여전히 어떤 식으로도 재현되지 않았다.
 
-> ℹ️ gRPC 경로의 `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)은
+> ### 🔧 정정 (해결됨) — `checkpoint_sha256()`은 이제 이 디렉터리를 받는다
+> **이전 판(보존):** *"gRPC 경로의 `checkpoint_sha256()`(`ur_env/rlpd_receive_server.py:148-159`)은
 > `os.path.isfile()`을 강제하므로 이 디렉터리를 **아직 받지 못한다.** 뷰어 경로에는 SHA pin이
 > 없어서 그냥 된다. 그래서 지금 두 경로는 서로 다른 체크포인트를 보고 있다
-> ([HANDOFF_NEXT_SESSION_KO.md](./HANDOFF_NEXT_SESSION_KO.md) §5.2).
+> ([HANDOFF_NEXT_SESSION_KO.md](./HANDOFF_NEXT_SESSION_KO.md) §5.2)."*
+>
+> G19은 닫혔다. `checkpoint_sha256()`이 `classifier_sidecar.directory_sha256()`에 위임하므로
+> orbax **디렉터리**를 그대로 pin한다. 두 경로는 **같은 체크포인트를 본다** — 위 3벌 대조가
+> 그 증거다.
 
 ---
 
@@ -439,6 +503,12 @@ ResNet-10 백본         5,418,792 (frozen, ImageNet-1K 사전학습)
 
 ### 왜 kanu 원격을 버렸나
 
+> 🗄️ **이 절 전체가 kanu 실측이다(2026-07-28~29).** 학습 서버가 2026-07-31에
+> junhyeong_ai로 옮겨 갔지만 **아래 숫자는 kanu 링크에서 잰 값 그대로 둔다** — 새 호스트에서
+> 대역폭·왕복을 다시 재지 않았다. 새 호스트에 대해 실측된 링크 사실은 **ICMP RTT가 kanu와
+> 같다**는 것 하나뿐이고, 그것은 대역폭이 같다는 뜻이 아니다. 결론(로컬 CPU가 낫다)은
+> **구조적 논증**이라 호스트가 바뀌어도 유지되지만, 새 호스트의 숫자를 인용하려면 다시 재라.
+
 | | 로컬 CPU | kanu 원격 |
 | --- | --- | --- |
 | 추론 | 6.6 ms | GPU라 더 빠름 |
@@ -448,7 +518,7 @@ ResNet-10 백본         5,418,792 (frozen, ImageNet-1K 사전학습)
 | 합계 | **11.9 ms** | 16 ms + 추론 + RTT + SSH 터널 |
 
 **즉 순수 전선 시간만으로도 로컬 전체 경로보다 느리다.** GPU가 아무리 빨라도 이길 수 없는
-구조다. 그래서 원격 경로는 [§11](#11-원격kanu-gpu-변형--존재하지만-비권장)로 강등했다.
+구조다. 그래서 원격 경로는 [§11](#11-원격서버-gpu-변형--존재하지만-비권장)로 강등했다.
 
 > ### 🔧 정정 (2026-07-29) — 위 표의 "공용 IP 경유"는 **틀렸다**
 > 이전 판은 링크를 *"공용 IP 경유 5.7 MiB/s"*로 적었다. **인터넷 전송 구간은 없다.**
@@ -500,15 +570,46 @@ cam1에서 로봇 팔이 화면 상단에서 내려오는 정도와 프레임 �
 틀린 게 아니라 팔이 프레임을 지나가고 있는 것**이다. 이 실패 모드의 해법은 threshold가 아니라
 **팔이 정지한 자세에서만 질의하거나 N-of-M 시간 평활**이다.
 
+> ### 📦 재학습 재료는 이제 learner와 **같은 호스트**에 있다 (2026-07-31)
+> 이 한계들 때문에 성공 판정 기본값이 `MANUAL`이고, `AUTO`를 운영 기본으로 되돌리려면
+> **재학습·재검증**이 필요하다. 그 재료가 kanu에만 있던 상태가 2026-07-31에 끝났다:
+>
+> ```text
+> junhyeong_ai:~/hil-serl-data/datasets/
+>     cube_in_cup_all3/        <- checkpoint_150을 학습시킨 그 데이터 (train/ 포함)
+>     cube_in_cup_combined/    <- evaluate_all.py (채점 표준 진입점)가 여기 있다
+>     cube_in_cup_cv/          <- leave-one-take-out fold + run_cv.sh · eval_fold.py
+>     cube_in_cup_raw_0724/
+>     cube_in_cup_reward_classifier_data.tar.gz
+>     success_0724.zip · fail_0724.zip · take_fail_val.zip   <- 라벨된 성공/실패/검증 take
+> ```
+>
+> **learner·GPU·데이터가 처음으로 한 호스트에 모였다.** kanu 사본은 지워지지 않았고
+> (읽기 전용 참조로 남는다), 레이아웃은 kanu의 `dataset/` 상대 구조를 그대로 보존했다.
+> ⚠️ 다만 **채점 인터프리터(`hil-serl/.venv-train`)는 옮겨 오지 않았다** — 새 호스트에
+> 존재하지 않는다(2026-07-31 확인). 재학습/재채점 절차와 조건은
+> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 「재현」절.
+
 ---
 
 ## 10.1 threshold
 
-기본값 **0.2**다. 근거는 통계가 아니라 **비용 비대칭**이다 — sparse binary reward에서
-**false positive는 복구 불가능**(episode가 잘못 성공 종료되고 그 transition이 버퍼에 남는다)인 반면
-**false negative는 사람이 개입해 메울 수 있다.**
+기본값 **0.5**다 — 뷰어 쪽 `reward_classifier_runtime.py`의 `DEFAULT_THRESHOLD`,
+`run_classifier_viewer.sh`, `run_remote_classifier_viewer.sh` 전부 `0.5`이고
+서버 `DEFAULT_REWARD_THRESHOLD`와 같다(2026-07-31 코드 확인).
 
-수치·측정 설계·이력(0.85 → 0.5 → 0.2)은 여기서 되풀이하지 않는다.
+> ### 🔧 정정 — 이 절은 `0.2`가 기본값이라고 적고 있었다 (보존)
+> **이전 판:** *"기본값 **0.2**다. 근거는 통계가 아니라 **비용 비대칭**이다 — sparse binary
+> reward에서 **false positive는 복구 불가능**(episode가 잘못 성공 종료되고 그 transition이
+> 버퍼에 남는다)인 반면 **false negative는 사람이 개입해 메울 수 있다.**"*
+>
+> `0.2`는 2026-07-29에 채택했다가 실기 운용 전에 폐기된 **역사적 결정**이고, 현재 production
+> 값은 `0.5`다. 비용 비대칭 논증 자체는 철회되지 않았다 — 그 기록은
+> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)에 그대로 있다.
+> **[§10](#10-알려진-행동적-한계--정직하게)의 `@0.2` 채점값은 측정값이므로 그대로 둔다** —
+> 기본값이 아니라 스윕 지점이다.
+
+수치·측정 설계·이력(0.85 → 0.5 → 0.2 → 0.5)은 여기서 되풀이하지 않는다.
 권위 있는 문서는 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)이고,
 권위 있는 코드값은 `ur_env/rlpd_receive_server.py:73`의 `DEFAULT_REWARD_THRESHOLD` 하나다.
 뷰어 쪽 기본값(`reward_classifier_runtime.py:18`, `run_classifier_viewer.sh:20`)은 **그것과
@@ -516,15 +617,19 @@ cam1에서 로봇 팔이 화면 상단에서 내려오는 정도와 프레임 �
 
 ---
 
-## 11. 원격(kanu GPU) 변형 — 존재하지만 **비권장**
+## 11. 원격(서버 GPU) 변형 — 존재하지만 **비권장**
 
 **결론부터: 쓰지 마라. [§9](#9-성능--실측값)에서 로컬 CPU가 이겼다.**
 아래는 코드가 남아 있으니 무엇인지 알아두라는 기록이다.
 
+> 🚚 **2026-07-31: 여기서 말하는 "원격"은 이제 junhyeong_ai다** (kanu가 아니다).
+> `run_remote_classifier_viewer.sh`의 `CLASSIFIER_SSH_HOST` 기본값도 `junhyeong_ai`로 바뀌었다.
+> 절 제목의 옛 표기는 `원격(kanu GPU) 변형`이었다.
+
 | 파일 | 위치 | 역할 |
 | --- | --- | --- |
-| `serl_ur_infra/remote_reward_classifier_server.py` | kanu | ZMQ **REP**, 기본 `--bind tcp://127.0.0.1:5594`. ROS 의존 없음 |
-| `serl_ur_infra/run_remote_reward_classifier_server.sh` | kanu | 위 서버 기동. `REQUIRE_JAX_GPU=true`가 기본이라 CPU면 거부 |
+| `serl_ur_infra/remote_reward_classifier_server.py` | 학습 서버 | ZMQ **REP**, 기본 `--bind tcp://127.0.0.1:5594`. ROS 의존 없음 |
+| `serl_ur_infra/run_remote_reward_classifier_server.sh` | 학습 서버 | 위 서버 기동. `REQUIRE_JAX_GPU=true`가 기본이라 CPU면 거부 |
 | `gello_recorder/remote_reward_classifier_node.py` | laptop3 | 카메라 구독 → ZMQ **REQ**. `ros2 run gello_recorder remote_reward_classifier` |
 | `ros2_ur_ws/run_remote_classifier_viewer.sh` | laptop3 | **SSH 터널(`-L 5594`)을 스스로 연다** + 위 노드 + 같은 GUI |
 
@@ -537,14 +642,23 @@ cam1에서 로봇 팔이 화면 상단에서 내려오는 정도와 프레임 �
   `max_camera_skew_s` 안에 들어올 때만 채택한다(`remote_reward_classifier_node.py:57-72`).
 - GUI 배지가 `REMOTE CONNECTED`/`REMOTE STALE`로 바뀌고 진단에 `roundtrip_ms`,
   `capture_age_ms`가 추가로 붙는다.
-- 추가 환경변수: `CLASSIFIER_SSH_HOST`(기본 `kanu`), `CLASSIFIER_LOCAL_PORT`/
+- 추가 환경변수: `CLASSIFIER_SSH_HOST`(기본 `junhyeong_ai`), `CLASSIFIER_LOCAL_PORT`/
   `CLASSIFIER_REMOTE_PORT`(기본 5594), `CLASSIFIER_TIMEOUT_S`(기본 2.0).
 
-> 🪤 **쓰려고 해도 지금은 안 될 가능성이 높다.** `run_remote_reward_classifier_server.sh`와
+> ### 🗄️ 이전 판의 🪤(kanu 기준, 보존)
+> *"**쓰려고 해도 지금은 안 될 가능성이 높다.** `run_remote_reward_classifier_server.sh`와
 > `remote_reward_classifier_server.py`는 최근 커밋에서 새로 생긴 파일이고, kanu의 worktree는
 > 머지 이전 커밋에 고정돼 있어 **그 파일들이 없다.** kanu의 별도 저장소
 > `~/workspace/youngwoong/gello_software_remote_classifier`에는 **폐기된 Jul-24 체크포인트**가
-> 있으니 그쪽을 쓰면 recall 0%짜리 모델을 보게 된다.
+> 있으니 그쪽을 쓰면 recall 0%짜리 모델을 보게 된다."*
+>
+> **junhyeong_ai에서는 그 두 가지가 다르다.** HIL checkout은
+> `~/gello_software_runtime`(독립 clone)이고 laptop3 HEAD와 같은 커밋을 유지하므로 **두 파일이
+> 있다.** 체크포인트도 `~/hil-serl-data/classifier_ckpt/checkpoint_150`(=배포본, [§6](#6-체크포인트-스테이징과-무결성)의
+> digest)이라 폐기된 Jul-24를 집을 이유가 없다.
+> ⚠️ **그래도 이 원격 경로는 새 호스트에서 한 번도 돌려 보지 않았다(미검증).** 그리고 §9의
+> 결론은 그대로다 — **쓰지 마라.**
+> 🚫 `~/gello_software`(새 호스트)는 **다른 사람의 작업 트리**다. 절대 그쪽을 쓰지 않는다.
 
 ---
 
@@ -582,7 +696,7 @@ export PYTHONPATH="$HIL_SERL_ROOT/serl_launcher${PYTHONPATH:+:$PYTHONPATH}"
 /home/laptop3/venvs/hilserl/bin/python -m gello_recorder.reward_classifier_node --ros-args \
   -p hil_serl_root:="$HIL_SERL_ROOT" \
   -p checkpoint_path:=/home/laptop3/gello_software/classifier_ckpt/cube_in_cup_all3 \
-  -p threshold:=0.2 \
+  -p threshold:=0.5 \
   -p inference_hz:=10.0 \
   -p max_camera_age_s:=0.5 \
   -p max_camera_skew_s:=0.10 \
@@ -647,7 +761,7 @@ ros2 topic echo /reward_classifier/status
 | `ros2_ur_ws/src/gello_recorder/gello_recorder/classifier_view_gui_node.py` | GUI 뒤의 ROS 노드 (policy 클라이언트 없음) |
 | `ros2_ur_ws/run_reward_classifier_gui.sh` | 같은 classifier 노드 + **policy_run_gui**. 정책 컨트롤이 붙으므로 모니터 전용이 아니다 |
 | `ros2_ur_ws/launch_cameras.sh`, `ros2_ur_ws/_resolve_camera_serials.sh` | 카메라 기동 / 시리얼 자동 해석 |
-| `serl_ur_infra/remote_reward_classifier_server.py` 외 3종 | 원격 변형([§11](#11-원격kanu-gpu-변형--존재하지만-비권장)) |
+| `serl_ur_infra/remote_reward_classifier_server.py` 외 3종 | 원격 변형([§11](#11-원격서버-gpu-변형--존재하지만-비권장)) |
 | `serl_ur_infra/ur_experiments/cube_in_cup.py:211-214` | **`IMAGE_CROP`** — 크롭 불일치의 출처([§3](#3--크롭-불일치--뷰어가-보는-것은-rl-loop가-보는-것이-아니다)) |
 | `serl_ur_infra/ur_env/rlpd_receive_server.py:73` | `DEFAULT_REWARD_THRESHOLD` — threshold의 유일한 권위 |
 | `serl_ur_infra/REWARD_CLASSIFIER_THRESHOLD_KO.md` | threshold 근거와 채점 결과 전문 |
