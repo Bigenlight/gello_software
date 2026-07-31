@@ -12,6 +12,41 @@
 > [`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) **§8 P1** ·
 > [`REMOTE_ACTOR_GRPC.md`](REMOTE_ACTOR_GRPC.md)(전송 계약)
 
+> # 🗄️ 이 조사의 시간 수치는 **kanu에서 잰 것이다** (같은 날 서버가 옮겨졌다)
+>
+> 2026-07-31에 learner가 **`kanu` → `junhyeong_ai`** 로 이전됐다(RTX A4000 8장 중 GPU 5 →
+> **RTX 5070 Ti 1장, GPU 0**). 이 문서의 **465 ms · 512/854 ms · 1.123 s ↔ 0.457 s ·
+> ICMP 2.02 ms**는 전부 **kanu 상대 관측**이며, 그래서 그대로 둔다 — 새 호스트의 개선
+> 폭은 이 값들과 대조해야만 나온다.
+>
+> **새 호스트에서 오늘 실제로 측정된 것** *(출처:
+> [`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md), 합성
+> 수락 시험 200 transition — 로봇 없음)*:
+>
+> | | kanu | **junhyeong_ai** |
+> | --- | --- | --- |
+> | `BeginEpisode` mean / max | 84.9 / **372.8 ms** | **57.7 / 82.2 ms** (tail 약 4.5배 짧음) |
+> | `Step` mean / max | — | 156.1 / 211.0 ms |
+> | ICMP RTT (min/avg/max, n=10) | 1.272 / 2.518 / 6.314 ms | 1.078 / **2.811** / 6.979 ms |
+>
+> *(kanu ICMP는 §3.1에도 이 조사 자체의 값 `avg 2.02 / min 1.02 / max 5.57`이 따로 있다 —
+> 같은 호스트를 다른 시각에 잰 것이고 둘 다 유효하다. 결론은 같다: **2~3 ms**.)*
+>
+> 📏 **ICMP가 사실상 같다 = 네트워크는 원인이 아니었고, 지금도 아니다.** 즉 §3.2의
+> "390~445 ms가 서버 안"이라는 **분해 구조 자체는 이전으로 바뀌지 않는다.** 호스트가
+> 빨라져 그 덩어리가 줄었을 뿐이고, **얼마나 줄었는지는 아직 모른다.**
+>
+> 🛑 **바뀌지 않은 것 — 이 문서의 결론과 계획은 전부 유효하다.** 락 공유 구조(C1/C2),
+> RPC 분할(A′), 파이프라이닝 불가(§5), C3 금지(§8.1), 그리고 무엇보다 **Stage 1 계측이
+> 먼저**라는 순서. 서버가 빨라졌다고 per-stage 타이머가 생기지는 않았다 —
+> **§10의 "인용 금지 목록"은 한 줄도 해소되지 않았다.**
+>
+> 🔴 **그리고 실기 루프 주기는 새 호스트에서 아직 재지 않았다.** 위 합성 시험의
+> transition당 RPC 합계 213.8 ms를 kanu의 512 ms에서 **그냥 빼지 마라** — 후자는 카메라
+> 디코드와 `env.step`의 100 ms 페이싱을 포함한 **로봇 루프 전체 주기**다. Stage 0의
+> "`POLICY_RUNNING` 구간만 걸러 다시 잰다"가 **여전히 첫 할 일**이고, 이제는 새 호스트
+> 기준선을 세우는 일이기도 하다.
+
 ---
 
 ## 0. 한 줄 결론
@@ -125,6 +160,7 @@ experiment 4종(`ram_insertion:114`, `usb_pickup_insertion:122`, `object_handove
 | 관측 96.57 KiB 전선 시간 | **9.53 / 16.55 / 60.85 ms** | 계산 | 83 / 47.8 / 13 Mbit/s — 셋 다 과거 실관측 |
 | sidecar 추가 전선(~2 Hz 스텝) | 1.31 / 2.28 / 8.39 ms | 계산 | 13.32 KiB |
 | kanu ICMP RTT | avg **2.02 ms** (min 1.02 / max 5.57) | **측정**(유휴, n=10) | 이번 조사 |
+| *(참고)* `junhyeong_ai` ICMP RTT | avg **2.811 ms** (min 1.078 / max 6.979) | **측정**(n=10, 2026-07-31) | `SERVER_MIGRATION_E2E_JUNHYEONG_AI.md` §3.1 — **같은 자릿수. 이전으로 링크 조건은 안 바뀌었다** |
 | **laptop + 전선 합계** | **18~78 ms = 4~17%** | | |
 
 🪤 **`env.step`의 100 ms 페이싱은 `get_im`을 덮지 않는다.** `ur7e_env.py:1444-1464`에서
@@ -144,10 +180,14 @@ sleep이 끝난 **뒤에** `_harvest_follow_window` → `_update_currpos()` → 
 
 | 값 | 조건 | 근거 |
 |---:|---|---|
-| 서버 inference **12.08 ms**, 왕복 **53.03 ms** | disposable 서버, **replay insert 0건**, learner 없음 | `HIL_SERL_KANU_RUNBOOK_KO.md:91-93` |
-| inference **18.44 ms**, 왕복 **47.75 ms** | 같은 no-submit probe 계열 | `HANDOFF_NEXT_SESSION_KO.md:76-77` |
+| 서버 inference **12.08 ms**, 왕복 **53.03 ms** | **kanu**, disposable 서버, **replay insert 0건**, learner 없음 | `HIL_SERL_KANU_RUNBOOK_KO.md` — "no-submit probe"로 검색 (원래 `:91-93`) |
+| inference **18.44 ms**, 왕복 **47.75 ms** | 같은 no-submit probe 계열 (**kanu**) | `HANDOFF_NEXT_SESSION_KO.md` — 같은 문구로 검색 (원래 `:76-77`) |
 
 **⇒ replay·learner가 붙는 순간 느려진다.**
+
+🗄️ **위 두 줄은 kanu probe다.** 새 호스트에는 대응하는 no-submit probe가 **아직 없다** —
+`junhyeong_ai`에서 잰 것은 replay·learner가 **붙은** 상태의 `Step` 156.1 ms 뿐이므로
+(§맨 위 표) 두 값을 같은 줄에 놓고 비교하면 안 된다.
 
 ### 3.3 서버 구조 — 가장 유력한 단일 용의자
 
@@ -180,8 +220,8 @@ ActorSessionService.step()                       actor_network.py:626-777
 
 | | 값 | 근거 |
 |---|---:|---|
-| learner step 중앙값 (actor 동시) | **1.123 s** | `HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md:149` |
-| learner step 중앙값 (actor 종료 후) | **0.457 s** | 같은 문서 `:150` |
+| learner step 중앙값 (actor 동시) | **1.123 s** | `HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md` — "learner step 중앙값"으로 검색 (원래 `:149`) |
+| learner step 중앙값 (actor 종료 후) | **0.457 s** | 같은 문서 (원래 `:150`) |
 
 **서로 비슷한 크기로 밀어내고 있다** — actor가 learner에 +0.67 s, learner가 actor에 약
 +350 ms. 이건 "락을 잠깐 기다린다"보다 **GPU 포화**에 가까운 그림이다(§6 참조).
@@ -195,15 +235,20 @@ ActorSessionService.step()                       actor_network.py:626-777
 
 ## 4. 해법 공간
 
+📌 아래 "추론 위치"의 **GPU 서버**는 2026-07-30까지 kanu였고 **2026-07-31부터
+`junhyeong_ai`(RTX 5070 Ti 1장)** 다. 방안의 구조는 호스트와 무관하다.
+🟡 다만 **D는 전제가 약해졌다** — 새 서버는 GPU가 **1장뿐이고 다른 사람과 공유**하므로,
+"별도 GPU"는 kanu의 8장 시절과 달리 지금은 **여유 GPU를 가정할 수 없다.**
+
 | | 방식 | 추론 위치 | 제어 경로 비용 | 비용 | 건드리는 계약 |
 |---|---|---|---:|---|---|
 | **A** | 정책 추론을 laptop3 CPU로 (upstream 구조) | laptop | ~20 ms | 대 | 프로토콜 + echo 검증 + venv 통합 |
-| **A′** | **RPC 분할** — `GetAction` / `SubmitTransition` | kanu 유지 | **~31 ms** | 중 | proto 신규 + **ACK 의미** |
+| **A′** | **RPC 분할** — `GetAction` / `SubmitTransition` | GPU 서버 유지 | **~31 ms** | 중 | proto 신규 + **ACK 의미** |
 | **B** | 파이프라이닝 (t 실행 중 t+1 요청) | — | — | — | 🔴 **불가** (§5) |
-| **C1** | `_encode`를 공유 락 밖으로 | kanu | ? | **소** | **없음** |
-| **C2** | learner 샘플링에 스냅샷/더블버퍼 | kanu | ? | 중 | 없음 |
-| **C3** | 인코딩·insert를 큐로 빼고 액션 먼저 반환 | kanu | 큼 | 중 | 🔴 **ACK=삽입완료 파기** |
-| **D** | 추론을 kanu의 별도 프로세스/GPU로 | kanu(별도) | ? | 중 | 없음 |
+| **C1** | `_encode`를 공유 락 밖으로 | GPU 서버 | ? | **소** | **없음** |
+| **C2** | learner 샘플링에 스냅샷/더블버퍼 | GPU 서버 | ? | 중 | 없음 |
+| **C3** | 인코딩·insert를 큐로 빼고 액션 먼저 반환 | GPU 서버 | 큼 | 중 | 🔴 **ACK=삽입완료 파기** |
+| **D** | 추론을 서버의 별도 프로세스/GPU로 | GPU 서버(별도) | ? | 중 | 없음 (🟡 새 서버는 GPU 1장 공유 — 위 주의) |
 | **E** | **유선 NIC 연결** | — | −0~50 ms | **0** | 없음 |
 | **F** | action chunking | — | — | 대 | upstream 선례 **없음** |
 
@@ -257,7 +302,7 @@ GetAction(observation)     → 정책 추론만. replay insert 없음, classifie
 SubmitTransition(data)     → 백그라운드 스레드. classifier · 인코딩 · insert 전부 여기로
 ```
 
-**추론을 kanu에 둔 채로 10 Hz가 나온다.** 지금 465 ms인 이유가 "액션을 받으려면 replay
+**추론을 GPU 서버에 둔 채로 10 Hz가 나온다.** 지금 465 ms인 이유가 "액션을 받으려면 replay
 insert까지 끝나야 해서"이기 때문이다.
 
 이것은 새 발명이 아니라 **upstream이 실제로 하는 구조**다 — 다만 upstream은 추론까지
@@ -290,6 +335,11 @@ insert까지 끝나야 해서"이기 때문이다.
 
 §3.3의 두 숫자(1.123 s ↔ 0.457 s)는 **상호 GPU 포화**에 가깝다. frozen ResNet-10 forward
 2회가 A4000에서 10~20 ms 수준이라면 **C1의 상한은 400 ms 중 20 ms**로 사실상 무의미하다.
+
+🟡 **이 추정의 GPU가 바뀌었다.** 두 숫자는 kanu(A4000, GPU 5) 관측이고 현행 서버는
+RTX 5070 Ti다. 방향은 그대로일 공산이 크지만 — 카드가 빨라지면 forward도 락 점유도 같이
+줄어 **C1의 상한은 오히려 더 낮아진다** — **재측정 없이 단정하지 마라.** 어차피 결론은
+같다: **Stage 1 계측이 먼저다.**
 
 C1이 크게 먹히는 경우는 **learner가 `sample_replay`로 락을 오래 잡을 때**뿐인데, 샘플링은
 링에서 memcpy라 원래 빠를 공산이 크다.
@@ -431,10 +481,21 @@ AUTO)을 통째로 잃는다. **A는 "agentlace 복귀"가 아니라 "현재 gRP
 - per-step RPC latency 분포. 465 ms가 **상시인지 tail spike인지 알 수 없다.**
 - 카메라 디코드 §3.1 수치는 **합성 JPEG 대용** 측정이다(실제 D435 캡처 아님).
 - 정책의 CPU 추론 실측(§9.2는 추정).
+- 🔴 **새 서버(`junhyeong_ai`) 기준 실기 루프 주기.** 이 문서의 465 / 512 / 854 ms는 전부
+  **kanu 상대**다. 2026-07-31 이전 뒤 잰 것은 **로봇 없는 합성 RPC 수치**뿐이므로
+  "이제 몇 Hz인가"에 답하지 못한다. Stage 0을 새 호스트에서 다시 돌리는 것이 그 답이다.
+- 🔴 **새 서버 기준 no-submit probe**(replay·learner 없이 추론만). §3.2의 12.08 ms에
+  대응하는 값이 아직 없어 "정책 추론은 무죄"를 새 호스트에서 재확인하지 못했다.
 
 ---
 
 ## 11. 근거 파일 색인
+
+🪤 **다른 `.md` 문서를 가리키는 줄번호는 이미 밀렸다.** 2026-07-31 서버 이전 문서 정리에서
+여러 문서 앞에 marker 블록이 들어갔다(확인함: `HIL_SERL_KANU_RUNBOOK_KO.md:91-93`,
+`HANDOFF_NEXT_SESSION_KO.md:76-77`, `HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md:149-150`은
+더 이상 그 내용이 아니다). **문서 줄번호는 인용 문구로 검색해서 찾아라.**
+아래 표의 **코드 파일** 줄번호는 코드가 바뀌지 않는 한 유효하다.
 
 | 주장 | 위치 |
 |---|---|
