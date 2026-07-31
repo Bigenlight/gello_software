@@ -29,7 +29,7 @@ if [[ ! -e "$REWARD_CLASSIFIER_CHECKPOINT" ]]; then
     echo "Reward-classifier checkpoint not found: $REWARD_CLASSIFIER_CHECKPOINT" >&2
     echo "Stage the canonical cube-in-cup orbax checkpoint first:" >&2
     echo "  mkdir -p $REPO_ROOT/classifier_ckpt/cube_in_cup_all3" >&2
-    echo "  rsync -a kanu:~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/ \\" >&2
+    echo "  rsync -a junhyeong_ai:~/hil-serl-data/classifier_ckpt/ \\" >&2
     echo "        $REPO_ROOT/classifier_ckpt/cube_in_cup_all3/" >&2
     echo "(it must end up containing a checkpoint_150 directory), or set" >&2
     echo "REWARD_CLASSIFIER_CHECKPOINT to an existing checkpoint directory." >&2

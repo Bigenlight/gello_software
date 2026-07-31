@@ -34,8 +34,7 @@ _MISSING_CHECKPOINT_HELP = (
     "The canonical cube-in-cup checkpoint is the orbax directory "
     "'cube_in_cup_all3' (it contains checkpoint_150).  Stage it with:\n"
     "  mkdir -p {default}\n"
-    "  rsync -a kanu:~/workspace/youngwoong/dataset/cube_in_cup_all3/"
-    "classifier_ckpt/ {default}/\n"
+    "  rsync -a junhyeong_ai:~/hil-serl-data/classifier_ckpt/ {default}/\n"
     "or point REWARD_CLASSIFIER_CHECKPOINT (or the checkpoint_path ROS "
     "parameter / --checkpoint flag) at an existing checkpoint directory."
 )

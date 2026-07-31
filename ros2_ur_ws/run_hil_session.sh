@@ -3,7 +3,7 @@
 # run_hil_session.sh — laptop3 HIL-SERL 운용을 한 터미널에서 소유하는 래퍼
 # =============================================================================
 #
-# 전제: UR7e/GELLO/gripper ROS topic과 localhost:50153 Kanu 터널은 이미 준비돼 있다.
+# 전제: UR7e/GELLO/gripper ROS topic과 localhost:50153 학습 서버 터널은 이미 준비돼 있다.
 # 이 스크립트는 검증된 기존 도구를 순서대로 실행할 뿐, 그 내부 안전 계약을 우회하지
 # 않는다.
 #
@@ -95,7 +95,7 @@ Examples:
   VIEW=false ./run_hil_session.sh
   ./run_hil_session.sh --no-arm
 
-The localhost:50153 Kanu tunnel and UR7e/GELLO/gripper topics must already be
+The localhost:50153 learner-host tunnel and UR7e/GELLO/gripper topics must already be
 ready. This wrapper owns --arm, --dry-preflight, --fake-env, and --deadman;
 all other arguments are passed to run_hil_actor.sh.
 
@@ -111,7 +111,7 @@ Environment:
         run_hil_actor.sh preflight [11] re-checks and fails).
   HIL_ACTOR_RETRY=1|0            (default 1)
         After a collision/PROTECTIVE_STOP the actor dies but the cameras, the
-        GUI and the Kanu tunnel are still fine. With 1, stages 3-5 (preposition,
+        GUI and the learner-host tunnel are still fine. With 1, stages 3-5 (preposition,
         preflight, actor) re-run once the operator has restarted
         run_hil_hardware.sh; stages 1-2 are never torn down. Only run_hil_actor.sh
         exit code 75 (RECOVERABLE) is eligible -- see its --help. Every arming
@@ -760,7 +760,7 @@ cat <<EOF
 ============================================================
  actor가 죽었지만 controller 복귀는 PASS했다 (rc=75).
  팔은 trajectory controller가 잡고 있고 command publisher는 0이다.
- cameras / HIL GUI / Kanu 터널은 **그대로 살아 있다** — 다시 만들지 마라.
+ cameras / HIL GUI / 학습 서버 터널은 **그대로 살아 있다** — 다시 만들지 마라.
 
  지금 할 일 (Terminal 2):
    1) 펜던트에서 protective stop / 오류를 클리어한다.

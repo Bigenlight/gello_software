@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Kanu: start the GPU reward-classifier service on loopback only.
+# Learner host (junhyeong_ai since 2026-07-31): start the GPU reward-classifier
+# service on loopback only.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
