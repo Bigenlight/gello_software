@@ -8,7 +8,11 @@ from typing import Any, Callable, Mapping, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
-from ur_env.actor_network import PolicyInferenceError, validate_action
+from ur_env.actor_network import (
+    ActorProtocolError,
+    PolicyInferenceError,
+    validate_action,
+)
 from ur_env.learner.config import FROZEN_TRUNK_MODEL_REVISION
 from ur_env.observation_schema import validate_canonical_observation
 
@@ -38,6 +42,34 @@ def canonical_policy_observation(value: int = 0) -> dict[str, np.ndarray]:
         "cam1": np.full((1, 128, 128, 3), value, dtype=np.uint8),
         "cam2": np.full((1, 128, 128, 3), value, dtype=np.uint8),
     }
+
+
+def _validated_policy_input(observation: Mapping[str, Any]) -> dict[str, Any]:
+    """Accept the canonical pixel observation OR its frozen-trunk features.
+
+    The agent's encoder is dual-input, so serving from the feature map the
+    server already computed for replay is the same network evaluated on the
+    same tensor -- it just skips a trunk forward the step has already paid
+    for.  Which form arrived is decided by the camera tensors themselves, so
+    neither validator is ever applied to the other's data.
+
+    ``frozen_trunk`` imports this module, so its validator is imported lazily
+    here rather than at module scope.
+    """
+
+    if not isinstance(observation, Mapping):
+        raise ActorProtocolError("policy observation must be a mapping")
+    camera = observation.get("cam1")
+    trailing = tuple(int(value) for value in np.asarray(camera).shape[-3:]) if (
+        camera is not None and np.asarray(camera).ndim >= 3
+    ) else ()
+    if trailing and trailing[-1] != 3:
+        from ur_env.learner.frozen_trunk import validate_frozen_trunk_observation
+
+        return validate_frozen_trunk_observation(
+            dict(observation), batched=False, copy=False
+        )
+    return validate_canonical_observation(observation, copy=False)
 
 
 def _leaf_signature(tree: Any) -> tuple[Any, tuple[tuple[tuple[int, ...], str], ...]]:
@@ -284,7 +316,7 @@ class VersionedPolicyRuntime:
     def __call__(
         self, observation: Mapping[str, Any], deterministic: bool
     ) -> tuple[np.ndarray, int]:
-        canonical = validate_canonical_observation(observation, copy=False)
+        canonical = _validated_policy_input(observation)
         import jax
 
         with self._lock:

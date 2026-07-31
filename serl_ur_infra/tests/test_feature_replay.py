@@ -389,8 +389,17 @@ def test_reused_observation_id_with_a_different_state_is_rejected():
         ingress(forged, False)
 
 
-def test_failed_extraction_caches_nothing():
-    """A faulted transition must leave the trunk cache untouched."""
+def test_a_failed_extraction_caches_only_what_succeeded():
+    """The cache memoises per observation, not per transition.
+
+    An earlier revision required both extractions to succeed before caching
+    anything, mirroring the ledger's all-or-nothing insert rule.  That rule
+    does not belong here: the cache is a memo of a pure function of the
+    pixels, keyed by observation_id and guarded by the state tripwire, so a
+    correctly encoded entry is never wrong -- and ``prime_observation`` has
+    always cached a lone observation with no transition in sight.  What must
+    hold is that the observation whose extraction FAILED is not cached.
+    """
 
     class SecondCallFails:
         def __init__(self) -> None:
@@ -406,7 +415,11 @@ def test_failed_extraction_caches_nothing():
     with pytest.raises(FeatureExtractionError):
         ingress(_data(0), False)
 
-    assert ingress._feature_cache == {}
+    cached = set(ingress._feature_cache)
+    assert ("actor-0", "session-0", "observation-0") in cached  # O(t) succeeded
+    assert ("actor-0", "session-0", "observation-1") not in cached  # O(t+1) did not
+    # And nothing was inserted, which is the invariant that actually matters.
+    assert ingress.status().replay_insert_count == 0
 
 
 def test_priming_makes_the_first_transition_a_single_extraction():

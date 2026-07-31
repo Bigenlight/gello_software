@@ -578,12 +578,15 @@ class ActorSessionService:
             # silently lose a classification the actor believed it had paid for.
             self._reject_classifier_sidecar(command.observation, rpc="BeginEpisode")
             observation = self._validated_observation(command.observation)
-            self._prime_replay_observation(
+            shared_features = self._prime_replay_observation(
                 observation, command.actor_id, command.session_id
             )
             try:
                 action, version, inference_ms = self._infer(
-                    observation.observation, command.deterministic
+                    shared_features
+                    if shared_features is not None
+                    else observation.observation,
+                    command.deterministic,
                 )
             except Exception as exc:
                 self._set_fault(
@@ -657,6 +660,13 @@ class ActorSessionService:
             )
             next_observation = self._validated_observation(next_packet)
             self._validate_data(command, session, next_observation)
+            # Run the image encoder ONCE for this step, before anything that
+            # wants its output.  _accept_data below finds it already cached
+            # (so the trunk does not run again inside the learner-shared
+            # lock), and _infer serves the policy from the same tensor.
+            shared_features = self._prime_replay_observation(
+                next_observation, command.actor_id, command.session_id
+            )
             observation_key = (
                 command.actor_id,
                 command.session_id,
@@ -740,7 +750,10 @@ class ActorSessionService:
 
             try:
                 action, version, inference_ms = self._infer(
-                    next_observation.observation, command.deterministic
+                    shared_features
+                    if shared_features is not None
+                    else next_observation.observation,
+                    command.deterministic,
                 )
                 if version < session.last_policy_version:
                     raise ActorProtocolError(
@@ -1401,21 +1414,22 @@ class ActorSessionService:
 
     def _prime_replay_observation(
         self, observation: Any, actor_id: str, session_id: str
-    ) -> None:
-        """Let a feature-native sink pre-encode O(0) for this episode.
+    ) -> Any:
+        """Encode this observation once, via a sink that shares its result.
 
-        Optional by design: ``accept_data`` is a plain callable in the
-        receive-only server and in tests, and a sink that stores raw
-        observations has nothing to warm.  Only sinks that advertise
-        ``prime_observation`` are called, and a failure propagates -- see
-        ``FeatureReplayIngress.prime_observation`` for why that is the safe
-        direction here.
+        Returns the frozen-trunk features, or ``None`` when the sink does not
+        encode -- ``accept_data`` is a plain callable in the receive-only
+        server and in tests, and a sink that stores raw observations has
+        nothing to share.  Callers fall back to the pixel path on ``None``.
+
+        A failure propagates; see ``FeatureReplayIngress.prime_observation``
+        for why that is the safe direction.
         """
 
         prime = getattr(self._accept_data, "prime_observation", None)
         if not callable(prime):
-            return
-        prime(
+            return None
+        return prime(
             actor_id=actor_id,
             session_id=session_id,
             observation_id=observation.observation_id,

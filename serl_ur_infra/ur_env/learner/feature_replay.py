@@ -692,31 +692,33 @@ class FeatureReplayIngress:
             raise ActorProtocolError("observation_id is required")
         key = self._cache_key(str(actor_id), str(session_id), observation_id)
         with self._lock:
-            if key in self._feature_cache:
-                # A BeginEpisode retry must not pay for the trunk twice.
-                self._feature_cache.move_to_end(key)
-                return
-            encoded = self._encode_observation(
-                observation, name="observations"
+            return self._cached_or_encoded(
+                key, observation, name="observations"
             )
-            self._cache_store(key, encoded)
 
     def _encode(
         self, raw_transition: Mapping[str, Any], record: IngressRecord
     ) -> dict[str, Any]:
-        raw_observation = raw_transition["observations"]
-        observations = self._cached_observation(record, raw_observation)
-        if observations is None:
-            observations = self._encode_observation(
-                raw_observation, name="observations"
-            )
-        next_observations = self._encode_observation(
+        # BOTH sides come through the cache.  O(t) is the previous
+        # transition's O(t+1); O(t+1) is whatever the service encoded before
+        # it called us.  When the service pre-encodes -- the production path
+        # once encoding moved to the top of step() -- the trunk runs zero
+        # times here, and the lock this ingress shares with the learner no
+        # longer contains a GPU forward at all.
+        observations = self._cached_or_encoded(
+            self._cache_key(
+                record.actor_id, record.session_id, record.observation_id
+            ),
+            raw_transition["observations"],
+            name="observations",
+        )
+        next_observations = self._cached_or_encoded(
+            self._cache_key(
+                record.actor_id, record.session_id, record.next_observation_id
+            ),
             raw_transition["next_observations"],
             name="next_observations",
         )
-        # Cache O(t+1) only after both extractions succeeded, so a faulted
-        # transition leaves no state behind -- the same rule the ledger uses.
-        self._cache_put(record, next_observations)
         return {
             "observations": observations,
             "next_observations": next_observations,
@@ -726,45 +728,39 @@ class FeatureReplayIngress:
             "grasp_penalty": raw_transition["grasp_penalty"],
         }
 
-    def _cached_observation(
-        self, record: IngressRecord, raw_observation: Mapping[str, np.ndarray]
-    ) -> dict[str, np.ndarray] | None:
-        """Return a private copy of the trunk output already computed for O(t).
+    def _cached_or_encoded(
+        self,
+        key: tuple[str, str, str],
+        raw_observation: Mapping[str, np.ndarray],
+        *,
+        name: str,
+    ) -> dict[str, np.ndarray]:
+        """Return this observation's trunk output, computing it only if new.
 
-        The returned mapping is handed to ``insert`` exactly like a fresh
-        extraction, so it must not alias the cache entry that a later
-        transition may still read.
+        The returned mapping is handed to ``insert`` (or to the policy) just
+        like a fresh extraction, so it must never alias the cache entry that a
+        later transition may still read.
         """
 
-        cached = self._feature_cache.get(
-            self._cache_key(
-                record.actor_id, record.session_id, record.observation_id
-            )
-        )
-        if cached is None:
-            return None
-        # Cheap tripwire.  Identical ids are supposed to mean identical
-        # pixels, so a divergent state means the actor reused an
-        # observation_id for different content -- exactly what the discarded
-        # extractor-side state check would have caught.  Comparing 19 floats
-        # keeps that guarantee without re-hashing ~96 KiB of images.
-        if not np.array_equal(cached["state"], raw_observation["state"]):
-            raise ActorProtocolError(
-                f"observation_id {record.observation_id!r} was reused for a "
-                "different state"
-            )
-        self.observation_cache_hits += 1
-        return {key: value.copy() for key, value in cached.items()}
-
-    def _cache_put(
-        self, record: IngressRecord, encoded: Mapping[str, np.ndarray]
-    ) -> None:
-        self._cache_store(
-            self._cache_key(
-                record.actor_id, record.session_id, record.next_observation_id
-            ),
-            encoded,
-        )
+        cached = self._feature_cache.get(key)
+        if cached is not None:
+            # Cheap tripwire.  Identical ids are supposed to mean identical
+            # pixels, so a divergent state means an observation_id was reused
+            # for different content -- exactly what the skipped extractor-side
+            # state check would have caught.  Comparing 19 floats keeps that
+            # guarantee without re-hashing ~96 KiB of images.
+            if not np.array_equal(cached["state"], raw_observation["state"]):
+                raise ActorProtocolError(
+                    f"observation_id {key[2]!r} was reused for a different state"
+                )
+            self._feature_cache.move_to_end(key)
+            self.observation_cache_hits += 1
+            return {name_: value.copy() for name_, value in cached.items()}
+        encoded = self._encode_observation(raw_observation, name=name)
+        # Store only after extraction succeeded, so a faulted transition
+        # leaves no state behind -- the same rule the ledger uses.
+        self._cache_store(key, encoded)
+        return encoded
 
     def _cache_store(
         self,
