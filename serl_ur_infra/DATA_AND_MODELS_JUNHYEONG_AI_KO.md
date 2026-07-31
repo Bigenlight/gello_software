@@ -36,7 +36,12 @@ ssh junhyeong_ai          # laptop3의 ~/.ssh/config에 등록돼 있다
 `nvidia-smi`로 점유를 확인한다.
 
 ⚠️ **`/home/junhyeong/gello_software`는 다른 사람의 작업 트리다** — 커밋 안 된 변경이 있다.
-읽지도 쓰지도 말 것. HIL이 쓰는 checkout은 `_hil` 접미사가 붙은 쪽이다(§2).
+읽지도 쓰지도 말 것. HIL이 쓰는 checkout은 **`gello_software_runtime`**이다(§2).
+
+이름이 그 차이를 말한다 — **`gello_software`는 편집하는 트리(dirty가 정상), `gello_software_runtime`은
+실행하는 트리(커밋에 고정, 항상 clean)**다. 같은 리포·같은 브랜치이며, 다른 것은 손이
+올라가 있느냐뿐이다. 🪤 이것은 **worktree가 아니다** — 이 프로젝트에서 linked worktree는
+금지이고 `run_hil_server.sh`가 거부한다(§2).
 
 ---
 
@@ -44,7 +49,7 @@ ssh junhyeong_ai          # laptop3의 ~/.ssh/config에 등록돼 있다
 
 ```
 junhyeong_ai:/home/junhyeong/
-├── gello_software_hil/          441M   HIL learner 코드 (§2)
+├── gello_software_runtime/          441M   HIL learner 코드 (§2)
 ├── gello_software/                     🚫 다른 사람 작업 트리 — 건드리지 말 것
 ├── hil-serl-data/              ~5.1G   ★ 데이터·모델 전부 여기 (§3)
 │   ├── demos/                   195M     학습용 canonical demo
@@ -65,9 +70,9 @@ kanu 시절에는 demo·classifier·runs·lock이 서로 다른 네 군데(그�
 
 | | |
 | --- | --- |
-| 경로 | `/home/junhyeong/gello_software_hil` |
+| 경로 | `/home/junhyeong/gello_software_runtime` |
 | 브랜치 | `feat/gello-ur7e-humble-22.04` |
-| HEAD | `ed60212` (= laptop3 = GitHub tip, 2026-07-31 3자 일치 실측) |
+| HEAD | laptop3 · GitHub tip와 **같은 커밋**을 유지한다 (2026-07-31 3자 일치 실측). 커밋 id는 스냅샷이므로 여기에 pin하지 않는다 — `git rev-parse HEAD`로 읽는다 |
 | origin | `https://github.com/Bigenlight/gello_software.git` |
 | submodule | `third_party/hil-serl` @ `c32939b` (이것만 init. DynamixelSDK·mujoco_menagerie는 kanu와 마찬가지로 미초기화) |
 | 크기 | 441 MB |
@@ -79,7 +84,7 @@ partial/promisor 아님, `fsck` 통과. 전진은 laptop3와 똑같이 **`git pu
 2026-07-30에 kanu에서 그 셋 때문에 하루를 잃었다 — 자세한 사고 경위는
 [`HIL_SERL_KANU_RUNBOOK_KO.md`](./HIL_SERL_KANU_RUNBOOK_KO.md) §1.1의 🪤.
 
-`gello_software_hil`과 `gello_software`(다른 사람 것)가 **같은 머신에 둘 있는 것은 정상**이다.
+`gello_software_runtime`과 `gello_software`(다른 사람 것)가 **같은 머신에 둘 있는 것은 정상**이다.
 금지된 것은 *같은 스택의* checkout이 둘인 것과, 하나가 다른 하나에 사슬로 물리는 것이다.
 
 ---
@@ -120,7 +125,7 @@ partial/promisor 아님, `fsck` 통과. 전진은 laptop3와 똑같이 **`git pu
 해시는 `sha256sum`이 아니라 **프로젝트 자체 함수**로 계산한다(서버가 검사하는 것도 이것이다):
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=~/gello_software_hil/serl_ur_infra \
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=~/gello_software_runtime/serl_ur_infra \
   python -c "from ur_env.classifier_sidecar import directory_sha256; \
              print(directory_sha256('$HOME/hil-serl-data/classifier_ckpt/checkpoint_150'))"
 ```
@@ -206,45 +211,83 @@ jax 0.5.3 · jaxlib 0.5.3 · flax 0.10.5 · distrax 0.1.5
 tensorflow_probability 0.25.0 · wandb 0.26.0
 ```
 
-⚠️ **GPU가 Blackwell(sm_120)로 바뀌었다.** kanu는 sm_86이었다. 2026-07-31 측정으로
-**jax 0.6.0은 이 GPU에서 정상 동작**이 확인됐다(같은 서버 `qc` env로 backend=gpu,
-matmul·cuDNN conv 수치 정답). **jax 0.5.3의 sm_120 동작 여부는 별도 검증 대상이며,
-안 되면 핀을 0.6.0으로 올리고 위 expected 딕셔너리와 테스트 기대값을 함께 고쳐야 한다.**
+✅ **GPU가 Blackwell(sm_120)로 바뀌었지만 핀은 그대로 간다 — 2026-07-31 실측으로 증명됐다.**
+kanu는 sm_86이었으므로 이것이 이전의 최대 위험이었다. 측정 결과:
+
+- XLA가 **네이티브 `.target sm_120a`**(PTX ISA 8.7)를 생성한다. 구형 아치 PTX의 JIT
+  폴백이 **아니다**. Triton GEMM autotune도 성공한다.
+- matmul 4096³ 16.7 M 원소 전원 정확, cuDNN conv 정확, flax+optax conv net이
+  30 step에 loss 1.9516 → 0.4321로 수렴하고 backward 커널이 해석해와 일치한다.
+- **kanu의 정확한 `nvidia-cudnn-cu12==9.22.0.52` + `nvidia-nccl-cu12==2.30.4`로도 통과**했다.
+  즉 freeze 그대로 재현하는 방식이 추정이 아니라 검증됐다.
+- 완성된 `il` env에서 `validate_learner_dependencies()`가 통과하고
+  `jax.default_backend()=='gpu'`, `devices()==[CudaDevice(id=0)]`이다.
+
+📌 f32 matmul 기본 정밀도는 **TF32**다(상대오차 ~2.7e-4). `Precision.HIGHEST`면 완전
+fp32(~8e-7)로 돌아온다. XLA의 아치 무관 기본 정책이라 kanu도 같았을 것이지만 **그건
+미측정**이다.
+
+🪤 **`pip install`을 즉흥적으로 하지 말 것.** 검증 중 `pip install flax==0.10.5 optax==0.2.4`가
+jax를 **0.5.3 → 0.6.2로 조용히 올려** 버렸다(chex·orbax도 함께). 그러면 learner가 기동
+시점에 fail-closed로 죽는다. env 구성은 **`pip install --no-deps -r <freeze>`** 하나로만 한다.
 
 🚫 **다른 env(`base acg expo gr00t lerobot qc robocasa robodiff`)를 수정하지 말 것.**
 다른 사람 것이다. 특히 `qc`의 jax를 0.5.3으로 강등시키면 그 사람 작업이 깨진다.
 
 ---
 
-## 6. ⚠️ 코드는 아직 kanu를 기본값으로 본다
+## 6. ✅ 코드 기본값이 이 서버다 (`5594d0e`)
 
-`ros2_ur_ws/run_hil_server.sh`가 이 서버를 기본으로 삼는 변경은 **이전 작업의 마지막
-단계**이며 이 문서 작성 시점에 아직 들어가지 않았다. 그때까지는 환경변수로 지정한다:
+**환경변수 없이 그냥 쓴다.** 2026-07-31 `5594d0e`에서 기본값이 전환됐고,
+**환경변수 0개로 실기동해서 증명**했다(burn-in #2).
 
 ```bash
 cd /home/laptop3/gello_software/ros2_ur_ws
-HIL_SSH_HOST=junhyeong_ai \
-HIL_KANU_REPO=/home/junhyeong/gello_software_hil \
-HIL_GPU_INDEX=0 \
-./run_hil_server.sh --check
+./run_hil_server.sh --check   # 읽기 전용
+./run_hil_server.sh           # learner 재사용/기동 + 터널
 ```
 
-하드코딩돼 있어 **환경변수로 못 바꾸는 것 4개**(`run_hil_server.sh`):
+옛 `HIL_KANU_*` 이름은 alias로 살아 있다(`${HIL_REMOTE_REPO:-${HIL_KANU_REPO:-…}}`).
+
+| 환경변수 | 기본값 |
+| --- | --- |
+| `HIL_SSH_HOST` | `junhyeong_ai` |
+| `HIL_GPU_INDEX` | `0` (이 서버는 GPU 1장) |
+| `HIL_REMOTE_REPO` | `/home/junhyeong/gello_software_runtime` |
+| `HIL_REMOTE_PYTHON` | `/home/junhyeong/miniconda3/envs/il/bin/python` |
+| **`HIL_REMOTE_DATA_ROOT`** | **`/home/junhyeong/hil-serl-data`** ← 신설. 아래 4개가 여기서 파생된다 |
 
 ```
-:68   REMOTE_RUN_BASE=/home/junhyeong/hil-serl-data/runs                  ← 계정명이 같아 그대로 맞는다
-:248  CLASSIFIER=/home/junhyeong/workspace/youngwoong/dataset/…/checkpoint_150   ← 임시 심링크로 우회 중
-:250  REAL_DEMO=/home/junhyeong/hil-serl-data/demos/…23takes.pkl          ← 그대로 맞는다
-:258  RUN_LOCK=/home/junhyeong/hil-serl-data/.run_hil_server.lock         ← 그대로 맞는다
+$DATA_ROOT/runs                                          run base
+$DATA_ROOT/demos/cube_in_cup_20260720_success_23takes.pkl  demo
+$DATA_ROOT/classifier_ckpt/checkpoint_150                classifier
+$DATA_ROOT/.run_hil_server.lock                          lock
 ```
 
-🩹 **임시 심링크가 하나 있다** — 코드를 고치기 전에 옛 스크립트로 시험 기동을 할 수 있게
-만든 것이다. **`HIL_REMOTE_DATA_ROOT` 변경이 들어가면 지운다.**
+**SHA 핀은 하나도 안 바뀌었다** — 경로 핀이 아니라 내용 핀이라 이전을 그대로 통과했고,
+오히려 **전송이 정확했는지를 검사해 줬다.**
 
+wandb run 이름은 `-kanu-5000` → **`-hil-5000`**으로 바뀌었다. 이 문자열은 기동 명령과
+`validate_process_contract`의 `exact()` **두 곳**에 있어 한쪽만 고치면 모든 `--check`가
+깨진다. 둘 다 원자적으로 바뀌었고 살아 있는 learner에 `--check`를 걸어 확인했다.
+
+🩹 임시 compat 심링크(`workspace/youngwoong/dataset/…/classifier_ckpt`)는 **2026-07-31에
+제거됐다.** burn-in #1 때는 실제로 하중을 받고 있었지만 이제 필요 없다.
+
+### ⚠️ kanu는 이제 이 스크립트로 못 본다 — 의도된 결과다
+
+`HIL_SSH_HOST=kanu`로 override해도 **실패한다.** kanu에는 `~/hil-serl-data/classifier_ckpt`가
+없고 classifier가 `workspace/youngwoong/…`에 있어서, **어떤 단일 `DATA_ROOT`도 kanu를
+만족시키지 못한다.** 그 흩어짐이 바로 이번에 고친 병이고 kanu가 그 병에 걸린 호스트다.
+
+kanu의 살아 있는 learner는 읽기 전용으로 본다:
+
+```bash
+ssh kanu 'ps -p 2540183 -o pid,etime,stat'      # 생존 확인
+# gRPC health는 kanu 자체 python으로 (아래 §9 런북)
 ```
-~/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt
-    -> ~/hil-serl-data/classifier_ckpt
-```
+
+되돌리기는 `git revert 5594d0e` 하나다.
 
 ---
 

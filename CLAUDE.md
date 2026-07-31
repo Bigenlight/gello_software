@@ -2,7 +2,7 @@
 
 문서 색인이다. 상태 보고서가 아니다 — 숫자와 근거는 링크된 문서에 있다.
 
-> # 🔴 2026-07-31 — **GPU 서버가 `kanu`에서 `junhyeong_ai`로 이전 중이다**
+> # 🔴 2026-07-31 — **GPU 서버가 `kanu`에서 `junhyeong_ai`로 옮겨졌다**
 >
 > **이 파일을 포함해 이 리포의 거의 모든 문서가 `kanu`를 전제로 쓰여 있다.**
 > 데이터·모델·코드 checkout의 **현재 위치**는 아래 문서가 정본이다:
@@ -13,14 +13,21 @@
 > | --- | --- | --- |
 > | ssh 별칭 | `kanu` | **`junhyeong_ai`** (166.104.146.29, hostname `junhyeong`) |
 > | GPU | A4000 ×8 (sm_86), GPU 5 | **RTX 5070 Ti ×1 (sm_120 Blackwell), GPU 0** |
-> | HIL checkout | `~/gello_software_hil_current` | **`~/gello_software_hil`** |
+> | HIL checkout | `~/gello_software_hil_current` | **`~/gello_software_runtime`** |
 > | 데이터·모델 | 네 군데 분산 | **전부 `~/hil-serl-data/` 아래** |
+> | 환경변수 | `HIL_KANU_*` | **`HIL_REMOTE_*`** (+ 신설 `HIL_REMOTE_DATA_ROOT`. 옛 이름은 alias) |
+>
+> **코드 기본값은 `5594d0e`에서 이미 전환됐다** — `./run_hil_server.sh`를 환경변수 없이
+> 그냥 쓴다. 환경변수 0개로 실기동해서 증명했다(burn-in #2: demo 2,037 로드,
+> `jax_backend=gpu`, GPU 0에 4400 MiB 실점유).
 >
 > 이전은 **복사**였고 **kanu에서 지운 것은 없다.** kanu learner는 사용자가 직접 멈출
-> 때까지 살아 있다. ⚠️ **`run_hil_server.sh`의 기본값은 아직 kanu다** — 새 서버로 쓰려면
-> 위 문서 §6의 환경변수를 준다.
+> 때까지 살아 있다. ⚠️ 다만 **`run_hil_server.sh`로는 이제 kanu를 볼 수 없다** —
+> classifier가 kanu에서만 다른 뿌리에 있어 단일 `HIL_REMOTE_DATA_ROOT`로 표현되지 않는다.
+> kanu는 `ssh kanu 'ps -p <pid>'` 같은 읽기 전용으로 본다(위 문서 §6).
 > ⚠️ 새 서버의 **`/home/junhyeong/gello_software`(접미사 없음)는 다른 사람의 작업
-> 트리다.** 읽지도 쓰지도 말 것. HIL이 쓰는 것은 `_hil`이 붙은 쪽이다.
+> 트리다.** 읽지도 쓰지도 말 것. HIL이 쓰는 것은 **`gello_software_runtime`**이다 —
+> 편집하는 트리와 실행하는 트리를 이름으로 갈라 놓았다.
 > ⚠️ 학습된 policy 체크포인트는 **어디에도 없다** — kanu의 run root 8개 전부
 > `checkpoints/`가 비어 있었다(실측). 이유는 위 문서 §4.
 
@@ -90,13 +97,18 @@ checkpoint가 없고 의미 없는 시험값이라는 사용자 판단에 따라
 
 **Kanu repo 배치 (2026-07-31 정리) — 스택당 checkout 하나씩, 그게 전부다.**
 
+> 🗄️ **아래 표는 이제 `kanu` 기록이다.** learner는 `junhyeong_ai`로 옮겨졌고 현재 배치는
+> [`serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md) §2가 정본이다.
+> 아래 🪤와 ✅ 두 문단은 **여전히 유효한 교훈**이라 남긴다 — 새 서버의 checkout도 정확히
+> 그 가드를 통과하도록 만들었고, `run_hil_server.sh`가 지금도 그것들을 검사한다.
+
 | 경로 | 용도 |
 | --- | --- |
 | `gello_software_hil_current` → `gello_software_hil_schema3_stage_20260730` | **HIL 유일 checkout.** 자립 clone(`.git`이 **디렉터리**), GitHub origin, `git pull --ff-only`로 전진 |
 | `workspace/youngwoong/gello_software` | FM/diffusion 배포 소스(도커 `gello-remote-policy:fm-070000-…`). **다른 스택 — 섞지 말 것**(§E) |
 
 심링크가 `HIL_KANU_REPO`의 기본값이고 스크립트가 `readlink -f`로 실경로를 쓰므로 그것만 타이핑한다.
-🗑️ `~/gello_software_hil`(worktree였다)과 `/tmp` worktree 2개는 은퇴했다.
+🗑️ kanu의 `~/gello_software_hil`(worktree였다)과 `/tmp` worktree 2개는 은퇴했다.
 
 🪤 **왜 정리했나 — 조용히 틀리는 종류의 사고였다.** staging checkout의 `origin`이 GitHub이 아니라
 **로컬 경로**를 가리켜, `git fetch origin`이 **rc=0으로 성공하고 아무것도 안 가져왔다.** 그래서
