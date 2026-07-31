@@ -454,6 +454,47 @@ class FeatureTransitionRing:
                 self._overwrite_count += 1
             return overwrote
 
+    def snapshot(self) -> dict[str, Any]:
+        """Return the filled entries, oldest first, as owned copies.
+
+        Only ``_size`` rows are returned.  The rings are preallocated at full
+        capacity, so dumping the raw arrays would write 7.3 GiB for the
+        production 50k/10k pair regardless of how little the run collected.
+
+        ``_insert_index`` is where the *next* write lands, which after the ring
+        wraps is also the oldest live row.  Stored order is therefore rotated
+        with respect to insertion order.  Sampling would not notice -- it draws
+        uniformly over ``_size`` -- but an artifact named "the replay buffer"
+        should be readable as the trajectory log it looks like, so the rotation
+        is undone here rather than left for every future reader to rediscover.
+        """
+
+        with self._lock:
+            size = self._size
+            if size < self.capacity:
+                order = np.arange(size)
+            else:
+                order = (np.arange(size) + self._insert_index) % self.capacity
+            return {
+                "size": size,
+                "capacity": self.capacity,
+                "insert_count": self._insert_count,
+                "overwrite_count": self._overwrite_count,
+                "expected_grasp_penalty": self.expected_grasp_penalty,
+                "observations": {
+                    key: value[order].copy()
+                    for key, value in self._observations.items()
+                },
+                "next_observations": {
+                    key: value[order].copy()
+                    for key, value in self._next_observations.items()
+                },
+                "actions": self._actions[order].copy(),
+                "rewards": self._rewards[order].copy(),
+                "masks": self._masks[order].copy(),
+                "grasp_penalty": self._grasp_penalty[order].copy(),
+            }
+
     def sample(self, batch_size: int) -> dict[str, Any]:
         """Sample with replacement using the ring-owned deterministic RNG."""
 

@@ -35,6 +35,12 @@ from ur_env.learner.checkpoint import (
     LearnerFingerprint,
     RestoredCheckpoint,
 )
+from ur_env.learner.emergency import (
+    RescueResult,
+    read_replay_snapshot_manifest,
+    rescue_learner_state,
+    save_replay_snapshot,
+)
 from ur_env.learner.config import (
     FROZEN_TRUNK_REPRESENTATION,
     FROZEN_TRUNK_SYNTHETIC_E2E_MODEL_REVISION,
@@ -155,6 +161,10 @@ __all__ = [
     "CheckpointManager",
     "CheckpointRunLock",
     "CheckpointSpaceError",
+    "RescueResult",
+    "read_replay_snapshot_manifest",
+    "rescue_learner_state",
+    "save_replay_snapshot",
     "ConvertedRecordedDemos",
     "DemoContractError",
     "DemoSidecar",

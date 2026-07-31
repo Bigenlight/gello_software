@@ -54,6 +54,7 @@ from ur_env.learner import (  # noqa: E402
     load_demo_pickles,
     preflight_checkpoint_run,
     prepare_learner_state,
+    rescue_learner_state,
     system_available_memory_bytes,
     validate_learner_dependencies,
 )
@@ -911,6 +912,7 @@ def _run_locked(
     wandb_metadata = logger.wandb_metadata
     _emit("learner_wandb_run", **wandb_metadata)
     worker: LearnerWorker | None = None
+    assembly = None
     server = None
     service = None
     shutdown_event = threading.Event()
@@ -1225,6 +1227,42 @@ def _run_locked(
                         "the non-daemon JAX worker is still completing its "
                         "current update; logger remains open"
                     ),
+                )
+        # The worker has now finished its in-flight update, so the agent is
+        # quiescent and safe to serialize.  This is the only place that
+        # persists the RAM-only replay rings, and with checkpoint_period at
+        # 5,000 outer steps it is usually the only place that persists the
+        # agent at all: a protective stop or an operator Ctrl-C lands here,
+        # never on a boundary.  It must not change the exit code -- a failed
+        # rescue is reported, not escalated, because the run is already over.
+        # ``worker is not None`` is the precise test for "a training run
+        # actually started".  --dry-run returns before the worker is built but
+        # after ``assembly`` exists, and when it is resuming a checkpoint its
+        # learner_step is nonzero, so gating on ``assembly`` alone would make a
+        # validation-only invocation write a rescue it never earned.
+        if worker is not None and assembly is not None and not args.synthetic_e2e:
+            try:
+                rescue = rescue_learner_state(
+                    learner=assembly.learner,
+                    ingress=raw_ingress,
+                    checkpoint_manager=checkpoint_manager,
+                    fingerprint=fingerprint,
+                    inference_rng=assembly.policy_runtime.inference_rng,
+                    provenance={
+                        "run_name": args.run_name,
+                        "exit_code": exit_code,
+                    },
+                )
+            except Exception as exc:  # the rescue itself promises not to
+                _emit(
+                    "rlpd_learner_emergency_save_crashed",
+                    error_type=type(exc).__name__,
+                    detail=str(exc)[:2_000],
+                )
+            else:
+                _emit("rlpd_learner_emergency_save", **rescue.event_fields())
+                _log_best_effort(
+                    logger, "emergency_save", **rescue.event_fields()
                 )
         for signal_number, handler in old_handlers.items():
             try:

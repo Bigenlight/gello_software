@@ -27,6 +27,16 @@ CHECKPOINT_FORMAT_VERSION = 1
 COMPLETION_MARKER_VERSION = 1
 COMPLETION_MARKER_NAME = "completion.json"
 
+#: Periodic checkpoints land on ``checkpoint_<step>``.  Shutdown rescues land
+#: on ``emergency_<step>`` instead, and that split is load-bearing: an
+#: emergency save happens at whatever step the run died on, which is almost
+#: never a checkpoint/publish boundary, so ``prepare_learner_state`` would
+#: reject it as corrupt.  ``latest_path()`` scans only the canonical prefix,
+#: so a rescue can never become the silent target of ``--resume-latest``.
+#: Reading one back is an explicit, operator-visible act.
+CHECKPOINT_PREFIX = "checkpoint_"
+EMERGENCY_PREFIX = "emergency_"
+
 
 class CheckpointError(RuntimeError):
     """Base error for learner checkpoint operations."""
@@ -102,6 +112,7 @@ class RestoredCheckpoint:
     policy_version: int
     inference_rng: Any
     path: Path
+    emergency: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,7 @@ class _CheckpointContents:
     gradient_step: int
     policy_version: int
     inference_rng: np.ndarray
+    emergency: bool
 
 
 def _nonnegative_int(value: Any, *, name: str) -> int:
@@ -142,15 +154,22 @@ class CheckpointManager:
         self.minimum_free_bytes_after_save = minimum_free_bytes_after_save
 
     @staticmethod
-    def checkpoint_name(learner_step: int) -> str:
+    def checkpoint_name(learner_step: int, *, emergency: bool = False) -> str:
         if isinstance(learner_step, bool) or not isinstance(learner_step, int):
             raise ValueError("learner_step must be an integer")
         if learner_step < 0:
             raise ValueError("learner_step must be non-negative")
-        return f"checkpoint_{learner_step:012d}"
+        if not isinstance(emergency, bool):
+            raise TypeError("emergency must be a bool")
+        prefix = EMERGENCY_PREFIX if emergency else CHECKPOINT_PREFIX
+        return f"{prefix}{learner_step:012d}"
 
-    def path_for_step(self, learner_step: int) -> Path:
-        return self.root / self.checkpoint_name(learner_step)
+    def path_for_step(
+        self, learner_step: int, *, emergency: bool = False
+    ) -> Path:
+        return self.root / self.checkpoint_name(
+            learner_step, emergency=emergency
+        )
 
     def save(
         self,
@@ -161,6 +180,7 @@ class CheckpointManager:
         policy_version: int,
         inference_rng: Any,
         fingerprint: LearnerFingerprint,
+        emergency: bool = False,
     ) -> Path:
         for name, value in (
             ("learner_step", learner_step),
@@ -169,7 +189,9 @@ class CheckpointManager:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
-        destination = self.path_for_step(learner_step)
+        if not isinstance(emergency, bool):
+            raise TypeError("emergency must be a bool")
+        destination = self.path_for_step(learner_step, emergency=emergency)
         if destination.exists() or destination.is_symlink():
             raise CheckpointExistsError(
                 f"checkpoint already exists and will not be overwritten: {destination}"
@@ -209,6 +231,7 @@ class CheckpointManager:
             "fingerprint_sha256": fingerprint.sha256,
             "fingerprint": fingerprint.document,
             "agent_state_sha256": state_sha256,
+            "emergency": emergency,
         }
         metadata_bytes = _canonical_json(metadata)
         completion = {
@@ -286,7 +309,14 @@ class CheckpointManager:
         policy_version = _nonnegative_int(
             metadata.get("policy_version"), name="policy_version"
         )
-        if checkpoint_path.name != self.checkpoint_name(learner_step):
+        emergency = metadata.get("emergency", False)
+        if not isinstance(emergency, bool):
+            raise CheckpointCorruptError("emergency flag must be a boolean")
+        # The prefix is derived from the payload, not from the directory, so a
+        # rescue cannot be laundered into a periodic checkpoint by renaming it.
+        if checkpoint_path.name != self.checkpoint_name(
+            learner_step, emergency=emergency
+        ):
             raise CheckpointCorruptError(
                 "checkpoint directory name does not match learner_step"
             )
@@ -355,14 +385,15 @@ class CheckpointManager:
             gradient_step=gradient_step,
             policy_version=policy_version,
             inference_rng=values,
+            emergency=emergency,
         )
 
     def latest_path(self) -> Path:
         candidates: list[tuple[int, Path]] = []
         for path in self.root.iterdir():
-            if not path.is_dir() or not path.name.startswith("checkpoint_"):
+            if not path.is_dir() or not path.name.startswith(CHECKPOINT_PREFIX):
                 continue
-            suffix = path.name.removeprefix("checkpoint_")
+            suffix = path.name.removeprefix(CHECKPOINT_PREFIX)
             if suffix.isdigit():
                 candidates.append((int(suffix), path))
         if not candidates:
@@ -435,6 +466,7 @@ class CheckpointManager:
             policy_version=contents.policy_version,
             inference_rng=jnp.asarray(contents.inference_rng),
             path=checkpoint_path,
+            emergency=contents.emergency,
         )
 
 
