@@ -358,7 +358,8 @@ C1이 크게 먹히는 경우는 **learner가 `sample_replay`로 락을 오래 �
 ### Stage 1 — 계측 (반나절) ← **어떤 방안이든 여기가 먼저다**
 
 문서가 §8 P1에서 **이미 요구하고 있는 바로 그 타이머**다
-(`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md:883-893`).
+(`HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md` §8 P1 —
+"최소한 다음 시간을 같은 `transition_id`와 함께 남긴다"로 검색).
 
 | 타이머 | 위치 |
 |---|---|
@@ -454,7 +455,7 @@ $ ... validate_learner_dependencies()
 
 정책과 분류기는 **같은 frozen ResNet-10 백본**을 쓴다. 그 분류기(7.27M 파라미터)의 laptop3
 **CPU** 실측이 forward **6.6~7.1 ms**, 디코드 포함 **11.9 ms(~84 Hz 여력)**다
-(`REWARD_CLASSIFIER_LIVE_KO.md:429-433`). 정책은 `hidden_dims=[256,256]`가 더 붙지만
+(`REWARD_CLASSIFIER_LIVE_KO.md` §9 「성능 — 실측값」). 정책은 `hidden_dims=[256,256]`가 더 붙지만
 **같은 자릿수**로 추정된다 — 🟡 **파라미터 수 기반 추정이고 실측이 아니다.**
 
 ### 9.3 그리고 코드가 이미 있다

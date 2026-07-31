@@ -605,7 +605,9 @@ ros2_ur_ws/
   **`xfailed 1`을 빼고 인용하지 말 것** — 그건 통계 잡음이 아니라 **알려진 결함의 표식**이다
   (`ee8af5e`가 박은 strict xfail: 저장 액션이 IK line-search 경로에서 실행 액션을 과대 진술할 수
   있다. 고치면 XPASS로 터진다). 재현 명령 정본은
-  `serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md:254-264`:
+  `serl_ur_infra/HANDOFF_NEXT_SESSION_KO.md`의 「테스트 — 이 명령 그대로」 절이다
+  (줄번호로 인용하지 말 것 — 밀린다. ⚠️ 그쪽 판은 다른 세션 작업 2파일을 빼는
+  `--ignore=` 두 줄이 더 붙은 07-30 스냅샷이라 인용된 passed 수도 아래와 다르다):
 
   ```bash
   cd /home/laptop3/gello_software

@@ -56,7 +56,8 @@ def ready(self) -> bool:
 > headless `run_recorder.sh`가 만드는 `session_<stamp>/`는 그쪽에 **보이지 않고**, 촬영은
 > 정상 종료되므로 **손실이 라벨링 시점에야 드러난다** — 그때는 이미 세션이 끝나 있다.
 > 기존 학습 take는 전부 GUI에서 나왔다. 근거: `32a193b`,
-> [`../ros2_ur_ws/src/gello_recorder/README.md`](../ros2_ur_ws/src/gello_recorder/README.md) `:153-159`.
+> [`../ros2_ur_ws/src/gello_recorder/README.md`](../ros2_ur_ws/src/gello_recorder/README.md)
+> 「reward classifier 학습 데이터는 **반드시 이 GUI 레코더로** 찍어라」 박스.
 >
 > 🚚 **이전 판은 "kanu의 classifier 라벨링 파이프라인"이라고 적었다.** 2026-07-31 서버 이전에서
 > 라벨링 **코퍼스**는 `junhyeong_ai:~/hil-serl-data/datasets/`로 넘어왔지만

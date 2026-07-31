@@ -1027,7 +1027,7 @@ class GelloIntervention(gym.ActionWrapper):
         # With substepping, the displacement the window executes is only known
         # once the window closes, so that convention cannot express it: the one
         # thing the storage invariant forbids is reporting a number the robot
-        # did not run (README.md:197-205).  UR7eEnv therefore harvests
+        # did not run (README.md "저장 액션 불변식").  UR7eEnv therefore harvests
         # `consumed_window_action()` at the end of the window — after the last
         # substep, before it reads obs_{k+1} — and hands it back here.  The
         # (obs_k, action_k, obs_{k+1}) triple stays aligned because the harvest

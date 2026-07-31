@@ -104,7 +104,7 @@ export WT=/home/laptop3/gello_software
    `state[..., -1]`은 그리퍼가 **아니라 `tcp_angular_velocity_z`**다.
    `GRIPPER_POSITION_INDEX` / `gripper_position_from_state()`만 쓴다.
    → `05_COMMS_GRPC.md` §4, `06_SENSORS.md` §5
-   ⚠️ `serl_ur_infra/RL_RECEIVE_SERVER.md:62-70`은 아직 **옛 v1 순서**(pose6, vel6,
+   ⚠️ `serl_ur_infra/RL_RECEIVE_SERVER.md`(§ "Exact observation contract")은 **옛 v1 순서**(pose6, vel6,
    force3, torque3, gripper 마지막)를 적고 있다. 그 문서를 근거로 쓰지 말 것.
 
 4. **cam2는 손목(wrist) 카메라다.** cam2는 그리퍼에 강체로 물려 있어 손가락이 항상 같은

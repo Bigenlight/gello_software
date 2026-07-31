@@ -108,7 +108,8 @@ These are orthogonal — satisfying one does not satisfy the other:
    `GELLO_REPO_ROOT` is unset). This machine is the build PC and has none of it, so the pipeline has
    nothing to attach to here regardless of GPU.
 2. **The ensemble benchmark FAILs on the robot PC's GPU.** The robot PC is an **RTX 3060 Mobile/Max-Q,
-   6GB** (`GELLO_UR7E_ACT_DEPLOY.md:215`) — a weaker part than this build PC's 12GB desktop 3060. There,
+   6GB** (`GELLO_UR7E_ACT_DEPLOY.md`, the "NVIDIA GeForce RTX 3060 Mobile/Max-Q ... VRAM 6GB" GPU
+   check) — a weaker part than this build PC's 12GB desktop 3060. There,
    even `K=1` fails the §6 safety gate (contended p99 545ms vs a 600ms `act_timeout_s`). This is a
    compute-saturation problem, not a hardware-presence one. Re-benchmarking on *this* 12GB card proves
    nothing about the robot PC — the benchmark must run **on the robot PC itself** (§9).

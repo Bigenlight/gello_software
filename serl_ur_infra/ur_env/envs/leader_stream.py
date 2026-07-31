@@ -189,7 +189,8 @@ Resampling the leader at 30 Hz makes the arm follow continuously, and that
 alone would break the stored-action invariant.  The recorded action is a
 7-vector in ``[-1,1]`` and one step's task-space increment is by definition
 ``action * ACTION_SCALE`` = at most 0.0125 m / 0.0625 rad
-(``ur_env/envs/config.py:55-73``); ``serl_ur_infra/README.md:197-205`` requires
+(``ur_env/envs/config.py:55-73``); the "저장 액션 불변식 (buffer correctness)"
+section of ``serl_ur_infra/README.md`` requires
 the action written to the replay buffer to be *the action that executed*.  But
 the real step period is not the nominal 100 ms — it is 158 ms in the good case,
 a measured mean of 502 ms on the production actor loop (worst step 854 ms), and
@@ -712,7 +713,7 @@ class InterventionBudget:
         Enforcing a per-substep cap would throttle a legitimately fast operator
         who is still inside the window budget, and it is not what the invariant
         asks for: the invariant constrains the window TOTAL (``config.py:55-73``,
-        ``README.md:197-205``).  Exposed for telemetry and for pacing decisions
+        ``README.md`` "저장 액션 불변식").  Exposed for telemetry and for pacing decisions
         the caller may want to make with full knowledge that they are policy,
         not correctness.
         """

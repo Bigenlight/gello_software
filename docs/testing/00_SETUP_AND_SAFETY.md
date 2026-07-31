@@ -377,7 +377,8 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 \
 ```
 
 📌 2026-07-30: 같은 **`579 passed, 11 skipped in 8.98s`** (2026-07-29에는 같은 형태로 `333`이었다).
-이 형태가 `HANDOFF_NEXT_SESSION_KO.md:254-264`의 정본 명령과 같은 것이다.
+이 형태가 `HANDOFF_NEXT_SESSION_KO.md` 「테스트 — 이 명령 그대로」 절의 정본 명령과
+같은 것이다 (줄번호로 찾지 말 것 — 밀린다).
 (`OVERLAY`를 하드코딩하지 않아 오버레이 레이아웃이 바뀌어도 버틴다.
 `env -u PYTHONPATH`가 **`OVERLAY` 계산 뒤에** 와야 하는 점만 주의. `PYTHONPATH`를 이렇게
 **덮어쓰는 것은 pytest에서만 옳다** — 러너에 재사용하면 rclpy가 사라진다, §3.4(2).)

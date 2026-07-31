@@ -181,7 +181,7 @@ cd /home/laptop3/gello_software/ros2_ur_ws
     - **⚠️ 이 항목의 07-28~07-29 판본이 권고하던 "크롭에 맞춘 classifier 재학습"은 채택되지 않았다.** 아래 「⛔ 폐기」 표시가 붙은 서술을 근거로 재학습 작업을 시작하지 마라.
     - **그래서 §12.3의 held-out 수치 전부가 그대로 살아 있다.** 분류기는 여전히 **무크롭** 프레임을 먹으므로 측정 조건이 바뀌지 않았다. 재학습을 택했다면 threshold 결정에 쓰인 숫자를 **전부 다시 재야** 했다([REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)의 sweep 전체 포함). 이것이 분리 방식의 가장 큰 실질 이득이다.
     - **당시** `DEFAULT_REWARD_THRESHOLD` 는 0.2였다. **현행 production 값은 0.5**이며 문서 최상단과 §4.7이 우선한다.
-    - **고쳐지지 않은 것: 팔 가림(occlusion) 병리.** `take_21` 은 @0.85 recall `0.0%`, @0.05 로 내려도 `57.9%` 다(§12.3 · 출처 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) `:369`). 팔이 cam1 시야를 쓸고 지나가면 확률이 `0.005 ↔ 1.0` 으로 진동한다. **원인은 전처리도 라벨도 아니고 시야/가림이다.** sidecar의 정지 게이트가 완화할 뿐이고, 진짜 해법은 **팔이 가로지르지 않는 카메라 배치**다.
+    - **고쳐지지 않은 것: 팔 가림(occlusion) 병리.** `take_21` 은 @0.85 recall `0.0%`, @0.05 로 내려도 `57.9%` 다(§12.3 · 출처 [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 「take 단위로 보면 훨씬 나쁘다 (all3 기준)」 절). 팔이 cam1 시야를 쓸고 지나가면 확률이 `0.005 ↔ 1.0` 으로 진동한다. **원인은 전처리도 라벨도 아니고 시야/가림이다.** sidecar의 정지 게이트가 완화할 뿐이고, 진짜 해법은 **팔이 가로지르지 않는 카메라 배치**다.
 - **(2026-07-28 측정 · 2026-07-29 감사로 조건 명시)** Jul-27 `cube_in_cup_all3` 체크포인트(orbax 디렉터리, 43 MB)의 held-out 성능. **아래 두 줄은 같은 체크포인트·같은 threshold인데 숫자가 다르다. 분할이 다르기 때문이고 둘 다 맞다.**
   - **0720 test split만**(success n=166), threshold 0.5, **크롭 없는 입력**, 2026-07-28 Kanu GPU: recall **100.0%** / FPR **0.0%** / acc **100.0%** (§12.3)
   - **0720 held-out 전체**(test 166 + val 100 = success n=266, 6 takes), threshold 0.5, **크롭 없는 입력**: recall **86.8%** — [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 「처음 측정된 held-out success recall (0720)」
@@ -1551,7 +1551,7 @@ actor가 pin해야 하는 값:
 >
 > **정직하게 적는다: sidecar는 `take_21` 을 구제하지 못한다.** `take_21_20260720_210234`
 > 은 @0.85 recall `0.0%`, @0.05 까지 내려도 `57.9%` 다(출처:
-> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) `:369` —
+> [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 「take 단위로 보면 훨씬 나쁘다 (all3 기준)」 절 —
 > 이 세션에서 재측정하지 않고 인용했다). 팔이 cam1 시야를 쓸고 지나가는 동안 확률이
 > **`0.005 ↔ 1.0`** 으로 진동한다.
 >
@@ -1879,7 +1879,7 @@ cam2  img[0:720, 420:1140]  →  --cam2-crop 420,0,1140,720
 1. **whole-take 라벨링의 영향.** 0724 데이터는 take 전체를 통째로 성공/실패로 라벨링했다. held-out FPR 0.0%가 이를 상당 부분 방어하지만, 프레임 단위 라벨과 whole-take 라벨이 섞인 학습이 경계 근처 판정에 어떤 영향을 주는지는 미측정.
 2. **실기 분포.** held-out은 전부 녹화 데이터다. 렌즈 개체차·색감·장착 각도 미세 차이가 실기에서 어떻게 작용하는지는 실제로 돌려봐야 안다. **ZMQ 뷰어로 텔레옵하며 `p(success)` 곡선을 보는 것이 가장 직접적인 확인이고, 이제는 gRPC 경로도 같은 무크롭 입력을 먹으므로 뷰어와 서버 판정이 일치한다**(§12.1). §8-A-1.
    - ✅ *"현재 붙어 있는 카메라가 녹화 개체와 같은지 확정되지 않았다"* 는 **해소됐다.** 카메라는 한 쌍뿐이고 시리얼 혼란은 필드 차이였다(§11.10). USB 포트 순서 차이는 여전히 사실이지만, 역할 배정은 `_resolve_camera_serials.sh` 가 버스에서 해석한다.
-3. 🔴 **`take_21` 급 실패 모드 — 이번 변경으로 고쳐지지 않았다.** 팔이 컵 위에 머무르거나 컵이 cam2에서 사라지면 threshold로는 구제되지 않는다: @0.85 recall `0.0%`, @0.05 로 내려도 `57.9%` (§12.3, [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) `:369`). 팔이 cam1을 쓸고 지나가는 동안 확률이 `0.005 ↔ 1.0` 으로 진동한다.
+3. 🔴 **`take_21` 급 실패 모드 — 이번 변경으로 고쳐지지 않았다.** 팔이 컵 위에 머무르거나 컵이 cam2에서 사라지면 threshold로는 구제되지 않는다: @0.85 recall `0.0%`, @0.05 로 내려도 `57.9%` (§12.3, [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md) 「take 단위로 보면 훨씬 나쁘다 (all3 기준)」 절). 팔이 cam1을 쓸고 지나가는 동안 확률이 `0.005 ↔ 1.0` 으로 진동한다.
    - **근본 원인은 시야/가림이고 전처리도 라벨도 아니다.** sidecar 분리로도, 재학습으로도, threshold로도 안 없어진다.
    - **현재 완화책**: sidecar의 **정지 게이트**(`stationary_speed_max`, 움직이는 동안 아예 분류하지 않는다) + **~2 Hz 희소 분류**. 완화지 해결이 아니다.
    - **진짜 해법은 팔이 가로지르지 않는 카메라 배치다.** 이게 이 절에 남은 가장 큰 미해결 항목이다.

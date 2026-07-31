@@ -1206,7 +1206,7 @@ class UR7eEnv(gym.Env):
 
         INVARIANT 1 (buffer correctness — why the charge is not optional).  A
         stored intervention action must stay inside [-1,1]^7 and must describe
-        the motion that actually ran (serl_ur_infra/README.md:197-205,
+        the motion that actually ran (serl_ur_infra/README.md "저장 액션 불변식",
         config.ACTION_SCALE:55-73).  The substeps after this one keep commanding
         motion inside the SAME env step, so without a single shared budget the
         window's total displacement would exceed one ACTION_SCALE step and the
