@@ -44,6 +44,7 @@ from ur_env.envs.wrappers import (
     RosTopicDeadman,
     SpacebarDeadman,
 )
+from ur_env.observation_preprocess import CropBox
 from ur_env.observation_schema import PROPRIO_KEYS
 
 # ``UNSET`` marks a field that must be measured on the real rig before this
@@ -214,9 +215,14 @@ class CubeInCupEnvConfig(DefaultUR7eEnvConfig):
     #   canonical observation.  It has NO call path to the gRPC receive server.
     #   An earlier comment here named it as the cause of G15; that was wrong
     #   and cost a session.
+    #   CropBox(y0, y1, x0, x1) is the same window the lambdas used to slice,
+    #   as data: it can be serialised into an artifact, compared against the
+    #   rule an observation was produced under, and hashed by
+    #   PreprocessRule.tag().  A lambda could be none of those, which is why
+    #   the crop could never be pinned to the pixels it produced.
     IMAGE_CROP: Optional[dict] = {
-        "cam1": lambda img: img[20:670, 340:990],   # 650x650
-        "cam2": lambda img: img[0:720, 420:1140],   # 720x720
+        "cam1": CropBox(20, 670, 340, 990),   # 650x650
+        "cam2": CropBox(0, 720, 420, 1140),   # 720x720
     }
 
     # --- reward -------------------------------------------------------------

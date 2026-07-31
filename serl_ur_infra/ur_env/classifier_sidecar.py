@@ -87,6 +87,7 @@ from typing import Any, Mapping, Optional
 
 import numpy as np
 
+from ur_env.observation_preprocess import preprocess_frame
 from ur_env.observation_schema import (
     STATE_DIM,
     STATE_FEATURE_INDEX,
@@ -372,8 +373,11 @@ def decode_classifier_frames(sidecar: Mapping[str, Any]) -> dict[str, np.ndarray
                 f"classifier sidecar {camera!r} JPEG decode failed "
                 f"({buffer.size} bytes); the frame is corrupt"
             )
-        resized = _resize_for_classifier(bgr)
-        rgb = np.ascontiguousarray(resized[..., ::-1], dtype=np.uint8)
+        # The shared recipe at this consumer's rule (crop=None): the resize is
+        # the same cv2 call _resize_for_classifier makes, followed by the same
+        # RGB flip.  Routing through it is what stops this copy from drifting
+        # away from the policy's, which is how G15 happened.
+        rgb = preprocess_frame(bgr, crop=None, size=CLASSIFIER_IMAGE_SIZE)
         frames[camera] = rgb[None, ...]
     return frames
 

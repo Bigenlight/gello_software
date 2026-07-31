@@ -690,7 +690,7 @@ def test_env_stashes_the_uncropped_frame_while_the_policy_keeps_its_crop():
         assert frames[camera].tobytes() == full.tobytes()
         # Policy: still cropped and resized, byte-identical to the pipeline
         # that existed before the sidecar.
-        cropped = config.IMAGE_CROP[camera](full)
+        cropped = config.IMAGE_CROP[camera].apply(full)
         expected = cv2.resize(
             cropped, env.observation_space["images"][camera].shape[:2][::-1]
         )[..., ::-1]
