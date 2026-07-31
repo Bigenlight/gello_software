@@ -190,6 +190,18 @@ def parse_actor_status(raw: str) -> dict[str, Any]:
     auto_success = _bool(payload, "auto_success")
     terminal_reason = _required_string(payload, "terminal_reason")
     message = _required_string(payload, "message")
+    # OPTIONAL, and not in REQUIRED_STATUS_FIELDS on purpose.  This GUI runs
+    # from the built install/ overlay, which routinely lags the actor's source
+    # tree; requiring the field (or bumping SCHEMA_VERSION for it) would make a
+    # stale overlay reject EVERY status and lose the whole panel, which is a
+    # far worse outcome than a missing classifier warning.  Absent means "the
+    # actor is too old to know", which renders exactly like "not degraded".
+    # Present-but-wrong-typed is still rejected: telemetry that lies about its
+    # own shape must not replace a known-good snapshot.
+    degraded = _bool(payload, "classifier_degraded")
+    degraded_detail = payload.get("classifier_degraded_detail", "")
+    if not isinstance(degraded_detail, str):
+        raise ValueError("classifier_degraded_detail must be a string")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -207,6 +219,8 @@ def parse_actor_status(raw: str) -> dict[str, Any]:
         "auto_success": auto_success,
         "terminal_reason": terminal_reason,
         "message": message,
+        "classifier_degraded": degraded,
+        "classifier_degraded_detail": degraded_detail,
     }
 
 
@@ -286,13 +300,24 @@ def scene_ready_enabled(
 
 
 def classifier_verdict_summary(
-    classifier_latch: Optional[Mapping[str, Any]], *, auto_success: bool
+    classifier_latch: Optional[Mapping[str, Any]],
+    *,
+    auto_success: bool,
+    degraded: bool = False,
 ) -> tuple[str, str, Optional[bool]]:
     """Return prominent classifier text, mode context, and strict verdict.
 
     The status stream is sparse, so the wording deliberately says ``LAST``.
     The third value is ``None`` before any evaluated result, otherwise the
     strict server rule ``probability > threshold``.
+
+    ``degraded`` takes over the headline entirely.  A faulted reward classifier
+    no longer stops the run (the server records the transition unclassified,
+    reward 0), and it no longer repeats itself in the learner terminal either,
+    so THIS is where the operator sees that the reward path is down — for as
+    long as it is down.  The latched probability below stays on screen because
+    it is still true, but it is history, and the headline has to stop it being
+    read as a live verdict.
     """
 
     mode_text = (
@@ -300,6 +325,23 @@ def classifier_verdict_summary(
         if auto_success
         else "MANUAL — classifier is display-only; use MARK SUCCESS"
     )
+    if degraded:
+        # Fail-closed, and the operator has to know which way: with no verdict
+        # ever, `operator_success or (auto_success and classifier_success)`
+        # can never fire in AUTO, so only the step limit or END EPISODE ends an
+        # episode until MANUAL is selected.
+        mode_text = (
+            "AUTO — classifier is FAULTED and can NEVER declare success; "
+            "switch to MANUAL or use END EPISODE"
+            if auto_success
+            else "MANUAL — classifier is FAULTED (display-only anyway); "
+            "MARK SUCCESS still works"
+        )
+        return (
+            "REWARD CLASSIFIER DEGRADED — no verdict, reward 0",
+            mode_text,
+            None,
+        )
     if classifier_latch is None:
         return "LAST CLASSIFIER: NO RESULT", mode_text, None
     probability = float(classifier_latch["probability"])
@@ -433,6 +475,13 @@ def format_actor_status(
 
     evaluated = bool(status.get("classifier_evaluated", False))
     current = "YES" if evaluated else "NO (sparse/unscored step)"
+    if bool(status.get("classifier_degraded", False)) and not evaluated:
+        # "sparse/unscored" is the innocent explanation and would be a lie
+        # here: the actor DID send a sidecar and got nothing back.
+        detail = str(status.get("classifier_degraded_detail") or "")
+        current = "NO — CLASSIFIER FAULTED, reward is 0 for every step"
+        if detail:
+            current = f"{current}   [{detail}]"
     if classifier_latch is None:
         score = (
             "verdict: —   p(success): —   threshold: —   "
@@ -448,6 +497,10 @@ def format_actor_status(
             f"threshold: {threshold:.3f}   "
             f"last eval env step: {_counter(classifier_latch.get('env_step'))}"
         )
+        if bool(status.get("classifier_degraded", False)):
+            # The latch is kept (it happened) but it stops being the answer to
+            # "what does the classifier think now?" the moment scoring breaks.
+            score = f"STALE — from before the fault:   {score}"
     owner = status.get("control_owner") or "—"
     run_id = status.get("run_id") or "—"
     terminal = terminal_latch or "—"

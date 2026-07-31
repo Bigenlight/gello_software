@@ -24,6 +24,7 @@ from ur_env.classifier_sidecar import (  # noqa: E402
     decode_classifier_frames,
 )
 from ur_env.rlpd_receive_server import (  # noqa: E402
+    CLASSIFIER_FAULT_CAUSE_LIMIT,
     UNCLASSIFIED_WARN_STREAK,
     ClassificationResult,
     FakeActionRuntime,
@@ -570,8 +571,13 @@ def test_classifier_fault_is_never_conflated_with_an_absent_sidecar():
     assert "no classifier sidecar" not in sink.messages[0]
 
 
-def test_faulted_classifier_warnings_are_rate_limited_by_the_streak():
-    """A latched-broken classifier must not print one line per scored step."""
+def test_a_faulted_classifier_warns_exactly_once_not_on_a_cadence():
+    """One line per learner process, then silence; the GUI carries the state.
+
+    The operator's words: "로그를 막 계속 띄운다는 말은 아니지? 그냥 한번 뜨고
+    gui에서만 보이면 돼."  A cadence -- any cadence -- is a slower way of
+    repeating one fact, so this asserts the count over MANY streak periods.
+    """
     sink = _WarningSink()
     # A single scripted failure latches the scripted runtime not-ready, exactly
     # like RewardClassifierRuntime.classify does, so every later call faults.
@@ -579,20 +585,127 @@ def test_faulted_classifier_warnings_are_rate_limited_by_the_streak():
         ScriptedRewardClassifierRuntime([RuntimeError("GPU fault")]), warn=sink
     )
 
-    for step in range(UNCLASSIFIED_WARN_STREAK):
+    for step in range(UNCLASSIFIED_WARN_STREAK * 5):
+        # The helpers fill uint8 pixels from their seed, so keep it in range;
+        # content is irrelevant to a classifier that always faults, and the
+        # session is unchanged so every one of these is one long streak.
+        finalizer(_data(step=step % 200), _sidecar(step % 200))
+
+    # Counters keep accumulating: only the printing is one-shot.
+    assert finalizer.classifier_fault_count == UNCLASSIFIED_WARN_STREAK * 5
+    assert finalizer.classifier_degraded is True
+    # Two, and only because this test double says something genuinely
+    # different once it latches ("scripted classifier is not ready", which
+    # shares no text with the original failure).  The REAL runtime wraps its
+    # original detail instead, and that collapses to a single line -- see
+    # test_a_latched_classifier_repeating_its_own_cause_is_not_a_new_line.
+    assert len(sink.messages) == 2
+    assert "GPU fault" in sink.messages[0]
+    assert "FAULTED" in sink.messages[0]
+    # It has to say where the live state now lives, or "printed once" reads as
+    # "stopped mattering".
+    assert "GUI" in sink.messages[0]
+    assert "--check" in sink.messages[0]
+    # The absent-sidecar cadence is silenced while faults drive the streak --
+    # it would otherwise reinstate the exact per-100-steps line just removed.
+    assert "no classifier sidecar" not in sink.messages[0]
+
+
+def test_a_latched_classifier_repeating_its_own_cause_is_not_a_new_line():
+    """The production shape: one fault, one line, for the whole process.
+
+    ``RewardClassifierRuntime.classify`` latches ``_ready = False`` and then
+    answers every later call with its ORIGINAL detail wrapped in a prefix
+    ("reward classifier is not ready: inference failed: ..."), which is the
+    same cause, not a new one.
+    """
+    sink = _WarningSink()
+    classifier = _FlakyClassifier(probabilities=[0.1])
+    finalizer = RewardTransitionFinalizer(classifier, warn=sink)
+
+    original = "inference failed: ValueError: Incompatible shapes"
+    classifier.fail_with = RewardClassifierError(original)
+    finalizer(_data(step=0), _sidecar(0))
+    classifier.fail_with = RewardClassifierError(
+        f"reward classifier is not ready: {original}"
+    )
+    for step in range(1, 20):
         finalizer(_data(step=step), _sidecar(step))
 
-    assert finalizer.classifier_fault_count == UNCLASSIFIED_WARN_STREAK
-    # First fault (named), then the streak cadence: the fault line and the
-    # unclassified-streak line, not one line per transition.
-    assert len(sink.messages) == 3
-    assert "GPU fault" in sink.messages[0]
-    assert "consecutive faults=1" in sink.messages[0]
-    assert f"consecutive faults={UNCLASSIFIED_WARN_STREAK}" in sink.messages[1]
-    streak_line = sink.messages[2]
-    assert f"{UNCLASSIFIED_WARN_STREAK} consecutive" in streak_line
-    assert "FAULTED" in streak_line
-    assert "no classifier sidecar" not in streak_line
+    assert finalizer.classifier_fault_count == 20
+    assert len(sink.messages) == 1
+    assert original in sink.messages[0]
+
+
+def test_a_new_fault_cause_is_worth_one_more_line_up_to_the_cap():
+    """Same exception repeating is not news; a different one is."""
+    sink = _WarningSink()
+    classifier = _FlakyClassifier(probabilities=[0.1])
+    finalizer = RewardTransitionFinalizer(classifier, warn=sink)
+
+    step = 0
+    for cause in range(CLASSIFIER_FAULT_CAUSE_LIMIT + 3):
+        classifier.fail_with = RewardClassifierError(f"cause {cause}")
+        for _ in range(3):  # the same cause, repeatedly
+            finalizer(_data(step=step), _sidecar(step))
+            step += 1
+
+    assert finalizer.classifier_fault_count == (
+        CLASSIFIER_FAULT_CAUSE_LIMIT + 3
+    ) * 3
+    # One line per distinct cause, and then the cap holds: an exception whose
+    # text embeds varying numbers cannot become a cadence by the back door.
+    assert len(sink.messages) == CLASSIFIER_FAULT_CAUSE_LIMIT
+    assert "cause 0" in sink.messages[0]
+    assert f"cause {CLASSIFIER_FAULT_CAUSE_LIMIT - 1}" in sink.messages[-1]
+    assert "no further fault causes will be printed" in sink.messages[-1]
+
+
+def test_the_absent_sidecar_streak_warning_is_unchanged_without_faults():
+    """The OTHER user of the streak: a sidecar that never arrives at all.
+
+    This signal predates the degrade-instead-of-die change and is about a dead
+    sidecar scheduler or an arm that never stands still, so it keeps both its
+    cadence and its original wording.
+    """
+    sink = _WarningSink()
+    finalizer = RewardTransitionFinalizer(
+        ScriptedRewardClassifierRuntime([0.1] * 4), warn=sink
+    )
+
+    for step in range(UNCLASSIFIED_WARN_STREAK * 2):
+        finalizer(_data(step=step), None)
+
+    assert len(sink.messages) == 2
+    for message in sink.messages:
+        assert "no classifier sidecar" in message
+        assert "sidecar scheduler running" in message
+
+
+def test_the_absent_sidecar_cadence_resumes_once_scoring_recovers():
+    sink = _WarningSink()
+    classifier = _FlakyClassifier(probabilities=[0.1])
+    finalizer = RewardTransitionFinalizer(classifier, warn=sink)
+
+    classifier.fail_with = RewardClassifierError("transient CUDA fault")
+    step = 0
+    for _ in range(UNCLASSIFIED_WARN_STREAK):
+        finalizer(_data(step=step), _sidecar(step))
+        step += 1
+    assert len(sink.messages) == 1  # the one-shot fault line, nothing else
+
+    # One successful classification clears the fault streak, so the older
+    # signal is armed again.
+    classifier.fail_with = None
+    finalizer(_data(step=step), _sidecar(step))
+    step += 1
+    sink.messages.clear()
+    for _ in range(UNCLASSIFIED_WARN_STREAK):
+        finalizer(_data(step=step), None)
+        step += 1
+
+    assert len(sink.messages) == 1
+    assert "no classifier sidecar" in sink.messages[0]
 
 
 def test_manual_operator_success_still_ends_the_episode_when_classifier_faults():
@@ -640,13 +753,15 @@ def test_auto_mode_can_never_succeed_while_the_classifier_is_faulted():
 
     assert outcome.success is False
     assert outcome.truncated is True
-    session_report = [
-        message for message in sink.messages if "session" in message
-    ]
-    assert len(session_report) == 2
-    assert "classified NONE" in session_report[0]
-    assert "FAULTED" in session_report[1]
-    assert "in AUTO no success could have been declared" in session_report[1]
+    # NOTHING at the episode boundary.  The per-session report would fire once
+    # per episode for as long as the fault lasts, which is a cadence measured
+    # in episodes instead of steps, and it would say what the GUI is already
+    # showing continuously.  "classified NONE" is suppressed for the same
+    # reason: while faulted it is a restatement of the fault, not the missing-
+    # sidecar signal it exists to raise.
+    assert [message for message in sink.messages if "session" in message] == []
+    # ... and the fault itself was already announced once, before this episode.
+    assert finalizer.classifier_fault_count == 4
 
 
 def test_a_recovered_classification_clears_the_fault_streak_not_the_total():
@@ -664,10 +779,13 @@ def test_a_recovered_classification_clears_the_fault_streak_not_the_total():
     assert outcome.classifier_evaluated is True
     assert finalizer.classification_count == 1
     assert finalizer.classifier_fault_count == 1
-    # The streak reset shows up as a fresh "first fault" warning next time.
+    # The SAME cause returning is not new information, so it is not reprinted:
+    # the operator watches the GUI headline go red again.  The total still
+    # counts it, which is what --check and any post-hoc log reading need.
     classifier.fail_with = RewardClassifierError("transient CUDA fault")
     finalizer(_data(step=2), _sidecar(2))
-    assert len([m for m in sink.messages if "consecutive faults=1" in m]) == 2
+    assert finalizer.classifier_fault_count == 2
+    assert len(sink.messages) == 1
 
 
 def test_health_detail_shows_a_degraded_classifier_to_run_hil_server_check():

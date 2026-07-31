@@ -15,6 +15,7 @@ import uuid
 import numpy as np
 
 from ur_env.actor_network import (
+    CLASSIFIER_DEGRADED_MARKER,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     ActorNetwork,
@@ -461,6 +462,125 @@ def _dump_data(
         pickle.dump(intervention_data, file)
 
 
+#: Seconds between server Health reads while the reward path looks degraded.
+#: Health is only ever called when there is already local evidence of a
+#: problem, so a healthy run pays exactly zero extra RPCs; a degraded one pays
+#: one short unary call per interval, off the per-step critical path in the
+#: sense that it cannot happen on a step that scored.
+CLASSIFIER_HEALTH_POLL_INTERVAL_S = 10.0
+
+#: Longest degraded-reason string published on ``/hil/actor_status``.  The GUI
+#: renders this in a wrapped label; an unbounded server exception text would
+#: push the whole operator panel around.
+CLASSIFIER_DEGRADED_DETAIL_LIMIT = 240
+
+#: How many degraded<->healthy transitions the actor announces on its terminal
+#: before it goes quiet and leaves the state entirely to the GUI.  The real
+#: runtime latches on its first fault, so a run normally prints at most one;
+#: this only bounds a hypothetically flapping classifier, which could otherwise
+#: rebuild a per-step cadence one edge at a time.
+CLASSIFIER_DEGRADED_EDGE_LIMIT = 4
+
+
+class _ClassifierDegradedProbe:
+    """Decide whether the reward path is degraded, and say why.
+
+    THE EVIDENCE IS LOCAL, THE EXPLANATION IS REMOTE
+    -----------------------------------------------
+    The actor knows two things per step that together settle the question
+    without any protocol change: whether IT attached a classifier sidecar, and
+    whether the server's ``TransitionOutcome`` came back
+    ``classifier_evaluated``.  Under a healthy server the first implies the
+    second — ``ActorSessionService.Step`` hands every non-None sidecar to the
+    finalizer, which classifies it — so "sidecar sent, no verdict returned" is
+    exactly the degraded reward path, whatever its cause (a faulted classifier,
+    or a server with no classifier configured at all).  That evidence needs no
+    new proto field, arrives on the very first affected step, and clears itself
+    the moment a scored step succeeds.
+
+    ``Health``'s free-form ``detail`` then supplies the CAUSE: the exception
+    the server saw and its running fault counts.  It is enrichment only.  A
+    failed or marker-less Health read downgrades the message, never the
+    verdict, so this cannot invent a degraded state out of a transport hiccup
+    and cannot hide one behind a dead Health RPC either.
+
+    Not on the hot path: ``health()`` is called only while degraded, at most
+    once per :data:`CLASSIFIER_HEALTH_POLL_INTERVAL_S`, and any exception it
+    raises is swallowed — telemetry must never take down a run that the whole
+    point of this change was to keep alive.
+    """
+
+    def __init__(
+        self,
+        network: Any,
+        *,
+        interval_s: float = CLASSIFIER_HEALTH_POLL_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._network = network
+        self._interval_s = float(interval_s)
+        self._clock = clock
+        self._last_poll: Optional[float] = None
+        self.degraded = False
+        self.detail = ""
+
+    def observe(self, *, attached: bool, evaluated: bool) -> bool:
+        """Fold one step's outcome in; return True when the state changed.
+
+        A step that attached no sidecar says nothing at all about the reward
+        path and is ignored: unattached steps are the overwhelming majority
+        (the sidecar is deliberately sparse) and treating their unevaluated
+        outcomes as evidence would report every run as degraded.
+        """
+
+        if not attached:
+            return False
+        if evaluated:
+            if not self.degraded:
+                return False
+            self.degraded = False
+            self.detail = ""
+            self._last_poll = None
+            return True
+        was_degraded = self.degraded
+        self.degraded = True
+        detail = self._refresh_detail(force=not was_degraded)
+        if detail is not None:
+            self.detail = detail
+        return not was_degraded
+
+    def _refresh_detail(self, *, force: bool) -> Optional[str]:
+        now = self._clock()
+        if not force and self._last_poll is not None:
+            if now - self._last_poll < self._interval_s:
+                return None
+        self._last_poll = now
+        base = "classifier sidecar was sent but the server returned no verdict"
+        health = getattr(self._network, "health", None)
+        if not callable(health):
+            return _clip_text(base, CLASSIFIER_DEGRADED_DETAIL_LIMIT)
+        try:
+            _alive, _ready, server_detail = health()
+        except Exception as exc:  # noqa: BLE001 - telemetry never stops the run
+            server_detail = f"health unavailable: {type(exc).__name__}: {exc}"
+        server_detail = str(server_detail or "").strip()
+        if CLASSIFIER_DEGRADED_MARKER in server_detail:
+            # The server already phrased it, counters and last exception
+            # included; repeating our own guess on top would only be noise.
+            return _clip_text(server_detail, CLASSIFIER_DEGRADED_DETAIL_LIMIT)
+        return _clip_text(
+            f"{base} (server health: {server_detail or 'unknown'})",
+            CLASSIFIER_DEGRADED_DETAIL_LIMIT,
+        )
+
+
+def _clip_text(text: str, limit: int) -> str:
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
 class _OperatorReporter:
     """Best-effort status reporting around a mandatory scene-ready wait."""
 
@@ -472,11 +592,22 @@ class _OperatorReporter:
         self.env_step = -1
         self.success = False
         self.terminal_reason = ""
+        # Latched, like terminal_reason: the degraded reward path is a
+        # CONDITION, not an event, and every status published while it lasts —
+        # including the ones published from HOMING and the operator gates,
+        # where no step is running — has to carry it, or the GUI indication
+        # would blink out exactly when the operator is standing at the panel.
+        self.classifier_degraded = False
+        self.classifier_degraded_detail = ""
 
     def position(self, *, episode_id: int, episode_step: int, env_step: int) -> None:
         self.episode_id = int(episode_id)
         self.episode_step = int(episode_step)
         self.env_step = int(env_step)
+
+    def set_classifier_degraded(self, degraded: bool, detail: str = "") -> None:
+        self.classifier_degraded = bool(degraded)
+        self.classifier_degraded_detail = str(detail) if degraded else ""
 
     def status(
         self,
@@ -511,6 +642,8 @@ class _OperatorReporter:
             success=self.success,
             terminal_reason=self.terminal_reason,
             message=message,
+            classifier_degraded=self.classifier_degraded,
+            classifier_degraded_detail=self.classifier_degraded_detail,
         )
 
     def publish(
@@ -855,6 +988,8 @@ def _run_remote_actor_impl(
     sidecar_build_failures = 0
     sidecar_latency = _RoundTripStats()
     plain_latency = _RoundTripStats()
+    degraded_probe = _ClassifierDegradedProbe(network)
+    degraded_edges = 0
 
     # A real armed topic actor does not obtain or execute a policy action just
     # because the launcher handed off the controller.  First HOME, then wait for
@@ -1241,6 +1376,40 @@ def _run_remote_actor_impl(
             # the unattached outcomes would hide the run's actual duty cycle
             # from it.
             sidecar_scheduler.note_outcome(outcome)
+        degraded_changed = degraded_probe.observe(
+            attached=attached, evaluated=bool(outcome.classifier_evaluated)
+        )
+        # Set every step, not only on the edge, so the refreshed server counts
+        # reach the GUI; the print below is the part that stays on the edge.
+        reporter.set_classifier_degraded(
+            degraded_probe.degraded, degraded_probe.detail
+        )
+        if degraded_changed and degraded_edges < CLASSIFIER_DEGRADED_EDGE_LIMIT:
+            # ONE line per transition of the CONDITION, never per step: the
+            # operator's continuous view of this is the GUI panel, and the
+            # server prints the cause once on its own side.  Both edges are
+            # worth a line because they are what brackets the damage for
+            # someone reading the log afterwards -- but only a few of them,
+            # because a classifier that flapped instead of latching would
+            # otherwise reinvent the per-step cadence one edge at a time.
+            degraded_edges += 1
+            last = degraded_edges == CLASSIFIER_DEGRADED_EDGE_LIMIT
+            print(
+                (
+                    "[remote-actor] reward classifier DEGRADED "
+                    f"(the GUI panel shows this state live): "
+                    f"{degraded_probe.detail}"
+                    if degraded_probe.degraded
+                    else "[remote-actor] reward classifier recovered: a "
+                    "scored step returned a verdict again"
+                )
+                + (
+                    "  [further changes of this state will not be printed]"
+                    if last
+                    else ""
+                ),
+                flush=True,
+            )
         transition = data["transition"]
         transition["rewards"] = float(outcome.reward)
         transition["masks"] = float(outcome.mask)

@@ -1054,3 +1054,228 @@ def test_abort_post_click_label_never_claims_the_arm_stopped(monkeypatch):
     assert "arm stopped" not in label
     assert "immediately" not in label.lower()
     assert "policy stops within one step" in label
+
+
+# ---------------------------------------------------------------------------
+# Degraded reward classifier.
+#
+# The learner announces a faulted classifier ONCE and then goes quiet by
+# design, so this panel is the operator's only continuous view of it.  The
+# state arrives as two OPTIONAL fields on the existing status JSON -- not a
+# gRPC/proto change, and deliberately not a SCHEMA_VERSION bump, because this
+# GUI runs from the built install/ overlay and a bump would make a stale
+# overlay reject every status and lose the whole panel.
+# ---------------------------------------------------------------------------
+
+
+def test_degraded_fields_default_to_absent_for_an_older_actor():
+    payload = _payload()
+    assert "classifier_degraded" not in payload
+
+    status = parse_actor_status(json.dumps(payload))
+
+    assert status["classifier_degraded"] is False
+    assert status["classifier_degraded_detail"] == ""
+
+
+def test_degraded_fields_are_parsed_and_type_checked():
+    status = _status(
+        classifier_degraded=True,
+        classifier_degraded_detail="inference failed: ValueError",
+    )
+    assert status["classifier_degraded"] is True
+    assert status["classifier_degraded_detail"] == "inference failed: ValueError"
+
+    with pytest.raises(ValueError):
+        _status(classifier_degraded="yes")
+    with pytest.raises(ValueError):
+        _status(classifier_degraded=True, classifier_degraded_detail=3)
+
+
+def test_degraded_takes_over_the_headline_from_a_stale_verdict():
+    """The latched probability is history the moment scoring breaks."""
+    latch = {"probability": 0.91, "threshold": 0.20, "env_step": 42}
+
+    healthy, _mode, verdict = classifier_verdict_summary(
+        latch, auto_success=False
+    )
+    assert "LAST CLASSIFIER: SUCCESS" in healthy
+    assert verdict is True
+
+    degraded, mode, verdict = classifier_verdict_summary(
+        latch, auto_success=False, degraded=True
+    )
+    assert "REWARD CLASSIFIER DEGRADED" in degraded
+    assert "reward 0" in degraded
+    assert "0.91" not in degraded
+    # None, so the caller cannot paint it green; the GUI paints degraded red.
+    assert verdict is None
+    assert "MARK SUCCESS still works" in mode
+
+
+def test_degraded_auto_mode_says_it_can_never_succeed():
+    """Fail-closed is a real loss of function and must not read as normal."""
+    _text, mode, _verdict = classifier_verdict_summary(
+        None, auto_success=True, degraded=True
+    )
+
+    assert "NEVER declare success" in mode
+    assert "END EPISODE" in mode
+
+
+def test_degraded_panel_never_calls_an_unscored_step_sparse():
+    status = _status(
+        classifier_evaluated=False,
+        classifier_degraded=True,
+        classifier_degraded_detail="ready; reward classifier DEGRADED: 12 faulted",
+    )
+    latch = {"probability": 0.91, "threshold": 0.20, "env_step": 42}
+
+    formatted = format_actor_status(
+        status, classifier_latch=latch, terminal_latch="", age_s=0.0
+    )
+
+    current = formatted["classifier_current"]
+    assert "CLASSIFIER FAULTED" in current
+    assert "sparse/unscored" not in current
+    assert "12 faulted" in current
+    # The last verdict stays on screen -- it happened -- but it is marked as
+    # what it is so it cannot be read as live.
+    assert formatted["classifier_score"].startswith("STALE")
+    assert "p(success): 0.910" in formatted["classifier_score"]
+
+
+def test_a_healthy_panel_is_unchanged_by_the_new_fields():
+    status = _status(classifier_evaluated=False)
+    latch = {"probability": 0.91, "threshold": 0.20, "env_step": 42}
+
+    formatted = format_actor_status(
+        status, classifier_latch=latch, terminal_latch="", age_s=0.0
+    )
+
+    assert formatted["classifier_current"] == (
+        "current step evaluated: NO (sparse/unscored step)"
+    )
+    assert formatted["classifier_score"].startswith("verdict: SUCCESS")
+
+
+class _FakeWidget:
+    def __init__(self):
+        self.text = None
+        self.style = None
+        self.enabled = None
+
+    def setText(self, text):
+        self.text = text
+
+    def setStyleSheet(self, style):
+        self.style = style
+
+    def setEnabled(self, enabled):
+        self.enabled = enabled
+
+
+class _FakePanelNode:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+
+    def get_actor_snapshot(self):
+        return self.snapshot
+
+    def auto_success_service_ready(self):
+        return True
+
+    def manual_success_service_ready(self):
+        return True
+
+    def scene_ready_service_ready(self):
+        return True
+
+    def abort_service_ready(self):
+        return True
+
+
+class _PanelWindowState:
+    """Duck-typed stand-in for MainWindow's actor panel widgets."""
+
+    def __init__(self, node):
+        self._node = node
+        self._auto_success = False
+        self._mode_future = None
+        self._manual_success_future = None
+        self._manual_success_queued = False
+        self._success_result_text = ""
+        self._success_result_color = "#000000"
+        self._scene_request_state = SCENE_REQUEST_IDLE
+        self._scene_result_text = ""
+        self._scene_result_color = "#000000"
+        self._abort_release_pending = False
+        self._abort_future = None
+        self._abort_queued = False
+        self._abort_result_text = ""
+        self._abort_result_color = "#000000"
+        self._armed = {}
+        self._widgets = {}
+
+    def _abort_request_pending(self):
+        return False
+
+    def __getattr__(self, name):
+        # Only widget lookups reach here: everything else is set in __init__.
+        if name.startswith("__"):
+            raise AttributeError(name)
+        widgets = self.__dict__["_widgets"]
+        if name not in widgets:
+            widgets[name] = _FakeWidget()
+        return widgets[name]
+
+
+def _apply_panel(status):
+    from ur_gello_bringup import gello_hil_gui_node as gui_module
+
+    snapshot = {
+        "status": status,
+        "age_s": 0.1,
+        "classifier_latch": {
+            "probability": 0.91,
+            "threshold": 0.20,
+            "env_step": 42,
+        },
+        "terminal_latch": "",
+        "diagnostic": "",
+        "diagnostic_age_s": None,
+    }
+    window = _PanelWindowState(_FakePanelNode(snapshot))
+    gui_module.MainWindow._apply_actor_panel(window, snapshot)
+    return gui_module, window
+
+
+def test_the_gui_paints_a_degraded_classifier_red_not_idle_grey():
+    """Grey is "no result yet"; a broken reward path is not idle."""
+    gui_module, window = _apply_panel(
+        _status(
+            classifier_evaluated=False,
+            classifier_degraded=True,
+            classifier_degraded_detail="inference failed: ValueError",
+        )
+    )
+
+    headline = window._classifier_verdict
+    assert "REWARD CLASSIFIER DEGRADED" in headline.text
+    assert gui_module._RED in headline.style
+    # Still the 16 pt compact headline, not a footnote.
+    assert "font-size: 16pt" in headline.style
+    assert "font-weight: bold" in headline.style
+    assert gui_module._RED in window._classifier_score.style
+    assert gui_module._RED in window._classifier_current.style
+    assert "inference failed" in window._classifier_current.text
+
+
+def test_a_healthy_classifier_panel_keeps_its_existing_colours():
+    gui_module, window = _apply_panel(_status())
+
+    headline = window._classifier_verdict
+    assert "LAST CLASSIFIER: SUCCESS" in headline.text
+    assert gui_module._GREEN in headline.style
+    assert gui_module._RED not in headline.style
+    assert window._classifier_current.style == ""

@@ -43,6 +43,17 @@ import numpy as np
 PROTOCOL_VERSION = "2"
 SCHEMA_VERSION = 3
 
+#: Sentinel inside ``HealthReply.detail`` that says the reward classifier is
+#: faulted.  ``detail`` is free-form text, so this is the whole machine-readable
+#: contract for it -- deliberately, because the alternative (a real field on
+#: ``TransitionOutcome``) means a ``.proto`` edit, a pb2 regeneration and a
+#: ``SCHEMA_VERSION`` bump, and protobuf drops unknown fields in silence, so a
+#: half-upgraded actor/learner pair would be asymptomatic contamination.
+#: ``remote_actor`` only ENRICHES its own local evidence with what it finds
+#: here, so a peer that never writes this marker degrades to a less detailed
+#: message rather than to a wrong one.
+CLASSIFIER_DEGRADED_MARKER = "reward classifier DEGRADED"
+
 # Resolved on first use, never at import time.  ``ur_env.classifier_sidecar``
 # imports ActorProtocolError from this module, so a module-scope import here
 # would be circular; a lazy one also keeps the image codec out of processes
@@ -540,7 +551,7 @@ class ActorSessionService:
         if faults <= 0:
             return "ready"
         return (
-            f"ready; reward classifier DEGRADED: {faults} faulted "
+            f"ready; {CLASSIFIER_DEGRADED_MARKER}: {faults} faulted "
             f"classification(s), {classifications} succeeded; transitions are "
             f"being recorded unclassified with reward 0 (last fault: {last})"
         )

@@ -78,6 +78,17 @@ class ActorStatus:
     terminal_reason: str
     message: str
     auto_success: bool = False
+    # ADDITIVE, AND DELIBERATELY NOT A SCHEMA BUMP.  ``parse_actor_status``
+    # ignores unknown extra fields ("forward-compatible diagnostics") but
+    # rejects an unexpected ``schema_version`` outright, and the GUI runs from
+    # the built ``ros2_ur_ws/install`` overlay, which can lag this source tree.
+    # Bumping would therefore mean an operator with a stale overlay loses the
+    # ENTIRE actor panel — including the deadman-adjacent state banner — in
+    # exchange for a classifier warning.  Optional-with-a-default degrades the
+    # right way in both directions instead: an old GUI drops the two fields, a
+    # new GUI shows "not degraded" for an old actor that never sends them.
+    classifier_degraded: bool = False
+    classifier_degraded_detail: str = ""
 
     def __post_init__(self) -> None:
         if self.schema_version != STATUS_SCHEMA_VERSION:
@@ -112,6 +123,10 @@ class ActorStatus:
             raise ValueError("status terminal_reason must be str")
         if not isinstance(self.message, str):
             raise ValueError("status message must be str")
+        if not isinstance(self.classifier_degraded, bool):
+            raise ValueError("status classifier_degraded must be bool")
+        if not isinstance(self.classifier_degraded_detail, str):
+            raise ValueError("status classifier_degraded_detail must be str")
 
     def as_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -149,6 +164,8 @@ class ActorStatusTracker:
         terminal_reason: str = "",
         message: str = "",
         auto_success: bool = False,
+        classifier_degraded: bool = False,
+        classifier_degraded_detail: str = "",
     ) -> ActorStatus:
         evaluated = bool(classifier_evaluated)
         if evaluated:
@@ -184,6 +201,10 @@ class ActorStatusTracker:
             terminal_reason=str(terminal_reason),
             message=str(message),
             auto_success=bool(auto_success),
+            classifier_degraded=bool(classifier_degraded),
+            classifier_degraded_detail=(
+                str(classifier_degraded_detail) if classifier_degraded else ""
+            ),
         )
 
 

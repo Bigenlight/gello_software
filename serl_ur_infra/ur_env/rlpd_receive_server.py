@@ -651,7 +651,27 @@ DEFAULT_CLASSIFIER_CONFIRMATIONS = 1
 #: Consecutive unclassified transitions that trigger a loud operator warning.
 #: At the 10 Hz control loop this is ten seconds during which nothing on this
 #: server could ever have produced a reward.
+#:
+#: This cadence belongs to ONE signal only: transitions that arrive with no
+#: classifier sidecar at all (the actor's scheduler is dead, or the arm never
+#: stands still).  A classifier that FAULTS is not on a cadence — see
+#: :data:`CLASSIFIER_FAULT_CAUSE_LIMIT`.
 UNCLASSIFIED_WARN_STREAK = 100
+
+#: How many DISTINCT classifier fault causes may be printed per learner process.
+#:
+#: A faulted classifier announces itself ONCE and then goes quiet, because
+#: ``RewardClassifierRuntime.classify`` latches ``_ready = False`` on its first
+#: fault: every later scored step faults identically, so any cadence — 100
+#: steps, 1000 steps — is just a slower way of repeating one fact the operator
+#: already read.  The live state belongs on the operator GUI (which shows
+#: ``REWARD CLASSIFIER DEGRADED`` for as long as it lasts) and the running
+#: counts belong in ``Health``'s detail, which ``run_hil_server.sh --check``
+#: prints.  A genuinely NEW cause — a different exception after a different
+#: failure — is new information and is worth one more line, up to this cap so
+#: an exception whose text embeds varying numbers cannot become the cadence
+#: this exists to remove.
+CLASSIFIER_FAULT_CAUSE_LIMIT = 5
 
 
 def _emit_operator_warning(message: str) -> None:
@@ -723,13 +743,26 @@ class RewardTransitionFinalizer:
     same ``classifier_evaluated=0``, same empty ``reward_model_id``.  No third
     reward meaning is introduced.
 
-    It stays loud.  A faulted classification is counted separately from an
-    absent sidecar (``classifier_fault_count`` / ``last_classifier_fault``,
-    surfaced in the ``Health`` detail so ``run_hil_server.sh --check`` shows a
-    degraded classifier), warns by name on the first fault of a streak, and
-    then keeps announcing itself on the ``UNCLASSIFIED_WARN_STREAK`` cadence.
-    "the classifier is broken" and "the arm was moving so we skipped scoring"
-    never render as the same message.
+    It stays loud, but it says it ONCE.  A faulted classification is counted
+    separately from an absent sidecar (``classifier_fault_count`` /
+    ``last_classifier_fault``, surfaced in the ``Health`` detail so
+    ``run_hil_server.sh --check`` shows a degraded classifier) and warns by
+    name the first time each distinct cause appears — and then never again for
+    that cause (:data:`CLASSIFIER_FAULT_CAUSE_LIMIT`).  The ONGOING state is
+    the operator GUI's job: the actor publishes ``classifier_degraded`` on
+    ``/hil/actor_status`` and the GUI shows ``REWARD CLASSIFIER DEGRADED`` in
+    red for as long as it lasts, which is in front of the operator continuously
+    in a way a scrolled-past terminal line is not.  Counters are never rate
+    limited, only their printing: they keep accumulating for ``--check``.
+
+    While faults are in play the ``UNCLASSIFIED_WARN_STREAK`` cadence is
+    silenced too, because every faulted transition also increments the
+    unclassified streak and that line would otherwise become the very cadence
+    this removed.  It is NOT deleted: it is the older, independent signal for
+    "no sidecar arrived at all" (dead scheduler, arm never stationary), it
+    keeps its original wording, and it resumes the moment a classification
+    succeeds again.  "the classifier is broken" and "the arm was moving so we
+    skipped scoring" therefore still never render as the same message.
 
     WHAT DEGRADING COSTS, PER OPERATOR MODE
     ---------------------------------------
@@ -778,6 +811,11 @@ class RewardTransitionFinalizer:
         self._classifier_fault_streak = 0
         self._session_classifier_faults = 0
         self._last_classifier_fault = ""
+        # Distinct fault causes already printed, for the whole process life.
+        # Bounded by CLASSIFIER_FAULT_CAUSE_LIMIT so a fault whose text carries
+        # varying numbers cannot grow it without bound or turn it into a
+        # cadence.
+        self._warned_fault_causes: set[str] = set()
 
     @property
     def transition_count(self) -> int:
@@ -1043,44 +1081,25 @@ class RewardTransitionFinalizer:
                     self._session_classifier_faults += 1
                     self._classifier_fault_streak += 1
                     self._last_classifier_fault = fault_detail
-                    # RATE LIMIT.  RewardClassifierRuntime.classify latches
-                    # _ready = False on its first fault, so once this starts,
-                    # every later scored step faults too — at the sidecar's
-                    # ~2 Hz that is a line every 500 ms forever.  Announce the
-                    # first fault of a streak in full (an operator must see the
-                    # exception the moment it happens) and then fall back to
-                    # the same streak cadence the absent-sidecar path uses.
-                    if (
-                        self._classifier_fault_streak == 1
-                        or self._classifier_fault_streak % UNCLASSIFIED_WARN_STREAK
-                        == 0
-                    ):
-                        warnings.append(
-                            "reward classifier FAULTED; this transition was "
-                            "degraded to unclassified (reward 0, no verdict, "
-                            "AUTO cannot declare success) — "
-                            f"{fault_detail} [consecutive faults="
-                            f"{self._classifier_fault_streak}, total="
-                            f"{self._classifier_fault_count}]"
-                        )
-                if self._unclassified_streak % UNCLASSIFIED_WARN_STREAK == 0:
-                    if self._classifier_fault_streak > 0:
-                        # Never render a broken classifier as a missing one.
-                        warnings.append(
-                            f"{self._unclassified_streak} consecutive "
-                            "transitions produced no classifier verdict, and "
-                            f"the last {self._classifier_fault_streak} of them "
-                            "FAULTED rather than merely arriving without a "
-                            f"sidecar (last fault: {self._last_classifier_fault})"
-                            "; no reward can be produced while this continues"
-                        )
-                    else:
-                        warnings.append(
-                            f"{self._unclassified_streak} consecutive transitions "
-                            "carried no classifier sidecar; no reward can be "
-                            "produced while this continues (is the actor's sidecar "
-                            "scheduler running, and is the arm ever stationary?)"
-                        )
+                    message = self._fault_warning_locked(fault_detail)
+                    if message:
+                        warnings.append(message)
+                if (
+                    # A faulted classifier increments this streak too, and
+                    # printing here would silently restore the per-100-steps
+                    # cadence the fault path just gave up.  The GUI carries the
+                    # live degraded state; this line stays reserved for its own
+                    # signal, a sidecar that never arrives, and comes straight
+                    # back when a classification succeeds and clears the streak.
+                    self._classifier_fault_streak == 0
+                    and self._unclassified_streak % UNCLASSIFIED_WARN_STREAK == 0
+                ):
+                    warnings.append(
+                        f"{self._unclassified_streak} consecutive transitions "
+                        "carried no classifier sidecar; no reward can be "
+                        "produced while this continues (is the actor's sidecar "
+                        "scheduler running, and is the arm ever stationary?)"
+                    )
             if terminal:
                 # Report at the episode boundary rather than only when the next
                 # session shows up, so an operator sees it while the episode is
@@ -1090,25 +1109,62 @@ class RewardTransitionFinalizer:
         for message in warnings:
             self._warn(message)
 
+    def _fault_warning_locked(self, fault_detail: str) -> str:
+        """Return the one-shot line for a NEW fault cause, else ``""``.
+
+        Called with ``self._lock`` held; the caller emits outside it.  The
+        counters above are already updated and are never suppressed — only the
+        printing is.  See :data:`CLASSIFIER_FAULT_CAUSE_LIMIT` for why this is
+        one-shot per cause rather than a slower cadence.
+        """
+
+        # Compare on the message, not on "ExceptionType: message": a latched
+        # classifier re-raises its ORIGINAL detail wrapped in a prefix on every
+        # later call ("reward classifier is not ready: inference failed:
+        # ValueError: ..."), and the shared exception type in front would stop
+        # the containment test below from recognising it as the same cause.
+        _type_name, _, cause = fault_detail.partition(": ")
+        cause = cause or fault_detail
+        for warned in self._warned_fault_causes:
+            # Substring either way, not equality: the wrapped re-report and the
+            # original are one fault, and printing both would make every real
+            # fault a two-line event for no added information.
+            if warned in cause or cause in warned:
+                return ""
+        if len(self._warned_fault_causes) >= CLASSIFIER_FAULT_CAUSE_LIMIT:
+            return ""
+        self._warned_fault_causes.add(cause)
+        message = (
+            "reward classifier FAULTED; every scored transition is being "
+            "degraded to unclassified (reward 0, no verdict, AUTO cannot "
+            f"declare success) — {fault_detail}"
+        )
+        capped = len(self._warned_fault_causes) >= CLASSIFIER_FAULT_CAUSE_LIMIT
+        return (
+            f"{message} — printed ONCE per distinct fault"
+            f"{'; no further fault causes will be printed' if capped else ''}. "
+            "The operator GUI shows REWARD CLASSIFIER DEGRADED for as long as "
+            "this lasts, and the running counts stay in the Health detail that "
+            "run_hil_server.sh --check prints."
+        )
+
     def _flush_session_locked(self) -> list[str]:
         """Close the accounting for the current session; caller emits, unlocked."""
         messages: list[str] = []
-        if self._session_transitions > 0 and self._session_classifications == 0:
+        if (
+            self._session_transitions > 0
+            and self._session_classifications == 0
+            # A faulted session classified none of its transitions BY
+            # DEFINITION, so this line would fire at every episode boundary and
+            # be the third way of saying the one thing the GUI is already
+            # showing continuously.  Its own signal — "this session ran and no
+            # sidecar was ever scored" — is only news when no fault explains it.
+            and self._session_classifier_faults == 0
+        ):
             messages.append(
                 f"session {self._session_id!r} finalized "
                 f"{self._session_transitions} transitions and classified NONE "
                 "of them; every reward in it is 0 by default, not by verdict"
-            )
-        if self._session_classifier_faults > 0:
-            # Reported even when the session DID classify some steps, because a
-            # partially faulted session is still one whose AUTO verdict cannot
-            # be trusted to have been available when it mattered.
-            messages.append(
-                f"session {self._session_id!r} degraded "
-                f"{self._session_classifier_faults} transitions to unclassified "
-                "because the reward classifier FAULTED (last fault: "
-                f"{self._last_classifier_fault}); in AUTO no success could have "
-                "been declared, in MANUAL only MARK SUCCESS could end it"
             )
         self._session_transitions = 0
         self._session_classifications = 0

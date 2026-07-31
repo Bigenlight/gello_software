@@ -622,6 +622,12 @@ class MainWindow(QMainWindow):
         classifier_col.setContentsMargins(0, 0, 0, 0)
         classifier_col.setSpacing(1)
         self._classifier_current = QLabel("current step evaluated: —")
+        # Wrapped and selectable because the degraded state puts the server's
+        # own fault text in here, and a truncated exception is not a diagnosis.
+        self._classifier_current.setWordWrap(True)
+        self._classifier_current.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
         self._classifier_score = QLabel(
             "p(success): —   threshold: —   last eval env step: —"
         )
@@ -1529,12 +1535,20 @@ class MainWindow(QMainWindow):
         self._classifier_current.setText(formatted["classifier_current"])
         self._classifier_score.setText(formatted["classifier_score"])
         classifier = snapshot["classifier_latch"]
+        degraded = bool(status and status.get("classifier_degraded", False))
         verdict_text, mode_text, verdict = classifier_verdict_summary(
-            classifier, auto_success=self._auto_success
+            classifier, auto_success=self._auto_success, degraded=degraded
         )
         self._classifier_verdict.setText(verdict_text)
+        # RED, not the "no result yet" grey.  A faulted reward classifier is
+        # survivable but it is not neutral: nothing can be scored, and AUTO
+        # cannot end an episode at all.  This headline is the ONLY continuous
+        # indication of it -- the server prints the cause once and then stays
+        # quiet on purpose -- so it must not be readable as "idle".
         classifier_color = (
-            _GRAY if verdict is None else _GREEN if verdict else "#aa6600"
+            _RED
+            if degraded
+            else _GRAY if verdict is None else _GREEN if verdict else "#aa6600"
         )
         self._classifier_verdict.setStyleSheet(
             f"color: {classifier_color}; font-size: 16pt; font-weight: bold; "
@@ -1542,6 +1556,9 @@ class MainWindow(QMainWindow):
         )
         self._classifier_score.setStyleSheet(
             f"color: {classifier_color}; font-weight: bold;"
+        )
+        self._classifier_current.setStyleSheet(
+            f"color: {_RED}; font-weight: bold;" if degraded else ""
         )
         self._success_mode_note.setText(mode_text)
         self._actor_terminal.setText(formatted["terminal"])
