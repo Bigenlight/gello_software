@@ -120,6 +120,28 @@ class FaultGatedReplayIngress:
         with self._lock:
             return self._ingress.status()
 
+    def prime_observation(self, **kwargs: Any) -> Any:
+        """Encode one observation through the wrapped ingress's trunk cache.
+
+        This is the hand-off that lets ``ActorSessionService`` run the image
+        encoder ONCE per step: the service encodes here, the returned features
+        go to the policy, and the cache entry means ``__call__`` finds them
+        already computed instead of running the trunk again inside this lock.
+
+        Unlike ``__call__`` it inserts nothing, so a failure cannot leave a
+        replay-only half of a route behind.  It therefore propagates the
+        exception *without* installing a permanent fault -- latching here would
+        let a transient extractor error retire an otherwise healthy learner.
+        A caller holding an already-faulted ingress is still refused.
+        """
+
+        prime = getattr(self._ingress, "prime_observation", None)
+        if not callable(prime):
+            return None
+        with self._lock:
+            self._raise_if_faulted()
+            return prime(**kwargs)
+
     def sample_replay(self, batch_size: int, **kwargs: Any) -> Mapping[str, Any]:
         with self._lock:
             self._raise_if_faulted()

@@ -219,10 +219,38 @@ def validate_classifier_frames(
     return result
 
 
+def _is_frozen_trunk_feature(value: Any) -> bool:
+    """True when a camera tensor is a trunk feature map rather than pixels."""
+
+    array = np.asarray(value)
+    return array.ndim >= 3 and tuple(int(v) for v in array.shape[-3:])[-1] != 3
+
+
 def _classifier_model_input(
     frames: Mapping[str, Any],
 ) -> dict[str, np.ndarray]:
-    validated = validate_classifier_frames(frames)
+    """Accept decoded camera pixels OR the step's shared trunk features.
+
+    The classifier's encoder is dual-input, so classifying the feature map the
+    server already computed for replay is the same network on the same tensor
+    -- it just does not run the image encoder a second time.  Which form
+    arrived is decided by the tensors themselves, so neither validator is ever
+    applied to the other's data.
+    """
+
+    if isinstance(frames, Mapping) and any(
+        key in frames and _is_frozen_trunk_feature(frames[key]) for key in IMAGE_KEYS
+    ):
+        from ur_env.learner.frozen_trunk import validate_frozen_trunk_feature
+
+        validated = {
+            key: validate_frozen_trunk_feature(
+                frames[key], name=key, batched=False, copy=False
+            )
+            for key in IMAGE_KEYS
+        }
+    else:
+        validated = validate_classifier_frames(frames)
     # The classifier checkpoint was trained with use_proprio=False and a
     # one-element dummy state.  Policy/replay state remains the canonical 19-D
     # tensor and is intentionally not fed to this checkpoint.
@@ -769,21 +797,7 @@ class RewardTransitionFinalizer:
             evaluated = False
             reward_model_id = ""
         else:
-            from ur_env.classifier_sidecar import decode_classifier_frames
-
-            # Decoding here rather than in ActorSessionService keeps the JPEG
-            # codec out of the transport contract and off the path of servers
-            # that do not classify at all.
-            try:
-                frames = decode_classifier_frames(classifier_sidecar)
-            except ValueError as exc:
-                # The structure was already validated on ingress, so reaching
-                # here means genuinely corrupt JPEG bytes.  Fail the transition
-                # rather than silently downgrading it to "unclassified": a
-                # camera producing undecodable frames must stop the run.
-                raise RewardClassifierError(
-                    f"classifier sidecar decode failed: {exc}"
-                ) from exc
+            frames = self._classifier_frames(classifier_sidecar)
             result = self.classifier.classify(frames)
             probability, classifier_success = self._confirm(result)
             threshold = float(result.threshold)
@@ -836,6 +850,33 @@ class RewardTransitionFinalizer:
             classifier_threshold=threshold,
             reward_model_id=reward_model_id,
         )
+
+    @staticmethod
+    def _classifier_frames(value: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return classifier input, decoding only a legacy JPEG sidecar.
+
+        The shared path hands over the step's frozen-trunk features and there
+        is nothing to decode.  A sidecar mapping still arrives from the
+        receive-only server and from actors that have not stopped attaching
+        one, so its JPEG bytes are still accepted here -- decoding stays out
+        of ``ActorSessionService`` so the codec never enters the transport
+        contract, nor the path of a server that does not classify.
+        """
+
+        if not any(key.endswith("_jpeg") for key in value):
+            return value
+        from ur_env.classifier_sidecar import decode_classifier_frames
+
+        try:
+            return decode_classifier_frames(value)
+        except ValueError as exc:
+            # The structure was already validated on ingress, so reaching here
+            # means genuinely corrupt JPEG bytes.  Fail the transition rather
+            # than silently downgrading it to "unclassified": a camera
+            # producing undecodable frames must stop the run.
+            raise RewardClassifierError(
+                f"classifier sidecar decode failed: {exc}"
+            ) from exc
 
     def _confirm(self, result: ClassificationResult) -> tuple[float, bool]:
         """Fold one instantaneous verdict into the confirmation window.

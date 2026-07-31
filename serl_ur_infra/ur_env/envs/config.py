@@ -6,9 +6,11 @@ Franka-only knobs (COMPLIANCE_PARAM, LOAD_PARAM, ...) replaced by the
 governor / safety knobs our stiff forward_position_controller path needs.
 """
 
-from typing import Callable, Dict
+from typing import Dict, Optional
 
 import numpy as np
+
+from ur_env.observation_preprocess import CropBox, PreprocessRule
 
 
 class DefaultUR7eEnvConfig:
@@ -23,7 +25,11 @@ class DefaultUR7eEnvConfig:
         "cam1": "/cam1/cam1/color/image_raw/compressed",   # scene (tripod)
         "cam2": "/cam2/cam2/color/image_raw/compressed",   # close-up
     }
-    IMAGE_CROP: Dict[str, Callable] = {}
+    # Square windows as DATA, not lambdas: a crop that cannot be serialised,
+    # compared, or hashed cannot be pinned to the observations it produced.
+    # A camera absent here (or mapped to None) is not cropped -- the full
+    # frame is squashed to IMAGE_OBS_SIZE.  See ur_env/observation_preprocess.
+    IMAGE_CROP: Dict[str, Optional[CropBox]] = {}
     IMAGE_OBS_SIZE: tuple = (128, 128)   # (H, W) of image observations
     IMAGE_STALE_S: float = 0.5   # newest frame older than this -> treat as failure
     DISPLAY_IMAGE: bool = True
@@ -282,3 +288,27 @@ class DefaultUR7eEnvConfig:
     # Safety default for the skeleton phase: compute everything but do NOT
     # publish robot commands unless explicitly armed.
     DRY_RUN: bool = True
+
+    # ---- preprocessing rule ---- #
+    @classmethod
+    def preprocess_rule(cls) -> PreprocessRule:
+        """The single pixel recipe every consumer of this task should use.
+
+        Built from ``CAMERAS`` (which cameras exist), ``IMAGE_CROP`` (the
+        window per camera, ``None`` for none) and ``IMAGE_OBS_SIZE``.  Having
+        one object rather than three fields is what lets the rule be hashed:
+        ``rule.tag()`` changes whenever any crop or the output size does, so a
+        stored observation can point at the rule that produced it instead of
+        at a hand-written literal that drifts.
+
+        ``IMAGE_OBS_SIZE`` is ``(H, W)`` -- the observation-space convention --
+        while ``PreprocessRule.size`` is ``(width, height)``, matching
+        ``cv2.resize``.  They are swapped here, once, rather than at each call
+        site.
+        """
+
+        height, width = cls.IMAGE_OBS_SIZE
+        return PreprocessRule(
+            crops={camera: cls.IMAGE_CROP.get(camera) for camera in cls.CAMERAS},
+            size=(width, height),
+        )

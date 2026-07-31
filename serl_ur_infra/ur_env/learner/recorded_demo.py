@@ -29,6 +29,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from ur_env.learner.demo import load_demo_object
+from ur_env.observation_preprocess import (
+    CropBox,
+    PreprocessRuleError,
+    preprocess_frame,
+)
 from ur_env.observation_schema import STATE_DIM, validate_canonical_observation
 
 
@@ -215,7 +220,7 @@ def policy_action_from_command_poses(
     return clipped, raw
 
 
-def _task_contract() -> tuple[np.ndarray, Mapping[str, Callable[[np.ndarray], np.ndarray]]]:
+def _task_contract() -> tuple[np.ndarray, Mapping[str, CropBox]]:
     try:
         from ur_experiments.cube_in_cup import CubeInCupEnvConfig
     except Exception as exc:
@@ -228,6 +233,10 @@ def _task_contract() -> tuple[np.ndarray, Mapping[str, Callable[[np.ndarray], np
         raise RecordedDemoConversionError("cube_in_cup ACTION_SCALE is invalid")
     if not isinstance(crops, Mapping) or set(crops) != {"cam1", "cam2"}:
         raise RecordedDemoConversionError("cube_in_cup IMAGE_CROP must define cam1/cam2")
+    if not all(isinstance(crop, CropBox) for crop in crops.values()):
+        raise RecordedDemoConversionError(
+            "cube_in_cup IMAGE_CROP windows must be CropBox values"
+        )
     return scale, crops
 
 
@@ -250,7 +259,7 @@ def _read_video_frames(
     path: Path,
     frame_indices: np.ndarray,
     *,
-    crop: Callable[[np.ndarray], np.ndarray],
+    crop: CropBox,
 ) -> list[np.ndarray]:
     try:
         import cv2
@@ -275,13 +284,15 @@ def _read_video_frames(
                 )
             if index not in needed:
                 continue
-            cropped = np.asarray(crop(frame))
-            if cropped.ndim != 3 or cropped.shape[2] != 3 or cropped.size == 0:
+            # The task's own recipe, not a copy of it: this is the same call
+            # UR7eEnv.get_im makes, so a converted take and a live observation
+            # cannot drift apart (ur_env/observation_preprocess).
+            try:
+                rgb = preprocess_frame(frame, crop=crop)
+            except PreprocessRuleError as exc:
                 raise RecordedDemoConversionError(
-                    f"{path.name} crop returned invalid shape {cropped.shape}"
-                )
-            resized = cv2.resize(cropped, (128, 128))
-            rgb = np.ascontiguousarray(resized[..., ::-1], dtype=np.uint8)
+                    f"{path.name} preprocessing failed: {exc}"
+                ) from exc
             if rgb.shape != (128, 128, 3):
                 raise RecordedDemoConversionError(
                     f"{path.name} preprocessing returned {rgb.shape}"

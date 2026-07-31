@@ -578,9 +578,15 @@ class ActorSessionService:
             # silently lose a classification the actor believed it had paid for.
             self._reject_classifier_sidecar(command.observation, rpc="BeginEpisode")
             observation = self._validated_observation(command.observation)
+            shared_features = self._prime_replay_observation(
+                observation, command.actor_id, command.session_id
+            )
             try:
                 action, version, inference_ms = self._infer(
-                    observation.observation, command.deterministic
+                    shared_features
+                    if shared_features is not None
+                    else observation.observation,
+                    command.deterministic,
                 )
             except Exception as exc:
                 self._set_fault(
@@ -654,6 +660,13 @@ class ActorSessionService:
             )
             next_observation = self._validated_observation(next_packet)
             self._validate_data(command, session, next_observation)
+            # Run the image encoder ONCE for this step, before anything that
+            # wants its output.  _accept_data below finds it already cached
+            # (so the trunk does not run again inside the learner-shared
+            # lock), and _infer serves the policy from the same tensor.
+            shared_features = self._prime_replay_observation(
+                next_observation, command.actor_id, command.session_id
+            )
             observation_key = (
                 command.actor_id,
                 command.session_id,
@@ -673,8 +686,23 @@ class ActorSessionService:
                 next_observation.observation
             )
             try:
+                # The sidecar still decides WHEN a step is scored -- its
+                # cadence and stationary gates are a correctness rule about
+                # occlusion, not a bandwidth trick.  WHAT gets scored is now
+                # the step's shared trunk feature, so the reward path no
+                # longer runs an image encoder of its own.  Falls back to the
+                # sidecar's own pixels when nothing encoded this step.
+                classifier_input = (
+                    None
+                    if classifier_sidecar is None
+                    else (
+                        shared_features
+                        if shared_features is not None
+                        else classifier_sidecar
+                    )
+                )
                 finalized = self._finalize_transition(
-                    copy.deepcopy(provisional_data), classifier_sidecar
+                    copy.deepcopy(provisional_data), classifier_input
                 )
                 if not isinstance(finalized, tuple) or len(finalized) != 2:
                     raise ActorProtocolError(
@@ -737,7 +765,10 @@ class ActorSessionService:
 
             try:
                 action, version, inference_ms = self._infer(
-                    next_observation.observation, command.deterministic
+                    shared_features
+                    if shared_features is not None
+                    else next_observation.observation,
+                    command.deterministic,
                 )
                 if version < session.last_policy_version:
                     raise ActorProtocolError(
@@ -1395,6 +1426,30 @@ class ActorSessionService:
             raise ActorProtocolError(
                 "request_action must be false exactly for terminal/truncated steps"
             )
+
+    def _prime_replay_observation(
+        self, observation: Any, actor_id: str, session_id: str
+    ) -> Any:
+        """Encode this observation once, via a sink that shares its result.
+
+        Returns the frozen-trunk features, or ``None`` when the sink does not
+        encode -- ``accept_data`` is a plain callable in the receive-only
+        server and in tests, and a sink that stores raw observations has
+        nothing to share.  Callers fall back to the pixel path on ``None``.
+
+        A failure propagates; see ``FeatureReplayIngress.prime_observation``
+        for why that is the safe direction.
+        """
+
+        prime = getattr(self._accept_data, "prime_observation", None)
+        if not callable(prime):
+            return None
+        return prime(
+            actor_id=actor_id,
+            session_id=session_id,
+            observation_id=observation.observation_id,
+            observation=observation.observation,
+        )
 
     def _infer(
         self, observation: Mapping[str, Any], deterministic: bool

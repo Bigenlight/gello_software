@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 
+from ur_env.envs.config import DefaultUR7eEnvConfig
+from ur_env.observation_preprocess import CropBox
 from ur_env.observation_schema import (
     assert_actor_environment_state_layout,
     state_slice,
@@ -17,8 +19,8 @@ pytest.importorskip(
 )
 
 _CROP = {
-    "cam1": lambda img: img[40:720, 250:930],
-    "cam2": lambda img: img[0:720, 280:1000],
+    "cam1": CropBox(40, 720, 250, 930),
+    "cam2": CropBox(0, 720, 280, 1000),
 }
 
 
@@ -175,3 +177,36 @@ def test_actor_protocol_forbids_random_warmup_steps():
     assert CubeInCupConfig.random_steps == 0
     assert CubeInCupConfig.max_steps > 0
     assert CubeInCupConfig.buffer_period >= 0
+
+
+def test_preprocess_rule_is_built_from_the_task_fields():
+    """One rule object, derived — not a fourth place to state the crop."""
+
+    rule = CubeInCupEnvConfig.preprocess_rule()
+
+    assert rule.describe() == {
+        "size": [128, 128],
+        "crops": {"cam1": [20, 670, 340, 990], "cam2": [0, 720, 420, 1140]},
+    }
+    for camera, crop in CubeInCupEnvConfig.IMAGE_CROP.items():
+        assert rule.crop_for(camera) is crop
+    # Deriving it means a crop edit cannot leave the tag behind.
+    assert rule.tag() != _Commissioned.preprocess_rule().tag()
+
+
+def test_preprocess_rule_swaps_image_obs_size_to_cv2_order():
+    """IMAGE_OBS_SIZE is (H, W); PreprocessRule.size is (width, height)."""
+
+    class Rectangular(CubeInCupEnvConfig):
+        IMAGE_OBS_SIZE = (96, 160)   # (H, W)
+
+    assert Rectangular.preprocess_rule().size == (160, 96)
+
+
+def test_uncropped_config_yields_a_rule_with_no_crops():
+    """The default config crops nothing, and says so explicitly per camera."""
+
+    rule = DefaultUR7eEnvConfig.preprocess_rule()
+
+    assert set(rule.crops) == set(DefaultUR7eEnvConfig.CAMERAS)
+    assert all(crop is None for crop in rule.crops.values())

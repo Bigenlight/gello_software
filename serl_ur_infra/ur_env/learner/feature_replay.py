@@ -5,6 +5,16 @@ observations.  This module is the ownership boundary after reward
 finalization: an injected frozen-trunk extractor converts both O(t) and
 O(t+1), and only float32 feature maps plus learner tensors enter either ring.
 No image stacking or later unpacking is performed.
+
+O(t) is normally *not* re-extracted.  ``ActorSessionService`` guarantees that
+one step's ``next_observation_id`` is the next step's ``observation_id`` for
+the same session (``actor_network`` continuity checks plus its refusal to
+accept a repeated ``observation_id``), so the trunk output for O(t) was
+already computed as the previous transition's O(t+1).  A small per-session
+cache returns it instead of paying a second GPU forward *and* a second
+blocking ``device_get`` inside the lock this ingress shares with the learner.
+The first transition of an episode still misses, because ``BeginEpisode``'s
+observation never reached this ingress.
 """
 
 from __future__ import annotations
@@ -39,6 +49,12 @@ FEATURE_MAP_SHAPE = FROZEN_TRUNK_FEATURE_SHAPE
 FEATURE_MAP_DTYPE = np.dtype(np.float32)
 
 DEFAULT_MEMORY_RESERVE_BYTES = 2 * 1024**3
+
+#: Encoded observations retained for the O(t+1) -> O(t) handoff.  Only the
+#: immediately preceding observation can ever hit, so this exists to stay
+#: correct across a retry rather than to raise the hit rate.  Each entry is
+#: two (1, 4, 4, 512) float32 maps plus one state vector (~32 KiB per camera).
+FEATURE_CACHE_CAPACITY = 4
 
 _STATE_SHAPE = (1, 19)
 _ACTION_SHAPE = (7,)
@@ -548,6 +564,14 @@ class FeatureReplayIngress:
         )
         self._last_transition_id = ""
         self._last_env_step: int | None = None
+        self._feature_cache: OrderedDict[
+            tuple[str, str, str], dict[str, np.ndarray]
+        ] = OrderedDict()
+        #: Diagnostics for the O(t) reuse above.  ``trunk_extractions`` counts
+        #: real frozen-trunk forwards; it is the number Stage-1 instrumentation
+        #: needs to tell "one slow forward" apart from "several forwards".
+        self.trunk_extractions = 0
+        self.observation_cache_hits = 0
         self._lock = threading.RLock()
 
     def __call__(self, data: dict[str, Any], intervened: bool) -> None:
@@ -570,7 +594,7 @@ class FeatureReplayIngress:
                     self._ledger.move_to_end(record.transition_id)
                     return
 
-            encoded = self._encode(raw_transition)
+            encoded = self._encode(raw_transition, record)
             if route is None:
                 # Do not evict an idempotency record until extraction has
                 # succeeded.  Extractor faults therefore leave the ledger
@@ -641,24 +665,127 @@ class FeatureReplayIngress:
         with self._lock:
             return tuple(self._intervention_sidecar)
 
-    def _encode(self, raw_transition: Mapping[str, Any]) -> dict[str, Any]:
+    def prime_observation(
+        self,
+        *,
+        actor_id: str,
+        session_id: str,
+        observation_id: str,
+        observation: Mapping[str, np.ndarray],
+    ) -> None:
+        """Encode an episode's first observation before any transition needs it.
+
+        ``BeginEpisode``'s observation never reaches ``__call__``, so without
+        this the episode's first transition is the one step that pays for two
+        trunk forwards instead of one.  Priming does not move that work off the
+        GPU -- the per-episode total is unchanged -- it moves it out of a step
+        inside the control loop and onto the episode boundary, where the
+        operator is repositioning the scene anyway.
+
+        Nothing is inserted into either ring, so a failure here leaves no
+        partial route.  It is still raised rather than swallowed: an extractor
+        that cannot encode O(0) would fail the first transition regardless, and
+        failing at the boundary is both earlier and louder.
+        """
+
+        if not isinstance(observation_id, str) or not observation_id:
+            raise ActorProtocolError("observation_id is required")
+        key = self._cache_key(str(actor_id), str(session_id), observation_id)
+        with self._lock:
+            return self._cached_or_encoded(
+                key, observation, name="observations"
+            )
+
+    def _encode(
+        self, raw_transition: Mapping[str, Any], record: IngressRecord
+    ) -> dict[str, Any]:
+        # BOTH sides come through the cache.  O(t) is the previous
+        # transition's O(t+1); O(t+1) is whatever the service encoded before
+        # it called us.  When the service pre-encodes -- the production path
+        # once encoding moved to the top of step() -- the trunk runs zero
+        # times here, and the lock this ingress shares with the learner no
+        # longer contains a GPU forward at all.
+        observations = self._cached_or_encoded(
+            self._cache_key(
+                record.actor_id, record.session_id, record.observation_id
+            ),
+            raw_transition["observations"],
+            name="observations",
+        )
+        next_observations = self._cached_or_encoded(
+            self._cache_key(
+                record.actor_id, record.session_id, record.next_observation_id
+            ),
+            raw_transition["next_observations"],
+            name="next_observations",
+        )
         return {
-            "observations": self._encode_observation(
-                raw_transition["observations"], name="observations"
-            ),
-            "next_observations": self._encode_observation(
-                raw_transition["next_observations"],
-                name="next_observations",
-            ),
+            "observations": observations,
+            "next_observations": next_observations,
             "actions": raw_transition["actions"],
             "rewards": raw_transition["rewards"],
             "masks": raw_transition["masks"],
             "grasp_penalty": raw_transition["grasp_penalty"],
         }
 
+    def _cached_or_encoded(
+        self,
+        key: tuple[str, str, str],
+        raw_observation: Mapping[str, np.ndarray],
+        *,
+        name: str,
+    ) -> dict[str, np.ndarray]:
+        """Return this observation's trunk output, computing it only if new.
+
+        The returned mapping is handed to ``insert`` (or to the policy) just
+        like a fresh extraction, so it must never alias the cache entry that a
+        later transition may still read.
+        """
+
+        cached = self._feature_cache.get(key)
+        if cached is not None:
+            # Cheap tripwire.  Identical ids are supposed to mean identical
+            # pixels, so a divergent state means an observation_id was reused
+            # for different content -- exactly what the skipped extractor-side
+            # state check would have caught.  Comparing 19 floats keeps that
+            # guarantee without re-hashing ~96 KiB of images.
+            if not np.array_equal(cached["state"], raw_observation["state"]):
+                raise ActorProtocolError(
+                    f"observation_id {key[2]!r} was reused for a different state"
+                )
+            self._feature_cache.move_to_end(key)
+            self.observation_cache_hits += 1
+            return {name_: value.copy() for name_, value in cached.items()}
+        encoded = self._encode_observation(raw_observation, name=name)
+        # Store only after extraction succeeded, so a faulted transition
+        # leaves no state behind -- the same rule the ledger uses.
+        self._cache_store(key, encoded)
+        return encoded
+
+    def _cache_store(
+        self,
+        key: tuple[str, str, str],
+        encoded: Mapping[str, np.ndarray],
+    ) -> None:
+        self._feature_cache[key] = {
+            name: value.copy() for name, value in encoded.items()
+        }
+        self._feature_cache.move_to_end(key)
+        while len(self._feature_cache) > FEATURE_CACHE_CAPACITY:
+            self._feature_cache.popitem(last=False)
+
+    @staticmethod
+    def _cache_key(
+        actor_id: str, session_id: str, observation_id: str
+    ) -> tuple[str, str, str]:
+        # observation_id is only unique within one (actor, session); the
+        # service scopes its own accepted-observation set the same way.
+        return (actor_id, session_id, observation_id)
+
     def _encode_observation(
         self, observation: Mapping[str, np.ndarray], *, name: str
     ) -> dict[str, np.ndarray]:
+        self.trunk_extractions += 1
         try:
             features = self.feature_extractor(observation)
         except Exception as exc:

@@ -47,6 +47,7 @@ from scipy.spatial.transform import Rotation
 from ur_env.envs.config import DefaultUR7eEnvConfig
 from ur_env.envs.leader_stream import NOMINAL_CONTROL_HZ
 from ur_env.envs.policy_delta_controller import PolicyDeltaController
+from ur_env.observation_preprocess import preprocess_frame
 
 # The background follower's own clock, bound at import time and NEVER reached
 # through the module global ``time``.  The substep tests replace
@@ -1956,16 +1957,19 @@ class UR7eEnv(gym.Env):
             # writes back into `bgr`.  Were that ever to change, copy here and
             # accept the ~2.7 MB/frame memcpy.
             self._last_camera_frames[key] = bgr
-            cropped = (
-                self.config.IMAGE_CROP[key](bgr)
-                if key in self.config.IMAGE_CROP
-                else bgr
+            crop = self.config.IMAGE_CROP.get(key)
+            cropped = bgr if crop is None else crop.apply(bgr)
+            # One recipe, shared with the demo converter and the classifier
+            # (ur_env/observation_preprocess): crop -> resize -> RGB -> uint8.
+            # Spelling it out here a fourth time is how G15 happened.
+            images[key] = preprocess_frame(
+                bgr,
+                crop=crop,
+                size=self.observation_space["images"][key].shape[:2][::-1],
             )
-            resized = cv2.resize(
+            display_images[key] = cv2.resize(  # BGR for cv2.imshow
                 cropped, self.observation_space["images"][key].shape[:2][::-1]
             )
-            images[key] = resized[..., ::-1]  # obs are RGB, FrankaEnv convention
-            display_images[key] = resized     # BGR for cv2.imshow
             full_res[key] = cropped.copy()
         if self.save_video:
             self.recording_frames.append(full_res)
