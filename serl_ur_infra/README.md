@@ -27,6 +27,22 @@
 > 장시간 online 분포 정합은 더 확인해야 한다. **팔 가림 병리(`take_21`)도 안 고쳐졌다**;
 > 정지 게이트가 완화할 뿐 진짜 해법은 카메라 배치다.
 
+> 🔴 **(2026-07-31) GPU 서버가 `kanu` → `junhyeong_ai`로 바뀌었다.** learner는 이제
+> **`junhyeong_ai` GPU 0**(RTX 5070 Ti ×1, sm_120)에서 돌고, 데이터·모델은 전부
+> **`~/hil-serl-data/`** 한 뿌리에 있으며, Terminal 1은 **환경변수 0개**로 `./run_hil_server.sh`다.
+> **3-CLI 절차 자체는 안 바뀌었다** — `run_hil_hardware.sh`에는 서버 참조가 0개이고
+> `run_hil_session.sh` / `run_hil_actor.sh`는 터널의 로컬 끝 `127.0.0.1:50153`만 본다.
+> 실기 세션도 **PASS**했다(2026-07-31, 조작자 확인: replay 316 / intervention 210).
+> 🗄️ **이 README와 다른 문서에 남은 kanu 시절 숫자·PID·경로는 kanu에서 실제로 측정된
+> 것이므로 그대로 둔다 — 호스트만 바꿔 읽지 말 것.** 환경변수는 `HIL_KANU_REPO` →
+> `HIL_REMOTE_REPO`, `HIL_KANU_PYTHON` → `HIL_REMOTE_PYTHON`으로 바뀌었고 **옛 이름은 alias로
+> 계속 동작한다**; 신설 `HIL_REMOTE_DATA_ROOT`. ⚠️ **`run_hil_server.sh`로 kanu를 몰 수는 없다**
+> (kanu의 classifier가 `hil-serl-data` 밖에 있어 단일 data root로 설명되지 않는다) — kanu는
+> 읽기 전용 ssh로만 본다. 정본:
+> [DATA_AND_MODELS_JUNHYEONG_AI_KO.md](DATA_AND_MODELS_JUNHYEONG_AI_KO.md) ·
+> [SERVER_MIGRATION_E2E_JUNHYEONG_AI.md](SERVER_MIGRATION_E2E_JUNHYEONG_AI.md) ·
+> 현재 진입점 [HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) **§3D**.
+
 > 🆕 **(2026-07-30) 성공 판정은 protocol 2 / transition schema 3이며 GUI 기본은 MANUAL이다.**
 > canonical observation schema는 여전히 v2/hash `3459098d…`라 서로 혼동하지 않는다.
 > MANUAL에서도 classifier sidecar는 계속 서버에서 평가되고 probability/threshold/verdict가
@@ -43,6 +59,12 @@
 > 사람 승인 offline demo **2,037개**는 보존·재로드했다. 정상 3-CLI의 server terminal은
 > `cd /home/laptop3/gello_software/ros2_ur_ws && ./run_hil_server.sh`; 읽기 전용 상태 확인은
 > `./run_hil_server.sh --check`다. 변동 가능한 최신 counter는 상태 문서 §11.5를 재확인한다.
+>
+> 🗄️ **(2026-07-31) 위 문단의 PID·GPU·run·카운터는 `kanu` 스냅샷이며 그대로 보존한다.**
+> 그 lineage는 kanu의 RAM에만 있었고 **새 서버로 넘어오지 않았다**(kanu에는 저장된 checkpoint가
+> **하나도** 없었다 — run root 8개 전부 빈 `checkpoints/`). 두 명령
+> (`./run_hil_server.sh`, `--check`)은 **그대로 유효하지만 이제 `junhyeong_ai`를 본다.**
+> 계약(protocol 2 / schema 3 / threshold 0.5)과 demo 2,037개는 호스트와 무관하게 그대로다.
 
 > 🆕 **(2026-07-30 오후, `edbb3f5` + `d6965a9`) 개입 추종이 RL 창 밖으로 나갔고 개입 예산이
 > 사라졌다.** ENGAGED 동안 팔은 `UR7eEnv`의 **데몬 스레드**가 30 Hz로 몰고, `env.step`은
@@ -59,7 +81,12 @@
 전부 낡았다.** 통합 상태·checkpoint·Kanu 검증·frozen-trunk feature replay·bounded fake-data
 learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)를 기준으로 한다.
 
-`scripts/run_fake_e2e_actor.py`는 robot를 제어하는 actor가 아니라 `--synthetic-e2e` Kanu learner에 canonical raw fake observation 100개를 보내 gRPC→classifier→feature replay→CTA→publish→checkpoint→fresh-process resume를 검증하는 acceptance tool이다. server는 exact actor/run ID, exact 100 inserts, bounded timeout을 강제하고 synthetic-only model ID를 advertise한다. cleanup 후 full checkpoint roundtrip/trunk invariant까지 통과해야 pass한다. synthetic checkpoint는 fingerprint/model scope가 다르므로 production robot lineage에 사용할 수 없다.
+`scripts/run_fake_e2e_actor.py`는 robot를 제어하는 actor가 아니라 `--synthetic-e2e` learner에 canonical raw fake observation 100개를 보내 gRPC→classifier→feature replay→CTA→publish→checkpoint→fresh-process resume를 검증하는 acceptance tool이다. server는 exact actor/run ID, exact 100 inserts, bounded timeout을 강제하고 synthetic-only model ID를 advertise한다. cleanup 후 full checkpoint roundtrip/trunk invariant까지 통과해야 pass한다. synthetic checkpoint는 fingerprint/model scope가 다르므로 production robot lineage에 사용할 수 없다.
+
+📌 이 도구는 **2026-07-31 새 서버 `junhyeong_ai`에서 다시 돌아 PASS**했다(fresh + resume 2 run,
+transition 200개) → [SERVER_MIGRATION_E2E_JUNHYEONG_AI.md](SERVER_MIGRATION_E2E_JUNHYEONG_AI.md).
+단 그 시험은 sidecar를 붙이지 않고 `intervened=1`도 0건이라 **classifier 추론과 intervention
+ingress는 증명하지 못한다** — 그 둘은 같은 날 실기 세션이 닫았다(상태 문서 §3D).
 
 ## 이 디렉터리의 문서 (`serl_ur_infra/*.md`)
 
@@ -67,10 +94,12 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 
 | 문서 | 무엇인가 |
 | --- | --- |
-| [HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) | **현재 진입점.** 첫 실물 E2E 증거(§3), 개입 손맛 오전 `in_window` 검증(§3A), **오후 `background` 추종·예산 제거(§3C)**, PASS/미완료 경계(§6·§6.1·§6.3), 3-CLI(§9)와 다음 우선순위(§8) |
+| [HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md](HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) | **현재 진입점.** 첫 실물 E2E 증거(§3), 개입 손맛 오전 `in_window` 검증(§3A), **오후 `background` 추종·예산 제거(§3C)**, **새 서버 `junhyeong_ai` 첫 실기 세션 PASS(§3D·§6.4)**, PASS/미완료 경계(§6·§6.1·§6.3), 3-CLI(§9)와 다음 우선순위(§8) |
+| [DATA_AND_MODELS_JUNHYEONG_AI_KO.md](DATA_AND_MODELS_JUNHYEONG_AI_KO.md) 🆕 | **서버 이전 정본 (2026-07-31).** `junhyeong_ai`의 접속·GPU·checkout(`gello_software_runtime`)·`~/hil-serl-data/` 배치·demo/classifier SHA·conda `il` env·**코드 기본값(환경변수 0개)**. 🔴 **kanu에는 저장된 policy checkpoint가 하나도 없었다**는 실측도 여기 |
+| [SERVER_MIGRATION_E2E_JUNHYEONG_AI.md](SERVER_MIGRATION_E2E_JUNHYEONG_AI.md) 🆕 | **로봇 없는 실통신 수락 시험 PASS (2026-07-31).** transition 200개로 gRPC→finalize→feature replay→CTA→publish→checkpoint→resume 전 구간, **RPC 실측**(`BeginEpisode` 57.7/82.2 ms, `Step` 156.1/211.0)과 kanu 대비, 그리고 **이 시험이 증명하지 못한 것**(classifier 추론·`intervened=1`·실기 루프 주기) |
 | [HANDOFF_NEXT_SESSION_KO.md](HANDOFF_NEXT_SESSION_KO.md) | 첫 E2E 이전의 하드웨어/classifier 상세 조사 기록. 최신 상태 지침으로 쓰지 않는다 |
 | [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md) | 전체 상태 기록. learner 구현 §1–10 / actor·하드웨어 §11 / reward classifier 조사 §12. 위 문서보다 깊다 |
-| [HIL_SERL_KANU_RUNBOOK_KO.md](HIL_SERL_KANU_RUNBOOK_KO.md) | Kanu에서 learner를 띄우는 절차 (dry-run → bounded run) |
+| [HIL_SERL_KANU_RUNBOOK_KO.md](HIL_SERL_KANU_RUNBOOK_KO.md) | learner 기동의 **옵션·게이트 의미** 정본 (dry-run → bounded run). ⚠️ **2026-07-31부터 🗄️ 기록 문서다** — 파일명도 본문도 kanu 기준이라 **본문 명령을 그대로 치지 않는다**(예외는 그 안의 `run_hil_server.sh` 절). 호스트·GPU index·경로는 위 `DATA_AND_MODELS_JUNHYEONG_AI_KO.md`가 정본 |
 | [REWARD_CLASSIFIER_THRESHOLD_KO.md](REWARD_CLASSIFIER_THRESHOLD_KO.md) | 0.85 → 0.5 → 0.2 결정의 측정·역사. **현행 실행값은 코드 상수 0.5**이므로 옛 문서 숫자를 CLI에 복사하지 않는다 |
 | [REMOTE_ACTOR_GRPC.md](REMOTE_ACTOR_GRPC.md) | gRPC protocol v2 / transition schema 3 — 같은 전송을 쓰는 **서버 entrypoint 3종의 차이**. canonical observation schema v2와 구별할 것 |
 | [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
@@ -275,9 +304,20 @@ learning E2E 계약은 [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](HIL_SERL_LEARNER
 - [ ] per-task config 예제 (`examples/experiments/<task>/config.py` 형식)
 - [x] **★ Kanu bounded synthetic learning acceptance — final schema v2**
       — unified `248255f`, 실제 SSH alias `kanu`, JAX/JAXLIB 0.5.3 GPU actual classifier/agent, laptop3 SSH tunnel에서 exact 100 transition → step 1/gradient 2/policy 1/checkpoint full-load roundtrip을 통과했다. fresh process resume가 1/2/1과 policy version 1 finite 7D action을 serving했다. fingerprint는 `fa1985378ad2729f466783e4f112d54022e14090430374a6531e4fb715440fcd`다.
-- [ ] **Kanu production robot/continuous acceptance**
-      — 남은 범위는 real canonical demo, 기본 50-step publish/5,000-step checkpoint, 장시간 memory/contention, robot E2E다.
-      정확한 명령과 feature RAM gate는 `HIL_SERL_KANU_RUNBOOK_KO.md`를 따른다.
+      🗄️ **위 fingerprint·커밋·호스트는 kanu 실측이라 그대로 둔다.**
+- [x] **★ `junhyeong_ai` bounded synthetic acceptance — 2026-07-31 재실행 PASS**
+      — 같은 도구로 새 서버에서 fresh + resume 2 run, transition 200개, 전 metric finite,
+      checkpoint round-trip verified. jax 0.5.3이 sm_120에서 **네이티브**로 돌아 핀 bump가
+      필요 없었다. 실측 전문은 [SERVER_MIGRATION_E2E_JUNHYEONG_AI.md](SERVER_MIGRATION_E2E_JUNHYEONG_AI.md).
+- [ ] **production robot/continuous acceptance (이제 `junhyeong_ai`)**
+      — 남은 범위는 기본 50-step publish/5,000-step checkpoint, 장시간 memory/contention,
+      **장시간 연속 robot E2E**다. real canonical demo(2,037개)는 이미 이 서버에 있고
+      2026-07-31 실기 세션이 **PASS**했다(replay 316 / intervention 210 — 상태 문서 §3D).
+      **checkpoint는 여전히 0개다**: kanu의 run root 8개 전부 빈 `checkpoints/`였고
+      (`checkpoint_period` 5,000 vs 최고 도달 step 301) 새 서버는 clean lineage로 시작한다.
+      정확한 명령과 feature RAM gate는 `HIL_SERL_KANU_RUNBOOK_KO.md`를 따르되,
+      **호스트·GPU index·경로는 `DATA_AND_MODELS_JUNHYEONG_AI_KO.md`가 우선**한다
+      (⚠️ 새 호스트는 GPU **1장**, 여유 RAM 약 **37 GB**다 — kanu의 8장/140 GB가 아니다).
 - [x] **reward classifier 입력 정합 (G15)** — 2026-07-29 해결. **재학습이 아니라 sidecar 분리다.**
       `IMAGE_CROP`은 불변, 관측 schema hash도 불변(`3459098d…`), proto 무변경.
 - [x] **orbax 디렉터리 checkpoint pin (G19)** — 2026-07-29 해결. `checkpoint_sha256()`이
@@ -355,8 +395,8 @@ G26)과 정확히 반대이며 원인은 다르다.
 
 1. **포화 transition을 서버측에서 제외.** proto **신규 필드 + `SCHEMA_VERSION` bump**가
    필요하고 **양끝을 같이 올려야 한다.** 🛑 protobuf가 unknown field를 **조용히 버리므로
-   반쪽 업그레이드는 무증상 오염**이다 — 옛 Kanu가 과소보고된 액션으로 학습하는데 어떤
-   경고도 나지 않는다.
+   반쪽 업그레이드는 무증상 오염**이다 — 안 올린 쪽 learner가 과소보고된 액션으로 학습하는데
+   어떤 경고도 나지 않는다(호스트가 kanu에서 `junhyeong_ai`로 바뀌어도 이 위험은 그대로다).
 2. **창 주기 자체를 줄인다** — `../docs/testing/08_OPEN_GAPS.md` **G21**
    (= 상태 문서 §8 **P1**). 포화는 창 길이에 비례하므로 이쪽이 근본이다.
 

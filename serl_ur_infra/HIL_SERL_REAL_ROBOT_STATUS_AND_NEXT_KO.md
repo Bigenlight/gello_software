@@ -1,5 +1,52 @@
 # 실물 UR7e HIL-SERL 현재 상태와 다음 단계
 
+> # 🔴 먼저 읽어라 — GPU 서버가 **`kanu` → `junhyeong_ai`** 로 바뀌었다 (2026-07-31)
+>
+> 이 문서 본문의 기준일은 **2026-07-29 / 07-30**이고 그때의 learner 호스트는 **kanu**였다.
+> 그 시점의 숫자·PID·run root·카운터는 **kanu에서 실제로 측정된 것이므로 그대로 둔다** —
+> 지우지도 않고 새 호스트 이름으로 갈아 끼우지도 않는다. 지금 사실은 아래 표뿐이다.
+>
+> | | 본문(07-29 / 07-30) | **지금 (2026-07-31~)** |
+> | --- | --- | --- |
+> | learner 호스트 | `kanu` | **`junhyeong_ai`** (166.104.146.29, hostname `junhyeong`) |
+> | GPU | A4000 ×8 중 **GPU 5** | **RTX 5070 Ti ×1 · GPU 0** (sm_120 Blackwell) |
+> | learner checkout | `gello_software_hil_current` → `…_schema3_stage_20260730` | **`/home/junhyeong/gello_software_runtime`** (독립 clone, worktree 아님) |
+> | 데이터·모델 | 네 군데로 흩어져 있었다 | **`~/hil-serl-data/{demos,classifier_ckpt,datasets,runs,archive}`** 한 뿌리 |
+> | Terminal 1 기동 | host/repo/python env override | **`./run_hil_server.sh` — 환경변수 0개** |
+> | 터널 | laptop3 `127.0.0.1:50153` → kanu `:50053` | laptop3 `127.0.0.1:50153` → **`junhyeong_ai`** `:50053` (**포트는 안 바뀜**) |
+>
+> **🟢 3-CLI 절차 자체는 하나도 안 바뀌었다.** 바뀐 것은 **Terminal 1 스크립트가 접속하는
+> 호스트뿐**이다 — `run_hil_hardware.sh`에는 서버 참조가 **0개**이고, `run_hil_session.sh`와
+> `run_hil_actor.sh`는 Terminal 1이 소유하는 터널의 **로컬 끝 `127.0.0.1:50153`만** 본다.
+> 즉 **§9의 조작 절차에서 새로 배울 것이 없다.**
+>
+> ✅ **새 서버에서 실기 세션 PASS (2026-07-31, 조작자 확인)** → **§3D**. replay **316** /
+> intervention **210** / last_env_step **68**,
+> run root `~/hil-serl-data/runs/cube_in_cup_real_20260731_054929`.
+>
+> 🔴 **kanu에서 학습된 policy checkpoint는 한 번도 만들어진 적이 없다.** kanu의 run root
+> **8개 전부** `checkpoints/`가 비어 있었다(2026-07-31 실측. `checkpoint_period=5000`인데
+> 최고 도달 learner step이 **301**이다). 그러므로 **warm start도, 이어받은 가중치도 없다** —
+> 새 서버는 사람 승인 canonical offline demo **2,037개**로 **깨끗한 새 lineage**를 시작한다.
+> 이 문서가 "checkpoint/resume 실물 검증 미완료"(§6)라고 적은 것은 그대로 유효하고,
+> 새 호스트에서도 **처음부터**다. 이전에서 잃은 것은 없다.
+>
+> ⚠️ **`run_hil_server.sh`는 이제 kanu를 몰 수 없다 — 의도된 결과다.** kanu의 classifier는
+> `hil-serl-data` 밖(FM 스택 dataset 디렉터리)에 있어 **어떤 단일 `HIL_REMOTE_DATA_ROOT`도
+> kanu를 만족시키지 못한다.** kanu는 **읽기 전용 ssh**로만 본다
+> (`ssh kanu 'ps -p <pid> -o pid,etime'`). 환경변수도 `HIL_KANU_REPO` → **`HIL_REMOTE_REPO`**,
+> `HIL_KANU_PYTHON` → **`HIL_REMOTE_PYTHON`**으로 바뀌었다 — **옛 이름은 alias로 계속
+> 동작한다**(없던 척하지 않는다). 신설: **`HIL_REMOTE_DATA_ROOT`**.
+>
+> 🪤 **두 서버의 계정명이 둘 다 `junhyeong`이다.** `/home/junhyeong/...` 경로만 보고 호스트를
+> 판별할 수 없다 — 본문의 `/home/junhyeong/hil-serl-data/runs/cube_in_cup_real_20260729_120225`
+> 같은 경로는 **kanu**의 것이다. 호스트를 항상 같이 확인하라.
+>
+> 정본 두 개: [`DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](./DATA_AND_MODELS_JUNHYEONG_AI_KO.md)
+> (데이터·모델·파이썬 환경·코드 기본값) ·
+> [`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md)
+> (로봇 없는 실통신 수락 시험 PASS와 RPC 실측).
+
 > 기준: **2026-07-29 KST**, 첫 실제 production-model actor run
 > · **2026-07-30 오전 KST**, 개입 손맛 오프라인 실측 + 격리 리그 검증과 schema 3 MANUAL
 >   learner 재기동 (§3A, §3B)
@@ -8,11 +55,14 @@
 >
 > laptop3 기준선: **이 문서를 포함한 최신 branch tip**. §3A의 창 안 30 Hz
 > 개입 서브스텝은 `4197f5b`, 매 세션 Enter/GO 제거는 `e86edd5`, §3C의 배경 추종 스레드와
-> 예산 제거는 `edbb3f5`, 기록 액션의 norm 비례 축소는 `d6965a9`에서 들어왔다. Kanu의 현재
-> schema 3 stage는
+> 예산 제거는 `edbb3f5`, 기록 액션의 norm 비례 축소는 `d6965a9`에서 들어왔다.
+> 🗄️ **이전 판(보존, kanu 기준):** *"Kanu의 현재 schema 3 stage는
 > `/home/junhyeong/gello_software_hil_schema3_stage_20260730` @ `c9c30c3e…`이고, 안정 링크
-> `/home/junhyeong/gello_software_hil_current`가 그 checkout을 가리킨다. 다음 실행 전에는
-> laptop3와 Kanu의 **실행 코드 HEAD와 실제 process argv를 다시 대조한다.**
+> `/home/junhyeong/gello_software_hil_current`가 그 checkout을 가리킨다."* — 2026-07-31
+> 이전 뒤 **실행 checkout은 `junhyeong_ai:/home/junhyeong/gello_software_runtime` 하나**이고
+> stage/stable-link 구조는 kanu와 함께 은퇴했다. 다음 실행 전에 laptop3와 **learner 호스트**의
+> **실행 코드 HEAD와 실제 process argv를 다시 대조한다**는 규칙은 그대로다
+> (`run_hil_server.sh`가 ssh 채널로 두 HEAD를 직접 비교한다).
 >
 > ⚠️ **세 날짜/시간대의 숫자를 섞지 마라.** 리그가 전부 다르다.
 >
@@ -28,9 +78,14 @@
 >
 > 이 문서의 목적은 다음 세션이 과거의 "아직 actor를 실기에서 돌리지 않았다"는 상태에서
 > 다시 시작하지 않도록, **마지막 실제 성공·현재 한계·다음 구현 방향·필요 CLI**를 한곳에
-> 고정하는 것이다. Kanu learner 전체 옵션의 정본은
-> [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md), laptop actor의 상세 정본은
+> 고정하는 것이다. learner 옵션 자체의 정본은
+> [HIL_SERL_KANU_RUNBOOK_KO.md](./HIL_SERL_KANU_RUNBOOK_KO.md)이고, laptop actor의 상세 정본은
 > [09_HIL_ACTOR_RUNBOOK.md](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)다.
+> ⚠️ **그 runbook은 2026-07-31부터 🗄️ 기록 문서다** — 파일명도 본문도 kanu 기준이라
+> **본문의 명령을 그대로 치지 않는다**(자기 머리에 그렇게 적혀 있다. 예외는 그 안의
+> `run_hil_server.sh` 절 하나뿐). learner **옵션·게이트의 의미**는 계속 유효하고,
+> **호스트·GPU index·경로는**
+> [`DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](./DATA_AND_MODELS_JUNHYEONG_AI_KO.md)가 정본이다.
 
 ---
 
@@ -74,7 +129,7 @@ controller 자동 복귀까지 확인했다.
 ## 2. 현재 시스템 구성
 
 ```text
-laptop3                                             Kanu
+laptop3                                             junhyeong_ai  (2026-07-31~, 이전에는 Kanu)
   UR7e + ROS2 Humble                                  SAC policy inference
   GELLO EEF leader                                    RLPD online learner
   RealSense cam1(scene), cam2(wrist)   gRPC/SSH       reward classifier
@@ -83,9 +138,14 @@ laptop3                                             Kanu
 ```
 
 - laptop3는 센서 수집, 실시간 robot command, GELLO intervention을 담당한다.
-- Kanu는 policy inference, reward classifier, RLPD learner를 담당한다.
-- Kanu server는 `127.0.0.1:50053`, laptop3는 SSH local forwarding
-  `127.0.0.1:50153 -> Kanu 127.0.0.1:50053`을 사용한다.
+- **learner 호스트**(2026-07-31부터 `junhyeong_ai` GPU 0, 그 전에는 Kanu GPU 5)는 policy
+  inference, reward classifier, RLPD learner를 담당한다. **역할 분담은 이전으로 바뀌지 않았다.**
+- server는 `127.0.0.1:50053`, laptop3는 SSH local forwarding
+  `127.0.0.1:50153 -> junhyeong_ai 127.0.0.1:50053`을 사용한다. **포트 쌍은 이전 전후로 동일**하고,
+  laptop3 쪽에서 보는 주소(`127.0.0.1:50153`)도 그대로다 — 그래서 actor/세션 스크립트는
+  호스트 이전의 영향을 받지 않았다.
+  > **이전 판(보존):** *"Kanu server는 `127.0.0.1:50053`, laptop3는 SSH local forwarding
+  > `127.0.0.1:50153 -> Kanu 127.0.0.1:50053`을 사용한다."*
 - transition/control 목표는 10 Hz다. 현재 각 RPC deadline은 **1.5초**, 응답 최대 age는
   **2.0초**다. 둘 다 fail boundary이며 10 Hz 달성 증명은 아니다.
 - **`edbb3f5` 이후(2026-07-30 오후): 개입 중 관절 타깃은 `env.step` *밖*의 데몬 스레드가
@@ -95,13 +155,20 @@ laptop3                                             Kanu
   - > **이전 판(보존):** *"`4197f5b` 이후(2026-07-30): 개입 중에는 그 10 Hz 창 안에서
     > 관절 타깃이 30 Hz로 갱신된다."* — 그 경로는 이제 `follow_mode="in_window"`로만 남아
     > 있고 **기본이 아니다.** §3A/§6.1의 판정은 그 경로의 판정으로 읽는다.
-- reward 권위는 Kanu다. MANUAL에서는 classifier를 계속 계산·표시·기록하되 조작자의
+- reward 권위는 **learner 서버**다(07-29/07-30 당시 Kanu, 현재 `junhyeong_ai`).
+  MANUAL에서는 classifier를 계속 계산·표시·기록하되 조작자의
   `MARK SUCCESS`만 성공 terminal/reward를 승인한다. AUTO에서는 classifier의 엄격한
   `p > 0.5`가 성공을 승인한다. laptop의 환경 reward는 이 배치에서 사용하지 않는다.
 
 ---
 
 ## 3. 2026-07-29 첫 실제 E2E 결과
+
+> 🗄️ **§3 · §3A · §3B · §3C의 서버측 숫자·PID·run root·checkout 경로는 전부 `kanu` 시절
+> 실측이다.** 2026-07-31 서버 이전 뒤에도 **한 글자도 고치지 않고 보존한다** — 새 호스트를
+> 비교할 유일한 기준선이기 때문이다. 새 호스트(`junhyeong_ai`)의 첫 실기 증거는 **§3D**다.
+> 로봇·랩톱 쪽 숫자(개입 손맛, 추종 스레드, 컨트롤러 스레드 안전화)는 **애초에 서버와
+> 무관하므로 이전의 영향을 받지 않는다.**
 
 ### 3.1 laptop3에서 확인된 순서
 
@@ -136,6 +203,11 @@ Qt의 `QFontDatabase` 경고는 font asset 경고이며 RPC timeout의 원인이
 /home/junhyeong/hil-serl-data/runs/cube_in_cup_real_20260729_120225
 ```
 
+> 🪤 **이 경로는 `kanu`의 것이다.** 두 서버 모두 계정이 `junhyeong`이라 경로만으로는 구분되지
+> 않는다. kanu의 원본은 지워지지 않았고, 2026-07-31 이전 때 run root 8개가
+> `junhyeong_ai:~/hil-serl-data/archive/kanu-runs/`로 **복사**됐다(로그·JSONL·wandb 이력이며
+> **모델이 아니다** — kanu에는 저장된 checkpoint가 애초에 없었다).
+
 | 항목 | 최종 확인값 | 의미 |
 | --- | ---: | --- |
 | accepted online replay | **201** | 실제 로봇 transition이 Kanu ingress에 들어감 |
@@ -168,8 +240,14 @@ actor로 돌아와 실제 로봇에서 실행됐다는 per-RPC 증거는 없다.
 
 07-29 문서 작성 시점에는 Kanu learner PID `159159`와 port `50053`이 아직 살아 있었다. actor가
 죽은 뒤 learner가 backlog를 step 102까지 따라잡은 상태다. 다음 세션에서 PID가 같다고
-가정하지 않는다. 이 process는 §3B의 schema 3 learner와 다르다. 현재값은 아래 명령 또는
-`run_hil_server.sh --check`로 다시 확인한다.
+가정하지 않는다. 이 process는 §3B의 schema 3 learner와 다르다.
+
+> ⚠️ **2026-07-31 갱신 — 이 절의 `ssh kanu` 명령은 이제 "옛 호스트 읽기 전용 확인"이다.**
+> **현재 운영 learner의 값은 `./run_hil_server.sh --check`로 읽는다. 그 명령은 이제
+> `junhyeong_ai`를 보며 kanu는 보지 않는다**(그 스크립트로 kanu를 몰 수 없다 — 문서 머리 참조).
+> 아래 세 줄은 kanu에 아직 살아 있는 process를 **읽기만** 할 때 쓴다. **어떤 process에도
+> 신호를 보내지 않는다.**
+> 🗄️ **이전 판(보존):** *"현재값은 아래 명령 또는 `run_hil_server.sh --check`로 다시 확인한다."*
 
 ```bash
 ssh kanu 'pgrep -af "run_rlpd_learner_server.py" || echo "no learner"'
@@ -177,7 +255,10 @@ ssh kanu 'ss -ltnp 2>/dev/null | grep ":50053" || echo "50053 unbound"'
 ssh kanu 'tail -n 5 /home/junhyeong/hil-serl-data/runs/cube_in_cup_real_20260729_120225/logs/learner.jsonl'
 ```
 
-이 lineage는 target step 5,000 전에 멈춰 있으므로 production checkpoint가 없다. learner를
+이 lineage는 target step 5,000 전에 멈춰 있으므로 production checkpoint가 없다.
+🔴 **2026-07-31 실측: 이것은 이 lineage만의 이야기가 아니었다** — kanu의 run root **8개
+전부** `checkpoints/`가 비어 있었다. 즉 **kanu에서 저장된 policy checkpoint는 하나도 없고,
+새 서버가 이어받을 가중치도 없다**(§3D). learner를
 종료하면 **RAM-only online replay와 현재 optimizer state는 복구할 수 없고**, JSONL과 run
 directory만 남는다. 종료가 필요하면 새 server를 먼저 띄우지 말고 기존 process에 SIGINT를
 한 번 보내 정상 종료한다. 임의의 `SIGKILL`이나 같은 checkpoint root의 두 번째 learner는 금지한다.
@@ -187,7 +268,9 @@ directory만 남는다. 종료가 필요하면 새 server를 먼저 띄우지 �
 ## 3A. 2026-07-30 **오전** 개입 손맛(intervention feel) 실기 검증 — `follow_mode="in_window"`
 
 > **절 번호를 유지하려고 `3A`로 넣었다.** 다른 문서가 이 파일의 절 번호로 링크한다
-> (`HIL_SERL_KANU_RUNBOOK_KO.md:83` → §9). 4번 이후를 밀지 말 것.
+> (`HIL_SERL_KANU_RUNBOOK_KO.md`가 §9를 링크한다). 4번 이후를 밀지 말 것.
+> *(옛 판은 그 링크를 `HIL_SERL_KANU_RUNBOOK_KO.md:83`으로 적었다 — 그 파일이 2026-07-31
+> 서버 이전 표기를 받으면서 줄이 밀렸으므로 줄번호를 지웠다.)*
 >
 > 아래 숫자는 **전부 2026-07-30 오전 측정**이다. §3(07-29)의 숫자와 같은 표에 놓지 않는다 —
 > 07-29 run에는 이 코드가 아예 없었다. **§3C(같은 날 오후)와도 섞지 마라** — 오후에
@@ -342,6 +425,14 @@ success→HOME→WAIT 연속 동작을 PASS로 승격시키지는 않는다.
 이 절은 2026-07-30 약 19:55 KST의 읽기 전용 관측이다. PID와 카운터는 불변값이 아니므로
 다음 세션에서는 `run_hil_server.sh --check`와 READY 배너를 다시 본다.
 
+> 🗄️ **아래 표는 통째로 `kanu` 스냅샷이다 — 보존한다.** PID·checkout·stable link·run root는
+> 전부 kanu 호스트의 것이고(계정명이 같아 경로만으로는 구분되지 않는다), **현재 운영 lineage가
+> 아니다.** 2026-07-31 이전 뒤 실행 checkout은 `junhyeong_ai:/home/junhyeong/gello_software_runtime`
+> 하나이며, 이 카운터(replay 400 / learner 301 / policy version 6)는 **새 호스트로 넘어가지
+> 않았다** — RAM replay와 optimizer state는 디스크에 없고 checkpoint도 없었기 때문이다(§3D).
+> 계약 행(protocol 2 / schema 3 / threshold 0.5, model·reward id)은 **호스트와 무관하게
+> 그대로 유효**하다.
+
 | 항목 | 관측값 |
 | --- | --- |
 | learner | PID `1112465`, Kanu `127.0.0.1:50053` |
@@ -359,7 +450,12 @@ observation schema v2**이고, `/hil/actor_status` JSON은 별도의 **status sc
 하나의 schema로 섞어 말하지 않는다.
 
 옛 `/home/junhyeong/gello_software_hil` checkout은 schema 2/threshold 0.2 코드이며 현재 learner가
-아니다. 현재 `run_hil_server.sh`는 stable link를 canonicalize해 schema 3 stage를 검증한다.
+아니다.
+> 🗄️ **이전 판(보존):** *"현재 `run_hil_server.sh`는 stable link를 canonicalize해 schema 3
+> stage를 검증한다."* — 2026-07-31 이후 검증 대상은 **`junhyeong_ai`의 단일 checkout
+> `/home/junhyeong/gello_software_runtime`**이다(심링크·stage 구조는 kanu와 함께 은퇴했다).
+> 가드 자체는 그대로다: `--git-dir == --git-common-dir`(worktree 사슬 금지) + canonical GitHub
+> origin + **ssh 채널로 laptop3↔learner 호스트 HEAD 직접 비교**.
 
 ## 3C. 2026-07-30 **오후** — 개입 추종을 RL 창 **밖**으로 (배경 스레드 + 예산 제거)
 
@@ -545,6 +641,82 @@ ActorProtocolError: executed_action must be within [-1, 1]
 4. **`background` 경로의 자동 채점 실기 run이 없다.** §3A가 남긴 anchor-latch/gain-latch/
    frame-map/action-exec/held-rate 판정의 `background` 대응물이 아직 0개다.
 
+## 3D. 2026-07-31 — 새 GPU 서버 `junhyeong_ai`에서의 첫 실기 세션 (PASS)
+
+> **절 번호 유지를 위해 `3D`로 넣었다**(§3A/§3C와 같은 이유 — 다른 문서가 §4 이후를 링크한다).
+>
+> 이 절만 **`junhyeong_ai` 리그**다. §3(kanu 07-29) / §3B(kanu 07-30 스냅샷)의 숫자와 **같은
+> 표에 놓지 마라** — 호스트도 GPU도 lineage도 다르다.
+
+### 3D.1 무엇이 옮겨갔나
+
+learner 호스트가 **`kanu` → `junhyeong_ai`** 로 바뀌었다. 랩톱·로봇·GELLO·카메라·컨트롤러는
+**하나도 안 바뀌었고**, 3-CLI 절차도 그대로다(문서 머리의 🟢 항목, §9.1).
+
+| | kanu (07-29 / 07-30) | **junhyeong_ai (2026-07-31~)** |
+| --- | --- | --- |
+| GPU | RTX A4000 ×8, learner는 **GPU 5** | **RTX 5070 Ti ×1 (sm_120), GPU 0** |
+| RAM | 여유 약 140 GB | 60 GB (여유 약 37 GB) |
+| 디스크 | 96 % 사용 (여유 73 GB) | **여유 약 594 GB** |
+| 코드 | stage checkout + 안정 심링크 | **`/home/junhyeong/gello_software_runtime`** 하나 (독립 clone) |
+| 데이터·모델 | 네 군데로 흩어짐 (classifier는 FM 스택 dataset 안) | **`~/hil-serl-data/` 한 뿌리** |
+| Terminal 1 | env override | **`./run_hil_server.sh` — 환경변수 0개** |
+
+의존성 핀은 **하나도 안 올렸다.** `jax 0.5.3`이 sm_120에서 **네이티브로** 돈다(XLA가
+`.target sm_120a`를 낸다 — PTX 폴백이 아니다). learner의 exact 핀 검사
+(`validate_learner_dependencies`)는 그대로 fail-closed다.
+
+### 3D.2 실기 세션 — **PASS (조작자 확인)**
+
+| 항목 | 값 |
+| --- | --- |
+| 일시 / 호스트 | 2026-07-31, **`junhyeong_ai`** |
+| run root | `~/hil-serl-data/runs/cube_in_cup_real_20260731_054929` |
+| online replay | **316** |
+| intervention replay | **210** |
+| last_env_step | **68** |
+| 판정 | **PASS** (조작자 확인) |
+
+🎯 **`intervention 210`이 이 세션의 핵심이다.** 그 앞의 로봇 없는 수락 시험
+([`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md))은
+`intervened=1` 전이를 **한 건도** 보내지 않았다. 그래서 **intervention 버퍼 ingress와
+RLPD 50:50의 개입 쪽 절반**은 이 호스트에서 **미검증**이었고, 조작자가 실제로 팔을 몰고서야
+닫혔다. 같은 이유로 **실제 classifier sidecar 추론**도 이 세션에서 처음 이 링크 위를 지났다
+(수락 시험은 sidecar를 붙이지 않아 `classifier_success_count: 0`이었다 — 그 문서 §4).
+
+### 3D.3 함께 측정된 것 (로봇 없는 수락 시험, 같은 날)
+
+전문은 [`SERVER_MIGRATION_E2E_JUNHYEONG_AI.md`](./SERVER_MIGRATION_E2E_JUNHYEONG_AI.md)다.
+요약만:
+
+- transition **200개**(100 × 2 run)가 `gRPC → reward finalize → feature replay → CTA →
+  publish → checkpoint → 별도 프로세스 resume` 전 구간을 통과했다.
+- RPC 실측: `BeginEpisode` **57.7 ms 평균 / 82.2 max**, `Step` **156.1 / 211.0**.
+  kanu의 schema v2 `BeginEpisode`는 **84.9 평균 / 372.8 max**였다 → **tail이 약 4.5배 짧다.**
+  ICMP RTT는 두 호스트가 사실상 같으므로 이득은 **네트워크가 아니라 호스트 연산**이다.
+- warm-up **28.4 / 16.0 / 0.101 s** (kanu는 46.83 / 37.22 / 0.466 s, 약 1.9배 느렸다).
+  📌 **kanu의 learner도 A4000을 한 장만 썼다** — 8장 대 1장의 비교가 아니다.
+
+🛑 **이 값들을 §3C.1의 `512 ms` 루프 주기와 빼서 읽지 마라.** 512 ms는 카메라 디코드와
+`env.step` 자체 페이싱을 포함한 **로봇 루프 전체 주기**의 **kanu 시절 실측**이고, 위 값은
+**RPC 두 개의 합**이다. **새 호스트에서 실기 루프 주기는 아직 재지 않았다** → §8 P1.
+
+### 3D.4 이 세션이 닫지 **않은** 것
+
+1. **장시간 연속 운용은 여전히 미검증이다.** §6의 `FAIL/PARTIAL` 행은 호스트가 바뀌어도
+   그대로다 — 필요한 것은 live actor의 plain/sidecar `Step RPC` **p99**와 수백 step 무-timeout이다.
+2. **새 호스트에서의 실기 루프 주기·포화 비율은 미계측이다.** §8 P1의 첫 산출물은 여전히
+   포화 비율이고, 이제 그것을 **`junhyeong_ai` 위에서** 재야 한다.
+3. **checkpoint/resume 실물 검증은 처음부터다.** kanu에서 저장된 checkpoint가 **하나도 없었고**
+   (run root 8개 전부 빈 `checkpoints/`, `checkpoint_period=5000` vs 최고 도달 step 301),
+   **새 서버는 canonical offline demo 2,037개로 깨끗한 새 lineage를 시작한다.**
+   ⚠️ 그러므로 이 문서 어디에도 "warm start"나 "이어받은 가중치"를 가정한 계획을 두지 않는다.
+4. **classifier 정확도는 그대로다.** 성공 판정 기본값이 `MANUAL`인 이유는 서버 성능이 아니라
+   분류기 정확도이며, `AUTO` 복귀는 **새 데이터로 재학습·재검증**해야 한다(재학습 재료는
+   이제 `junhyeong_ai:~/hil-serl-data/datasets/`에 있다).
+5. **`background` 경로의 자동 채점 실기 run은 여전히 0개다**(§3C.7-4). 호스트 이전은 그
+   항목과 무관하다.
+
 ---
 
 ## 4. HIL 제어권 의미: 사용자의 관찰이 맞다
@@ -553,7 +725,7 @@ ActorProtocolError: executed_action must be within [-1, 1]
 
 | GUI 상태 | 실제 실행 action | transition 기록 |
 | --- | --- | --- |
-| `DISENGAGED` | Kanu policy action | `intervened=0` |
+| `DISENGAGED` | learner 서버의 policy action | `intervened=0` |
 | `ENGAGED` + fresh GELLO | GELLO EEF action | `intervened=1`, policy action도 counterfactual로 보존 |
 | `ENGAGED` + GELLO stale | HOLD | intervention으로 기록 |
 | deadman heartbeat stale | actor fail-stop | policy로 자동 복귀하지 않음 |
@@ -566,10 +738,14 @@ ActorProtocolError: executed_action must be within [-1, 1]
 정상 경로는 terminal 세 개에서 실행하는 **3-CLI**다.
 
 ```text
-Terminal 1  run_hil_server.sh    Kanu learner 검증/재사용 + SSH tunnel
+Terminal 1  run_hil_server.sh    learner 호스트(junhyeong_ai) 검증/재사용 + SSH tunnel
 Terminal 2  run_hil_hardware.sh  UR7e + gripper + passive GELLO reader
 Terminal 3  run_hil_session.sh   cameras + compact HIL GUI + preposition + actor
 ```
+
+> 📌 **2026-07-31 서버 이전에서 바뀐 것은 Terminal 1 한 줄뿐이다.** Terminal 2에는 서버
+> 참조가 **0개**이고, Terminal 3(과 그 아래 `run_hil_actor.sh`)은 Terminal 1이 소유하는 터널의
+> 로컬 끝 **`127.0.0.1:50153`만** 본다. 조작자 입장에서 절차는 **이전 전과 동일하다.**
 
 `run_hil_session.sh`가 GUI의 fresh `ENGAGED` heartbeat를 최대 120초 동안 polling한다. 예전처럼
 조작자가 Enter를 눌러 다음 단계로 보내는 프롬프트는 없다. 그래도 실제 gate가 약해진 것은 아니다.
@@ -672,6 +848,10 @@ HOME 승인 후 종료하고 새 episode를 열지 않는다. WAIT 동안 status
 (learner·gRPC 없음) **§6.1에 따로**, 2026-07-30 **오후** 배경 추종 판정은 **§6.3에 따로** 둔다 —
 세 리그를 한 표에 섞지 않는다.
 
+> 🗄️ **§6 · §6.1 · §6.2 · §6.3의 판정은 전부 `kanu` 시절 리그의 판정이다 — 취소하지도
+> 고쳐 쓰지도 않는다.** 새 호스트 `junhyeong_ai`의 판정은 **§6.4**에 따로 둔다. 로봇·랩톱
+> 쪽 판정(개입·컨트롤러·프레임)은 서버와 무관하므로 이전의 영향을 받지 않는다.
+
 | 기능 | 상태 | 판정 범위 |
 | --- | --- | --- |
 | 실제 sensor/canonical observation | **PASS** | actor preflight와 실제 loop에서 cam1/cam2/state 사용 |
@@ -747,6 +927,24 @@ HOME 승인 후 종료하고 새 episode를 열지 않는다. WAIT 동안 status
 | `run_real_hil.py`의 안전 여유 | 🔻 **후퇴** | 그 러너는 박스 OFF(G1)이고 예산도 없다 → **production보다 덜 안전** |
 | `background` 경로 자동 채점 실기 run | **0회** | §3A의 anchor/gain/frame-map/action-exec/held 판정에 대응물이 없다 |
 
+### 6.4 2026-07-31 새 서버 `junhyeong_ai` 판정 (§3D)
+
+리그: 실기 UR7e + production actor(gRPC) + **`junhyeong_ai` learner**. 근거는 §3D이고
+**§6/§6.1/§6.2/§6.3의 kanu 숫자와 섞지 않는다.**
+
+| 기능 | 상태 | 판정 범위 |
+| --- | --- | --- |
+| 새 호스트에서 실기 세션 | **PASS(조작자 확인)** | replay **316** / intervention **210** / last_env_step **68**, run root `cube_in_cup_real_20260731_054929` |
+| intervention 버퍼 ingress · RLPD 50:50 개입 쪽 | **PASS** | `intervened=1` **210건**. 로봇 없는 수락 시험은 이걸 **0건** 보냈다 |
+| 실제 classifier sidecar 추론이 이 링크를 지남 | **PASS** | 수락 시험(`classifier_success_count: 0`)이 못 덮던 구간 |
+| gRPC transport / finalize / feature replay / CTA / publish / checkpoint / resume | **PASS(로봇 없음)** | transition 200개, `SERVER_MIGRATION_E2E_JUNHYEONG_AI.md` |
+| jax 0.5.3 on sm_120 (Blackwell) | **PASS** | 네이티브 `.target sm_120a`, 핀 bump 없음 |
+| RPC tail | **개선(측정됨)** | `BeginEpisode` max 372.8 ms(kanu) → **82.2 ms**. 링크가 아니라 호스트 연산 |
+| 3-CLI 조작 절차 | **무변경** | Terminal 2 서버 참조 0개, Terminal 3은 `127.0.0.1:50153`만 본다 |
+| 실기 루프 주기 / 포화 비율 (새 호스트) | **미계측** | 512 ms는 **kanu 시절 실측**이다 → §8 P1 |
+| 장시간 10 Hz 연속 운용 | **미검증** | 호스트가 바뀌어도 §6의 이 행은 그대로다 |
+| checkpoint/resume 실물 검증 | **미완료(처음부터)** | kanu에 저장된 checkpoint가 **0개**였다. 새 lineage는 demo 2,037개에서 clean start |
+
 ---
 
 ## 7. 남은 RPC timeout의 해석
@@ -803,7 +1001,7 @@ plain/sidecar RPC p99와 실제 `env.step` 간격을 따로 재는 것이다.
 >
 > | P | 이번 오후 작업이 한 일 | 결론 |
 > | --- | --- | --- |
-> | **P0** | 새 Kanu lineage를 만들지 않았다(§3A와 달리 이번엔 production actor 경로였으므로 **transition이 들어갔을 수 있다** — 첫 시도는 `ActorProtocolError`로 즉사했다) | **유지 + 확인 필요.** 07-30 오후 시도가 어느 run root에 몇 개를 남겼는지 **미확인**. 다음 세션이 `run_hil_server.sh --check`로 먼저 본다 |
+> | **P0** | 새 Kanu lineage를 만들지 않았다(§3A와 달리 이번엔 production actor 경로였으므로 **transition이 들어갔을 수 있다** — 첫 시도는 `ActorProtocolError`로 즉사했다) | **유지 + 확인 필요.** 07-30 오후 시도가 어느 run root에 몇 개를 남겼는지 **미확인**. 다음 세션이 `run_hil_server.sh --check`로 먼저 본다 (⚠️ **2026-07-31: 그 run root는 kanu에 있고 `--check`는 이제 `junhyeong_ai`를 본다** — P0 본문 참조) |
 > | **P1** | 개입 **손맛**의 G21 종속을 **끊었다**(창 밖 추종). 대신 창 주기 1.95 Hz가 이제 **데이터 손실**(포화)의 단독 원인이 됐다 | 🥇 **여전히 최우선. 더 뾰족해졌다** — 아래 |
 > | **P2** | 무관 | 변화 없음 (코드 완료 / 실기 미완료) |
 > | **P3** | 🔴 **안전 항목이 새로 들어왔다** — `suspend_follower()` 미배선 | **범위 확대.** 그 항목은 P3 안에서 최우선이고, 다음 armed 세션의 **선행 조건**으로 봐야 한다 |
@@ -824,11 +1022,19 @@ plain/sidecar RPC p99와 실제 `env.step` 간격을 따로 재는 것이다.
 
 ### P0. 이번 run을 보존하고 실험 계보를 구분한다
 
+> 🔴 **2026-07-31 서버 이전으로 이 항목의 전제가 하나 확정됐다: 이어받을 것이 없다.**
+> kanu의 run root **8개 전부** `checkpoints/`가 비어 있었으므로(§3D.4-3) **계보를 "잇는"
+> 선택지는 애초에 없었다.** 새 호스트 `junhyeong_ai`는 canonical offline demo 2,037개로
+> **새 lineage를 시작**하고, kanu의 run root들은 `~/hil-serl-data/archive/kanu-runs/`에
+> 읽기 전용 사료로 복사돼 있다(로그·JSONL·wandb이며 **모델이 아니다**).
+> 아래 원칙 — 계보를 섞지 않는다 — 은 **그대로 유효하고 오히려 더 명확해졌다.**
+
 - `cube_in_cup_real_20260729_120225`는 **first E2E smoke evidence**로 보존한다.
 - 76.1% intervention이고 timeout으로 끝났으므로 최종 production learning 결과로 승격하지 않는다.
 - 다음 코드 변경 후에는 새 run root를 만들고, 이 RAM-only lineage를 최종 실험과 섞지 않는다.
-- 기존 learner가 살아 있는 동안 Kanu checkout을 pull하거나 같은 port/root에 다른 learner를
-  띄우지 않는다.
+- 기존 learner가 살아 있는 동안 **learner 호스트의 checkout**(현재
+  `junhyeong_ai:/home/junhyeong/gello_software_runtime`)을 pull하거나 같은 port/root에 다른
+  learner를 띄우지 않는다.
 - **2026-07-30 오전 개입 검증(§3A)은 새 lineage가 아니다** — learner가 없었으므로 Kanu run root도,
   transition도 만들지 않았다. 그 CSV 3개를 07-29 run root의 증거와 같은 묶음으로 취급하지 않는다.
 - **2026-07-30 오후(§3C)는 다르다 — production actor 경로였다.** 그러므로 그 시도가
@@ -837,8 +1043,35 @@ plain/sidecar RPC p99와 실제 `env.step` 간격을 따로 재는 것이다.
   **몇 개가 들어갔는지, 그중 몇 개가 포화 창이었는지 모두 미확인이다** — 다음 세션은
   `run_hil_server.sh --check`와 run root의 `logs/learner.jsonl`을 **먼저** 본다.
   포화 여부는 wire에 없으므로(§3C.6) **서버 로그만으로는 사후 판별이 불가능하다.**
+  - ⚠️ **2026-07-31 갱신:** 그 run root는 **kanu**에 있고 `run_hil_server.sh --check`는 이제
+    **`junhyeong_ai`**를 본다 — 그 명령으로는 이 질문의 답이 나오지 않는다. 확인이 필요하면
+    `junhyeong_ai:~/hil-serl-data/archive/kanu-runs/`의 사본이나 `ssh kanu`**읽기 전용**으로
+    본다. 그리고 그 lineage는 새 서버로 **넘어오지 않았으므로**(RAM replay·checkpoint 없음)
+    이제 학습 위험이 아니라 **순수 사후 감사 항목**이다.
 
 ### P1. steady-state RPC latency의 phase를 먼저 계측한다 (여전히 최우선)
+
+> ### 🔴 2026-07-31 서버 이전 — 이 항목은 **닫히지 않았고, 측정을 새 호스트에서 다시 해야 한다**
+>
+> `junhyeong_ai`에서 잰 것과 안 잰 것을 구분한다.
+>
+> | | 값 | 리그 |
+> | --- | --- | --- |
+> | `BeginEpisode` mean / max | **57.7 / 82.2 ms** (kanu schema v2: 84.9 / **372.8**) | 로봇 없는 수락 시험 |
+> | `Step` mean / max | **156.1 / 211.0 ms** (⚠️ classifier 추론 **미포함**) | 〃 |
+> | ICMP RTT | 두 호스트 사실상 동일 → 이득은 **호스트 연산**이지 네트워크가 아니다 | 〃 |
+> | **실기 루프 주기** | **미계측** | — |
+> | **포화 비율** | **미계측** | — |
+>
+> 🛑 **`213.8 ms`(RPC 두 개 합)를 §3C.1의 `512 ms`에서 빼지 마라.** 512 ms는 카메라 디코드와
+> `env.step` 자체 페이싱을 포함한 **로봇 루프 전체 주기의 kanu 시절 실측**이다. **RPC tail이
+> 짧아진 것이 실기 루프를 얼마나 줄였는지는 아무도 모른다** — 그게 아래 acceptance가 여전히
+> 필요한 이유다. 실기 sidecar가 붙는 `Step`은 위 156 ms보다 **느릴 수밖에 없다.**
+>
+> ⚠️ **새 호스트는 GPU가 1장뿐이다(RTX 5070 Ti).** 아래 본문의 *"필요하면 다른 GPU로
+> inference를 분리한다"* 는 **kanu(A4000 ×8) 시절의 선택지이고 지금은 없다.** 남은 수단은
+> 같은 GPU 위의 **프로세스/스케줄 분리**와 pacing·lock 범위 축소다. 그리고 GPU 1장은
+> **다른 사람과 공유**하므로 계측 전에 `nvidia-smi`로 점유를 확인한다.
 
 > ### 🔄 2026-07-30 **오후** — 이 항목의 근거가 **교체**됐다 (순위는 그대로)
 >
@@ -893,8 +1126,10 @@ learner sampling / critic update / full update
 ```
 
 그 뒤 가장 작은 scheduling 변경으로 actor inference를 우선한다. 후보는 learner update 사이에
-RPC를 처리할 수 있도록 pacing/lock 범위를 줄이는 것이며, 필요하면 Kanu의 다른 GPU/process로
-inference를 분리한다. **계측 없이 UTD, timeout, classifier cadence를 동시에 바꾸지 않는다.**
+RPC를 처리할 수 있도록 pacing/lock 범위를 줄이는 것이며, 필요하면 별도 process로 inference를
+분리한다. **계측 없이 UTD, timeout, classifier cadence를 동시에 바꾸지 않는다.**
+> **이전 판(보존):** *"필요하면 Kanu의 다른 GPU/process로 inference를 분리한다."* — kanu는
+> A4000이 8장이었다. `junhyeong_ai`는 **GPU 1장**이므로 "다른 GPU" 선택지는 없다(위 🔴 블록).
 
 Acceptance는 “평균”이 아니라 live actor의 plain/sidecar `Step RPC` p99가 deadline 안에 있고,
 최소 수백 step 동안 timeout이 없는 것이다.
@@ -1055,11 +1290,17 @@ Enter 입력은 없고, controller handoff 뒤 HOME/WAIT에서 GUI START가 poli
 cd /home/laptop3/gello_software/ros2_ur_ws
 ```
 
-Terminal 1 — Kanu learner를 검증해 재사용하거나 없으면 시작하고, SSH tunnel을 소유한다.
+Terminal 1 — **learner 호스트(`junhyeong_ai`)** 의 learner를 검증해 재사용하거나 없으면
+시작하고, SSH tunnel을 소유한다. **환경변수 override는 필요 없다 — 기본값이 이 서버다.**
 
 ```bash
 ./run_hil_server.sh
 ```
+
+> 📌 **2026-07-31 이전으로 바뀐 것은 이 명령이 접속하는 호스트뿐이다** — 명령 자체도, 아래
+> Terminal 2·3도 그대로다. 옛 `HIL_KANU_REPO` / `HIL_KANU_PYTHON`은 **alias로 계속 동작하지만**
+> 정본 이름은 `HIL_REMOTE_REPO` / `HIL_REMOTE_PYTHON`이고, 데이터 뿌리는 신설
+> `HIL_REMOTE_DATA_ROOT`(기본 `/home/junhyeong/hil-serl-data`)에서 파생된다.
 
 Terminal 2 — UR7e driver, Robotiq gripper, passive GELLO reader를 한 번에 소유한다.
 
@@ -1079,33 +1320,48 @@ Terminal 3 — 두 카메라, HIL GUI, preposition, armed-readiness preflight, �
 
 ### 9.2 Terminal 1의 소유 범위
 
-`run_hil_server.sh`는 Kanu에서 다음을 fail-closed로 확인한다.
+`run_hil_server.sh`는 **learner 호스트(`junhyeong_ai`)** 에서 다음을 fail-closed로 확인한다.
 
 - learner entrypoint가 0개이거나 정확히 1개인지(2개 이상이면 거절)
 - classifier/demo/ResNet SHA와 schema/model/reward 및 production 필수 CLI/env 계약이 정확한지
 - 기존 learner가 health-ready인지
 - 새 learner가 필요하면 GPU가 비어 있고 `MemAvailable`이 예상 feature ring + demo + reserve
   합계 이상인지
+  - ⚠️ **새 호스트의 여유 RAM은 약 37 GB로 kanu(약 140 GB)보다 훨씬 작다**(총 60 GB).
+    memory preflight는 fail-closed이므로 **거부당하면 그것이 정상 동작**이다 — 우회하지 말고
+    replay capacity/여유를 조정하거나 다른 사용자의 점유를 확인한다. 디스크는 반대로
+    **약 594 GB 여유**로 넉넉하다(kanu는 96 % 사용 중이었다).
 
-정확히 일치하는 learner가 이미 있으면 **그 process를 재사용**하고, 없으면 기본 physical GPU 5에
-새 run root를 만들어 detached learner를 시작한다. 그 뒤 laptop의
-`127.0.0.1:50153 -> Kanu 127.0.0.1:50053` tunnel과 실제 gRPC read-only probe를 연다.
+정확히 일치하는 learner가 이미 있으면 **그 process를 재사용**하고, 없으면 기본 physical
+**GPU 0**(이 서버는 GPU가 1장이다)에 새 run root를 만들어 detached learner를 시작한다. 그 뒤
+laptop의 `127.0.0.1:50153 -> junhyeong_ai 127.0.0.1:50053` tunnel과 실제 gRPC read-only probe를 연다.
+
+> **이전 판(보존):** *"없으면 기본 physical GPU 5에 새 run root를 만들어 … laptop의
+> `127.0.0.1:50153 -> Kanu 127.0.0.1:50053` tunnel"* — kanu는 A4000 8장 중 GPU 5를 썼다.
 
 ```bash
 # learner/계약 상태만 읽고 tunnel은 열지 않는다.
 ./run_hil_server.sh --check
 
-# 기존 learner가 없을 때 사용할 GPU/run 이름을 지정한다.
-./run_hil_server.sh --gpu 6 --run-id cube_in_cup_real_YYYYMMDD_HHMMSS
+# 기존 learner가 없을 때 사용할 GPU/run 이름을 지정한다. (이 서버의 유효 index는 0뿐이다)
+./run_hil_server.sh --gpu 0 --run-id cube_in_cup_real_YYYYMMDD_HHMMSS
 
 # 기존 healthy/initializing learner가 있으면 재사용하지 않고 거절한다.
-./run_hil_server.sh --new-lineage --gpu 6 --run-id cube_in_cup_real_YYYYMMDD_HHMMSS
+./run_hil_server.sh --new-lineage --gpu 0 --run-id cube_in_cup_real_YYYYMMDD_HHMMSS
 ```
 
-Terminal 1의 `Ctrl-C`는 **자기가 만든 SSH tunnel만 닫는다.** Kanu learner는 server-owned라
-계속 살아 있다. learner까지 끝낼 때만 PID를 다시 눈으로 확인하고 Kanu에서 `SIGINT`를 한 번
-보낸다. target 5,000 전 checkpoint가 없는 learner를 내리면 RAM replay/optimizer state는
-복구되지 않는다.
+⚠️ **옛 문서에 남은 `--gpu 5` / `--gpu 6`을 그대로 복사하지 마라** — kanu 시절 index다.
+그리고 **GPU 1장을 다른 사람과 공유**하므로 새 lineage를 시작하기 전에 점유를 확인한다
+(스크립트도 GPU가 비어 있는지 fail-closed로 본다).
+
+⚠️ **이 스크립트로는 kanu를 볼 수 없다 — 의도된 것이다**(문서 머리 참조). kanu의 잔존
+learner는 `ssh kanu 'ps -p <pid> -o pid,etime'` 같은 **읽기 전용** 명령으로만 확인한다.
+
+Terminal 1의 `Ctrl-C`는 **자기가 만든 SSH tunnel만 닫는다.** learner는 server-owned라
+계속 살아 있다. learner까지 끝낼 때만 PID를 다시 눈으로 확인하고 **learner 호스트**에서
+`SIGINT`를 한 번 보낸다. target 5,000 전 checkpoint가 없는 learner를 내리면 RAM
+replay/optimizer state는 복구되지 않는다 — **kanu에서 실제로 그렇게 사라졌고, 그래서 새
+호스트에도 이어받을 가중치가 없다**(§3D.4-3).
 
 ### 9.3 Terminal 2의 재기동 의미
 
@@ -1201,7 +1457,8 @@ controller cleanup PASS: scaled_joint_trajectory_controller=active, forward_posi
 [09_HIL_ACTOR_RUNBOOK.md](../docs/testing/09_HIL_ACTOR_RUNBOOK.md)에 장애 진단용으로 보존한다.
 정상 세션에서는 다시 여러 terminal로 풀어 실행하지 않는다.
 
-Kanu의 현재 process/run root는 Terminal 1 READY 배너가 출력한다. 실행 중에는 그 run root의
+**learner 호스트(`junhyeong_ai`)** 의 현재 process/run root는 Terminal 1 READY 배너가 출력한다.
+run root는 이제 `~/hil-serl-data/runs/<run_id>/` 아래다. 실행 중에는 그 run root의
 `logs/learner.jsonl`에서 다음 event를 본다.
 
 - `learner_process_ready`
@@ -1334,7 +1591,15 @@ python3 tests/run_real_hil.py --arm --scale 1.0 --max-steps 150
 
 1. 실제 HIL-SERL 원형은 이미 성공했다. “actor 실기 미실행” 단계로 돌아가지 않는다.
 2. `ENGAGE=GELLO`, `DISENGAGE=policy`가 실물에서 확인됐다.
-3. 현재 Kanu schema 3 MANUAL run은 스냅샷 기준 transition 400, learner 301, policy version 6까지 갔다.
+3. 🔴 **learner 호스트는 이제 `junhyeong_ai`(GPU 0)이고 `./run_hil_server.sh`는 환경변수
+   0개로 돈다.** 3-CLI 절차는 그대로다. 2026-07-31 새 서버 실기 세션이 **PASS**했고
+   (replay **316** / intervention **210**, run root `cube_in_cup_real_20260731_054929`),
+   그중 **intervention 210이 이 호스트에서 처음으로 개입 버퍼 ingress와 RLPD 50:50의 개입
+   절반을 증명했다**(§3D). **kanu에는 저장된 checkpoint가 하나도 없었으므로 warm start는
+   없다** — 새 lineage는 canonical demo 2,037개에서 시작한다.
+   > **이전 판(보존, kanu 스냅샷):** *"현재 Kanu schema 3 MANUAL run은 스냅샷 기준
+   > transition 400, learner 301, policy version 6까지 갔다."* — 그 lineage는 kanu의 RAM에만
+   > 있었고 넘어오지 않았다(§3B).
 4. 07-29의 0.6초 timeout은 역사 증거다. 현재 fail boundary는 RPC 1.5초 / response age 2.0초이며,
    다음 blocker는 이 경계 안이라는 사실이 아니라 **실제 10 Hz p99와 연속 운용 검증**이다.
 5. compact GUI, MANUAL/AUTO, classifier 지속 표시·기록, policy-first와 두 단계 reset 승인은
