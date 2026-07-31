@@ -1,15 +1,27 @@
 # HIL-SERL learner Kanu 실행 runbook
 
-> ## 🆕 2026-07-30 현재 정본 — 아래 2026-07-29 스냅샷보다 우선
+> ## 🆕 2026-07-31 현재 정본 — 아래 2026-07-30/07-29 스냅샷보다 우선
 >
 > - 정상 명령은 laptop3의 `ros2_ur_ws/run_hil_server.sh` 하나다. Kanu checkout을 손으로
 >   골라 긴 learner CLI를 다시 입력하지 않는다.
-> - Kanu runtime은 stable symlink
->   `/home/junhyeong/gello_software_hil_current`가 가리키는 clean staging checkout을 쓴다.
->   staging commit은 `c9c30c3e236a76afdf65e75d9c247ad531031563`, hil-serl submodule은
->   `c32939bccb65f3b8c43a9f9add3d322d4ab0264a`다. laptop 전체 HEAD와 Kanu staging HEAD는
->   문서/ROS-local 파일 범위가 달라 같을 필요가 없다. wrapper가 실제 서버 runtime 계약과
->   checkout cleanliness를 검사한다.
+> - **Kanu의 HIL checkout은 이제 하나뿐이다.** runtime은 stable symlink
+>   `/home/junhyeong/gello_software_hil_current` →
+>   `/home/junhyeong/gello_software_hil_schema3_stage_20260730`을 쓴다. 이것은
+>   **독립 clone**이다 — `.git`이 **디렉터리**(326 MB)이고 alternates가 없으며 `origin`은
+>   GitHub(`https://github.com/Bigenlight/gello_software.git`), branch는
+>   `feat/gello-ur7e-humble-22.04`다. laptop3와 **똑같이 `git pull --ff-only`로 제자리
+>   전진**시킨다. hil-serl submodule은 `c32939bccb65f3b8c43a9f9add3d322d4ab0264a`.
+>   전체 topology와 그렇게 된 이유는 **§1.1**에 있다.
+>   > **이전 판(보존):** *"Kanu runtime은 stable symlink
+>   > `/home/junhyeong/gello_software_hil_current`가 가리키는 clean **staging checkout**을 쓴다.
+>   > staging commit은 `c9c30c3e236a76afdf65e75d9c247ad531031563` …"*
+>   > 📌 그 commit id는 **laptop3에서 더 이상 resolve되지 않는다**(`fatal: bad object`,
+>   > 2026-07-31 확인). checkout HEAD는 스냅샷이므로 **문서에 pin하지 않는다** — §1.1의
+>   > 명령으로 그때그때 읽는다.
+> - laptop3 HEAD와 Kanu HEAD는 **같을 필요가 없다**(문서/ROS-local 파일 범위가 다르고
+>   laptop3에는 push 전 commit이 있을 수 있다). 하지만 **Kanu가 조용히 뒤처지는 것은 다른
+>   문제다** — 실제로 하루치가 그렇게 밀린 적이 있다. 원인과 확인 명령은 §1.1의 🪤에 있다.
+>   wrapper는 실제 서버 runtime 계약과 checkout cleanliness를 검사한다.
 > - gRPC actor transport는 protocol **2** / schema **3**이다. 이것은 observation schema
 >   v2/hash `3459098d…0352903`과 다른 숫자다. observation schema 자체는 바뀌지 않았다.
 > - reward threshold는 **0.5**, 성공 비교는 strict `p > 0.5`다. 0.2는 이전 lineage의
@@ -36,6 +48,9 @@
 > 아래 본문에 남은 PID `159159`, checkout `gello_software_hil`, threshold 0.2, exact 양쪽
 > HEAD 일치 요구와 `GO` 프롬프트는 2026-07-29 재현 기록이다. 현재 운용 판단에는 이 박스와
 > wrapper 출력을 우선한다.
+> 🗑️ 특히 **`/home/junhyeong/gello_software_hil`은 2026-07-31에 제거됐다**(§1.1). 본문과
+> shell history에 그 경로가 남아 있어도 **다시 만들지 않는다** — 지금 타이핑할 이름은
+> `/home/junhyeong/gello_software_hil_current` 하나뿐이다.
 
 > 상태: **첫 실물 production-model learning smoke 완료**. 실제 transition 201개와
 > learner 102 step/policy version 2까지 갔지만 첫 publish 경계의 RPC deadline 때문에
@@ -50,7 +65,10 @@
 > **497 passed, 11 skipped**, controller/종료 경로 focused **137 passed**. Kanu 실제
 > classifier/demo/SAC production 규모 dry-run과 실제 policy gRPC no-submit probe도 통과했다.
 >
-> **Kanu 실행 checkout: `/home/junhyeong/gello_software_hil`** — 2026-07-29 신설된 영속 worktree. §1.1
+> **Kanu 실행 checkout: `/home/junhyeong/gello_software_hil_current`** (symlink → 독립 clone
+> `gello_software_hil_schema3_stage_20260730`). §1.1
+> > **이전 판(보존):** *"**Kanu 실행 checkout: `/home/junhyeong/gello_software_hil`** —
+> > 2026-07-29 신설된 영속 worktree."* 그 경로는 **worktree였고 2026-07-31에 제거됐다**.
 >
 > 구현 상태와 차단점: [HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md](./HIL_SERL_LEARNER_STATUS_AND_NEXT_KO.md)
 >
@@ -83,6 +101,8 @@
 
 - 실제 E2E 실행 시점에 laptop3와 Kanu 영속 checkout의 HEAD는 `18e3696`으로 동기화됐다.
   아래 증거를 기록한 문서 commit 뒤에는 branch tip이 달라질 수 있으므로 현재 HEAD는 직접 읽는다.
+  📌 여기서 "Kanu 영속 checkout"은 **은퇴한 `~/gello_software_hil` worktree**다. 현재 checkout은
+  §1.1의 독립 clone이며 이 문단은 그때의 기록으로만 읽는다.
 - 실제 23-take/2,037-transition demo, 정본 Orbax classifier, ResNet-10, 실제 hybrid
   SAC agent, production ring 50k/10k를 사용한 dry-run이 통과했다. fingerprint는
   `c952dc2e292675dc6aa033d5c470ee34c28c6589430ddba2cd98fadaeadb9cd5`, RAM gate는
@@ -138,9 +158,11 @@ cd /home/laptop3/gello_software/ros2_ur_ws
    git rev-parse HEAD
    git merge-base --is-ancestor ca19652 HEAD
 
-   # Kanu
-   ssh kanu 'cd /home/junhyeong/gello_software_hil && git branch --show-current && git rev-parse HEAD'
+   # Kanu — 타이핑할 이름은 symlink 하나뿐이다 (§1.1)
+   ssh kanu 'cd /home/junhyeong/gello_software_hil_current && git branch --show-current && git rev-parse HEAD'
    ```
+   > **이전 판(보존):** *`ssh kanu 'cd /home/junhyeong/gello_software_hil && …'`* — 그 경로는
+   > 2026-07-31에 제거됐다.
 
    `git merge-base`가 0이 아니거나 양쪽 실행 HEAD가 다르면 시작하지 않는다. 2026-07-29
    21:05 KST에는 양쪽과 origin이 `ca19652` 이상으로 동기화돼 있었지만, 다음 세션에서도 위
@@ -306,10 +328,21 @@ step 5,000 전에는 production checkpoint가 생기지 않는다. 짧은 smoke�
 - ⚠️ 2026-07-29의 "HIL 프로세스 없음" 기록은 역사다. 현재값은
   `run_hil_server.sh --check`로만 판단한다.
 - ⚠️ **`/home/laptop3/gello_software`는 Kanu에 존재하지 않는다.** 그 경로는 laptop3 전용이다. Kanu 쪽 실제 경로는 1.1절 표에 있다.
-- ✅ **`HIL_KANU_REPO`는 더 이상 "만들어야 하는 값"이 아니다.** 현재 wrapper 기본값은
-  `/home/junhyeong/gello_software_hil_current` symlink이며 clean schema-3 staging checkout을
-  가리킨다. 옛 `/home/junhyeong/gello_software_hil`은 현재 production 기본값이 아니다.
-- 🔴 **`/tmp`에 있는 것은 전부 잃어버릴 수 있다.** Kanu는 uptime 157일인데 `systemd-tmpfiles-clean.timer`가 **active**이고 규칙은 `D /tmp 1777 root root 30d`다(2026-07-29 확인). 과거 milestone worktree 두 개와 **재현 불가능한 venv 두 개**가 아직 `/tmp`에 있다. worktree는 commit이 origin에 있으니 안전하지만 venv는 git에 없다 — 1.1절과 1.2.1절에 재생성 명령이 있다.
+- ✅ **`HIL_KANU_REPO`는 그냥 두면 된다 — export할 이유가 없다.** `run_hil_server.sh`의 기본값이
+  이미 `/home/junhyeong/gello_software_hil_current` symlink다. 이 문서의 명령을 손으로 돌릴
+  때만 같은 값을 export한다(§1.1).
+  > **이전 판(보존):** *"옛 `/home/junhyeong/gello_software_hil`은 현재 production 기본값이
+  > 아니다."* 2026-07-31 기준으로는 "기본값이 아니다"가 아니라 **그 경로가 존재하지 않는다**.
+- 🔴 **`/tmp`에 있는 것은 전부 잃어버릴 수 있다.** Kanu는 uptime 159일인데
+  `systemd-tmpfiles-clean.timer`가 **active**이고 규칙은 `D /tmp 1777 root root 30d`다
+  (2026-07-29 확인, 2026-07-31 재확인). 여기서 **지금도 진짜 위험한 것은 재현 불가능한
+  venv 두 개뿐**이다 — git에 없다. 과거 milestone worktree 두 개는 2026-07-31에 제거됐다(§1.1.1).
+  > **이전 판(보존):** *"과거 milestone worktree 두 개와 재현 불가능한 venv 두 개가 아직
+  > `/tmp`에 있다. worktree는 commit이 origin에 있으니 안전하지만 venv는 git에 없다 —
+  > 1.1절과 1.2.1절에 재생성 명령이 있다."*
+  > ⚠️ **`1.2.1절`은 이 문서에 존재하지 않는다** (2026-07-31 확인 — §1.2 다음은 §1.3이다).
+  > venv 재생성 명령은 **어디에도 적혀 있지 않다.** 지금 필요하면 `pip freeze` 없이
+  > §1.1.1의 버전 목록으로부터 다시 만들어야 한다.
 - 🟢 **정본 classifier를 gRPC 경로에 물릴 수 있다 (2026-07-29 해소).** ~~`checkpoint_sha256()`이 `os.path.isfile()`을 강제해서 orbax 디렉터리인 정본을 pin할 수 없다~~는 더 이상 맞지 않는다. `checkpoint_sha256()`이 `ur_env.classifier_sidecar.directory_sha256()`에 위임한다 — 디렉터리는 재귀 해시(정렬된 POSIX relpath + 크기 + 내용)하고, **단일 파일은 예전과 완전히 같은 digest**를 내므로 기존 pin도 그대로 유효하다(`08_OPEN_GAPS.md` G19). ZMQ 뷰어 절차는 여전히 [REWARD_CLASSIFIER_LIVE_KO.md](./REWARD_CLASSIFIER_LIVE_KO.md)에 있다.
 - 🟢 **크롭 불일치도 같은 변경에서 닫혔다 — 재학습이 아니라 분리로.** ~~port 50053의 canonical observation이 크롭된 입력인데 classifier는 무크롭으로 학습됐다~~는 이제 사실이 아니다. **classifier는 그 크롭된 관측을 아예 보지 않는다.** actor가 자기 몫의 **무크롭 128×128 JPEG sidecar**를 관측 tensor map의 예약 키(`classifier`)에 얹어 약 2 Hz로, **팔이 정지해 있을 때만** 보내고, 서버는 라이브 뷰어와 같은 레시피로 그것을 푼다. `IMAGE_CROP`은 그대로다(cam1 `img[20:670, 340:990]`, cam2 `img[0:720, 420:1140]`) — 실측값이고 정책이 1차 소비자다.
   > **➡️ 실질적 결과: [REWARD_CLASSIFIER_THRESHOLD_KO.md](./REWARD_CLASSIFIER_THRESHOLD_KO.md)의 무크롭 스윕이 이 경로에 그대로 적용된다.** 재학습을 택했다면 그 수치가 전부 무효가 됐을 것이다. 이것이 분리를 택한 가장 큰 실익이다.
@@ -346,32 +379,86 @@ ssh kanu 'df -h ~/workspace'
 >
 > 🪤 **디스크가 96%다.** production checkpoint 하나가 약 305 MiB이고 pruning이 없으므로, 5,000-step 주기로 오래 돌릴 계획이면 시작 전에 `--checkpoint-reserve-gib`와 예상 checkpoint 수를 함께 계산한다(2절).
 >
-> 📌 **스냅샷 (2026-07-27, 재실행 필요):** `/home/junhyeong/miniconda3/envs/il/bin/python`에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개. 그날의 GPU dry-run/CTA smoke는 기존 dirty detached repository를 건드리지 않으려고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 만든 일회성 tree에서 수행했다. **그 tree는 `/tmp`이므로 지금 남아 있다고 가정하지 않는다. 그리고 그 우회는 더 이상 필요하지 않다** — 1.1절의 영속 checkout이 그 자리를 대신한다.
+> 📌 **스냅샷 (2026-07-27, 재실행 필요):** `/home/junhyeong/miniconda3/envs/il/bin/python`에서 JAX/JAXLIB 0.5.3, Flax 0.10.5, backend `gpu`, device 8개. 그날의 GPU dry-run/CTA smoke는 기존 dirty detached repository를 건드리지 않으려고 `/tmp/hil-feature-dryrun-BUJNWu`에 rsync/symlink로 만든 일회성 tree에서 수행했다. **그 tree는 `/tmp`이므로 지금 남아 있다고 가정하지 않는다. 그리고 그 우회는 더 이상 필요하지 않다** — §1.1의 HIL 독립 clone이 그 자리를 대신한다(*이전 판: "1.1절의 영속 checkout" — 그것은 은퇴한 worktree를 가리키던 표현이다*).
 
-### 1.1 Kanu 경로 — 2026-07-29 18:53 KST ssh 재확인
+### 1.1 Kanu 경로 — **목표 topology** (2026-07-31)
 
-`~`는 `/home/junhyeong`이다. 아래는 전부 그 시각에 직접 본 값이다.
+`~`는 `/home/junhyeong`이다.
+
+> ⚠️ **이 절은 2026-07-31에 진행 중인 정리의 *목표 상태*를 적는다.** ssh로 지금 보는 것과
+> 다를 수 있다 — 제거 대상이 아직 남아 있을 수 있고 다른 세션이 그것을 지우는 중이다.
+> **경로가 살아 있다는 것이 그 경로가 정본이라는 뜻은 아니다.**
+
+**규칙 하나: kanu는 스택마다 checkout 하나씩, 전부 합쳐 둘이다. 그 이상 만들지 않는다.**
 
 | 경로 | 정체 | 상태 |
 | --- | --- | --- |
-| **`~/gello_software_hil`** | **HIL-SERL run용 영속 checkout.** branch `feat/gello-ur7e-humble-22.04`, code baseline `18e3696` 포함, clean. exact HEAD는 `git rev-parse HEAD`로 확인. submodule `third_party/hil-serl` @ `c32939b` 초기화 완료 | ✅ **이것을 쓴다** |
-| `~/workspace/youngwoong/gello_software` | 위 worktree의 **주 저장소**(`.git` 1.1 GB object store를 공유한다). 현재 branch `rescue/kanu-worktree-20260729-014633` @ `7148f54` | ⛔ **동기화하지 않는다** — 아래 설명 |
+| **`~/gello_software_hil_current`** | **HIL 스택에서 사람이 타이핑하는 유일한 이름.** `~/gello_software_hil_schema3_stage_20260730`을 가리키는 symlink이고, `ros2_ur_ws/run_hil_server.sh`의 `HIL_KANU_REPO` 기본값으로 이미 박혀 있다 | ✅ **이것을 쓴다** |
+| `~/gello_software_hil_schema3_stage_20260730` | 위 symlink의 실체이자 **유일한 HIL checkout.** 진짜 **독립 clone**이다 — `.git`이 **디렉터리**(326 MB), alternates 없음, `origin` = GitHub `https://github.com/Bigenlight/gello_software.git`, branch `feat/gello-ur7e-humble-22.04`, submodule `third_party/hil-serl` @ `c32939b`. laptop3와 똑같이 `git pull --ff-only`로 **제자리 전진**시킨다 | ✅ 실체. 이 이름을 직접 타이핑할 일은 없다 |
+| `~/workspace/youngwoong/gello_software` | **FM/diffusion 레거시 스택**의 checkout. branch `rescue/kanu-worktree-20260729-014633` @ `7148f54`. docker image `gello-remote-policy:fm-070000-53e15d0` / `:fm-070000-41120b7`, `gello-remote-diffusion:dev`의 빌드 소스라 **남긴다** | ⛔ **HIL과 섞지 않는다** — 아래 설명 |
 | `~/workspace/youngwoong/gello_software_remote_classifier` | ZMQ 뷰어 checkout. `feat/remote-cube-classifier-viewer` @ `a2733ee`, clean. **Jul-24 폐기 checkpoint**도 여기 있다 | 확인됨 |
 | `~/workspace/youngwoong/hil-serl` | classifier 학습처. YWhero/hil-serl fork, branch `agent/cube-in-cup-classifier` @ `d753571` | 확인됨 |
 | `~/workspace/youngwoong/dataset/cube_in_cup_all3/` | 학습 데이터 + **Jul-27 정본 checkpoint** | 확인됨 |
 | `~/gello-rescue-backups/` | `gello_software-allrefs-*.bundle`(333 MB, 전 ref) + `dirty-20260729-014633/`(구 dirty 상태 원본 복사) | 확인됨 |
 | `/home/junhyeong/miniconda3/envs/il/bin/python` | 공유 conda base Python (3.10.20) | 확인됨 |
-| `/tmp/gello-hil-rl-receive-server-v2` | RLPD receive server를 실제로 돌리던 worktree @ `5fb716b` | 🔴 `/tmp`. 아래 1.1.1 |
-| `/tmp/gello-hil-grpc-server` | gRPC actor smoke worktree @ `5709bb5` | 🔴 `/tmp`. 아래 1.1.1 |
 | `/home/laptop3/gello_software` | — | **Kanu에 없음.** laptop3 전용 경로다 |
 
+`HIL_KANU_REPO`는 **export하지 않아도 된다** — 위 symlink가 이미 `run_hil_server.sh`의
+기본값이다. 이 문서의 Kanu 명령을 손으로 돌릴 때만 같은 값을 export한다.
+
 ```bash
-export HIL_KANU_REPO=/home/junhyeong/gello_software_hil
+export HIL_KANU_REPO=/home/junhyeong/gello_software_hil_current
 ```
 
-**왜 주 저장소를 최신으로 맞추지 않는가.** `~/workspace/youngwoong/gello_software`는 2026-07-29 새벽까지 dirty + detached였고, 그 상태를 잃지 않도록 branch `rescue/kanu-worktree-20260729-014633`(`7148f54`)로 구조했다. 그 checkout은 **의도적으로 `feat/remote-gpu-server` 계열에 남아 있다** — 이 서버의 `gello-remote-policy:fm-070000-*` docker image가 그 tree에서 빌드됐기 때문이다(2026-07-29 `docker images`로 `fm-070000-53e15d0` / `fm-070000-41120b7` 확인). **그 checkout을 통합 브랜치로 checkout/pull/reset하지 마라.** HIL 작업은 전부 새 worktree에서 한다. 두 checkout은 object store만 공유하고 working tree는 완전히 분리돼 있다.
+> **이전 판(보존):** *`export HIL_KANU_REPO=/home/junhyeong/gello_software_hil`* — 그 경로는
+> 2026-07-31에 제거됐다. shell history에서 그 줄을 찾더라도 다시 실행하지 마라.
 
-> ℹ️ `git worktree`이므로 `~/gello_software_hil/.git`은 디렉터리가 아니라 `gitdir: …/gello_software/.git/worktrees/gello_software_hil` 한 줄짜리 파일이다. 정상이다. `.git`이 파일이라고 clone이 깨졌다고 판단하지 마라.
+🗑️ **2026-07-31에 제거된 것 — 다시 만들지 않는다.**
+
+| 제거된 경로 | 정체 | 왜 |
+| --- | --- | --- |
+| `~/gello_software_hil` | **clone이 아니었다.** 레거시 checkout에 딸린 **linked worktree**이고 `.git`은 94 바이트짜리 gitfile이었다 | HIL checkout 이중화의 뿌리 — 아래 🪤 |
+| `/tmp/gello-hil-rl-receive-server-v2` | worktree @ `5fb716b`. RLPD receive server를 실제로 돌리던 tree | milestone 기록이고 commit은 GitHub에 있다 |
+| `/tmp/gello-hil-grpc-server` | worktree @ `5709bb5`. gRPC actor smoke tree | 같은 이유 |
+
+> ### 🪤 왜 checkout을 하나로 줄였나 — 실제로 있었던 일 (2026-07-30~31)
+>
+> kanu의 HIL checkout은 `origin`이 GitHub이 아니라 **로컬 경로
+> `/home/junhyeong/gello_software_hil`**(= 위의 그 worktree)을 가리키고 있었다. 결과:
+>
+> - `git fetch origin`이 **rc=0으로 성공하면서 아무것도 가져오지 않았다.** 원격이 로컬 경로라
+>   GitHub의 새 commit은 애초에 시야에 없었다.
+> - 그래서 **kanu가 laptop3보다 하루치를 조용히 뒤처진 채** 모든 점검이 healthy로 보였다.
+> - 그 stale `FETCH_HEAD`에 대고 diff를 뜨면 **삭제 2,349줄**이 나왔다 — 거기에 reset했다면
+>   **살아 있는 learner의 checkout에서 operator-session 기능 전체가 되돌아갔을 것이다.**
+>
+> **구조적 결함은 세 가지가 겹친 것이다:** checkout이 둘 이상 있었고, 그중 하나가 GitHub이
+> 아니라 **다른 checkout에 물려 있었고**, kanu HEAD를 laptop3와 비교하는 것이 아무것도
+> 없었다. 그래서 지금은 (a) HIL checkout이 **하나**, (b) 그것이 **GitHub에 직접 물린 독립
+> clone**, (c) 이름은 **symlink 하나**다.
+
+> ### 🔄 이전 판의 `.git` 주의사항은 이제 **정확히 반대**다
+>
+> **이전 판(보존):** *"ℹ️ `git worktree`이므로 `~/gello_software_hil/.git`은 디렉터리가 아니라
+> `gitdir: …/gello_software/.git/worktrees/gello_software_hil` 한 줄짜리 파일이다. 정상이다.
+> `.git`이 파일이라고 clone이 깨졌다고 판단하지 마라."*
+>
+> 그 문장은 **은퇴한 worktree에만** 해당했다. 현재 checkout에 그대로 적용하면 사람을 잘못
+> 인도한다 — **지금 정본의 `.git`은 디렉터리여야 한다.** `.git`이 파일로 보이면 그건 정상이
+> 아니라 **"또 worktree를 만들었다"는 신호**다.
+>
+> ```bash
+> ssh kanu 'ls -ld /home/junhyeong/gello_software_hil_current/.git'        # d 로 시작해야 한다
+> ssh kanu 'git -C /home/junhyeong/gello_software_hil_current remote -v'   # github.com 이어야 한다
+> ssh kanu 'cat /home/junhyeong/gello_software_hil_current/.git/objects/info/alternates 2>/dev/null \
+>   || echo "alternates 없음 (정상)"'
+> ```
+
+**왜 레거시 checkout은 남기나.** `~/workspace/youngwoong/gello_software`는 2026-07-29 새벽까지 dirty + detached였고, 그 상태를 잃지 않도록 branch `rescue/kanu-worktree-20260729-014633`(`7148f54`)로 구조했다. 그 checkout은 **의도적으로 `feat/remote-gpu-server` 계열에 남아 있다** — 이 서버의 `gello-remote-policy:fm-070000-*` docker image가 그 tree에서 빌드됐기 때문이다(2026-07-29 확인, 2026-07-31 `docker images`로 `fm-070000-53e15d0` / `fm-070000-41120b7` / `gello-remote-diffusion:dev` 재확인). **그 checkout을 통합 브랜치로 checkout/pull/reset하지 마라.** 그것은 루트 `CLAUDE.md` §E의 모방학습(ACT/Diffusion/FM) 스택이고 **HIL과 코드가 다르다 — 섞지 않는다.**
+
+> **이전 판(보존):** *"HIL 작업은 전부 새 worktree에서 한다. 두 checkout은 object store만
+> 공유하고 working tree는 완전히 분리돼 있다."* 이제 **공유하는 object store가 없다** — HIL
+> checkout은 자기 `.git`(326 MB)을 가진 독립 clone이고, 두 스택은 GitHub을 통해서만 만난다.
 
 run 직전 상태 확인:
 
@@ -389,9 +476,7 @@ cd "$HIL_KANU_REPO"
 git submodule update --init --recursive third_party/hil-serl
 ```
 
-**브랜치 tip 동기화.** 2026-07-29 18:53에는 laptop3, origin, 이 checkout이 모두
-`18e3696`이었다. 이 기록을 현재 사실로 간주하지 말고 run 직전에 fetch/fast-forward한 뒤
-양쪽 exact HEAD를 다시 비교한다.
+**브랜치 tip 동기화 — laptop3와 똑같이 `--ff-only`로 제자리 전진.**
 
 ```bash
 cd "$HIL_KANU_REPO"
@@ -400,22 +485,57 @@ git pull --ff-only origin feat/gello-ur7e-humble-22.04
 git submodule update --init --recursive third_party/hil-serl
 ```
 
-#### 1.1.1 🔴 `/tmp` 위험 — 지금 조치할 것
+🪤 **`git fetch`의 rc=0만 보고 "최신"이라고 판정하지 마라.** 위 🪤가 정확히 그 함정이었다.
+fetch가 무엇을 상대로 돌았는지와 실제로 무엇이 왔는지를 같이 본다.
 
-Kanu는 **uptime 157일**이고 `systemd-tmpfiles-clean.timer`가 **active**다(2026-07-29 확인, 다음 실행 매일 13:29 UTC). 규칙은 `/usr/lib/tmpfiles.d/tmp.conf:11`의 `D /tmp 1777 root root 30d`다 — **30일간 접근되지 않은 `/tmp` 항목은 지워진다.**
+```bash
+# 이 checkout이 정말 GitHub을 보고 있는가
+ssh kanu 'git -C /home/junhyeong/gello_software_hil_current config --get remote.origin.url'
+
+# origin tip 대비 뒤/앞 (0 0 이어야 한다)
+ssh kanu 'git -C /home/junhyeong/gello_software_hil_current rev-list --left-right --count \
+  origin/feat/gello-ur7e-humble-22.04...HEAD'
+
+# laptop3와 직접 대조
+cd /home/laptop3/gello_software && git rev-parse HEAD
+ssh kanu 'git -C /home/junhyeong/gello_software_hil_current rev-parse HEAD'
+```
+
+> 📌 **2026-07-31 스냅샷(재실행 필요):** kanu는 `0640c127` = `origin/feat/gello-ur7e-humble-22.04`
+> tip(뒤/앞 `0 0`)이었고, 그 commit은 laptop3 HEAD의 **조상**이었다 — laptop3에 아직 push하지
+> 않은 commit이 있다는 뜻이다. **이 상태는 정상이다.** 병적인 상태는 그 반대, 즉 kanu가
+> GitHub tip보다 뒤처지는 것이다.
+
+#### 1.1.1 🔴 `/tmp` 위험 — 이제 남은 것은 **venv 두 개뿐**이다
+
+Kanu는 **uptime 159일**이고 `systemd-tmpfiles-clean.timer`가 **active**다(2026-07-29 확인,
+2026-07-31 재확인. 다음 실행 매일 13:29 UTC). 규칙은 `/usr/lib/tmpfiles.d/tmp.conf:11`의
+`D /tmp 1777 root root 30d`다 — **30일간 접근되지 않은 `/tmp` 항목은 지워진다.**
 
 | `/tmp` 항목 | 정체 | 잃으면? |
 | --- | --- | --- |
-| `/tmp/gello-hil-rl-receive-server-v2` | worktree @ `5fb716b`. **RLPD receive server를 실제로 돌리던 tree** | 안전 — commit이 origin에 있고 `~/gello_software_hil`이 상위집합이다 |
-| `/tmp/gello-hil-grpc-server` | worktree @ `5709bb5` (gRPC actor smoke) | 안전 — 같은 이유 |
 | `/tmp/gello-hil-rl-receive-overlay-v2` | 33 MB. conda `il` 위의 `--system-site-packages` overlay venv. agentlace 0.1.3 / lz4 4.3.3 / protobuf 3.20.3 | 🔴 **git에 없다. 진짜 손실이다** |
 | `/tmp/gello-hil-grpc-venv` | 108 MB. system `python3.12` plain venv. grpcio 1.74.0 / numpy 1.26.4 / protobuf 3.20.3 | 🔴 **git에 없다. 진짜 손실이다** |
 
-worktree 두 개는 `~/gello_software_hil`이 대체하므로 새로 만들 필요가 없다. **venv 두 개는 재현 명령이 1.2.1절에 있다.** 지금 영속 경로로 다시 만들어 두는 것을 권장한다.
+📌 **worktree 두 행은 이제 역사다.** `/tmp/gello-hil-rl-receive-server-v2`(@ `5fb716b`)와
+`/tmp/gello-hil-grpc-server`(@ `5709bb5`)는 **2026-07-31에 제거됐다**(§1.1의 제거 표).
+둘 다 레거시 checkout에 등록된 linked worktree였고, commit은 GitHub에 있으므로 잃은 것은 없다.
+
+> **이전 판(보존):**
+> *"| `/tmp/gello-hil-rl-receive-server-v2` | worktree @ `5fb716b`. **RLPD receive server를
+> 실제로 돌리던 tree** | 안전 — commit이 origin에 있고 `~/gello_software_hil`이 상위집합이다 |*
+> *| `/tmp/gello-hil-grpc-server` | worktree @ `5709bb5` (gRPC actor smoke) | 안전 — 같은 이유 |"*
+> 그리고 *"worktree 두 개는 `~/gello_software_hil`이 대체하므로 새로 만들 필요가 없다."*
+> — 대체자였던 `~/gello_software_hil`도 같은 날 제거됐다. **지금의 대체자는 §1.1의 독립
+> clone이다.**
+
+⚠️ **venv 두 개의 "재현 명령이 1.2.1절에 있다"는 이전 판의 문장은 거짓이었다 — 이 문서에
+`1.2.1`이라는 절은 존재하지 않는다**(2026-07-31 확인. §1.2 다음은 §1.3이다). 재현이 필요하면
+위 표의 패키지·버전 목록과 `requirements-grpc.lock`에서 직접 다시 만든다.
 
 ```bash
-# 지금 남아 있는지 확인
-ssh kanu 'ls -d /tmp/gello-hil-* 2>/dev/null || echo "/tmp 항목 없음 — 1.2.1로"'
+# 지금 남아 있는지 확인 (worktree 두 개는 없는 것이 정상이다)
+ssh kanu 'ls -d /tmp/gello-hil-* 2>/dev/null || echo "/tmp 항목 없음"'
 ```
 
 > 🪤 test suite는 **녹색인지가 아니라 passed 개수**로 판단한다. `PYTHONPATH`에서
@@ -1013,7 +1133,12 @@ ssh -N -T -o ExitOnForwardFailure=yes \
 
 server에 `rlpd_learner_server_ready`가 출력된 뒤 laptop의 검증할 commit checkout에서 fake actor를 실행한다. 이 script는 robot env를 열지 않고 canonical raw observation을 gRPC로 보내는 acceptance tool이다. synthetic-only model ID `hil-serl-hybrid-sac-resnet10-trunk-cache-synthetic-e2e-v1`, observation schema, reward authority/model을 inference 전에 pin한다.
 
-이 script는 `rclpy`나 카메라를 열지 않으므로 ROS overlay 없이 gRPC 클라이언트 환경만 있으면 된다. 시스템 `python3`(grpcio 1.30.2)로 실행하지 않는다 — `/tmp/gello-hil-grpc-venv`(grpcio 1.74.0 / numpy 1.26.4 / protobuf 3.20.3, `requirements-grpc.lock`과 일치, 2026-07-29 확인)나 `/home/laptop3/venvs/gello-hil-actor/bin/python`을 쓴다.
+이 script는 `rclpy`나 카메라를 열지 않으므로 ROS overlay 없이 gRPC 클라이언트 환경만 있으면 된다. 시스템 `python3`(grpcio 1.30.2)로 실행하지 않는다 — **laptop3에서는 `/home/laptop3/venvs/gello-hil-actor/bin/python`을 쓴다.**
+
+> 🪤 **호스트 혼동 정정 (2026-07-31).** 이전 판은 여기서 `/tmp/gello-hil-grpc-venv`(grpcio
+> 1.74.0 / numpy 1.26.4 / protobuf 3.20.3, `requirements-grpc.lock`과 일치, 2026-07-29 확인)를
+> 먼저 제시했다. **그 venv는 Kanu의 `/tmp` 항목이고(§1.1.1) laptop3에는 존재하지 않는다**
+> (2026-07-31 `ls` 확인). 이 절은 laptop3에서 실행하므로 actor venv가 유일하게 맞는 값이다.
 
 ```bash
 export HIL_LAPTOP_REPO=/home/laptop3/gello_software   # laptop3 전용 경로. Kanu에는 없다
@@ -1021,7 +1146,7 @@ export HIL_SYNTH_RUN_ID=THE_EXACT_SAME_SYNTH_E2E_RUN_ID_USED_ON_KANU
 
 cd "$HIL_LAPTOP_REPO"
 PYTHONPATH="$HIL_LAPTOP_REPO/serl_ur_infra" \
-/tmp/gello-hil-grpc-venv/bin/python serl_ur_infra/scripts/run_fake_e2e_actor.py \
+/home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/run_fake_e2e_actor.py \
   --target 127.0.0.1:50053 \
   --actor-id fake-e2e-actor \
   --run-id "$HIL_SYNTH_RUN_ID-fresh" \

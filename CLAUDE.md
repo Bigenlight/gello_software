@@ -66,6 +66,34 @@ learner step 158은
 checkpoint가 없고 의미 없는 시험값이라는 사용자 판단에 따라 폐기했다. offline demo pickle은
 그대로 보존했다. PID와 run root는 스냅샷이므로 매번 `./run_hil_server.sh --check`로 읽는다.
 
+**Kanu repo 배치 (2026-07-31 정리) — 스택당 checkout 하나씩, 그게 전부다.**
+
+| 경로 | 용도 |
+| --- | --- |
+| `gello_software_hil_current` → `gello_software_hil_schema3_stage_20260730` | **HIL 유일 checkout.** 자립 clone(`.git`이 **디렉터리**), GitHub origin, `git pull --ff-only`로 전진 |
+| `workspace/youngwoong/gello_software` | FM/diffusion 배포 소스(도커 `gello-remote-policy:fm-070000-…`). **다른 스택 — 섞지 말 것**(§E) |
+
+심링크가 `HIL_KANU_REPO`의 기본값이고 스크립트가 `readlink -f`로 실경로를 쓰므로 그것만 타이핑한다.
+🗑️ `~/gello_software_hil`(worktree였다)과 `/tmp` worktree 2개는 은퇴했다.
+
+🪤 **왜 정리했나 — 조용히 틀리는 종류의 사고였다.** staging checkout의 `origin`이 GitHub이 아니라
+**로컬 경로**를 가리켜, `git fetch origin`이 **rc=0으로 성공하고 아무것도 안 가져왔다.** 그래서
+kanu가 하루치 뒤처진 채 모든 점검이 healthy로 보였고, 그 stale `FETCH_HEAD`로 reset했으면
+operator-session 기능 전체가 롤백됐을 것이다(diff 2,349줄 삭제로 발각). 구조적 결함은 셋이었다 —
+checkout이 여럿, 하나가 GitHub이 아니라 **다른 checkout에 사슬로 물림**, 그리고 **kanu HEAD와
+laptop3 HEAD를 비교하는 코드가 어디에도 없었다.**
+
+✅ **그래서 `run_hil_server.sh`에 가드가 생겼다.** GitHub을 조회하는 대신 **ssh 채널로 laptop3↔kanu
+HEAD를 직접 비교한다** — 사고가 "kanu가 laptop3에서 갈라진 것"이고 ssh는 이미 그 둘을 잇고 있으므로
+**네트워크 없이 성립한다.** 함께: `--git-dir == --git-common-dir`(worktree 사슬 금지) + origin URL이
+canonical GitHub인지. 실패 동작은 **의도적으로 갈랐다** — 새 lineage 시작은 `remote_die`,
+**기존 learner 재사용과 `--check`는 큰 배너 후 진행**한다(재사용까지 막으면 살아 있는 learner 밑에서
+checkout을 올리거나 lineage 중간에 laptop3 개발을 얼려야 한다. 재사용의 교차버전 안전성은
+schema-hash/model-id/process-contract가 이미 본다. **고칠 결함은 불일치가 아니라 침묵이었다**).
+탈출구 `HIL_ACCEPT_HEAD_MISMATCH=1`. GitHub tip 조회는 부가 진단이고 실패해도 치명적이지 않다.
+⚠️ **한계: HEAD만 본다.** laptop3 작업 트리는 상시 dirty라(07-30 저녁 배치 전체가 uncommitted로 돌았다)
+설계상 범위 밖이다.
+
 ## 2026-07-30 저녁 — 조작자 경로 4건 (**실기 미검증**)
 
 아래 넷은 **아직 커밋 전**이고 **실기에서 한 번도 돌지 않았다.** 오프라인 단위 테스트만

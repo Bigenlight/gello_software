@@ -42,6 +42,9 @@
 #   HIL_KANU_REPO            default /home/junhyeong/gello_software_hil_current
 #   HIL_KANU_PYTHON          default /home/junhyeong/miniconda3/envs/il/bin/python
 #   ACTOR_VENV               default /home/laptop3/venvs/gello-hil-actor
+#   HIL_ACCEPT_HEAD_MISMATCH default 0; 1 downgrades the fresh-lineage refusal
+#                            on a Kanu/laptop3 HEAD mismatch to a warning
+#                            (offline emergency only -- see "code identity")
 #
 # The artifact pins, feature-ring sizes, RAM reserve, reward contract and
 # learner options below are the production command from
@@ -176,6 +179,36 @@ if [[ "$MODE" == "start" ]] && ! local_port_is_free; then
     die "local port $LOCAL_PORT is occupied; no remote learner operation was attempted"
 fi
 
+# ---------------------------------------------------------------------------
+# Cross-host code identity.
+#
+# The defect this exists for: Kanu's HIL checkout had `origin` pointing at a
+# LOCAL PATH instead of GitHub.  `git fetch origin` there returned rc=0 and
+# fetched nothing, so Kanu sat a full day behind laptop3 while every existing
+# check still passed.  Nothing in the stack ever compared Kanu's HEAD to
+# laptop3's, so the staleness was invisible until someone nearly reset the live
+# learner's checkout to that stale FETCH_HEAD.
+#
+# The fix compares the two hosts DIRECTLY over the ssh channel that already
+# connects them, rather than asking GitHub whether either one is current.  The
+# failure mode was Kanu diverging from laptop3, so laptop3 is the reference and
+# network reachability becomes irrelevant to the guard.  The GitHub tip is only
+# a best-effort third opinion (remote-side diagnose_github_tip).
+#
+# ACCEPTED LIMITATION, stated so nobody oversells it: this compares committed
+# HEADs only.  laptop3's working tree is routinely dirty -- the entire
+# 2026-07-30 evening operator batch ran uncommitted -- so "HEADs match" does NOT
+# mean Kanu holds the exact bytes the actor is executing.  Shipping the working
+# tree is out of scope by design.
+LAPTOP_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+LAPTOP_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [[ ! "$LAPTOP_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+    LAPTOP_HEAD="unknown"
+    echo "WARNING: cannot read laptop3 HEAD from $REPO_ROOT; the Kanu/laptop3 code identity check will report relation=laptop_head_unknown." >&2
+fi
+[[ -n "$LAPTOP_BRANCH" ]] || LAPTOP_BRANCH="unknown"
+ACCEPT_HEAD_MISMATCH="${HIL_ACCEPT_HEAD_MISMATCH:-0}"
+
 SSH_OPTIONS=(
     -o BatchMode=yes
     -o ConnectTimeout=10
@@ -191,7 +224,8 @@ REMOTE_OUTPUT="$(
     ssh "${SSH_OPTIONS[@]}" "$SSH_HOST" bash -s -- \
         "$MODE" "$NEW_LINEAGE" "$GPU_INDEX" "$RUN_ID" \
         "$START_TIMEOUT_S" "$KANU_REPO" "$KANU_PYTHON" \
-        "$REMOTE_PORT" "$REMOTE_RUN_BASE" <<'REMOTE_SCRIPT'
+        "$REMOTE_PORT" "$REMOTE_RUN_BASE" \
+        "$LAPTOP_HEAD" "$LAPTOP_BRANCH" "$ACCEPT_HEAD_MISMATCH" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 MODE="$1"
@@ -205,6 +239,11 @@ KANU_REPO="$(readlink -f "$6")"
 KANU_PYTHON="$7"
 REMOTE_PORT="$8"
 REMOTE_RUN_BASE="$9"
+# laptop3's committed code identity, measured on the laptop and carried over the
+# same ssh channel; see the laptop-side "Cross-host code identity" comment.
+LAPTOP_HEAD="${10}"
+LAPTOP_BRANCH="${11}"
+ACCEPT_HEAD_MISMATCH="${12}"
 
 CLASSIFIER="/home/junhyeong/workspace/youngwoong/dataset/cube_in_cup_all3/classifier_ckpt/checkpoint_150"
 CLASSIFIER_SHA256="512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
@@ -228,6 +267,30 @@ validate_static_contract() {
     [[ -x "$KANU_PYTHON" ]] || remote_die "Kanu Python is missing: $KANU_PYTHON"
     [[ -f "$KANU_REPO/serl_ur_infra/scripts/run_rlpd_learner_server.py" ]] || \
         remote_die "learner entrypoint is missing from $KANU_REPO"
+
+    # --- repository topology (network-free) ---------------------------------
+    # A linked git worktree chains its object store and its refs to ANOTHER
+    # local checkout, so what this repo reports can be advanced or rewound by
+    # work done elsewhere on Kanu that nothing here can see.  That is exactly
+    # the defect class this guard exists to eliminate, so refuse the shape
+    # rather than try to audit the checkout it is chained to.
+    local git_dir git_common_dir origin_url origin_pattern
+    git_dir="$(git -C "$KANU_REPO" rev-parse --git-dir 2>/dev/null)" || \
+        remote_die "Kanu checkout is not a git repository: $KANU_REPO"
+    git_common_dir="$(git -C "$KANU_REPO" rev-parse --git-common-dir 2>/dev/null)" || \
+        remote_die "Kanu checkout is not a git repository: $KANU_REPO"
+    [[ "$git_dir" == "$git_common_dir" ]] || \
+        remote_die "Kanu checkout is a linked git worktree chained to another local checkout (git-dir=$git_dir, git-common-dir=$git_common_dir): $KANU_REPO"
+
+    # `origin` pointing at a LOCAL PATH is the precise 2026-07-30 defect: fetch
+    # returned rc=0, transferred nothing, and left this checkout a full day
+    # stale while looking healthy.  Pin origin to the canonical GitHub remote so
+    # a silent no-op fetch cannot happen again.
+    origin_url="$(git -C "$KANU_REPO" remote get-url origin 2>/dev/null || true)"
+    origin_pattern='^(https://|ssh://git@|git@)github\.com[:/]Bigenlight/gello_software(\.git)?$'
+    [[ "$origin_url" =~ $origin_pattern ]] || \
+        remote_die "Kanu 'origin' is not the canonical GitHub remote (got: ${origin_url:-<none>}); a local-path origin makes 'git fetch origin' a silent no-op"
+
     git -C "$KANU_REPO" merge-base --is-ancestor ca19652 HEAD || \
         remote_die "Kanu checkout does not contain required learner baseline ca19652"
 
@@ -270,6 +333,127 @@ PY
     )"
     [[ "$defaults" == $'0.5\n1\nfullframe-jpeg-passthrough-v1' ]] || \
         remote_die "remote reward defaults no longer match the pinned production contract: $defaults"
+}
+
+# ---------------------------------------------------------------------------
+# Cross-host code identity.  HEAD_RELATION is one of:
+#   match | kanu_behind | kanu_ahead | diverged | kanu_never_fetched |
+#   laptop_head_unknown | unchecked
+# It is only ever FATAL at the fresh-lineage gate further down; every other
+# caller (reuse, --check) gets the banner and proceeds.  See that gate for the
+# rationale of the split.
+# ---------------------------------------------------------------------------
+HEAD_RELATION="unchecked"
+KANU_HEAD=""
+KANU_BRANCH=""
+
+# Best-effort third opinion, never fatal.  This deliberately uses ls-remote and
+# NEVER `git fetch`: fetch writes refs into the very checkout being audited and
+# can block indefinitely on an unreachable remote.  ls-remote only reads, and is
+# bounded by `timeout`.
+diagnose_github_tip() {
+    local ref line github_head
+    if [[ "$LAPTOP_BRANCH" == "unknown" || "$LAPTOP_BRANCH" == "HEAD" ]]; then
+        echo "GitHub tip UNVERIFIED: laptop3 is not on a named branch, so there is nothing to look up. The laptop3<->Kanu comparison above is authoritative." >&2
+        return 0
+    fi
+    ref="refs/heads/$LAPTOP_BRANCH"
+    if ! line="$(timeout 8 git -C "$KANU_REPO" ls-remote origin "$ref" 2>/dev/null)"; then
+        echo "GitHub tip UNVERIFIED: 'git ls-remote origin $ref' failed or timed out from Kanu (no fetch was attempted). The laptop3<->Kanu comparison above is authoritative." >&2
+        return 0
+    fi
+    github_head="${line%%[[:space:]]*}"
+    if [[ -z "$github_head" ]]; then
+        echo "GitHub has no $ref: neither laptop3 nor Kanu has pushed this branch. The laptop3<->Kanu comparison above is authoritative." >&2
+        return 0
+    fi
+    echo "HIL_SERVER_GITHUB_TIP=branch=$LAPTOP_BRANCH head=$github_head"
+    {
+        if [[ "$github_head" == "$LAPTOP_HEAD" && "$github_head" == "$KANU_HEAD" ]]; then
+            echo "Three-way: laptop3, Kanu and GitHub $ref all agree ($github_head)."
+        elif [[ "$LAPTOP_HEAD" == "$KANU_HEAD" ]]; then
+            echo "Three-way: laptop3 and Kanu agree ($LAPTOP_HEAD) but GitHub $ref is $github_head -- the agreeing pair is UNPUSHED (or GitHub carries work neither host has)."
+        elif [[ "$github_head" == "$LAPTOP_HEAD" ]]; then
+            echo "Three-way: laptop3 matches GitHub $ref; KANU is the stale one."
+        elif [[ "$github_head" == "$KANU_HEAD" ]]; then
+            echo "Three-way: Kanu matches GitHub $ref; LAPTOP3 is the odd one out (unpushed local commits, or laptop3 is behind)."
+        else
+            echo "Three-way: laptop3, Kanu and GitHub $ref are ALL different."
+        fi
+    } >&2
+}
+
+compare_heads() {
+    # A missing or non-git KANU_REPO is reported far more precisely by
+    # validate_static_contract, which runs immediately after this.  Stay silent
+    # rather than pre-empt it with a raw git error.
+    [[ -d "$KANU_REPO" ]] || return 0
+    git -C "$KANU_REPO" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    KANU_HEAD="$(git -C "$KANU_REPO" rev-parse HEAD 2>/dev/null || true)"
+    KANU_BRANCH="$(git -C "$KANU_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [[ -n "$KANU_HEAD" ]] || return 0
+
+    if [[ ! "$LAPTOP_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+        HEAD_RELATION="laptop_head_unknown"
+    elif [[ "$LAPTOP_HEAD" == "$KANU_HEAD" ]]; then
+        HEAD_RELATION="match"
+    elif ! git -C "$KANU_REPO" cat-file -e "$LAPTOP_HEAD" 2>/dev/null; then
+        # Kanu's object store has never even seen laptop3's commit.  This is the
+        # signature of the incident: a fetch that reports success while
+        # transferring nothing.
+        HEAD_RELATION="kanu_never_fetched"
+    elif git -C "$KANU_REPO" merge-base --is-ancestor "$KANU_HEAD" "$LAPTOP_HEAD" 2>/dev/null; then
+        HEAD_RELATION="kanu_behind"
+    elif git -C "$KANU_REPO" merge-base --is-ancestor "$LAPTOP_HEAD" "$KANU_HEAD" 2>/dev/null; then
+        HEAD_RELATION="kanu_ahead"
+    else
+        HEAD_RELATION="diverged"
+    fi
+
+    if [[ "$HEAD_RELATION" == "match" ]]; then
+        echo "HIL_SERVER_HEAD_MATCH=laptop=$LAPTOP_HEAD kanu=$KANU_HEAD relation=match"
+        diagnose_github_tip
+        return 0
+    fi
+
+    echo "HIL_SERVER_HEAD_MISMATCH=laptop=$LAPTOP_HEAD kanu=$KANU_HEAD relation=$HEAD_RELATION"
+    {
+        echo "=================================================================="
+        echo "  !!  KANU / LAPTOP3 CODE IDENTITY MISMATCH  !!"
+        echo "=================================================================="
+        echo "  laptop3 : $LAPTOP_HEAD  (${LAPTOP_BRANCH})"
+        echo "  kanu    : $KANU_HEAD  (${KANU_BRANCH:-unknown})"
+        echo "  kanu repo: $KANU_REPO"
+        echo "  relation: $HEAD_RELATION"
+        echo "------------------------------------------------------------------"
+        case "$HEAD_RELATION" in
+            kanu_never_fetched)
+                echo "  Kanu's object store does not contain laptop3's commit AT ALL."
+                echo "  That is the signature of a fetch that reported success and"
+                echo "  transferred nothing (for example an 'origin' that points at a"
+                echo "  local path).  Kanu has never seen this work."
+                ;;
+            kanu_behind)
+                echo "  Kanu is BEHIND laptop3: it has the commit but has not checked"
+                echo "  it out.  The learner is running older code than the actor."
+                ;;
+            kanu_ahead)
+                echo "  Kanu is AHEAD of laptop3: laptop3 is running older code than"
+                echo "  the learner, or laptop3 was rewound."
+                ;;
+            diverged)
+                echo "  The checkouts have DIVERGED: neither HEAD contains the other."
+                ;;
+            laptop_head_unknown)
+                echo "  laptop3's HEAD could not be read, so no comparison was made."
+                ;;
+        esac
+        echo "------------------------------------------------------------------"
+        echo "  This is a REPORT, not a repair.  Nothing here fetches, checks"
+        echo "  out, merges or resets either side.  Align them by hand."
+        echo "=================================================================="
+    } >&2
+    diagnose_github_tip
 }
 
 list_learner_pids() {
@@ -603,6 +787,16 @@ inspect_existing() {
     return 3
 }
 
+# compare_heads runs BEFORE validate_static_contract even though the spec for
+# this feature said "right after", and the deviation is deliberate: the
+# comparison is never fatal at this point (the only fatal use is the
+# fresh-lineage gate below), while a checkout wrong enough to fail the static
+# contract -- missing learner entrypoint, missing baseline commit ca19652 -- is
+# usually wrong precisely BECAUSE it is a different lineage.  Reporting the HEAD
+# relation first turns "learner entrypoint is missing" into "...and here is why".
+# Nothing is weakened: validate_static_contract runs immediately after with
+# every one of its checks intact and still aborts the run on failure.
+compare_heads
 validate_static_contract
 
 if [[ "$MODE" == "check" ]]; then
@@ -680,6 +874,27 @@ if [[ "$existing_status" -eq 3 ]]; then
     remote_die "existing learner PID $initializing_pid exited during initialization"
 fi
 [[ "$existing_status" -eq 2 ]] || remote_die "unexpected learner inspection status $existing_status"
+
+# A fresh lineage is permanent: every transition it will ever learn from is
+# produced by the actor running laptop3's code, and a lineage born from a
+# different Kanu commit cannot be repaired afterwards.  This is therefore the
+# one place where a HEAD mismatch is fatal.
+#
+# Reuse and --check deliberately do NOT die on a mismatch.  Hard-failing reuse
+# would force one of two worse outcomes: advancing Kanu's checkout underneath a
+# live learner -- which imports modules lazily, so it would then be running a
+# mixture of two versions -- or freezing laptop3 development until the lineage
+# ends.  Cross-version safety for an already-running learner is already enforced
+# by the observation-schema hash, the policy/reward model IDs and
+# validate_process_contract.  The defect being cured here is the SILENCE, not
+# the mismatch itself.
+if [[ "$HEAD_RELATION" != "match" ]]; then
+    if [[ "$ACCEPT_HEAD_MISMATCH" == "1" ]]; then
+        echo "HIL_ACCEPT_HEAD_MISMATCH=1: starting a fresh lineage despite code identity relation '$HEAD_RELATION'." >&2
+    else
+        remote_die "refusing to start a fresh lineage while Kanu and laptop3 are not on the same commit (relation=$HEAD_RELATION, laptop=$LAPTOP_HEAD, kanu=${KANU_HEAD:-unknown}); align the checkouts, or set HIL_ACCEPT_HEAD_MISMATCH=1 to accept it deliberately"
+    fi
+fi
 
 dirty_checkout="$(git -C "$KANU_REPO" status --porcelain --untracked-files=normal)"
 [[ -z "$dirty_checkout" ]] || \
