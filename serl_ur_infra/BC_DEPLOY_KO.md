@@ -1,8 +1,12 @@
 # BC 정책 실기 평가 런북 (조작자용, 한국어)
 
-> **상태: 실기 미검증.** 이 문서는 BC 평가 세션을 **처음** 돌리기 위한 절차다.
-> 아래 명령은 전부 복사해서 그대로 붙여넣을 수 있다. 한 단계씩 하고, 각 단계의
-> **「성공 표식」을 눈으로 확인한 뒤에만** 다음으로 넘어간다.
+> **상태: 실기 검증 완료 (2026-07-31 밤 ~ 08-02).** 이 절차 그대로 production HIL actor
+> 파이프라인으로 실제 BC 평가가 실기 UR7e에서 돌았다. 아래 명령은 전부 복사해서 그대로
+> 붙여넣을 수 있다. 한 단계씩 하고, 각 단계의 **「성공 표식」을 눈으로 확인한 뒤에만**
+> 다음으로 넘어간다.
+>
+> 📖 **여러 정책(BC/FM/…)을 통틀어 "실기 평가를 어떻게 돌리나"의 최상위 가이드는
+> [`POLICY_EVAL_KO.md`](POLICY_EVAL_KO.md)다.** 이 문서는 그중 **BC 경로의 상세 런북**이다.
 
 ---
 
@@ -107,6 +111,11 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 **성공 표식:** READY 배너와 세 토픽(`/joint_states`, `/robotiq_gripper/position_percent`,
 `/gello/joint_states`)이 요구 rate를 만족한다는 출력.
 **실패하면:** 09 런북 §4.2 / §5를 따른다 — 이 단계는 평소와 완전히 동일하다.
+`ERROR: another HIL hardware bundle still owns …/hil-hardware-<uid>.lock`으로 **즉시 거부**되면
+이전 번들의 프로세스가 아직 살아 있다는 뜻이다 — `ps aux | grep run_hil_hardware`로 감독
+프로세스를 찾아 `kill -INT <pid>`로 정리하고(`[cleanup] complete`를 기다린다) 다시 실행한다.
+락은 `flock`이라 **프로세스가 죽으면 자동으로 풀린다** — 남아 있는 락 *파일*은 무해하니
+지우려 하지 말 것.
 
 ### 4.4 T3 — 카메라 + GUI + actor (핀 3개 + sidecar 끄기)
 
@@ -129,6 +138,18 @@ reward classifier를 끈다 — 이 평가에서 성공 판정은 **사람만** 
 이 세션에서는 **T1(BC 서버)이 죽었거나 아직 안 떴다는 뜻**이다 — production `run_hil_server.sh`를
 띄우지 말고 T1을 다시 확인한다.
 
+**`preposition proof attempt 1/3 …` 이 보여도 당황하지 말 것 (정상 동작).** 예전에는 팔이 RESET
+자세에 **제대로 도착했는데도** controller 상태를 단 한 번 읽어 그 순간 `inactive/inactive`가
+보이면 세션이 그대로 죽었다(UR 드라이버의 `controller_stopper`가 로봇 프로그램이 잠깐만
+멈춰도 모션 컨트롤러를 내린다). `31d6567`부터는 **최대 3회 재시도**하고, 그중 유일하게
+양성인 상태 — **자세 증명을 통과한 정지된 팔을 아무도 잡고 있지 않은 both-inactive** — 이면
+STJC를 **1회만 안전 재활성화**(움직임이 아니라 hold다)한 뒤 다시 검증한다. 그 뒤에도 실패하면
+그때는 **진짜로** 뭔가 잘못된 것이다 → **펜던트에서 프로그램이 실행 중(▶ RUNNING)인지부터
+확인**한다(정지돼 있으면 재활성화가 실패하고 스크립트가 그렇게 경고한다).
+놉(기본값을 바꿀 일은 거의 없다): `HIL_PREPOSITION_PROOF_RETRIES`(기본 3) ·
+`HIL_PREPOSITION_PROOF_RETRY_DELAY_S`(기본 2초) · `HIL_PREPOSITION_AUTOACTIVATE`(기본 1,
+`0`이면 재활성화 없이 재시도만).
+
 ### 4.5 (선택) T4 — rollout 상세 녹화
 
 평가 중 **로봇 쪽 원시 데이터**를 native rate로 함께 남기고 싶을 때만 연다. 로봇에 아무 명령도
@@ -144,18 +165,26 @@ T3보다 먼저 띄우지 않는다). **종료:** 평가가 끝나면 이 창에
 
 **무엇이 남나** — `ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>/`
 
-- `vectors.h5` — 로봇 스트림: UR 관절 ~100 Hz, bridge command, gripper, wrench, TCP pose
-- 카메라 `mp4` — 이미 떠 있는 cam1/cam2를 구독해 저장
+- `robot/vectors.h5` — 로봇 스트림: UR 관절 ~100 Hz, bridge command, gripper, wrench, TCP pose
+- `robot/cam1.mp4` · `robot/cam2.mp4` — 이미 떠 있는 cam1/cam2를 구독해 저장
 - `status.jsonl` — `/hil/actor_status` · `/hil/deadman` 타임라인 (에피소드 경계 정렬용)
 
 **성공 표식:** 시작 배너에 rollout 디렉터리 경로가 출력되고, `Ctrl-C` 하면 마지막 줄에
 `[bc-rollout] saved -> …` 가 나온다.
 
+> ⚠️ **mp4는 `Ctrl-C`로 T4를 정상 종료해야 재생 가능해진다.** 재생 인덱스(moov atom)는
+> `cv2.VideoWriter`가 **release될 때**, 즉 종료 시 기록된다 — **녹화 중에 파일을 열면 재생이
+> 안 되는 것이 정상이고 고장이 아니다.** 같은 이유로 `kill -9` 같은 강제 종료로 끝내면
+> **그 mp4는 영구히 재생 불가**다(`vectors.h5`/`metadata.json`도 종료 시 finalize된다).
+> 반드시 그 창에서 `Ctrl-C`로 끝낼 것. `Ctrl-C` 직후 rclpy shutdown traceback이 보이는 것은
+> **알려진 무해한 현상**이며, finalize는 그와 무관하게 수행된다.
+
 **실패하면:** 이 창만 `Ctrl-C`로 닫고 **평가는 그대로 계속한다** — 녹화는 부가 기능이라 평가를
 막지 않는다. 출력은 담당자에게 전달한다.
 
-> 서버 쪽 기록(episode pickle · `actions.jsonl` · `inference.jsonl`)은 **T4 없이도 항상** 남는다
-> (§7). T4는 거기에 **로봇 원시 데이터와 고주기 신호**를 더하는 것이다.
+> 서버 쪽 기록(episode pickle · `actions.jsonl`)은 **T4 없이도 항상** 남는다(§7).
+> T4는 거기에 **로봇 원시 데이터와 고주기 신호**를 더하는 것이다.
+> `inference.jsonl`에는 조건이 하나 붙는다 — §7을 볼 것.
 
 ---
 
@@ -229,8 +258,13 @@ T3보다 먼저 띄우지 않는다). **종료:** 평가가 끝나면 이 창에
 T4(§4.5)를 띄웠다면 **이 순서에 끼지 않는다** — 순수 구독자라 앞이든 뒤든 아무 때나 `Ctrl-C`.
 
 **기록물 위치 (서버):** `junhyeong_ai:~/hil-serl-data/bc_eval/bc_eval_<타임스탬프>/served/`
-— episode별 pickle + `actions.jsonl` + `inference.jsonl`(모델 출력·추론 지연·입력 state 벡터.
-T4 없이도 **자동으로** 생성된다).
+— episode별 pickle + `actions.jsonl`. 둘 다 T4 없이도 **자동으로** 생성된다.
+
+⚠️ **`inference.jsonl`(모델 출력·추론 지연·입력 state 벡터)에는 조건이 있다** — 이 파일은
+**커밋 `084ec1a` 이후에 기동된 BC 서버부터** 생성된다. 그 전에 떠 있던 T1이 서빙한 run에는
+**아예 없다**(실측: 2026-07-31 run에 없었다). 파일이 안 보이면 고장이 아니라 서버 프로세스가
+낡은 것이므로, **T1을 `Ctrl-C` 후 다시 띄우면 그 다음 run부터 자동으로 남는다.**
+`analyze_bc_rollout.py`는 이 파일이 없어도 동작한다 — 추론 지연 관련 항목만 빠진다.
 **기록물 위치 (laptop3, T4를 띄웠을 때만):** `ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>/`.
 
 **회수와 분석은 메인 세션(담당자)이 한다.** 조작자는 서버에 접속하지 않는다. 조작자가

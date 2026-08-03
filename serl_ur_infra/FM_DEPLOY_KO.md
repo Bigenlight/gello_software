@@ -1,8 +1,9 @@
 # FM 정책 실기 평가 런북 (조작자용, 한국어) — **BC 런북의 델타**
 
-> **상태: 실기 미검증.** 이 문서는 [`BC_DEPLOY_KO.md`](BC_DEPLOY_KO.md)를 **먼저 읽었다는
-> 전제**로 쓴 차분(델타)이다. 절차·안전·기록양식은 BC와 **완전히 같고** 여기 적힌 것은
-> **FM에서만 다른 것**뿐이다. BC 런북을 옆에 띄워 두고 함께 본다.
+> **상태: 2026-08-01~02 실기 검증 완료** — 실제 UR7e에서 FM 평가 세션이 돌았다(조작자 확인).
+> 이 문서는 [`BC_DEPLOY_KO.md`](BC_DEPLOY_KO.md)를 **먼저 읽었다는 전제**로 쓴 차분(델타)이다.
+> 절차·안전·기록양식은 BC와 **완전히 같고** 여기 적힌 것은 **FM에서만 다른 것**뿐이다. BC 런북을
+> 옆에 띄워 두고 함께 본다. 평가 전반의 최상위 가이드는 [`POLICY_EVAL_KO.md`](POLICY_EVAL_KO.md)다.
 
 ## 1. FM이 뭐고, BC와 뭐가 다른가
 
@@ -17,9 +18,13 @@ BC와 로봇·카메라·GUI·안전장치는 100% 같고 **정책을 서빙하�
   (receding horizon). 즉 매 스텝 새로 추론한다.
 - 🟢 **추론이 확률적이라 같은 장면에서도 액션이 매번 조금씩 다르다 — 정상이다.**
   BC와 달리 "완전히 똑같이 재현"되지 않는 것은 고장이 아니다.
+- ⏱️ **추론 지연은 컴파일 뒤 ~72 ms다** — `0c0f094`가 chunk 샘플러를 `jax.jit`으로 감쌌다(eager
+  시절엔 호출당 **502 ms**, 100 ms 제어주기를 한참 넘겼다. 둘 다 서버 GPU smoke 실측). 첫 1~2회
+  호출은 컴파일로 느린데 **기동 smoke가 `ready` 전에 다 태우므로 조작자는 체감하지 않는다**(§2.1).
 
 **학습 지표 (담당자 보고값)** — first-action continuous MSE **0.04724** ·
 first-action gripper 정확도 **96.8 %** · chunk gripper 정확도 **92.0 %**.
+**로컬 CPU 게이트 실측**(holdout 30 obs) — first-action MSE **0.0375** · translation cosine **0.637** · gripper **96.7 %**.
 
 > 참고로 BC의 MSE는 0.0325라 **FM이 약간 높다.** 그래도 실기 성공률이 어느 쪽이 높은지는
 > **모른다** — 그걸 재려고 이 평가를 하는 것이다. §4의 A/B 팁을 보라.
@@ -33,6 +38,9 @@ cd /home/laptop3/gello_software/ros2_ur_ws && ./run_fm_server.sh
 ```
 
 **성공 표식:** `FM_SERVER_RESULT=started` + `[fm-server] ready ...` 줄 + 프롬프트가 안 돌아옴.
+
+⏳ **`ready`까지 수십 초 걸리는 것은 정상이다.** 기동 smoke가 ODE 추론을 **두 번** 돌려 jit
+컴파일을 미리 태운다(§1) — 멈춘 것처럼 보여도 기다린다. 그 두 번은 기록물에 안 남는다(§4).
 
 🛑 **터널은 하나뿐이다.** FM 서버의 원격 포트는 **50055**라 BC 서버(50054)·production
 learner(50053)와 서버 쪽에서는 충돌하지 않는다. **그러나 로컬 `50153` 터널은 셋이 공유한다** —
@@ -78,6 +86,8 @@ EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTED_REWARD_AUTHORITY
 **기록물 (서버, T4 없이도 항상 생성):**
 `junhyeong_ai:~/hil-serl-data/fm_eval/fm_eval_<타임스탬프>/served/`
 — episode별 pickle + `actions.jsonl` + `inference.jsonl`.
+🟢 **FM 서버는 처음부터 최신 코드로 떴으므로 `inference.jsonl`이 첫 run부터 있다** (BC의
+07-31 첫 run에는 없다). 기동 smoke 2회는 로거를 그 뒤에 붙이므로 이 파일에 섞이지 않는다.
 **회수·분석은 메인 세션(담당자)이 한다** — 조작자는 서버에 접속하지 않는다.
 분석기는 **BC와 같은 것**을 쓴다(BC 런북 §7의 `analyze_bc_rollout.py --served …`).
 
