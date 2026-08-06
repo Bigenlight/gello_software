@@ -847,14 +847,21 @@ def test_launcher_marshals_the_value_to_the_learner_host_only_when_set(tmp_path)
     unset_dir.mkdir()
     on_dir.mkdir()
 
-    unset = _run_launcher(unset_dir, "--check")
+    # Pinned, not incidental: the launcher's default run id is
+    # `cube_in_cup_real_$(date -u +...%H%M%S)`, so two invocations that straddle
+    # a second boundary disagree in positional 4 and the comparison below fails
+    # for a reason that has nothing to do with latency profiling.  Measured at
+    # roughly one run in ten before it was pinned.
+    fixed = {"HIL_RUN_ID": "cube_in_cup_real_20260101_000000"}
+
+    unset = _run_launcher(unset_dir, "--check", **fixed)
     assert unset.returncode == 3, unset.stderr
     # 14 positionals is the pre-existing contract; an unset profile adds none,
     # because ssh joins these into one command line and an empty trailing
     # argument does not survive the trip (hence ${15:-} on the remote side).
     assert len(positionals(unset)) == 14
 
-    on = _run_launcher(on_dir, "--check", HIL_LATENCY_PROFILE="1")
+    on = _run_launcher(on_dir, "--check", HIL_LATENCY_PROFILE="1", **fixed)
     assert on.returncode == 3, on.stderr
     assert positionals(on) == positionals(unset) + ["1"]
 

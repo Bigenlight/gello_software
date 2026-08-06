@@ -33,6 +33,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import inspect
 import math
+import os
 import threading
 import time
 from typing import Any, Callable, Mapping, Optional, Protocol, Tuple
@@ -53,6 +54,32 @@ SCHEMA_VERSION = 3
 #: here, so a peer that never writes this marker degrades to a less detailed
 #: message rather than to a wrong one.
 CLASSIFIER_DEGRADED_MARKER = "reward classifier DEGRADED"
+
+#: Opt-in switch for :class:`ActorSessionService`'s
+#: ``accept_external_policy_meta``, read once by
+#: ``scripts/run_rlpd_learner_server.py``.  Forwarded to a FRESHLY STARTED
+#: learner by ``ros2_ur_ws/run_hil_server.sh`` as an ENV VAR -- never as an argv
+#: token, because ``validate_process_contract`` compares the learner's argv
+#: token by token and a new flag would make every ingesting learner fail its own
+#: reuse check.  Same shape and same reuse rule as ``HIL_LATENCY_PROFILE`` and
+#: ``HIL_PARAMS_EXPORT``.
+EXTERNAL_POLICY_INGEST_ENV_VAR = "HIL_EXTERNAL_POLICY_INGEST"
+
+#: Accepted truthy spellings, compared lowercased and stripped.  The same table
+#: as ``ur_env/latency_profile.py`` and ``ur_env/learner/params_export.py``, so
+#: the three server opt-ins cannot disagree about what ``HIL_..=on`` means.
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def is_external_policy_ingest_enabled(
+    env: Optional[Mapping[str, str]] = None
+) -> bool:
+    """True iff ``HIL_EXTERNAL_POLICY_INGEST`` is set to a truthy spelling."""
+
+    source = os.environ if env is None else env
+    value = source.get(EXTERNAL_POLICY_INGEST_ENV_VAR, "")
+    return str(value or "").strip().lower() in _TRUTHY_ENV_VALUES
+
 
 # Resolved on first use, never at import time.  ``ur_env.classifier_sidecar``
 # imports ActorProtocolError from this module, so a module-scope import here
@@ -428,10 +455,62 @@ class _SessionState:
     last_action: np.ndarray
     last_policy_version: int
     active: bool = True
+    #: Highest ``meta.policy_version`` this session has ACCEPTED FROM THE
+    #: ACTOR.  Only read under ``accept_external_policy_meta``; ``None`` until
+    #: the first Step, because BeginEpisode carries no policy meta.  It is
+    #: deliberately NOT ``last_policy_version``: that field is the version this
+    #: service's OWN inference last published, and the two streams are
+    #: independent numbers in external-ingest mode.
+    last_external_policy_version: Optional[int] = None
 
 
 class ActorSessionService:
-    """Transport-independent server state, validation, routing, and dedupe."""
+    """Transport-independent server state, validation, routing, and dedupe.
+
+    EXTERNAL POLICY META (``accept_external_policy_meta``)
+    -----------------------------------------------------
+    By default this service enforces CHAIN OF CUSTODY on the policy fields of
+    every transition: ``meta.policy_version`` and ``meta.policy_action`` must
+    equal the version and action THIS service issued for the previous
+    observation.  That is the right rule when the actor is talking to the
+    server that answered it, and it is the default for every existing
+    deployment.
+
+    It is the wrong rule when the actions were issued by a DIFFERENT
+    ActorSessionService.  In laptop-side local inference
+    (``ur_env/local_policy/proxy.py``) the proxy runs a real
+    ``ActorSessionService`` of its own, answers the actor from local inference,
+    and forwards the raw request bytes to the learner server.  The forwarded
+    transition therefore carries the PROXY's action; the learner's own
+    (stochastic, different-backend) inference over the same observation cannot
+    reproduce it, so the strict rule rejects every online transition with
+    ``INVALID_ARGUMENT`` and replay stays empty.  Chain of custody is not lost
+    in that topology -- it is enforced one hop earlier, by the proxy's own
+    service, against the actions the proxy itself issued.
+
+    With the flag set, the two equality checks are REPLACED (not dropped) by
+    intrinsic validation of the incoming values:
+
+    * ``meta.policy_action`` must still be a finite float32 action of the
+      configured shape within ``[-1, 1]`` (unchanged ``validate_action``), and
+      a non-intervention transition's ``transition.actions`` must still equal
+      it -- so the executed action is still tied to the claimed policy action.
+    * ``meta.policy_version`` must still be a non-negative int64 and must never
+      DECREASE within a session.  The watermark is the incoming stream's own,
+      not this service's publish counter; see
+      ``_SessionState.last_external_policy_version``.
+
+    Nothing else moves: fingerprint dedup, exactly-once replies, request_id and
+    step_id ordering, observation chaining, executed-action validation,
+    finalization and replay routing are identical in both modes.
+
+    PHASE-2 OPTIMIZATION, DELIBERATELY NOT DONE HERE: in external-ingest mode
+    the reply action this service computes is discarded by the forwarder, so
+    the per-Step inference is wasted work (~ms).  Skipping it would change
+    ``StepResult``'s shape for a caller that may still want an action, and
+    would make the learner's own policy version stop advancing observably.
+    Measure before optimizing.
+    """
 
     def __init__(
         self,
@@ -457,7 +536,13 @@ class ActorSessionService:
         in_memory_capacity: int = 256,
         allowed_actor_ids: Optional[Tuple[str, ...]] = None,
         allowed_run_ids: Optional[Tuple[str, ...]] = None,
+        accept_external_policy_meta: bool = False,
     ) -> None:
+        if not isinstance(accept_external_policy_meta, bool):
+            # Strict on purpose.  This flag arrives from an environment
+            # variable two processes away; accepting "0" or "false" as truthy
+            # would silently relax the identity rule on a production learner.
+            raise ValueError("accept_external_policy_meta must be a bool")
         if not action_shape or any(int(dim) <= 0 for dim in action_shape):
             raise ValueError("action_shape must contain positive dimensions")
         if cache_size <= 0:
@@ -473,6 +558,7 @@ class ActorSessionService:
             allowed_run_ids, name="allowed_run_ids"
         )
         self._sample_action = sample_action
+        self._accept_external_policy_meta = accept_external_policy_meta
         self._action_shape = tuple(int(dim) for dim in action_shape)
         self._model_id = str(model_id)
         self._reward_authority = reward_authority
@@ -520,6 +606,16 @@ class ActorSessionService:
         ):
             raise ValueError(f"{name} must be a non-empty tuple of strings")
         return frozenset(normalized)
+
+    @property
+    def accept_external_policy_meta(self) -> bool:
+        """True when policy meta issued by another service is accepted.
+
+        Read-only: the mode is fixed for the lifetime of the service, so a
+        session cannot be validated under one rule and continued under another.
+        """
+
+        return self._accept_external_policy_meta
 
     def health(self) -> tuple[bool, bool, str]:
         with self._lock:
@@ -816,6 +912,11 @@ class ActorSessionService:
                     else next_observation.observation,
                     command.deterministic,
                 )
+                # Both sides of this comparison are THIS service's own
+                # publishes (set here and in begin_episode), so it means the
+                # same thing under accept_external_policy_meta and is
+                # deliberately left alone there: the actor's stream is tracked
+                # separately by _track_external_policy_version.
                 if version < session.last_policy_version:
                     raise ActorProtocolError(
                         "policy_version decreased from "
@@ -1394,14 +1495,23 @@ class ActorSessionService:
         policy_version = validate_counter(
             meta.get("policy_version"), name="policy_version"
         )
-        if policy_version != session.last_policy_version:
+        # The two identity checks below are the ONLY places the issued action
+        # and version are enforced; see the class docstring for why external
+        # ingest replaces them with intrinsic checks rather than dropping them.
+        # The order is preserved exactly across both modes so a malformed
+        # request reports the same first error it always did.
+        if self._accept_external_policy_meta:
+            self._track_external_policy_version(session, policy_version)
+        elif policy_version != session.last_policy_version:
             raise ActorProtocolError("meta.policy_version does not match issued action")
         policy_action = validate_action(
             meta.get("policy_action"),
             action_shape=self._action_shape,
             name="meta.policy_action",
         )
-        if not np.array_equal(policy_action, session.last_action):
+        if not self._accept_external_policy_meta and not np.array_equal(
+            policy_action, session.last_action
+        ):
             raise ActorProtocolError("meta.policy_action does not match issued action")
         intervened = meta.get("intervened")
         if isinstance(intervened, np.generic):
@@ -1472,6 +1582,35 @@ class ActorSessionService:
             raise ActorProtocolError(
                 "request_action must be false exactly for terminal/truncated steps"
             )
+
+    @staticmethod
+    def _track_external_policy_version(
+        session: _SessionState, policy_version: int
+    ) -> None:
+        """Enforce a non-decreasing INCOMING policy version, then record it.
+
+        The externally issued stream has its own counter, which this service
+        never publishes and therefore cannot predict.  What it can insist on is
+        the property the issuer promises: a version that only ever goes up
+        within a session (``ur_env/local_policy/params_sync.py`` refuses a
+        stale blob, and the proxy holds the old number while a fetch is in
+        flight).  A decrease means two different issuers are answering one
+        session, or a replay of an older episode's meta -- both of which would
+        put actions from an unknown policy into replay.
+
+        The watermark advances during validation rather than after acceptance.
+        That is safe and deliberate: a retried request carries identical bytes
+        and so an identical version (``>=`` holds), and a step rejected further
+        down was never going to lower a later legitimate version anyway.
+        """
+
+        previous = session.last_external_policy_version
+        if previous is not None and policy_version < previous:
+            raise ActorProtocolError(
+                "meta.policy_version decreased within the session: "
+                f"{previous} -> {policy_version}"
+            )
+        session.last_external_policy_version = policy_version
 
     def _prime_replay_observation(
         self, observation: Any, actor_id: str, session_id: str

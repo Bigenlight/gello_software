@@ -105,6 +105,7 @@ ingress는 증명하지 못한다** — 그 둘은 같은 날 실기 세션이 �
 | [RVIZ_HIL_TEST_CLI.md](RVIZ_HIL_TEST_CLI.md) | mock(`use_fake_hardware`) 4터미널 개입 테스트 절차. 실기 위험 0 |
 | [REWARD_CLASSIFIER_LIVE_KO.md](REWARD_CLASSIFIER_LIVE_KO.md) | 라이브 reward classifier 뷰어 런북 (랩톱 CPU, 터미널 4개). **2026-07-29 실기 검증됨.** 인터프리터 함정 · 조용한 실패 · 트러블슈팅 |
 | [REWARD_TO_RL_INTEGRATION_KO.md](REWARD_TO_RL_INTEGRATION_KO.md) | **분류기를 개입·학습에 연결하는 사람이 읽을 것.** reward/termination 계약(서버 권위, `next_observations` 기준) · 개입의 **버퍼 이중 기록** · RLPD 50:50 배치 · 연결 순서 6단계 · 감시 지표. 코드에서 직접 추적해 작성 |
+| [HIL_LOCAL_INFERENCE_KO.md](HIL_LOCAL_INFERENCE_KO.md) 🆕 | **로컬 추론 모드 (`HIL_POLICY_MODE=local`) 설계 정본.** 정책 추론만 laptop3로 옮겨 블로킹 Step RPC를 10 Hz 루프에서 빼는 opt-in 경로 — 서로 분리된 세 경로(액션/전이 forward/파라미터 pull), 조작자 CLI, **MANUAL 전용 · AUTO fail-closed**, 그리고 정직한 한계(서버는 forward된 전이당 여전히 ~156 ms를 쓰므로 **에피소드 중 백로그가 자라고 대기 화면에서 빠진다**, 파라미터는 한 전송분 뒤처진다, divergence 로깅이 parity 알람이다). proto·`SCHEMA_VERSION`·`remote_actor.py` **무변경**이 설계 조건. 🛑 **실기 미검증** |
 | [RECORDED_TAKE_DEMO_CONVERSION_KO.md](RECORDED_TAKE_DEMO_CONVERSION_KO.md) | `gello_recorder`의 `take_*/{vectors.h5,cam1.mp4,cam2.mp4}` 를 strict canonical offline demo pickle로 바꾸는 CLI·동기화·action 복원·라벨 계약 (`40b99f8`). **learner 시작 게이트의 절반이 여기 달려 있다** — online replay ≥ `training_starts`(기본 100) **그리고** offline demo ≥ 1 이어야 학습이 시작된다(`ur_env/learner/batches.py::RLPDBatchSampler.ready`). ⚠️ **headless recorder의 `session_<stamp>/` 는 입력이 아니다** — GUI recorder의 `take_*/` 레이아웃이 필요하다 |
 
 ### 🗄️ 기록물 — 사료로만. 여기 적힌 명령을 실행하지 말 것

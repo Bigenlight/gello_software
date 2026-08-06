@@ -446,6 +446,7 @@ def build_actor_service(
     allowed_actor_ids: tuple[str, ...] | None = None,
     allowed_run_ids: tuple[str, ...] | None = None,
     latency_probe: Any | None = None,
+    accept_external_policy_meta: bool = False,
 ) -> Any:
     """Bind the shared policy and ingress to the transport-neutral service.
 
@@ -454,6 +455,14 @@ def build_actor_service(
     successful.  It defaults to 1 -- no smoothing -- so the server's verdict
     matches the live classifier viewer frame for frame; see the rationale on
     ``--success-confirmations`` in ``scripts/run_rlpd_learner_server.py``.
+
+    ``accept_external_policy_meta`` opts this learner into ingesting
+    transitions whose ``meta.policy_action``/``meta.policy_version`` were
+    issued by ANOTHER ActorSessionService -- the laptop-side local-inference
+    proxy.  Default False keeps the strict issued-action identity rule every
+    existing deployment relies on; the whole contract is documented on
+    ``ActorSessionService``.  ``run_rlpd_learner_server.py`` sets it from
+    ``HIL_EXTERNAL_POLICY_INGEST``.
 
     ``latency_probe`` is the opt-in per-step profiler
     (``ur_env/server_latency.py``).  It reaches the two collaborators that own
@@ -508,6 +517,7 @@ def build_actor_service(
         buffer_status_provider=ingress.status,
         allowed_actor_ids=allowed_actor_ids,
         allowed_run_ids=allowed_run_ids,
+        accept_external_policy_meta=accept_external_policy_meta,
     )
 
 

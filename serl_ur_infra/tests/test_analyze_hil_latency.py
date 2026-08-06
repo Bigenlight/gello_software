@@ -765,3 +765,614 @@ def test_cli_requires_actor() -> None:
     result = _run("--server", "whatever.jsonl")
     assert result.returncode == 2
     assert "--actor" in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# LOCAL INFERENCE MODE (sections 6-8)                                           #
+#                                                                               #
+# Same fixture discipline as above: every distribution is built so that         #
+# numpy's linear-interpolation percentile lands ON a sample, so the assertions  #
+# are exact constants an operator could recompute by hand.  The three roles     #
+# (proxy / uploader / paramsync) and their field names are PINNED by the local  #
+# inference design spec -- these fixtures are the analyzer's copy of that       #
+# contract, so a wiring commit that renames a field fails here first.           #
+# --------------------------------------------------------------------------- #
+
+N_PROXY = 101              # Step replies served locally
+N_UPLOADER = 50            # transitions forwarded to the real server
+N_PARAMSYNC = 40           # LATEST.json polls
+N_PARAMSYNC_FETCHES = 5    # of which actually pulled a blob
+DIVERGENT_INDICES = (7, 23, 41)
+
+
+def write_proxy(path: Path, *, count: int = N_PROXY) -> Path:
+    """local_inference 0.1..10.1 ms, queue 0..10, age 0..5 s, version 7..11.
+
+    ``local_inference_ms`` spans the feasibility study's own range (2 ms GPU,
+    9.6 ms CPU) on purpose: a fixture that pinned percentiles with 1..101 ms
+    would read like a claim that local inference costs 100 ms.
+    """
+
+    lines = []
+    for index in range(count):
+        lines.append(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "role": "proxy",
+                    "seq": index,
+                    "t_epoch": ACTOR_T0 + index,
+                    "run_id": RUN_ID,
+                    "episode_id": 0,
+                    "transition_id": _transition_id(index),
+                    "local_inference_ms": round((index + 1) / 10.0, 4),
+                    "local_finalize_ms": 0.5,
+                    "total_ms": 12.0,
+                    "queue_depth": index // 10,
+                    "params_version": 7 + index // 25,
+                    "params_age_s": float(index % 6),
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_uploader(
+    path: Path,
+    *,
+    count: int = N_UPLOADER,
+    divergent: Sequence[int] = DIVERGENT_INDICES,
+) -> Path:
+    """upload_rpc 100..198 ms, backlog 0..49, oldest 0..24.5 s."""
+
+    lines = []
+    for index in range(count):
+        lines.append(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "role": "uploader",
+                    "seq": index,
+                    "t_epoch": ACTOR_T0 + index,
+                    "transition_id": _transition_id(index),
+                    "upload_rpc_ms": 100.0 + 2.0 * index,
+                    "backlog_depth": index,
+                    "oldest_backlog_s": round(0.5 * index, 3),
+                    "outcome_divergence": index in tuple(divergent),
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_paramsync(
+    path: Path, *, count: int = N_PARAMSYNC, versions: Sequence[int] | None = None
+) -> Path:
+    """40 polls, every 8th a real fetch; staleness 0..9 s, version 7..11."""
+
+    lines = []
+    for index in range(count):
+        record: dict[str, Any] = {
+            "schema": 1,
+            "role": "paramsync",
+            "seq": index,
+            "t_epoch": ACTOR_T0 + index,
+            "poll_ms": 1.0,
+            "staleness_s": float(index % 10),
+            "version": (
+                versions[index] if versions is not None else 7 + index // 8
+            ),
+        }
+        if index % 8 == 0:
+            record["fetch_ms"] = 3000.0 + 200.0 * (index // 8)
+            record["load_ms"] = 120.0
+            record["swap_ms"] = 0.4
+        lines.append(json.dumps(record))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _sections_local(
+    actor: Path,
+    *,
+    server: Path | None = None,
+    learner: Path | None = None,
+    proxy: Path | None = None,
+    uploader: Path | None = None,
+    paramsync: Path | None = None,
+):
+    sections, *_ = analyzer.build_report(
+        actor, server, learner, proxy, uploader, paramsync
+    )
+    return sections
+
+
+# --------------------------------------------------------------------------- #
+# 6. proxy                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_proxy_phase_percentiles_are_exact(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"), proxy=write_proxy(tmp_path / "p.jsonl")
+    )
+    section = _section(sections, "POLICY PROXY")
+    row = _row(section, "local_inference_ms")
+    assert row["count"] == str(N_PROXY)
+    assert row["mean"] == "5.100"
+    assert row["p50"] == "5.100"
+    assert row["p90"] == "9.100"
+    assert row["p99"] == "10.000"
+    assert row["max"] == "10.100"
+
+    finalize = _row(section, "local_finalize_ms")
+    assert finalize["count"] == str(N_PROXY)
+    assert finalize["max"] == "0.500"
+
+    total = _row(section, "total_ms")
+    assert total["count"] == str(N_PROXY)
+    assert "contains" in total["note"]
+
+
+def test_proxy_gauges_are_not_in_the_phase_table(tmp_path: Path) -> None:
+    """queue_depth / params_age_s are levels, not durations."""
+
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"), proxy=write_proxy(tmp_path / "p.jsonl")
+    )
+    section = _section(sections, "POLICY PROXY")
+    phase_table = next(
+        block
+        for block in section.blocks
+        if isinstance(block, analyzer.Table) and block.headers[0] == "phase"
+    )
+    assert [row[0] for row in phase_table.rows] == [
+        "total_ms",
+        "local_inference_ms",
+        "local_finalize_ms",
+    ]
+
+    depth = _row(section, "queue_depth")
+    assert depth["count"] == str(N_PROXY)
+    assert depth["p50"] == "5.000"
+    assert depth["max"] == "10.000"
+
+    age = _row(section, "params_age_s")
+    assert age["count"] == str(N_PROXY)
+    assert age["p50"] == "2.000"
+    assert age["max"] == "5.000"
+
+
+def test_proxy_params_version_progression(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"), proxy=write_proxy(tmp_path / "p.jsonl")
+    )
+    section = _section(sections, "POLICY PROXY")
+    assert _row(section, "first")["value"] == "7"
+    assert _row(section, "last")["value"] == "11"
+    assert _row(section, "distinct")["value"] == "5"
+    assert _row(section, "advances")["value"] == "4"
+    assert _row(section, "regressions")["value"] == "0"
+    assert "WARNING" not in _notes(section)
+
+
+def test_proxy_version_regression_is_flagged(tmp_path: Path) -> None:
+    """The proxy contracts to stamp monotonically; a decrease must be loud."""
+
+    path = tmp_path / "p.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "role": "proxy",
+                    "seq": index,
+                    "local_inference_ms": 2.0,
+                    "params_version": version,
+                }
+            )
+            for index, version in enumerate((9, 10, 8, 11))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    section = _section(
+        _sections_local(write_actor(tmp_path / "actor.jsonl"), proxy=path),
+        "POLICY PROXY",
+    )
+    assert _row(section, "regressions")["value"] == "1"
+    assert _row(section, "advances")["value"] == "2"
+    notes = _notes(section)
+    assert "WARNING: params_version went BACKWARDS 1 time(s)" in notes
+
+
+def test_proxy_high_water_queue_is_called_out(tmp_path: Path) -> None:
+    path = tmp_path / "p.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "role": "proxy",
+                    "seq": index,
+                    "local_inference_ms": 2.0,
+                    "queue_depth": depth,
+                }
+            )
+            for index, depth in enumerate((1, 501, 3))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    notes = _notes(
+        _section(
+            _sections_local(write_actor(tmp_path / "actor.jsonl"), proxy=path),
+            "POLICY PROXY",
+        )
+    )
+    assert "WARNING: queue_depth reached 501" in notes
+    assert str(analyzer.BACKLOG_HIGH_WATER) in notes
+
+
+# --------------------------------------------------------------------------- #
+# 7. uploader                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_uploader_rpc_and_backlog_summary(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        uploader=write_uploader(tmp_path / "u.jsonl"),
+    )
+    section = _section(sections, "UPLOADER")
+    rpc = _row(section, "upload_rpc_ms")
+    assert rpc["count"] == str(N_UPLOADER)
+    assert rpc["mean"] == "149.000"
+    assert rpc["p50"] == "149.000"
+    assert rpc["p90"] == "188.200"
+    assert rpc["p99"] == "197.020"
+    assert rpc["max"] == "198.000"
+
+    depth = _row(section, "backlog_depth")
+    assert depth["count"] == str(N_UPLOADER)
+    assert depth["p50"] == "24.500"
+    assert depth["max"] == "49.000"
+
+    oldest = _row(section, "oldest_backlog_s")
+    assert oldest["max"] == "24.500"
+
+    notes = _notes(section)
+    assert f"{N_UPLOADER} uploads recorded" in notes
+    assert "backlog_depth max 49" in notes
+    assert "oldest entry 24.500 s" in notes
+
+
+def test_uploader_divergence_is_loud(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        uploader=write_uploader(tmp_path / "u.jsonl"),
+    )
+    section = _section(sections, "UPLOADER")
+    row = _row(section, "outcome_divergence")
+    assert row["n"] == str(len(DIVERGENT_INDICES))
+    assert row["of"] == str(N_UPLOADER)
+    assert row["fraction"] == "6.0%"
+
+    notes = _notes(section)
+    assert analyzer.DIVERGENCE_BANNER in notes
+    assert f"on {len(DIVERGENT_INDICES)}/{N_UPLOADER} forwarded transitions" in notes
+    # and it survives into what an operator actually reads
+    assert analyzer.DIVERGENCE_BANNER in _console(sections)
+
+
+def test_uploader_zero_divergence_says_zero_not_silence(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        uploader=write_uploader(tmp_path / "u.jsonl", divergent=()),
+    )
+    section = _section(sections, "UPLOADER")
+    assert _row(section, "outcome_divergence")["n"] == "0"
+    notes = _notes(section)
+    assert analyzer.DIVERGENCE_BANNER not in notes
+    assert f"outcome_divergence: 0/{N_UPLOADER}" in notes
+
+
+def test_uploader_without_the_divergence_field_says_unknown(tmp_path: Path) -> None:
+    """Absent parity data must never read as proven parity."""
+
+    path = tmp_path / "u.jsonl"
+    path.write_text(
+        json.dumps(
+            {"schema": 1, "role": "uploader", "seq": 0, "upload_rpc_ms": 150.0}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    notes = _notes(
+        _section(
+            _sections_local(write_actor(tmp_path / "actor.jsonl"), uploader=path),
+            "UPLOADER",
+        )
+    )
+    assert "UNKNOWN for this session, not proven" in notes
+
+
+def test_uploader_high_water_backlog_is_called_out(tmp_path: Path) -> None:
+    path = tmp_path / "u.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "role": "uploader",
+                    "seq": index,
+                    "upload_rpc_ms": 150.0,
+                    "backlog_depth": depth,
+                    "outcome_divergence": False,
+                }
+            )
+            for index, depth in enumerate((10, 900))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    notes = _notes(
+        _section(
+            _sections_local(write_actor(tmp_path / "actor.jsonl"), uploader=path),
+            "UPLOADER",
+        )
+    )
+    assert f"exceeded the {analyzer.BACKLOG_HIGH_WATER} high-water mark" in notes
+    assert "Nothing was dropped" in notes
+
+
+# --------------------------------------------------------------------------- #
+# 8. param sync                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_paramsync_phase_tables(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        paramsync=write_paramsync(tmp_path / "s.jsonl"),
+    )
+    section = _section(sections, "PARAM SYNC")
+    poll = _row(section, "poll_ms")
+    assert poll["count"] == str(N_PARAMSYNC)
+    assert poll["mean"] == "1.000"
+
+    fetch = _row(section, "fetch_ms")
+    assert fetch["count"] == str(N_PARAMSYNC_FETCHES)
+    assert fetch["mean"] == "3400.000"
+    assert fetch["p50"] == "3400.000"
+    assert fetch["p90"] == "3720.000"
+    assert fetch["max"] == "3800.000"
+
+    assert _row(section, "load_ms")["count"] == str(N_PARAMSYNC_FETCHES)
+    assert _row(section, "swap_ms")["max"] == "0.400"
+
+    notes = _notes(section)
+    assert f"{N_PARAMSYNC} polls, {N_PARAMSYNC_FETCHES} carried a fetch" in notes
+
+
+def test_paramsync_staleness_and_version(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        paramsync=write_paramsync(tmp_path / "s.jsonl"),
+    )
+    section = _section(sections, "PARAM SYNC")
+    stale = _row(section, "staleness_s")
+    assert stale["count"] == str(N_PARAMSYNC)
+    assert stale["mean"] == "4.500"
+    assert stale["p50"] == "4.500"
+    assert stale["max"] == "9.000"
+
+    assert _row(section, "first")["value"] == "7"
+    assert _row(section, "last")["value"] == "11"
+    assert _row(section, "advances")["value"] == "4"
+    assert _row(section, "regressions")["value"] == "0"
+
+
+def test_paramsync_version_regression_is_flagged(tmp_path: Path) -> None:
+    versions = [7 + index // 8 for index in range(N_PARAMSYNC)]
+    versions[20] = 3          # a blob older than the loaded one got applied
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        paramsync=write_paramsync(tmp_path / "s.jsonl", versions=versions),
+    )
+    section = _section(sections, "PARAM SYNC")
+    assert _row(section, "regressions")["value"] == "1"
+    assert "WARNING: version went BACKWARDS 1 time(s)" in _notes(section)
+
+
+# --------------------------------------------------------------------------- #
+# Section 3 must be re-read in local mode                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_loop_budget_flags_the_local_hop_when_proxy_is_present(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"), proxy=write_proxy(tmp_path / "p.jsonl")
+    )
+    notes = _notes(_section(sections, "LOOP BUDGET"))
+    assert analyzer.LOCAL_HOP_PHRASE in notes
+    assert "127.0.0.1" in notes
+    assert f"{N_PROXY} records" in notes
+
+
+def test_loop_budget_says_nothing_about_local_mode_without_proxy(tmp_path: Path) -> None:
+    notes = _notes(
+        _section(_sections(write_actor(tmp_path / "actor.jsonl")), "LOOP BUDGET")
+    )
+    assert analyzer.LOCAL_HOP_PHRASE not in notes
+
+
+# --------------------------------------------------------------------------- #
+# Degradation + purity of the remote-mode report                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_remote_mode_report_states_local_mode_was_not_given(tmp_path: Path) -> None:
+    sections = _sections(write_actor(tmp_path / "actor.jsonl"))
+    section = _section(sections, "LOCAL INFERENCE MODE")
+    assert analyzer.LOCAL_MODE_NOT_GIVEN in _notes(section)
+    # ... and the three per-role sections are NOT rendered.
+    titles = [s.title for s in sections]
+    assert not any("POLICY PROXY" in title for title in titles)
+    assert not any("UPLOADER" in title for title in titles)
+    assert not any("PARAM SYNC" in title for title in titles)
+
+
+def test_absent_local_files_degrade_with_grep_phrases(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        proxy=tmp_path / "no_proxy.jsonl",
+        uploader=tmp_path / "no_uploader.jsonl",
+        paramsync=tmp_path / "no_paramsync.jsonl",
+    )
+    text = _console(sections)
+    for phrase in (
+        analyzer.PROXY_ABSENT,
+        analyzer.UPLOADER_ABSENT,
+        analyzer.PARAMSYNC_ABSENT,
+    ):
+        assert phrase in text
+    assert text.count("file not found") >= 3
+
+
+def test_one_local_file_does_not_degrade_the_other_two_silently(tmp_path: Path) -> None:
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"), proxy=write_proxy(tmp_path / "p.jsonl")
+    )
+    assert _row(_section(sections, "POLICY PROXY"), "local_inference_ms")["count"] == str(
+        N_PROXY
+    )
+    assert analyzer.UPLOADER_ABSENT in _notes(_section(sections, "UPLOADER"))
+    assert analyzer.PARAMSYNC_ABSENT in _notes(_section(sections, "PARAM SYNC"))
+    assert "not given" in _notes(_section(sections, "PARAM SYNC"))
+
+
+def test_empty_local_files_are_not_mistaken_for_absent_flags(tmp_path: Path) -> None:
+    for name in ("p.jsonl", "u.jsonl", "s.jsonl"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+    sections = _sections_local(
+        write_actor(tmp_path / "actor.jsonl"),
+        proxy=tmp_path / "p.jsonl",
+        uploader=tmp_path / "u.jsonl",
+        paramsync=tmp_path / "s.jsonl",
+    )
+    text = _console(sections)
+    assert "held no parsable records" in text
+    assert "HIL_LATENCY_PROFILE=1 was in ITS process environment" in text
+
+
+def test_local_flags_do_not_change_the_existing_sections(tmp_path: Path) -> None:
+    """The remote-mode half of the report must be byte-identical either way."""
+
+    actor = write_actor(tmp_path / "actor.jsonl")
+    server = write_server(tmp_path / "server.jsonl")
+    learner = write_learner(tmp_path / "learner.jsonl")
+    plain = _sections(actor, server, learner)
+    local = _sections_local(
+        actor,
+        server=server,
+        learner=learner,
+        proxy=write_proxy(tmp_path / "p.jsonl"),
+        uploader=write_uploader(tmp_path / "u.jsonl"),
+        paramsync=write_paramsync(tmp_path / "s.jsonl"),
+    )
+    for needle in ("PER-PHASE", "CROSS-HOST JOIN", "CONTENTION", "INTERVENTION"):
+        assert _console([_section(plain, needle)]) == _console(
+            [_section(local, needle)]
+        ), needle
+
+
+def test_local_records_with_junk_fields_do_not_crash(tmp_path: Path) -> None:
+    for name in ("p.jsonl", "u.jsonl", "s.jsonl"):
+        (tmp_path / name).write_text(
+            "\n".join(
+                [
+                    json.dumps({}),
+                    json.dumps({"local_inference_ms": None, "queue_depth": "deep"}),
+                    json.dumps({"params_version": float("nan"), "version": "v3"}),
+                    json.dumps({"outcome_divergence": "maybe"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    text = _console(
+        _sections_local(
+            write_actor(tmp_path / "actor.jsonl"),
+            proxy=tmp_path / "p.jsonl",
+            uploader=tmp_path / "u.jsonl",
+            paramsync=tmp_path / "s.jsonl",
+        )
+    )
+    assert "6. LOCAL MODE" in text
+    assert "8. LOCAL MODE" in text
+
+
+# --------------------------------------------------------------------------- #
+# CLI -- local mode                                                             #
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_local_mode_prints_sections_six_to_eight(tmp_path: Path) -> None:
+    result = _run(
+        "--actor", write_actor(tmp_path / "actor.jsonl"),
+        "--proxy", write_proxy(tmp_path / "p.jsonl"),
+        "--uploader", write_uploader(tmp_path / "u.jsonl"),
+        "--paramsync", write_paramsync(tmp_path / "s.jsonl"),
+    )
+    assert result.returncode == 0, result.stderr
+    for needle in (
+        "6. LOCAL MODE -- POLICY PROXY",
+        "7. LOCAL MODE -- TRANSITION UPLOADER",
+        "8. LOCAL MODE -- PARAM SYNC",
+        "local_inference_ms",
+        "params_age_s",
+        "backlog_depth",
+        "staleness_s",
+        analyzer.DIVERGENCE_BANNER,
+        analyzer.LOCAL_HOP_PHRASE,
+    ):
+        assert needle in result.stdout, needle
+    # the remote-mode sections are still all there
+    for needle in ("0. INPUTS", "1. PER-PHASE", "3. LOOP BUDGET", "5. INTERVENTION"):
+        assert needle in result.stdout, needle
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_missing_local_files_still_exit_zero(tmp_path: Path) -> None:
+    result = _run(
+        "--actor", write_actor(tmp_path / "actor.jsonl"),
+        "--proxy", tmp_path / "absent_proxy.jsonl",
+        "--uploader", tmp_path / "absent_uploader.jsonl",
+        "--paramsync", tmp_path / "absent_paramsync.jsonl",
+    )
+    assert result.returncode == 0, result.stderr
+    assert analyzer.PROXY_ABSENT in result.stdout
+    assert analyzer.UPLOADER_ABSENT in result.stdout
+    assert analyzer.PARAMSYNC_ABSENT in result.stdout
+    assert "warning: --proxy" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_local_mode_markdown_carries_the_new_sections(tmp_path: Path) -> None:
+    out = tmp_path / "reports" / "local.md"
+    result = _run(
+        "--actor", write_actor(tmp_path / "actor.jsonl"),
+        "--proxy", write_proxy(tmp_path / "p.jsonl"),
+        "--uploader", write_uploader(tmp_path / "u.jsonl"),
+        "--paramsync", write_paramsync(tmp_path / "s.jsonl"),
+        "--out", out,
+    )
+    assert result.returncode == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+    assert "## 6. LOCAL MODE -- POLICY PROXY (laptop3)" in text
+    assert "| gauge |" in text
+    assert "| progression | value |" in text
+    assert analyzer.DIVERGENCE_BANNER in text

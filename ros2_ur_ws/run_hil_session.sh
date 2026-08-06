@@ -29,6 +29,14 @@
 #   * 이 스크립트를 Ctrl-C 하거나 세션이 끝나면 이 스크립트가 띄운 HIL GUI와 camera
 #     launcher도 정리한다.
 #
+# 로컬 추론 (opt-in, HIL_POLICY_MODE=local):
+#   기본은 remote이고 그때는 이 스크립트의 동작이 한 바이트도 달라지지 않는다.
+#   local이면 1단계보다 **먼저** run_hil_local_policy.sh를 띄워 파라미터 fetch와
+#   JIT 워밍업을 camera 기동과 겹치게 하고, camera READY 뒤에 proxy가 스스로
+#   READY를 보고할 때까지 기다린 다음 나머지 단계를 진행한다. 정리도 camera/GUI와
+#   같은 방식으로 이 스크립트가 소유한다 (다만 proxy는 마지막에 멈춘다 — 업로드 큐를
+#   비울 시간이 필요하다). 설계는 serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md.
+#
 # 하드웨어 재기동 자동 복구 (3~5단계만 재시도):
 #   충돌 → PROTECTIVE_STOP → actor 사망은 이 리그의 일상이고, 펜던트에서 오류를
 #   지우는 것만으로는 부족해서 조작자가 Terminal 2의 run_hil_hardware.sh를 껐다 켠다.
@@ -69,8 +77,16 @@ CAMERA_SCRIPT="$SCRIPT_DIR/launch_cameras.sh"
 GUI_SCRIPT="$SCRIPT_DIR/run_hil_gui.sh"
 PREPOSITION_SCRIPT="$SCRIPT_DIR/run_hil_preposition.sh"
 ACTOR_SCRIPT="$SCRIPT_DIR/run_hil_actor.sh"
+LOCAL_POLICY_SCRIPT="$SCRIPT_DIR/run_hil_local_policy.sh"
 TOPIC_CHECKER="$SCRIPT_DIR/_hil_topic_rate_check.py"
 CAMERA_READY_TIMEOUT_S="${HIL_CAMERA_READY_TIMEOUT_S:-90}"
+# proxy는 파라미터 첫 blob을 기다리고(기본 최대 300 s) 그 뒤 두 policy trace를
+# JIT 컴파일한다(0.7~1.6 s씩). 그래서 camera READY보다 훨씬 넉넉해야 한다.
+LOCAL_POLICY_READY_TIMEOUT_S="${HIL_LOCAL_POLICY_READY_TIMEOUT_S:-420}"
+# Ctrl-C 뒤 proxy가 업로드 큐를 비우는 데 쓰는 시간의 **상한**이다(기본 drain
+# timeout 60 s + 여유). 큐가 비어 있으면 즉시 끝나므로 매번 이만큼 기다리지 않는다.
+# 이 값이 drain보다 짧으면 정리 과정이 아직 서버에 못 간 전이를 SIGKILL로 버린다.
+LOCAL_POLICY_DRAIN_GRACE_S="${HIL_LOCAL_POLICY_DRAIN_GRACE_S:-75}"
 
 NO_ARM=0
 PLAN_ONLY=0
@@ -120,6 +136,18 @@ Environment:
   HIL_HARDWARE_RECYCLE_WAIT_S    (default 900) wait for the operator's restart
   HIL_RETRY_RESUME_DELAY_S       (default 5)   cancellable countdown before
                                                stage 3 moves the arm again
+  HIL_POLICY_MODE=remote|local   (default remote)
+        Where policy inference happens. 'remote' is unchanged in every respect.
+        'local' additionally starts run_hil_local_policy.sh BEFORE the cameras
+        (so its parameter fetch and JIT warm-up overlap the RealSense bring-up),
+        gates progression on the proxy reporting itself ready, owns its
+        lifecycle like the cameras and the GUI, and points run_hil_actor.sh at
+        127.0.0.1:${HIL_LOCAL_POLICY_PORT:-50253}. Reward authority still lives
+        on the server. See serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md.
+  HIL_LOCAL_POLICY_PORT          (default 50253) local-mode proxy port
+  HIL_LOCAL_POLICY_READY_TIMEOUT_S (default 420) how long to wait for the proxy
+  HIL_LOCAL_POLICY_DRAIN_GRACE_S (default 75) upper bound on the proxy's
+        shutdown drain; shorter than the drain means killing queued transitions
 EOF
 }
 
@@ -172,6 +200,46 @@ case "$STARTUP_DEADMAN" in
 esac
 export HIL_STARTUP_DEADMAN="$STARTUP_DEADMAN"
 STARTUP_DEADMAN_LABEL="${STARTUP_DEADMAN^^}"
+
+# 정책 추론을 어디서 하는가.  remote(기본)에서는 이 스크립트의 동작이 한 바이트도
+# 달라지지 않는다 — 아래 local 분기는 전부 ((POLICY_LOCAL)) 뒤에 있다.
+# local이면 laptop3의 local policy proxy를 camera/GUI와 같은 방식으로 이 세션이
+# 소유하고(기동·준비 대기·정리), run_hil_actor.sh가 그것을 다이얼한다.
+# 오타는 fail-closed다: 조용히 remote로 해석하면 조작자는 local을 켰다고 믿은 채
+# 서버 추론으로 세션을 돌게 되고, 그 차이는 지연 로그를 뜯어보기 전에는 안 보인다.
+POLICY_MODE="${HIL_POLICY_MODE:-remote}"
+POLICY_LOCAL=0
+case "$POLICY_MODE" in
+    remote)
+        # 여기서 아무것도 export하지 않는 것이 의도다.  remote는 기본값이고,
+        # run_hil_actor.sh의 기본값도 remote다 — 그러니 이 자리에서
+        # HIL_POLICY_MODE=remote 를 굳이 환경에 얹으면 "환경변수를 안 준 세션"의
+        # 자식 환경이 옛 판과 달라진다.  기능은 같지만 그 동일성이 이 기능의
+        # 첫 번째 계약이라 문자 그대로 지킨다.
+        ;;
+    local)
+        POLICY_LOCAL=1
+        export HIL_POLICY_MODE="$POLICY_MODE"
+        ;;
+    *)
+        echo "FATAL: HIL_POLICY_MODE는 'remote' 또는 'local'이어야 한다 (받은 값 '$POLICY_MODE')." >&2
+        exit 2
+        ;;
+esac
+if ((POLICY_LOCAL)); then
+    if [[ ! "$LOCAL_POLICY_READY_TIMEOUT_S" =~ ^[1-9][0-9]*$ ]]; then
+        echo "FATAL: HIL_LOCAL_POLICY_READY_TIMEOUT_S는 양의 정수여야 한다." >&2
+        exit 2
+    fi
+    if [[ ! "$LOCAL_POLICY_DRAIN_GRACE_S" =~ ^[0-9]+$ ]]; then
+        echo "FATAL: HIL_LOCAL_POLICY_DRAIN_GRACE_S는 음이 아닌 정수여야 한다." >&2
+        exit 2
+    fi
+    if [[ ! -x "$LOCAL_POLICY_SCRIPT" ]]; then
+        echo "FATAL: 실행할 수 없는 필수 스크립트: $LOCAL_POLICY_SCRIPT" >&2
+        exit 1
+    fi
+fi
 
 # --- 하드웨어 재기동 자동 복구 루프 설정 -------------------------------------
 # 충돌/protective stop 뒤 조작자는 Terminal 2의 run_hil_hardware.sh를 껐다 켠다.
@@ -234,6 +302,9 @@ else
 fi
 echo "   camera viewer : ${VIEW:-true}"
 echo "   startup deadman : $STARTUP_DEADMAN_LABEL (기본 DISENGAGED = policy로 시작)"
+if ((POLICY_LOCAL)); then
+    echo "   policy : LOCAL 추론 (이 세션이 run_hil_local_policy.sh를 소유한다)"
+fi
 if ((NO_ARM == 0)); then
     if ((RETRY_ENABLED)); then
         echo "   hw recovery : ON (rc=75 + 번들 PID 세대교체 확인 시 3~5단계만 최대 ${RETRY_MAX}회 재시도)"
@@ -251,6 +322,10 @@ fi
 
 if ((PLAN_ONLY)); then
     echo ""
+    if ((POLICY_LOCAL)); then
+        echo "[plan] local policy proxy (cameras보다 먼저 띄우고 병렬로 워밍업한다)"
+        print_command "$LOCAL_POLICY_SCRIPT"
+    fi
     echo "[plan] cameras"
     print_command "$CAMERA_SCRIPT"
     echo "[plan] HIL deadman GUI"
@@ -272,12 +347,15 @@ fi
 
 CAMERA_PID=""
 GUI_PID=""
+LOCAL_POLICY_PID=""
 CLEANED=0
 SESSION_TMP="$(mktemp -d /tmp/hil_session_XXXXXX)"
 CAMERA_LOG="$SESSION_TMP/cameras.log"
 GUI_LOG="$SESSION_TMP/hil_gui.log"
+LOCAL_POLICY_LOG="$SESSION_TMP/local_policy.log"
 : >"$CAMERA_LOG"
 : >"$GUI_LOG"
+: >"$LOCAL_POLICY_LOG"
 
 group_has_live_processes() {
     local pgid="$1"
@@ -320,6 +398,48 @@ verify_session_leader() {
     kill -TERM "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# local policy proxy가 **실제로 서빙 중**이 될 때까지 기다린다 (local 모드 전용).
+# ---------------------------------------------------------------------------
+# 무엇을 보는가: run_local_policy_proxy.py는 기동 단계마다 한 줄짜리 JSON을
+# stdout에 찍는다(_emit). 그 중 local_policy_proxy_ready 는 네 가지가 **전부**
+# 끝났다는 뜻이다 — 진짜 서버와의 핸드셰이크, 첫 파라미터 blob 적재, 두 policy
+# trace의 smoke 컴파일, 그리고 리스너 바인드. TCP connect만 보면 그 넷 중 마지막
+# 하나만 증명되고, 나머지 셋이 안 끝난 proxy에 actor를 붙이면 첫 Step이 컴파일을
+# 기다리다 deadline을 넘긴다. 그래서 로그 줄이 1차 게이트이고 TCP는 확인 사살이다.
+# startup_failed 를 보면 타임아웃을 기다리지 않고 즉시 실패한다.
+hil_wait_for_local_policy() {
+    local deadline=$((SECONDS + LOCAL_POLICY_READY_TIMEOUT_S))
+    local next_note=0 remaining
+    while true; do
+        if grep -q '"event":"local_policy_proxy_ready"' "$LOCAL_POLICY_LOG"; then
+            return 0
+        fi
+        if grep -q '"event":"local_policy_proxy_startup_failed"' "$LOCAL_POLICY_LOG"; then
+            echo "  !! local policy proxy가 기동에 실패했다 (startup_failed)."
+            return 1
+        fi
+        if ! kill -0 "$LOCAL_POLICY_PID" 2>/dev/null; then
+            echo "  !! local policy proxy가 READY 전에 종료했다."
+            return 1
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "  !! ${LOCAL_POLICY_READY_TIMEOUT_S}s 안에 proxy READY를 확인하지 못했다."
+            return 1
+        fi
+        if ((SECONDS >= next_note)); then
+            remaining=$((deadline - SECONDS))
+            echo "  .. proxy 워밍업 대기 중 (파라미터 fetch + JIT 컴파일, 남은 시간 ${remaining}s)"
+            next_note=$((SECONDS + 30))
+        fi
+        sleep 1
+    done
+}
+
+hil_local_policy_port_open() {
+    (exec 3<>"/dev/tcp/127.0.0.1/${HIL_LOCAL_POLICY_PORT:-50253}") >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -538,7 +658,18 @@ cleanup() {
     # launch_cameras.sh가 viewer + 두 camera node를 자체적으로 순서대로 정리한다.
     # 독립 process group kill은 그 자체 cleanup이 실패해도 grandchild를 남기지 않는다.
     stop_child_group "$CAMERA_PID" "camera launcher" 20
+    # proxy는 **마지막에** 멈춘다. TERM을 받으면 listener를 닫고 아직 서버에 못 간
+    # 전이를 마저 올리는데(drain), 그 시간을 camera/GUI 정리와 겹치게 두는 것보다
+    # 뒤로 미는 편이 단순하고, grace가 drain timeout보다 길어야 하는 이유이기도 하다.
+    # 큐가 비어 있으면 즉시 끝난다 — 이 값은 상한이지 고정 대기가 아니다.
+    if [[ -n "$LOCAL_POLICY_PID" ]]; then
+        echo "[cleanup] local policy proxy는 업로드 큐를 비운 뒤 끝난다 (최대 ${LOCAL_POLICY_DRAIN_GRACE_S}s)"
+    fi
+    stop_child_group "$LOCAL_POLICY_PID" "local policy proxy" "$LOCAL_POLICY_DRAIN_GRACE_S"
     echo "[session] logs: $CAMERA_LOG | $GUI_LOG"
+    if ((POLICY_LOCAL)); then
+        echo "[session]       $LOCAL_POLICY_LOG"
+    fi
     return "$rc"
 }
 
@@ -546,6 +677,18 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# proxy는 cameras보다 **먼저** 띄운다. 파라미터 첫 blob fetch와 두 policy trace의
+# JIT 컴파일에 수십 초가 걸리는데, 그 시간은 RealSense 기동과 완전히 겹칠 수 있다.
+# READY 확인은 cameras READY 뒤에서 한다 (아래) — 그래야 둘이 병렬로 워밍업한다.
+if ((POLICY_LOCAL)); then
+    echo ""
+    echo "[local-policy] proxy 기동 (cameras와 병렬로 워밍업; log: $LOCAL_POLICY_LOG)"
+    echo "               venv/터널/파라미터 디렉터리 확인은 그 스크립트가 한다."
+    setsid "$LOCAL_POLICY_SCRIPT" >"$LOCAL_POLICY_LOG" 2>&1 &
+    LOCAL_POLICY_PID=$!
+    verify_session_leader "$LOCAL_POLICY_PID" "local policy proxy"
+fi
 
 echo ""
 echo "[1/$STAGE_TOTAL] RealSense pair 기동"
@@ -580,6 +723,27 @@ while ! grep -q '^### READY' "$CAMERA_LOG"; do
     sleep 0.5
 done
 echo "      camera launcher READY"
+
+# 여기가 local 모드의 게이트다. proxy가 서빙 중이 아니면 그 뒤 단계를 진행하지
+# 않는다 — preflight [6]은 포트가 열렸는지만 보므로, 준비 안 된 proxy를 통과시키면
+# 실패가 첫 Step RPC까지 밀려서 나타난다 (팔은 이미 arming된 뒤다).
+if ((POLICY_LOCAL)); then
+    echo ""
+    echo "[local-policy] proxy READY 대기 (최대 ${LOCAL_POLICY_READY_TIMEOUT_S}s)"
+    if ! hil_wait_for_local_policy; then
+        echo "" >&2
+        tail -n 30 "$LOCAL_POLICY_LOG" >&2 || true
+        echo "FATAL: local policy proxy가 준비되지 않았다 — 이 상태로 actor를 arming하지 않는다." >&2
+        echo "       전체 로그: $LOCAL_POLICY_LOG" >&2
+        exit 1
+    fi
+    if ! hil_local_policy_port_open; then
+        echo "FATAL: proxy가 READY를 보고했지만 127.0.0.1:${HIL_LOCAL_POLICY_PORT:-50253} 에 연결되지 않는다." >&2
+        echo "       로그: $LOCAL_POLICY_LOG" >&2
+        exit 1
+    fi
+    echo "               proxy READY (127.0.0.1:${HIL_LOCAL_POLICY_PORT:-50253} 연결 확인)"
+fi
 
 echo ""
 echo "[2/$STAGE_TOTAL] HIL deadman GUI 기동"

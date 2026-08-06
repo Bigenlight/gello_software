@@ -81,6 +81,30 @@
 #                            argv token by token.  A REUSED learner keeps
 #                            whatever it was started with -- profiling cannot be
 #                            switched on under a running lineage.
+#   HIL_PARAMS_EXPORT        unset by default.  Forwarded the same way, and with
+#                            the same reuse rule, as HIL_LATENCY_PROFILE.  When
+#                            set, a FRESHLY STARTED learner writes its
+#                            TRAINABLE-only parameter blob (the frozen ResNet-10
+#                            trunk pruned: 12.4 MB of 32.0 MB) plus a LATEST.json
+#                            manifest to <run root>/params_live/ at every policy
+#                            publish, so laptop3 can run local inference
+#                            (HIL_POLICY_MODE=local on run_hil_session.sh).  It
+#                            changes nothing else: same wire protocol, same argv,
+#                            same reward authority.
+#   HIL_EXTERNAL_POLICY_INGEST
+#                            unset by default.  Forwarded the same way, and with
+#                            the same reuse rule, as HIL_LATENCY_PROFILE.  When
+#                            set, a FRESHLY STARTED learner accepts transitions
+#                            whose meta.policy_action/policy_version were issued
+#                            by the laptop-side local-inference proxy instead of
+#                            requiring them to equal the action the learner
+#                            itself would have issued.  Without it, EVERY online
+#                            transition forwarded in HIL_POLICY_MODE=local is
+#                            answered INVALID_ARGUMENT and replay stays empty.
+#                            It relaxes nothing else: the action is still
+#                            validated (finite, in [-1,1], equal to the executed
+#                            action on non-intervention steps) and the version
+#                            must still never decrease within a session.
 #   ACTOR_VENV               default /home/laptop3/venvs/gello-hil-actor
 #   HIL_ACCEPT_HEAD_MISMATCH default 0; 1 downgrades the fresh-lineage refusal
 #                            on a learner-host/laptop3 HEAD mismatch to a
@@ -137,6 +161,22 @@ LATENCY_PROFILE="${HIL_LATENCY_PROFILE:-}"
 if [[ -n "$LATENCY_PROFILE" && ! "$LATENCY_PROFILE" =~ ^[A-Za-z0-9]+$ ]]; then
     echo "WARNING: ignoring HIL_LATENCY_PROFILE=$LATENCY_PROFILE (expected a plain word such as 1); the learner will not profile." >&2
     LATENCY_PROFILE=""
+fi
+# Opt-in trainable-params export for laptop-side local inference.  Same shape,
+# same reasons, same guard as HIL_LATENCY_PROFILE above: an ENV VAR for a fresh
+# learner, never an argv token.
+PARAMS_EXPORT="${HIL_PARAMS_EXPORT:-}"
+if [[ -n "$PARAMS_EXPORT" && ! "$PARAMS_EXPORT" =~ ^[A-Za-z0-9]+$ ]]; then
+    echo "WARNING: ignoring HIL_PARAMS_EXPORT=$PARAMS_EXPORT (expected a plain word such as 1); the learner will not export params." >&2
+    PARAMS_EXPORT=""
+fi
+# Opt-in ingest of policy meta issued by the laptop-side local-inference proxy.
+# Same shape, same reasons, same guard as the two above: an ENV VAR for a fresh
+# learner, never an argv token.
+EXTERNAL_INGEST="${HIL_EXTERNAL_POLICY_INGEST:-}"
+if [[ -n "$EXTERNAL_INGEST" && ! "$EXTERNAL_INGEST" =~ ^[A-Za-z0-9]+$ ]]; then
+    echo "WARNING: ignoring HIL_EXTERNAL_POLICY_INGEST=$EXTERNAL_INGEST (expected a plain word such as 1); the learner will reject forwarded local-inference transitions." >&2
+    EXTERNAL_INGEST=""
 fi
 ACTOR_VENV="${ACTOR_VENV:-/home/laptop3/venvs/gello-hil-actor}"
 ACTOR_PY="$ACTOR_VENV/bin/python"
@@ -311,6 +351,32 @@ SSH_OPTIONS=(
     -o TCPKeepAlive=yes
 )
 
+# The opt-in positionals ride at the END of the argument list, and each is EMPTY
+# when its env var is unset.  ssh joins these arguments into ONE remote command
+# line, so an empty argument does not survive the trip: a TRAILING empty simply
+# disappears (which is why the remote side reads them with ":-", and why the
+# production default is still exactly 14 positionals), but an INTERIOR empty
+# would shift every later value one slot left -- HIL_PARAMS_EXPORT=1 alone would
+# arrive as HIL_LATENCY_PROFILE=1 and switch on the wrong feature with no error
+# anywhere.  So: drop trailing empties, then send any remaining interior empty
+# as a sentinel the remote side maps back to "".  The sentinel cannot collide
+# with a real value because every guard above accepts only [A-Za-z0-9]+, which
+# excludes "_".
+#
+# THE ORDER OF THIS ARRAY IS THE WIRE FORMAT: element N is read as ${14+N+1} on
+# the remote side.  Append new opt-ins at the END and add the matching ${N:-}
+# read plus its sentinel line there; never insert one in the middle.
+OPTIONAL_UNSET="__unset__"
+OPTIONAL_POSITIONALS=("$LATENCY_PROFILE" "$PARAMS_EXPORT" "$EXTERNAL_INGEST")
+while (( ${#OPTIONAL_POSITIONALS[@]} > 0 )) \
+    && [[ -z "${OPTIONAL_POSITIONALS[-1]}" ]]; do
+    unset 'OPTIONAL_POSITIONALS[-1]'
+done
+for optional_index in "${!OPTIONAL_POSITIONALS[@]}"; do
+    [[ -n "${OPTIONAL_POSITIONALS[$optional_index]}" ]] || \
+        OPTIONAL_POSITIONALS[$optional_index]="$OPTIONAL_UNSET"
+done
+
 # The remote program is passed on stdin.  In check mode it performs no mkdir,
 # lock-file open, process start, signal, or other external mutation.
 set +e
@@ -320,7 +386,8 @@ REMOTE_OUTPUT="$(
         "$START_TIMEOUT_S" "$REMOTE_REPO" "$REMOTE_PYTHON" \
         "$REMOTE_PORT" "$REMOTE_RUN_BASE" \
         "$LAPTOP_HEAD" "$LAPTOP_BRANCH" "$ACCEPT_HEAD_MISMATCH" \
-        "$REMOTE_DATA_ROOT" "$WANDB_MODE" "$LATENCY_PROFILE" <<'REMOTE_SCRIPT'
+        "$REMOTE_DATA_ROOT" "$WANDB_MODE" \
+        ${OPTIONAL_POSITIONALS[@]+"${OPTIONAL_POSITIONALS[@]}"} <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 MODE="$1"
@@ -351,12 +418,22 @@ REMOTE_DATA_ROOT="${13}"
 # passing while the thing it guards has moved (see the "Cross-host code
 # identity" comment for the day that cost).
 WANDB_MODE="${14}"
-# Opt-in latency profiling for a FRESH learner.  ":-" is load-bearing: ssh joins
-# these positionals into one command line, so an empty last argument does not
-# survive the trip and ${15} would be unbound under `set -u`.  Empty means "do
-# not forward", which is why the expansion below is unquoted -- a quoted empty
-# expansion would hand `env` an empty argument instead of nothing at all.
+# Opt-in per-feature switches for a FRESH learner.  ":-" is load-bearing: ssh
+# joins these positionals into one command line, so an empty trailing argument
+# does not survive the trip and ${15}/${16}/${17} would be unbound under
+# `set -u`.  Empty means "do not forward", which is why the expansions below are
+# unquoted -- a quoted empty expansion would hand `env` an empty argument
+# instead of nothing at all.  The sentinel is how an INTERIOR empty survives
+# (params export on, latency profiling off); see the laptop-side
+# OPTIONAL_POSITIONALS comment for why an argument that vanishes mid-list is
+# worse than one that is missing.
+OPTIONAL_UNSET="__unset__"
 LATENCY_PROFILE="${15:-}"
+PARAMS_EXPORT="${16:-}"
+EXTERNAL_INGEST="${17:-}"
+[[ "$LATENCY_PROFILE" != "$OPTIONAL_UNSET" ]] || LATENCY_PROFILE=""
+[[ "$PARAMS_EXPORT" != "$OPTIONAL_UNSET" ]] || PARAMS_EXPORT=""
+[[ "$EXTERNAL_INGEST" != "$OPTIONAL_UNSET" ]] || EXTERNAL_INGEST=""
 
 CLASSIFIER="$REMOTE_DATA_ROOT/classifier_ckpt/checkpoint_150"
 CLASSIFIER_SHA256="512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
@@ -1109,6 +1186,8 @@ nohup env \
     WANDB_DISABLE_CODE=true \
     PYTHONPATH="$REMOTE_REPO/serl_ur_infra:$REMOTE_REPO/third_party/hil-serl/serl_launcher" \
     ${LATENCY_PROFILE:+HIL_LATENCY_PROFILE="$LATENCY_PROFILE"} \
+    ${PARAMS_EXPORT:+HIL_PARAMS_EXPORT="$PARAMS_EXPORT"} \
+    ${EXTERNAL_INGEST:+HIL_EXTERNAL_POLICY_INGEST="$EXTERNAL_INGEST"} \
     "$REMOTE_PYTHON" \
     serl_ur_infra/scripts/run_rlpd_learner_server.py \
     --host 127.0.0.1 \

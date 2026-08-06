@@ -59,6 +59,42 @@ learner는 이미 `logs/learner.jsonl`에 `learner_update`마다
 `timing/sample_ms` · `timing/critic_update_ms` · `timing/full_update_ms` ·
 `timing/learner_step_ms`를 남긴다. 분석기는 **그 파일을 그대로 읽는다.** 중복 계측 없음.
 
+### 1.4 🆕 로컬 추론 모드 (`HIL_POLICY_MODE=local`) — role 3개가 더 생긴다
+
+정책 추론을 laptop3에서 돌리면(설계·근거·한계는
+[`../../serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md`](../../serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md))
+**같은 프로파일러**를 세 컴포넌트가 더 쓴다. 전부 laptop3 안이고, 전부 **같은 스위치
+(`HIL_LATENCY_PROFILE`) 하나**를 본다.
+
+#### `role: "proxy"` — 로컬에서 답한 Step 1회당 1줄
+
+| 필드 | 뜻 |
+|---|---|
+| `local_inference_ms` | laptop3에서 돈 정책 forward pass. 📌 벤치 앵커는 **GPU 2.0 ms / CPU 9.6 ms** — **이 파일의 값이 측정이고 저건 기대치다** |
+| `local_finalize_ms` | 서버 reward 분기를 대신하는 **MANUAL finalizer** |
+| `total_ms` | 프록시 핸들러 진입→탈출. **위 둘을 담는다** |
+| `queue_depth` | **게이지.** 응답 시점의 forward 큐 깊이 |
+| `params_version` | 이 응답을 만든 정책 버전. **세션 안에서 단조여야 한다** |
+| `params_age_s` | **게이지.** 그 파라미터가 얼마나 낡았나 |
+
+#### `role: "uploader"` — 서버로 forward한 요청 1회당 1줄
+
+| 필드 | 뜻 |
+|---|---|
+| `upload_rpc_ms` | 진짜 서버로의 왕복. **제어 루프 밖이다** — 이 값이 커도 로봇은 안 느려진다 |
+| `backlog_depth` | **게이지.** 아직 못 보낸 전이 수 |
+| `oldest_backlog_s` | **게이지.** 큐에서 가장 오래 기다린 전이의 나이 |
+| `outcome_divergence` | **불리언 알람.** 프록시의 로컬 MANUAL verdict ≠ 서버가 돌려준 outcome. **0이 정상이다** |
+
+#### `role: "paramsync"` — `LATEST.json` 폴링 1회당 1줄
+
+| 필드 | 뜻 |
+|---|---|
+| `poll_ms` | 매 주기 지불 |
+| `fetch_ms` · `load_ms` · `swap_ms` | **새 버전이 있을 때만.** blob 전송 / 역직렬화+trunk 접붙임 / hot-swap |
+| `version` | 적용한 파라미터 버전 |
+| `staleness_s` | `now − 적용한 버전의 LATEST.json 시각`. **0이 될 수 없다** — 12.4 MB가 ~3.6 MB/s 링크를 건너야 한다 |
+
 ---
 
 ## 2. 켜는 법 — 3-CLI 워크플로우
@@ -109,6 +145,46 @@ HIL_LATENCY_PROFILE=1 ./run_hil_session.sh
 서버 파일은 **여전히 `<run_root>/logs/latency_server.jsonl`에 떨어진다.** 서버 경로를
 옮기려면 learner 프로세스 자신의 환경에 그 변수가 있어야 한다(= 런처 수정).
 
+### 2.2 🆕 로컬 추론 모드에서 켜기
+
+터미널 수는 그대로 3개다. **환경변수가 세 개 더 붙을 뿐이다.**
+
+```bash
+cd /home/laptop3/gello_software/ros2_ur_ws
+
+# Terminal 1 — 서버 learner + tunnel + 파라미터 export + 외부 정책 meta 수용
+#   HIL_EXTERNAL_POLICY_INGEST=1 을 빼면 learner가 forward된 전이를 **전부 거절한다**.
+HIL_PARAMS_EXPORT=1 HIL_EXTERNAL_POLICY_INGEST=1 HIL_LATENCY_PROFILE=1 ./run_hil_server.sh
+
+# Terminal 2 — 하드웨어 (그대로)
+./run_hil_hardware.sh
+
+# Terminal 3 — cameras + GUI + 로컬 프록시 + actor
+HIL_POLICY_MODE=local HIL_LATENCY_PROFILE=1 ./run_hil_session.sh
+```
+
+T3의 `HIL_LATENCY_PROFILE` 하나가 **actor · proxy · uploader · paramsync 네 파일**을 만든다
+(세 컴포넌트 전부 T3가 소유하는 프로세스라 같은 환경을 물려받는다).
+
+> 🪤 **함정 1이 `HIL_PARAMS_EXPORT`에도 똑같이 적용된다.** 재사용된 learner
+> (`HIL_SERVER_RESULT=reused`)는 **자기가 기동될 때의 환경변수**만 갖는다 — `params_live/`가
+> 안 생기고, 프록시는 초기 파라미터를 못 받아 **health-ready가 되지 않는다.** T1 출력의
+> `HIL_SERVER_RESULT`를 먼저 본다.
+>
+> 🛑 **그리고 `HIL_EXTERNAL_POLICY_INGEST`는 같은 함정의 훨씬 조용한 판이다.**
+> `HIL_PARAMS_EXPORT`가 빠지면 프록시가 아예 안 뜨므로 **즉시 안다.** 이쪽은 반대다 —
+> learner가 forward된 전이를 `INVALID_ARGUMENT`로 거절해도 **actor는 멀쩡히 돈다**
+> (프록시가 로컬에서 답하므로 로봇 세션은 완벽히 정상으로 보인다). 유일한 신호는 프록시
+> 로그의 `TRANSITION NOT INGESTED` 줄이고, 그건 `run_hil_session.sh`가 소유하는
+> `/tmp/hil_session_*/local_policy.log`에 있지 조작자 터미널에 있지 않다. **세션이 끝나고
+> replay가 비어 있는 것으로 알게 된다.** 세션 시작 직후 그 로그를 한 번 확인할 것:
+> `grep -c 'TRANSITION NOT INGESTED' /tmp/hil_session_*/local_policy.log` 가 0이어야 한다.
+
+> 🛑 **로컬 모드에서 `step_rpc_ms`의 의미가 바뀐다.** actor가 다이얼한 상대가
+> `127.0.0.1:50253`(로컬 프록시)이므로 그 값은 **로컬 홉**이다. 원격 모드 파일과 나란히 놓고
+> "서버가 빨라졌다"고 읽으면 틀린다 — 서버의 ~156 ms는 사라진 게 아니라 **uploader로 옮겨
+> 갔다.** 분석기가 `--proxy`가 있을 때 3절에 이 경고를 자동으로 찍는다.
+
 ---
 
 ## 3. 파일이 어디에 떨어지나
@@ -118,6 +194,12 @@ HIL_LATENCY_PROFILE=1 ./run_hil_session.sh
 | **actor** (laptop3) | `/home/laptop3/gello_software/ros2_ur_ws/gello_logs/hil_latency/<UTC>_actor_<pid>.jsonl` |
 | **server** (junhyeong_ai) | `<run_root>/logs/latency_server.jsonl` |
 | **learner** (junhyeong_ai, 원래부터 있던 것) | `<run_root>/logs/learner.jsonl` |
+| 🆕 **proxy** (laptop3, 로컬 모드) | `.../gello_logs/hil_latency/<UTC>_proxy_<pid>.jsonl` |
+| 🆕 **uploader** (laptop3, 로컬 모드) | `.../gello_logs/hil_latency/<UTC>_uploader_<pid>.jsonl` |
+| 🆕 **paramsync** (laptop3, 로컬 모드) | `.../gello_logs/hil_latency/<UTC>_paramsync_<pid>.jsonl` |
+
+🟢 **로컬 모드의 세 파일은 laptop3에 있으므로 `scp`가 필요 없다.** 파일명의 role로 고르고,
+`ls -t`로 이번 세션 것을 집는다(같은 디렉터리에 actor 파일과 섞여 있다).
 
 `<run_root>`는 `./run_hil_server.sh --check`가 알려 준다. 📌 **run root는 스냅샷이므로
 문서에 적힌 값을 복사하지 말고 매번 읽는다.**
@@ -148,11 +230,22 @@ $PY serl_ur_infra/scripts/analyze_hil_latency.py \
   --server  /tmp/latency_server.jsonl \
   --learner /tmp/learner.jsonl \
   --out     /tmp/hil_latency_report.md
+
+# (c) 🆕 로컬 추론 모드 — 6·7·8절이 더 붙는다 (세 파일 다 laptop3에 있다)
+$PY serl_ur_infra/scripts/analyze_hil_latency.py \
+  --actor     ros2_ur_ws/gello_logs/hil_latency/<UTC>_actor_<pid>.jsonl \
+  --proxy     ros2_ur_ws/gello_logs/hil_latency/<UTC>_proxy_<pid>.jsonl \
+  --uploader  ros2_ur_ws/gello_logs/hil_latency/<UTC>_uploader_<pid>.jsonl \
+  --paramsync ros2_ur_ws/gello_logs/hil_latency/<UTC>_paramsync_<pid>.jsonl
 ```
 
-`--actor`만 필수다. `--server`/`--learner`는 없으면 **해당 절이 이유를 적고 강등**되며
-**exit code는 0이다.** 없는 파일을 가리키면 stderr에 `warning:`이 한 줄 뜨고 나머지는 그대로
-나온다. `--actor`가 없는 파일이면 그때만 **exit 2 + 한 줄 오류**다(traceback 없음).
+`--actor`만 필수다. `--server`/`--learner`/`--proxy`/`--uploader`/`--paramsync`는 없으면
+**해당 절이 이유를 적고 강등**되며 **exit code는 0이다.** 없는 파일을 가리키면 stderr에
+`warning:`이 한 줄 뜨고 나머지는 그대로 나온다. `--actor`가 없는 파일이면 그때만
+**exit 2 + 한 줄 오류**다(traceback 없음).
+
+로컬 3종을 **하나도 안 주면** 6절이 한 줄짜리 `local-mode data not given`으로만 나온다 —
+평소의 원격 모드 보고서는 예전과 같은 모양이다.
 
 ### 4.1 보고서 5개 절
 
@@ -168,6 +261,24 @@ $PY serl_ur_infra/scripts/analyze_hil_latency.py \
 **5절이 P1의 acceptance 항목 중 "포화 비율"을 그대로 답한다** — 창이 길어지면 개입 액션이
 포화되고 **저장된 액션이 실제 이동을 과소진술한다**(`08_OPEN_GAPS.md` G33). 이건 조작자가
 알아챌 수 없는 종류의 오염이라 계측이 유일한 탐지 수단이다.
+
+### 4.1a 🆕 로컬 모드 3개 절 (6·7·8)
+
+| 절 | 내용 | 필요한 파일 |
+|---|---|---|
+| **6. LOCAL MODE — POLICY PROXY** | `local_inference_ms`/`local_finalize_ms`/`total_ms` phase 표 + `queue_depth`·`params_age_s` 게이지 + **`params_version` 진행**(first/last/distinct/advances/**regressions**). 버전이 뒤로 가면 WARNING — 프록시는 단조 스탬핑이 계약이다 | `--proxy` |
+| **7. LOCAL MODE — TRANSITION UPLOADER** | `upload_rpc_ms` phase 표 + **백로그 추이**(`backlog_depth`·`oldest_backlog_s`의 max 포함) + **divergence 카운트**. 1건이라도 있으면 `!!! OUTCOME DIVERGENCE` 배너가 크게 뜬다. 백로그가 500을 넘으면 high-water 경고 | `--uploader` |
+| **8. LOCAL MODE — PARAM SYNC** | `poll_ms`/`fetch_ms`/`load_ms`/`swap_ms` 표(폴링 수 vs 실제 fetch 수 포함) + **`staleness_s` 분포** + version 진행 | `--paramsync` |
+
+읽는 법 세 가지만:
+
+- **6절의 `params_age_s`는 "정책이 얼마나 낡았나"다.** 0이 될 수 없다(§1.4). 이건 원격 모드에는
+  없던 **새 비용**이므로 루프가 빨라진 이득과 같이 봐야 한다.
+- **7절의 백로그는 에피소드 중에 자라고 대기 화면에서 빠지는 게 정상이다.** 서버는 forward된
+  전이당 여전히 ~156 ms를 쓴다. **에피소드 사이에 ~0으로 안 돌아오면 설계 전제가 깨진 것이다.**
+- **`outcome_divergence`는 지표가 아니라 알람이다. 0이 정상이고, 1 이상은 조사 대상이다** —
+  actor가 본 에피소드와 learner가 학습한 에피소드가 갈라졌다는 뜻이다. ⚠️ 그 필드가 파일에
+  아예 없으면 분석기는 "parity UNKNOWN"이라고 적는다 — **없는 것을 통과로 읽지 않는다.**
 
 ### 4.2 phase 목록은 하드코딩이 아니다
 
@@ -253,6 +364,7 @@ learner metrics sink에 세운 규칙과 같다: 죽은 sink는 logger를 강등
 | 모듈 · wiring · 분석기 · 오프라인 단위 테스트 | **코드 통합** |
 | **실기 세션에서 한 번이라도 켜고 돌린 적** | 🛑 **없다 — 미검증** |
 | P1 acceptance(실기 루프 주기 · 포화 비율 · phase 귀속) | 🛑 **미측정.** 이 문서는 **재는 방법**이지 측정 결과가 아니다 |
+| 🆕 로컬 모드 3 role(`proxy`/`uploader`/`paramsync`) + 분석기 6·7·8절 | 분석기·오프라인 테스트는 **있다**. 실기는 🛑 **없다** — [`../../serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md`](../../serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md) §9 |
 
 📌 **여기에 실측치를 적지 말 것.** 세션 결과는 `README.md` §1 상태표와
 `HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md` §8 P1에 날짜와 함께 남긴다.

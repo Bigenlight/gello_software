@@ -119,7 +119,11 @@
 #     EXPECTED_REWARD_AUTHORITY, EXPECTED_REWARD_MODEL_ID, ROS_SETUP,
 #     HZ_TIMEOUT_S, HIL_PREPOSITION_MARKER, HIL_PREPOSITION_MARKER_MAX_AGE_S,
 #     HIL_STARTUP_DEADMAN (disengaged|engaged — 아래 deadman gate 항목),
-#     HIL_ACTOR_EXIT_MAP (1|0 — 위 종료 코드 계약의 75 재mapping)
+#     HIL_ACTOR_EXIT_MAP (1|0 — 위 종료 코드 계약의 75 재mapping),
+#     HIL_POLICY_MODE (remote|local — remote가 기본이고 아무것도 안 바뀐다.
+#       local은 SERVER_PORT 기본값을 ${HIL_LOCAL_POLICY_PORT:-50253}로,
+#       EXPECTED_MODEL_ID 기본값을 proxy의 것으로 바꾼다. 그 둘뿐이다),
+#     HIL_LOCAL_POLICY_PORT (local 모드의 proxy 포트, 기본 50253)
 #   SKIP_ROS_CHECKS=1은 fake/no-arm 진단 전용이며 --arm과 함께 쓰면 거부한다.
 #
 # NOTE: `set -e`만 쓴다. `set -u`는 쓰지 않는다 — ROS의 setup.bash가 -u에서
@@ -150,8 +154,37 @@ ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
 WS_SETUP="$REPO_ROOT/ros2_ur_ws/install/setup.bash"
 ACTOR_SCRIPT="$REPO_ROOT/serl_ur_infra/scripts/run_remote_rlpd_actor.py"
 
+# HIL_POLICY_MODE — actor가 **누구에게** action을 달라고 하는가.
+#   remote (기본): SSH 터널의 로컬 끝 127.0.0.1:50153 = 서버 learner. 기존 그대로.
+#   local        : laptop3의 local policy proxy 127.0.0.1:50253
+#                  (run_hil_local_policy.sh / run_hil_session.sh의 HIL_POLICY_MODE=local).
+# 두 모드에서 **딱 두 값만** 다르다: 포트와 기대 model id.
+#   * SERVER_HOST는 양쪽 다 127.0.0.1이다 (proxy도 loopback 전용이다).
+#   * OBS_SCHEMA_HASH / EXPECTED_REWARD_* 는 **바뀌면 안 된다** — proxy는 기동 시
+#     진짜 서버와 핸드셰이크해서 observation schema hash와 reward 필드를 **그대로
+#     미러링**하고 자기 것으로 바꾸는 것은 model_id 하나뿐이다
+#     (ur_env/local_policy/proxy.py). 여기서 그 값들까지 갈아 끼우면 proxy와 서버가
+#     서로 다른 계약을 말하는 것을 이 핸드셰이크가 더 이상 잡아내지 못한다.
+# 오타는 fail-closed다 (HIL_STARTUP_DEADMAN과 같은 패턴): 조용히 remote로 해석하면
+# 조작자는 local을 켰다고 믿은 채 서버 추론으로 세션을 돌게 된다.
+POLICY_MODE="${HIL_POLICY_MODE:-remote}"
+case "$POLICY_MODE" in
+    remote)
+        DEFAULT_SERVER_PORT="50153"
+        DEFAULT_EXPECTED_MODEL_ID="hil-serl-hybrid-sac-resnet10-trunk-cache-v1"
+        ;;
+    local)
+        DEFAULT_SERVER_PORT="${HIL_LOCAL_POLICY_PORT:-50253}"
+        DEFAULT_EXPECTED_MODEL_ID="hil-serl-local-policy-resnet10-manual-v1"
+        ;;
+    *)
+        echo "FATAL: HIL_POLICY_MODE must be 'remote' or 'local' (got '$POLICY_MODE')" >&2
+        exit 2
+        ;;
+esac
+
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
-SERVER_PORT="${SERVER_PORT:-50153}"          # 로컬 터널 입구 → learner 50053
+SERVER_PORT="${SERVER_PORT:-$DEFAULT_SERVER_PORT}"   # 로컬 터널 입구 → learner 50053
 EXP_NAME="${EXP_NAME:-cube_in_cup}"
 UR_CONFIG_MODULE="${UR_CONFIG_MODULE:-ur_experiments.mappings}"
 # Real startup measurements include observation serialization, SSH transport,
@@ -161,7 +194,7 @@ UR_CONFIG_MODULE="${UR_CONFIG_MODULE:-ur_experiments.mappings}"
 TIMEOUT_S="${TIMEOUT_S:-1.5}"
 MAX_RESPONSE_AGE_S="${MAX_RESPONSE_AGE_S:-2.0}"
 OBS_SCHEMA_HASH="${OBS_SCHEMA_HASH:-3459098d8050886f4cb0e1f10dbf47c994a30bf5ec90994503be2c61c0352903}"
-EXPECTED_MODEL_ID="${EXPECTED_MODEL_ID:-hil-serl-hybrid-sac-resnet10-trunk-cache-v1}"
+EXPECTED_MODEL_ID="${EXPECTED_MODEL_ID:-$DEFAULT_EXPECTED_MODEL_ID}"
 EXPECTED_REWARD_AUTHORITY="${EXPECTED_REWARD_AUTHORITY:-server_classifier}"
 # 서버 `--reward-model-id` 와 **정확히 같은 문자열**이어야 한다. 이 값은 자유
 # 문자열이고 GetServerInfo 에서 동일성만 검사하므로, 체크포인트뿐 아니라 **분류기가
@@ -415,6 +448,9 @@ _say " HIL actor preflight"
 _say "   repo root : $REPO_ROOT"
 _say "   venv      : $ACTOR_VENV"
 _say "   server    : $SERVER_HOST:$SERVER_PORT"
+if [ "$POLICY_MODE" = "local" ]; then
+    _say "   policy    : LOCAL proxy (model id $EXPECTED_MODEL_ID; reward 권위는 서버 그대로)"
+fi
 _say "   exp/config: $EXP_NAME / $UR_CONFIG_MODULE"
 if [ "$FAKE_ENV" -eq 1 ]; then
     _say "   mode      : FAKE ENV (로봇/센서 미사용)"
@@ -642,6 +678,13 @@ fi
 # ---------------------------------------------------------------------------
 _say ""
 _say "[6] 학습 서버 접속점 $SERVER_HOST:$SERVER_PORT"
+# 실패 문구는 모드마다 다른 터미널을 가리켜야 한다 — local 모드에서 "터널을 열어라"는
+# 조작자를 엉뚱한 곳으로 보낸다 (그 포트를 여는 것은 proxy이지 ssh가 아니다).
+if [ "$POLICY_MODE" = "local" ]; then
+    SERVER_ENDPOINT_HINT="local policy proxy는 run_hil_session.sh(HIL_POLICY_MODE=local)가 띄운다. 단독으로 띄우려면: ./run_hil_local_policy.sh (그 proxy는 다시 127.0.0.1:50153 터널을 필요로 하므로 run_hil_server.sh도 떠 있어야 한다)"
+else
+    SERVER_ENDPOINT_HINT="터널은 run_hil_server.sh(Terminal 1)가 연다. 직접 열려면: ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:$SERVER_PORT:127.0.0.1:50053 junhyeong_ai (그리고 그 서버에서 learner가 떠 있어야 한다)"
+fi
 if [ "$VENV_OK" -ne 1 ]; then
     p_skip "venv가 없어 건너뜀"
 else
@@ -668,7 +711,7 @@ PYEOF
         p_ok "TCP $SERVER_HOST:$SERVER_PORT — $PORT_OUT"
     else
         p_fail "TCP $SERVER_HOST:$SERVER_PORT 연결 실패 — $PORT_OUT" \
-               "터널은 run_hil_server.sh(Terminal 1)가 연다. 직접 열려면: ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:$SERVER_PORT:127.0.0.1:50053 junhyeong_ai (그리고 그 서버에서 learner가 떠 있어야 한다)"
+               "$SERVER_ENDPOINT_HINT"
     fi
 fi
 

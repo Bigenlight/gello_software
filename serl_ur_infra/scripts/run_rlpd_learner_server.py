@@ -58,8 +58,16 @@ from ur_env.learner import (  # noqa: E402
     system_available_memory_bytes,
     validate_learner_dependencies,
 )
+from ur_env.actor_network import (  # noqa: E402
+    EXTERNAL_POLICY_INGEST_ENV_VAR,
+    is_external_policy_ingest_enabled,
+)
 from ur_env.classifier_sidecar import CLASSIFIER_INPUT_ID  # noqa: E402
 from ur_env.learner.demo import SYNTHETIC_ACCEPTANCE_ONLY_KEY  # noqa: E402
+from ur_env.learner.params_export import (  # noqa: E402
+    DIRECTORY_NAME as PARAMS_EXPORT_DIRECTORY_NAME,
+    ParamsExporter,
+)
 from ur_env.observation_schema import (  # noqa: E402
     CANONICAL_OBSERVATION_SCHEMA_HASH,
 )
@@ -884,6 +892,38 @@ def _run_locked(
     )
     if latency_probe.enabled:
         _emit("rlpd_learner_latency_profile", path=str(latency_probe.path))
+    # Opt-in trainable-params export for a laptop-side local-inference peer,
+    # off unless HIL_PARAMS_EXPORT is truthy in THIS process's environment.  No
+    # CLI flag, for the same reason the latency probe has none.  The directory
+    # is derived from the learner JSONL exactly as latency_server.jsonl is, so
+    # both land inside the run root without a second definition of where that
+    # is: <run root>/logs/learner.jsonl -> <run root>/params_live/.
+    params_exporter = ParamsExporter.from_env(
+        jsonl_path.parent.parent / PARAMS_EXPORT_DIRECTORY_NAME
+    )
+    if params_exporter.enabled:
+        _emit(
+            "rlpd_learner_params_export",
+            directory=str(params_exporter.directory),
+        )
+    # Opt-in ingest of policy meta issued by the laptop-side local-inference
+    # proxy, off unless HIL_EXTERNAL_POLICY_INGEST is truthy in THIS process's
+    # environment.  No CLI flag, for the same reason the two gates above have
+    # none: validate_process_contract compares argv token by token.  Emitted
+    # unconditionally -- "which identity rule is this learner enforcing" is the
+    # first question when forwarded transitions are being rejected, and a line
+    # that only appears in one mode cannot answer it for the other.
+    accept_external_policy_meta = is_external_policy_ingest_enabled()
+    _emit(
+        "rlpd_learner_external_policy_ingest",
+        enabled=accept_external_policy_meta,
+        env_var=EXTERNAL_POLICY_INGEST_ENV_VAR,
+        policy_meta_rule=(
+            "intrinsic"
+            if accept_external_policy_meta
+            else "must_match_issued_action"
+        ),
+    )
     logger = JsonlWandbLogger(
         jsonl_path,
         wandb_mode=args.wandb_mode,
@@ -950,6 +990,20 @@ def _run_locked(
             candidate_postprocessor=feature_extractor.repin_target_trunk,
             policy_model_id=policy_model_id,
         )
+        # Version 0 goes to disk here -- before the 80-150 s JAX warm-up and
+        # before the gRPC port exists -- because the local-inference peer needs
+        # a blob to load at ITS startup, and the first published version is 50
+        # learner steps away on a replay buffer that starts empty.
+        initial_export = assembly.learner.attach_params_exporter(params_exporter)
+        if initial_export is not None:
+            _emit(
+                "rlpd_learner_params_export_initial",
+                path=str(initial_export.path),
+                version=initial_export.version,
+                learner_step=initial_export.learner_step,
+                bytes=initial_export.bytes,
+                sha256=initial_export.sha256,
+            )
         # Compile/initialize both CTA traces on a disposable lineage before
         # the gRPC port exists.  In the first real robot smoke the lazy JAX
         # work took 46 s + 39 s and starved a 0.6 s Step RPC at transition 100.
@@ -983,6 +1037,7 @@ def _run_locked(
             allowed_run_ids=(
                 (args.synthetic_run_id,) if args.synthetic_e2e else None
             ),
+            accept_external_policy_meta=accept_external_policy_meta,
         )
         restored_path = (
             str(assembly.restored_checkpoint.path)
@@ -1004,6 +1059,12 @@ def _run_locked(
             wandb_mode=wandb_metadata["mode"],
             wandb_url=wandb_metadata["url"],
             wandb_run_path=wandb_metadata["run_path"],
+            # Persisted for the same reason as the W&B identity above: the
+            # environment that chose this is gone by the time someone REUSES
+            # this learner, and reusing a strict one under HIL_POLICY_MODE=local
+            # rejects every forwarded transition.  The run's own JSONL is the
+            # only place that question can still be answered.
+            accept_external_policy_meta=accept_external_policy_meta,
         )
         if args.dry_run:
             _emit(

@@ -26,6 +26,30 @@ question ``HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`` §8 P1 asks -- *which*
 phase owns the 512 ms loop period, and how much of it is contention with the
 learner -- has an answer made of samples rather than of two streaming means.
 
+LOCAL INFERENCE MODE (``HIL_POLICY_MODE=local``) ADDS THREE MORE WRITERS
+------------------------------------------------------------------------
+When the policy runs on laptop3 the same profiler is used by three new
+components, each with its own ``role`` and its own file in the same directory
+(``serl_ur_infra/HIL_LOCAL_INFERENCE_KO.md``):
+
+  (c) the PROXY -- one line per Step reply it served locally
+      (``local_inference_ms``, ``local_finalize_ms``, ``total_ms``,
+      ``queue_depth``, ``params_version``, ``params_age_s``).
+
+  (d) the UPLOADER -- one line per transition forwarded to the real server
+      (``upload_rpc_ms``, ``backlog_depth``, ``oldest_backlog_s``,
+      ``outcome_divergence``).
+
+  (e) the PARAM SYNC -- one line per poll of the learner's exported params
+      (``poll_ms``, ``fetch_ms``, ``load_ms``, ``swap_ms``, ``version``,
+      ``staleness_s``).
+
+They are optional in exactly the way ``--server`` is: pass them and sections
+6-8 appear, leave them out and the report is the remote-mode report it always
+was.  🛑 **In local mode the actor's ``step_rpc_ms`` no longer measures the GPU
+server** -- it measures the hop to the proxy on 127.0.0.1, and section 3 says
+so whenever ``--proxy`` is present.
+
 It trains nothing, touches no hardware, opens no socket, imports no jax and
 never writes into a run root unless ``--out`` says to: stdlib + numpy.
 
@@ -47,6 +71,13 @@ USAGE
         --server  /tmp/latency_server.jsonl \\
         --learner /tmp/learner.jsonl \\
         --out     /tmp/hil_latency_report.md
+
+    # local inference mode -- the three extra files live next to the actor's
+    $PY serl_ur_infra/scripts/analyze_hil_latency.py \\
+        --actor     ros2_ur_ws/gello_logs/hil_latency/<utc>_actor_<pid>.jsonl \\
+        --proxy     ros2_ur_ws/gello_logs/hil_latency/<utc>_proxy_<pid>.jsonl \\
+        --uploader  ros2_ur_ws/gello_logs/hil_latency/<utc>_uploader_<pid>.jsonl \\
+        --paramsync ros2_ur_ws/gello_logs/hil_latency/<utc>_paramsync_<pid>.jsonl
 
 THE CLOCK RULE -- READ THIS BEFORE TRUSTING SECTION 2
 -----------------------------------------------------
@@ -128,6 +159,43 @@ SERVER_PHASE_ORDER = (
     "response_build_ms",
 )
 
+#: Local-inference mode (``HIL_POLICY_MODE=local``).  Same rule as above: these
+#: are a reading order, not a filter -- a field the proxy adds later still shows
+#: up, appended and sorted.
+PROXY_PHASE_ORDER = (
+    "total_ms",
+    "local_inference_ms",
+    "local_finalize_ms",
+)
+UPLOADER_PHASE_ORDER = ("upload_rpc_ms",)
+PARAMSYNC_PHASE_ORDER = (
+    "poll_ms",
+    "fetch_ms",
+    "load_ms",
+    "swap_ms",
+)
+
+#: Gauges (not durations, so they never belong in a phase table) reported with
+#: the phase stats machinery anyway, because "how deep did the queue get" is
+#: the same kind of question as "how long did the RPC take".
+PROXY_GAUGE_ORDER = ("queue_depth", "params_age_s")
+UPLOADER_GAUGE_ORDER = ("backlog_depth", "oldest_backlog_s")
+PARAMSYNC_GAUGE_ORDER = ("staleness_s",)
+
+#: The proxy's forward queue is unbounded in RAM by design (a dropped
+#: transition is worse than a fat queue), so the only defence is noticing.
+#: This is the threshold the uploader itself warns at.
+BACKLOG_HIGH_WATER = 500
+
+#: Feasibility-study anchors (2026-08-06, measured -- NOT measurements of the
+#: file being analyzed).  Printed next to the tables so a reader can tell at a
+#: glance whether a session behaved like the study predicted.
+ANCHOR_LOCAL_INFERENCE_MS = "2.0 ms GPU / 9.6 ms CPU"
+ANCHOR_REMOTE_STEP_MS = 156.1
+ANCHOR_PARAMS_BYTES = 12_383_812
+ANCHOR_PUBLISH_PERIOD_S = 5.77
+ANCHOR_LINK_MB_S = 3.6
+
 #: Keys that end in ``_ms`` but are *not* a duration measured by the writer.
 #: They stay in the table (they are useful) with the provenance spelled out,
 #: because summing the actor's phases and finding more than ``iter_interval_ms``
@@ -140,7 +208,7 @@ PASSTHROUGH_MS_KEYS = {
 #: consecutive loop starts and therefore contains all the other phases.
 NON_ADDITIVE_MS_KEYS = {
     "iter_interval_ms": "loop period (start-to-start), not a component phase",
-    "total_ms": "handler entry->exit; contains the other server phases",
+    "total_ms": "handler entry->exit; contains the phases below it",
     "service_step_ms": "contains the session-service phases below it",
 }
 
@@ -156,6 +224,23 @@ BEGIN_EPISODE_RPC = "begin_episode"
 SERVER_ABSENT = "server data absent"
 LEARNER_ABSENT = "learner data absent"
 ACTOR_ABSENT = "actor data absent"
+PROXY_ABSENT = "proxy data absent"
+UPLOADER_ABSENT = "uploader data absent"
+PARAMSYNC_ABSENT = "paramsync data absent"
+
+#: Printed when none of the three local-mode files was given at all, which is
+#: the ordinary remote-mode session -- not a degradation, just a fact.
+LOCAL_MODE_NOT_GIVEN = "local-mode data not given"
+
+#: Section 3 says this, verbatim, whenever --proxy has records: in local mode
+#: the actor's Step round trip is a loopback call, and reading it as "the
+#: server got faster" would be the single easiest mistake to make with this
+#: report.
+LOCAL_HOP_PHRASE = "step_rpc_ms measures the LOCAL hop"
+
+#: The divergence callout.  An operator greps for this; it is deliberately
+#: ugly.
+DIVERGENCE_BANNER = "!!! OUTCOME DIVERGENCE"
 
 
 # --------------------------------------------------------------------------- #
@@ -519,6 +604,89 @@ def phase_table(
     return Table(("phase", *STAT_HEADERS, "note"), rows, caption)
 
 
+def gauge_table(
+    records: Sequence[Mapping[str, Any]],
+    keys: Sequence[str],
+    caption: str,
+) -> Table | None:
+    """Stats for named non-duration fields; ``None`` when none of them exist.
+
+    A gauge that no record carries produces no row at all rather than a row of
+    dashes: "the writer never logged this" and "the writer logged zeros" are
+    different facts and must not render the same.
+    """
+
+    rows: list[list[str]] = []
+    for key in keys:
+        stats = summarize(record.get(key) for record in records)
+        if stats is None:
+            continue
+        rows.append([key] + _stat_cells(stats))
+    if not rows:
+        return None
+    return Table(("gauge", *STAT_HEADERS), rows, caption)
+
+
+# --------------------------------------------------------------------------- #
+# Version progression (params blobs)                                            #
+# --------------------------------------------------------------------------- #
+
+
+class VersionProgression:
+    """How a monotonic version counter actually moved through a file.
+
+    ``regressions`` is the load-bearing number: the local proxy pins its
+    ``params_version`` stamping monotonic within a session (it holds the old
+    number while a fetch is in flight), and the param sync refuses to apply a
+    blob older than the loaded one.  A regression here therefore means one of
+    those two guards did not hold, which a mean would hide completely.
+    """
+
+    __slots__ = ("values", "first", "last", "distinct", "advances", "regressions", "missing")
+
+    def __init__(self, values: Sequence[float], missing: int) -> None:
+        self.values = list(values)
+        self.first = self.values[0] if self.values else None
+        self.last = self.values[-1] if self.values else None
+        self.distinct = len(set(self.values))
+        self.advances = sum(
+            1 for a, b in zip(self.values, self.values[1:]) if b > a
+        )
+        self.regressions = sum(
+            1 for a, b in zip(self.values, self.values[1:]) if b < a
+        )
+        self.missing = int(missing)
+
+
+def version_progression(
+    records: Sequence[Mapping[str, Any]], key: str
+) -> VersionProgression:
+    values: list[float] = []
+    missing = 0
+    for record in records:
+        value = _number(record, key)
+        if value is None:
+            missing += 1
+            continue
+        values.append(value)
+    return VersionProgression(values, missing)
+
+
+def version_table(prog: VersionProgression, caption: str) -> Table:
+    return Table(
+        ("progression", "value"),
+        [
+            ["first", _fmt(prog.first, 0)],
+            ["last", _fmt(prog.last, 0)],
+            ["distinct", str(prog.distinct)],
+            ["advances", str(prog.advances)],
+            ["regressions", str(prog.regressions)],
+            ["records without the field", str(prog.missing)],
+        ],
+        caption,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Record partitioning                                                           #
 # --------------------------------------------------------------------------- #
@@ -594,7 +762,12 @@ def _schema_roles(load: JsonlLoad) -> str:
 
 
 def section_inputs(
-    actor: JsonlLoad, server: JsonlLoad, learner: JsonlLoad
+    actor: JsonlLoad,
+    server: JsonlLoad,
+    learner: JsonlLoad,
+    proxy: JsonlLoad | None = None,
+    uploader: JsonlLoad | None = None,
+    paramsync: JsonlLoad | None = None,
 ) -> Section:
     section = Section("0. INPUTS")
     section.note(_load_note("actor  ", actor, optional=False))
@@ -606,6 +779,17 @@ def section_inputs(
     if detail:
         section.note(f"         {detail}")
     section.note(_load_note("learner", learner, optional=True))
+
+    # Local-mode inputs are listed only when at least one was given, so a
+    # remote-mode report keeps the shape operators already know.
+    local = [
+        ("proxy    ", proxy),
+        ("uploader ", uploader),
+        ("paramsync", paramsync),
+    ]
+    if any(load is not None and load.path is not None for _, load in local):
+        for label, load in local:
+            section.note(_load_note(label, load if load is not None else JsonlLoad(None), optional=True))
 
     if actor.records:
         runs = sorted({str(r["run_id"]) for r in actor.records if r.get("run_id")})
@@ -840,10 +1024,13 @@ def section_join(
 # --------------------------------------------------------------------------- #
 
 
-def section_loop_budget(actor: JsonlLoad) -> Section:
+def section_loop_budget(actor: JsonlLoad, proxy: JsonlLoad | None = None) -> Section:
     section = Section(f"3. LOOP BUDGET vs {TARGET_HZ:g} Hz ({TARGET_PERIOD_MS:g} ms)")
+    local_mode = bool(proxy is not None and proxy.records)
     if not actor.records:
         section.note(f"{ACTOR_ABSENT} -- no loop budget.")
+        if local_mode:
+            section.note(_local_hop_note(proxy))
         return section
     values = [
         v
@@ -888,7 +1075,24 @@ def section_loop_budget(actor: JsonlLoad) -> Section:
         "854 ms max) on the OLD server -- that number is a comparison anchor, "
         "not a claim about this file."
     )
+    if local_mode:
+        section.note(_local_hop_note(proxy))
     return section
+
+
+def _local_hop_note(proxy: JsonlLoad | None) -> str:
+    """Why section 3 must be read differently once --proxy is present."""
+
+    count = len(proxy.records) if proxy is not None else 0
+    return (
+        f"LOCAL INFERENCE MODE: --proxy carries {_plural(count, 'record')}, so "
+        f"{LOCAL_HOP_PHRASE} -- the actor dialled 127.0.0.1 and the reply came "
+        "from the local policy proxy, NOT from the GPU server. Do not compare "
+        f"this file's step_rpc_ms with a remote-mode run's and call it a "
+        f"speedup of the server: the server's Step (anchor "
+        f"{ANCHOR_REMOTE_STEP_MS:g} ms) moved off the control loop into the "
+        "uploader, section 7."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1260,34 +1464,345 @@ def section_intervention(actor: JsonlLoad) -> Section:
 
 
 # --------------------------------------------------------------------------- #
+# Sections 6-8 -- local inference mode                                          #
+# --------------------------------------------------------------------------- #
+
+
+def _absent_note(load: JsonlLoad, phrase: str, what: str) -> str:
+    """One line explaining an empty local-mode input, whichever way it failed."""
+
+    if load.path is None:
+        return f"{phrase} -- not given ({what})."
+    if load.error is not None:
+        return f"{phrase} -- {load.path}: {load.error}."
+    return (
+        f"{phrase} -- {load.path} held no parsable records. The component only "
+        "writes when HIL_LATENCY_PROFILE=1 was in ITS process environment."
+    )
+
+
+def section_local_proxy(proxy: JsonlLoad) -> Section:
+    section = Section("6. LOCAL MODE -- POLICY PROXY (laptop3)")
+    if not proxy.records:
+        section.note(
+            _absent_note(
+                proxy,
+                PROXY_ABSENT,
+                "pass --proxy <...>_proxy_<pid>.jsonl for the local action path",
+            )
+        )
+        return section
+
+    records = proxy.records
+    section.blocks.append(
+        phase_table(
+            records,
+            PROXY_PHASE_ORDER,
+            caption=f"PROXY -- {len(records)} Step replies served locally",
+        )
+    )
+    section.note(
+        "local_inference_ms is the policy forward pass on laptop3 "
+        f"(feasibility anchor {ANCHOR_LOCAL_INFERENCE_MS}); local_finalize_ms "
+        "is the MANUAL finalizer that replaces the server's reward branch. "
+        "Both are perf_counter deltas inside the proxy process."
+    )
+
+    gauges = gauge_table(
+        records,
+        PROXY_GAUGE_ORDER,
+        caption="proxy gauges (levels at reply time, not durations)",
+    )
+    if gauges is not None:
+        section.blocks.append(gauges)
+        backlog = summarize(record.get("queue_depth") for record in records)
+        if backlog is not None and backlog["max"] > BACKLOG_HIGH_WATER:
+            section.note(
+                f"WARNING: queue_depth reached {backlog['max']:.0f}, over the "
+                f"{BACKLOG_HIGH_WATER} high-water mark -- the forward queue is "
+                "unbounded in RAM by design (dropping a transition is worse), "
+                "so a queue this deep is a fact to act on, not a limit that "
+                "protected you."
+            )
+        age = summarize(record.get("params_age_s") for record in records)
+        if age is not None:
+            section.note(
+                "params_age_s is how old the loaded params were when that "
+                "reply was served. It has a floor of roughly one transfer: "
+                f"the learner publishes every ~{ANCHOR_PUBLISH_PERIOD_S:g} s "
+                f"and {ANCHOR_PARAMS_BYTES / 1e6:.1f} MB over a "
+                f"~{ANCHOR_LINK_MB_S:g} MB/s link is ~"
+                f"{ANCHOR_PARAMS_BYTES / 1e6 / ANCHOR_LINK_MB_S:.1f} s of it. "
+                "The actor is ALWAYS acting on a slightly old policy here; "
+                "this row says how old."
+            )
+
+    prog = version_progression(records, "params_version")
+    if prog.values:
+        section.blocks.append(
+            version_table(prog, caption="params_version as the proxy stamped it")
+        )
+        if prog.regressions:
+            section.note(
+                f"WARNING: params_version went BACKWARDS {prog.regressions} "
+                "time(s). The proxy is contracted to stamp monotonically "
+                "within a session (it holds the old number while a fetch is in "
+                "flight), so this is a contract violation, not a slow link."
+            )
+    else:
+        section.note(
+            "no params_version field in the proxy log -- cannot tell which "
+            "policy served these replies."
+        )
+    return section
+
+
+def section_local_uploader(uploader: JsonlLoad) -> Section:
+    section = Section("7. LOCAL MODE -- TRANSITION UPLOADER (laptop3 -> server)")
+    if not uploader.records:
+        section.note(
+            _absent_note(
+                uploader,
+                UPLOADER_ABSENT,
+                "pass --uploader <...>_uploader_<pid>.jsonl for the forward path",
+            )
+        )
+        return section
+
+    records = uploader.records
+    section.note(
+        f"{_plural(len(records), 'upload')} recorded (one record per forwarded "
+        "request). This path is OFF the control loop: its latency costs "
+        "freshness of the server's replay, never a control-loop millisecond."
+    )
+    section.blocks.append(
+        phase_table(
+            records,
+            UPLOADER_PHASE_ORDER,
+            caption=f"UPLOADER -- {_plural(len(records), 'forwarded request')}",
+        )
+    )
+    gauges = gauge_table(
+        records,
+        UPLOADER_GAUGE_ORDER,
+        caption="backlog over time (level at the moment each upload was recorded)",
+    )
+    if gauges is not None:
+        section.blocks.append(gauges)
+        depth = summarize(record.get("backlog_depth") for record in records)
+        oldest = summarize(record.get("oldest_backlog_s") for record in records)
+        if depth is not None:
+            section.note(
+                f"backlog_depth max {depth['max']:.0f}"
+                + (
+                    f", oldest entry {oldest['max']:.3f} s"
+                    if oldest is not None
+                    else ""
+                )
+                + ". The server still ingests every forwarded transition at "
+                f"its usual cost (anchor {ANCHOR_REMOTE_STEP_MS:g} ms per "
+                "Step), so during an episode the backlog GROWS and it drains "
+                "on the WAIT screens. A backlog that never returns to ~0 "
+                "between episodes is the signal that this design's assumption "
+                "broke."
+            )
+            if depth["max"] > BACKLOG_HIGH_WATER:
+                section.note(
+                    f"WARNING: backlog_depth exceeded the {BACKLOG_HIGH_WATER} "
+                    "high-water mark. Nothing was dropped (the queue is "
+                    "unbounded on purpose) -- but RAM on laptop3 is the only "
+                    "thing bounding it."
+                )
+
+    divergent = [r for r in records if _truthy(r.get("outcome_divergence"))]
+    has_field = any("outcome_divergence" in r for r in records)
+    if not has_field:
+        section.note(
+            "no outcome_divergence field in this log -- the parity alarm "
+            "between the proxy's LOCAL MANUAL verdict and the server's own "
+            "outcome was not recorded, so parity is UNKNOWN for this session, "
+            "not proven."
+        )
+        return section
+    section.table(
+        ("counter", "n", "of", "fraction"),
+        [
+            [
+                "outcome_divergence",
+                str(len(divergent)),
+                str(len(records)),
+                _pct(len(divergent), len(records)),
+            ]
+        ],
+        caption="local verdict vs the server's returned outcome",
+    )
+    if divergent:
+        section.note(
+            f"{DIVERGENCE_BANNER} on {len(divergent)}/{len(records)} forwarded "
+            f"transitions ({_pct(len(divergent), len(records))})"
+        )
+        section.note(
+            "The proxy replicates the server's MANUAL finalizer; a divergence "
+            "means the two disagreed about done/truncated/masks/reward for a "
+            "transition the ACTOR already acted on. The server's copy is what "
+            "the learner trained on, so the data is not corrupt -- but the "
+            "actor saw a different episode than the learner did, and that gap "
+            "is exactly what this alarm exists to catch. Investigate before "
+            "trusting the session."
+        )
+    else:
+        section.note(
+            f"outcome_divergence: 0/{len(records)} -- the local MANUAL verdict "
+            "matched the server on every forwarded transition in this file."
+        )
+    return section
+
+
+def section_local_paramsync(paramsync: JsonlLoad) -> Section:
+    section = Section("8. LOCAL MODE -- PARAM SYNC (server -> laptop3)")
+    if not paramsync.records:
+        section.note(
+            _absent_note(
+                paramsync,
+                PARAMSYNC_ABSENT,
+                "pass --paramsync <...>_paramsync_<pid>.jsonl for the params path",
+            )
+        )
+        return section
+
+    records = paramsync.records
+    section.blocks.append(
+        phase_table(
+            records,
+            PARAMSYNC_PHASE_ORDER,
+            caption=f"PARAM SYNC -- {_plural(len(records), 'poll')}",
+        )
+    )
+    fetches = sum(1 for r in records if _number(r, "fetch_ms") is not None)
+    swaps = sum(1 for r in records if _number(r, "swap_ms") is not None)
+    section.note(
+        f"{_plural(len(records), 'poll')}, {fetches} carried a fetch and "
+        f"{swaps} a swap: poll_ms is paid every cycle, fetch/load/swap only "
+        "when the learner published a newer version. All three are background "
+        "work -- none of them is in the control loop."
+    )
+    gauges = gauge_table(
+        records,
+        PARAMSYNC_GAUGE_ORDER,
+        caption="staleness of the applied params (s)",
+    )
+    if gauges is not None:
+        section.blocks.append(gauges)
+        section.note(
+            "staleness_s = now - the LATEST.json timestamp of the version "
+            "actually applied. It cannot be zero: the blob has to cross the "
+            "link first. Compare it with the learner's publish period "
+            f"(anchor ~{ANCHOR_PUBLISH_PERIOD_S:g} s) -- staleness of about "
+            "one period is the design working, staleness that GROWS means the "
+            "link cannot keep up with the learner and the local policy is "
+            "falling behind."
+        )
+
+    prog = version_progression(records, "version")
+    if prog.values:
+        section.blocks.append(
+            version_table(prog, caption="params version seen by the sync client")
+        )
+        if prog.regressions:
+            section.note(
+                f"WARNING: version went BACKWARDS {prog.regressions} time(s). "
+                "The sync client is contracted to skip-to-newest and refuse an "
+                "older blob, so this means either a learner restart reset the "
+                "counter (check the run root) or the refusal did not hold."
+            )
+    else:
+        section.note("no version field in the paramsync log -- progression unknown.")
+    return section
+
+
+def section_local_mode_absent(
+    proxy: JsonlLoad, uploader: JsonlLoad, paramsync: JsonlLoad
+) -> Section:
+    """Placeholder section for the ordinary remote-mode report.
+
+    Rendering three empty sections on every remote run would train operators
+    to scroll past the end of the report, so a remote run gets one line
+    instead -- but it does get that line, because "this report says nothing
+    about local mode" is itself worth stating on a page someone will paste
+    into a status document.
+    """
+
+    section = Section("6. LOCAL INFERENCE MODE")
+    section.note(
+        f"{LOCAL_MODE_NOT_GIVEN} -- no --proxy / --uploader / --paramsync. "
+        "This is the remote-mode report: the actor's step_rpc_ms is the round "
+        "trip to the GPU server. Pass those three files (written when "
+        "HIL_POLICY_MODE=local and HIL_LATENCY_PROFILE=1) to get sections "
+        "6-8: local inference, forward backlog and params staleness."
+    )
+    return section
+
+
+def local_mode_sections(
+    proxy: JsonlLoad, uploader: JsonlLoad, paramsync: JsonlLoad
+) -> list[Section]:
+    if all(load.path is None for load in (proxy, uploader, paramsync)):
+        return [section_local_mode_absent(proxy, uploader, paramsync)]
+    return [
+        section_local_proxy(proxy),
+        section_local_uploader(uploader),
+        section_local_paramsync(paramsync),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Assembly                                                                      #
 # --------------------------------------------------------------------------- #
 
 
 def build_sections(
-    actor: JsonlLoad, server: JsonlLoad, learner: JsonlLoad
+    actor: JsonlLoad,
+    server: JsonlLoad,
+    learner: JsonlLoad,
+    proxy: JsonlLoad | None = None,
+    uploader: JsonlLoad | None = None,
+    paramsync: JsonlLoad | None = None,
 ) -> list[Section]:
+    proxy = proxy if proxy is not None else JsonlLoad(None)
+    uploader = uploader if uploader is not None else JsonlLoad(None)
+    paramsync = paramsync if paramsync is not None else JsonlLoad(None)
     server_steps, server_begins, _other = split_server_records(server.records)
     join = join_by_transition(actor.records, server_steps)
-    return [
-        section_inputs(actor, server, learner),
+    sections = [
+        section_inputs(actor, server, learner, proxy, uploader, paramsync),
         section_phases(actor, server_steps, server_begins, server),
         section_join(actor, server, join, server_steps),
-        section_loop_budget(actor),
+        section_loop_budget(actor, proxy),
         section_contention(server, server_steps, learner, join),
         section_intervention(actor),
     ]
+    sections.extend(local_mode_sections(proxy, uploader, paramsync))
+    return sections
 
 
 def build_report(
     actor_path: str | os.PathLike,
     server_path: str | os.PathLike | None = None,
     learner_path: str | os.PathLike | None = None,
-) -> tuple[list[Section], JsonlLoad, JsonlLoad, JsonlLoad]:
+    proxy_path: str | os.PathLike | None = None,
+    uploader_path: str | os.PathLike | None = None,
+    paramsync_path: str | os.PathLike | None = None,
+) -> tuple[
+    list[Section], JsonlLoad, JsonlLoad, JsonlLoad, JsonlLoad, JsonlLoad, JsonlLoad
+]:
     actor = load_jsonl(actor_path)
     server = load_jsonl(server_path)
     learner = load_jsonl(learner_path)
-    return build_sections(actor, server, learner), actor, server, learner
+    proxy = load_jsonl(proxy_path)
+    uploader = load_jsonl(uploader_path)
+    paramsync = load_jsonl(paramsync_path)
+    sections = build_sections(actor, server, learner, proxy, uploader, paramsync)
+    return sections, actor, server, learner, proxy, uploader, paramsync
 
 
 # --------------------------------------------------------------------------- #
@@ -1301,7 +1816,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Join the actor's and the server's HIL_LATENCY_PROFILE JSONL logs "
             "and report per-phase p50/p90/p99/max, the derived network+queue "
-            "time, the loop budget against 10 Hz, and learner contention."
+            "time, the loop budget against 10 Hz, and learner contention. In "
+            "local inference mode (HIL_POLICY_MODE=local) the proxy, uploader "
+            "and param-sync files add sections 6-8."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -1309,6 +1826,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  analyze_hil_latency.py --actor gello_logs/hil_latency/<f>.jsonl\n"
             "  analyze_hil_latency.py --actor <f>.jsonl --server latency_server.jsonl \\\n"
             "      --learner learner.jsonl --out /tmp/hil_latency_report.md\n"
+            "  analyze_hil_latency.py --actor <f>.jsonl --proxy <p>.jsonl \\\n"
+            "      --uploader <u>.jsonl --paramsync <s>.jsonl\n"
         ),
     )
     parser.add_argument(
@@ -1333,6 +1852,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="the learner's own <run_root>/logs/learner.jsonl (for contention)",
     )
     parser.add_argument(
+        "--proxy",
+        default=None,
+        help=(
+            "LOCAL MODE: the policy proxy's jsonl "
+            "(gello_logs/hil_latency/*_proxy_*.jsonl) -- local inference, "
+            "queue depth, params age/version. Section 6"
+        ),
+    )
+    parser.add_argument(
+        "--uploader",
+        default=None,
+        help=(
+            "LOCAL MODE: the forwarding uploader's jsonl (*_uploader_*.jsonl) "
+            "-- upload RPC, backlog, outcome divergence. Section 7"
+        ),
+    )
+    parser.add_argument(
+        "--paramsync",
+        default=None,
+        help=(
+            "LOCAL MODE: the param sync client's jsonl (*_paramsync_*.jsonl) "
+            "-- poll/fetch/load/swap and staleness. Section 8"
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="also write the report as markdown to this path",
@@ -1351,11 +1895,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: --actor is a directory, not a file: {actor_path}", file=sys.stderr)
         return 2
 
-    sections, actor, server, learner = build_report(
-        actor_path, args.server, args.learner
+    sections, actor, server, learner, proxy, uploader, paramsync = build_report(
+        actor_path,
+        args.server,
+        args.learner,
+        args.proxy,
+        args.uploader,
+        args.paramsync,
     )
 
-    for label, load in (("--server", server), ("--learner", learner)):
+    for label, load in (
+        ("--server", server),
+        ("--learner", learner),
+        ("--proxy", proxy),
+        ("--uploader", uploader),
+        ("--paramsync", paramsync),
+    ):
         if load.path is not None and load.error is not None:
             print(
                 f"warning: {label} {load.path}: {load.error} "

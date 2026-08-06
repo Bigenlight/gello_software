@@ -112,6 +112,14 @@ def _rig(tmp_path: Path, *, wandb_mode: str) -> dict[str, str]:
         # test_server_latency_wiring.py expands this same block with "1" and
         # asserts the argv is byte-identical either way.
         "LATENCY_PROFILE": "",
+        # Same shape, same default, same argv-purity claim, for the trainable-
+        # params export a local-inference peer pulls.  Expanded with "1" by
+        # test_params_export.py.
+        "PARAMS_EXPORT": "",
+        # Third of the same family: the learner-side opt-in that lets forwarded
+        # local-inference transitions past the issued-action identity rule.
+        # Expanded with "1" by test_external_policy_ingest.py.
+        "EXTERNAL_INGEST": "",
         "checkpoint_root": str(run_root / "checkpoints"),
         "jsonl_path": str(run_root / "logs" / "learner.jsonl"),
         "memory_path": str(run_root / "logs" / "memory-preflight.jsonl"),

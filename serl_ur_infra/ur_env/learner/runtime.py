@@ -109,6 +109,7 @@ class HILSERLLearner:
         policy_version: int = 0,
         parameter_validator: Callable[[Any], None] | None = None,
         candidate_postprocessor: Callable[[Any], Any] | None = None,
+        params_exporter: Any | None = None,
     ) -> None:
         self.agent = agent
         self.sampler = sampler
@@ -139,6 +140,7 @@ class HILSERLLearner:
         ):
             raise TypeError("candidate_postprocessor must be callable")
         self._candidate_postprocessor = candidate_postprocessor
+        self._params_exporter = self._checked_exporter(params_exporter)
         self._fault: LearnerFault | None = None
         self._lock = threading.Lock()
         validate_tree_finite(agent.state, name="initial agent state")
@@ -147,6 +149,46 @@ class HILSERLLearner:
     def _validate_parameter_invariant(self, params: Any) -> None:
         if self._parameter_validator is not None:
             self._parameter_validator(params)
+
+    @staticmethod
+    def _checked_exporter(exporter: Any | None) -> Any | None:
+        if exporter is not None and not callable(getattr(exporter, "export", None)):
+            raise TypeError("params_exporter must expose a callable export()")
+        return exporter
+
+    def attach_params_exporter(self, exporter: Any) -> Any:
+        """Install the opt-in params exporter and write the CURRENT version now.
+
+        The local-inference peer must have a blob to load before it can serve
+        anything, and the first publish is 50 learner steps -- an unbounded wall
+        clock -- away, because replay starts empty at session start.  So the
+        install point is also an export point: attaching at learner-process
+        ready puts version 0 on disk before the gRPC port even exists.
+
+        Returns whatever ``exporter.export`` returned (``None`` when the
+        exporter is disabled), so the caller can report the initial blob.
+        ``ParamsExporter.export`` never raises; see its module docstring.
+        """
+
+        self._params_exporter = self._checked_exporter(exporter)
+        return self._export_params()
+
+    def _export_params(self) -> Any:
+        """Best-effort trainable-params export.  Must not disturb training.
+
+        No ``try`` here on purpose: the exporter's contract is that
+        :meth:`export` never raises, and wrapping it again would hide a bug in
+        that contract instead of surfacing it in the tests that pin it.
+        """
+
+        exporter = self._params_exporter
+        if exporter is None:
+            return None
+        return exporter.export(
+            self.agent.state.params,
+            learner_step=self.learner_step,
+            version=self.policy_version,
+        )
 
     @staticmethod
     def _counter(value: Any, name: str) -> int:
@@ -354,6 +396,9 @@ class HILSERLLearner:
                     self.agent.state.params, self.learner_step
                 )
                 published = True
+                # Same params, same version, one file: the local-inference peer
+                # reads what in-process inference just started serving.
+                self._export_params()
                 if self.logger is not None:
                     self.logger.log(
                         "policy_published",
