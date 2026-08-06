@@ -73,6 +73,14 @@
 #                            settled yet.  The mode is fixed for the LIFETIME of
 #                            a lineage: a running learner is only reusable by a
 #                            launcher asking for the mode it was started with.
+#   HIL_LATENCY_PROFILE      unset by default.  When set here it is forwarded
+#                            as an ENV VAR to a FRESHLY STARTED learner, which
+#                            then writes one JSONL row per Step RPC to
+#                            <run root>/logs/latency_server.jsonl.  It is not a
+#                            CLI flag because validate_process_contract compares
+#                            argv token by token.  A REUSED learner keeps
+#                            whatever it was started with -- profiling cannot be
+#                            switched on under a running lineage.
 #   ACTOR_VENV               default /home/laptop3/venvs/gello-hil-actor
 #   HIL_ACCEPT_HEAD_MISMATCH default 0; 1 downgrades the fresh-lineage refusal
 #                            on a learner-host/laptop3 HEAD mismatch to a
@@ -118,6 +126,18 @@ REMOTE_RUN_BASE="$REMOTE_DATA_ROOT/runs"
 # cannot drift from the thing it guards.  See the remote-side WANDB_MODE
 # comment for why that coupling is written the way it is.
 WANDB_MODE="${HIL_WANDB_MODE:-offline}"
+# Opt-in per-step latency profiling, carried to the learner host as a positional
+# and expanded there into the launch command's ENVIRONMENT -- never into its
+# argv, which validate_process_contract compares token by token.  The value is
+# passed through verbatim so ur_env/latency_profile.py stays the ONE definition
+# of what counts as truthy; the pattern guard exists only because these
+# positionals cross an ssh command line, where a value containing whitespace or
+# a metacharacter would re-split on the remote shell.
+LATENCY_PROFILE="${HIL_LATENCY_PROFILE:-}"
+if [[ -n "$LATENCY_PROFILE" && ! "$LATENCY_PROFILE" =~ ^[A-Za-z0-9]+$ ]]; then
+    echo "WARNING: ignoring HIL_LATENCY_PROFILE=$LATENCY_PROFILE (expected a plain word such as 1); the learner will not profile." >&2
+    LATENCY_PROFILE=""
+fi
 ACTOR_VENV="${ACTOR_VENV:-/home/laptop3/venvs/gello-hil-actor}"
 ACTOR_PY="$ACTOR_VENV/bin/python"
 
@@ -300,7 +320,7 @@ REMOTE_OUTPUT="$(
         "$START_TIMEOUT_S" "$REMOTE_REPO" "$REMOTE_PYTHON" \
         "$REMOTE_PORT" "$REMOTE_RUN_BASE" \
         "$LAPTOP_HEAD" "$LAPTOP_BRANCH" "$ACCEPT_HEAD_MISMATCH" \
-        "$REMOTE_DATA_ROOT" "$WANDB_MODE" <<'REMOTE_SCRIPT'
+        "$REMOTE_DATA_ROOT" "$WANDB_MODE" "$LATENCY_PROFILE" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 MODE="$1"
@@ -331,6 +351,12 @@ REMOTE_DATA_ROOT="${13}"
 # passing while the thing it guards has moved (see the "Cross-host code
 # identity" comment for the day that cost).
 WANDB_MODE="${14}"
+# Opt-in latency profiling for a FRESH learner.  ":-" is load-bearing: ssh joins
+# these positionals into one command line, so an empty last argument does not
+# survive the trip and ${15} would be unbound under `set -u`.  Empty means "do
+# not forward", which is why the expansion below is unquoted -- a quoted empty
+# expansion would hand `env` an empty argument instead of nothing at all.
+LATENCY_PROFILE="${15:-}"
 
 CLASSIFIER="$REMOTE_DATA_ROOT/classifier_ckpt/checkpoint_150"
 CLASSIFIER_SHA256="512b657530af0ad78b746d40fd09e561b33a2ea92dede83d096477599162846d"
@@ -1082,6 +1108,7 @@ nohup env \
     WANDB_SILENT=true \
     WANDB_DISABLE_CODE=true \
     PYTHONPATH="$REMOTE_REPO/serl_ur_infra:$REMOTE_REPO/third_party/hil-serl/serl_launcher" \
+    ${LATENCY_PROFILE:+HIL_LATENCY_PROFILE="$LATENCY_PROFILE"} \
     "$REMOTE_PYTHON" \
     serl_ur_infra/scripts/run_rlpd_learner_server.py \
     --host 127.0.0.1 \

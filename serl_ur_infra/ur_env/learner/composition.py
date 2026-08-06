@@ -445,6 +445,7 @@ def build_actor_service(
     success_confirmations: int = 1,
     allowed_actor_ids: tuple[str, ...] | None = None,
     allowed_run_ids: tuple[str, ...] | None = None,
+    latency_probe: Any | None = None,
 ) -> Any:
     """Bind the shared policy and ingress to the transport-neutral service.
 
@@ -453,6 +454,13 @@ def build_actor_service(
     successful.  It defaults to 1 -- no smoothing -- so the server's verdict
     matches the live classifier viewer frame for frame; see the rationale on
     ``--success-confirmations`` in ``scripts/run_rlpd_learner_server.py``.
+
+    ``latency_probe`` is the opt-in per-step profiler
+    (``ur_env/server_latency.py``).  It reaches the two collaborators that own
+    the phases the transport cannot see -- the finalizer (``reward_finalize`` /
+    ``classifier``) and the ingress sink (``trunk_encode`` / ``replay_insert``).
+    A ``None`` or disabled probe changes nothing: the ingress is passed through
+    unwrapped and the finalizer's timers are shared no-ops.
     """
 
     if not bool(getattr(classifier, "ready", False)):
@@ -470,6 +478,7 @@ def build_actor_service(
         )
     from ur_env.actor_network import ActorSessionService
     from ur_env.rlpd_receive_server import RewardTransitionFinalizer
+    from ur_env.server_latency import wrap_ingress_sink
 
     runtime = assembly.policy_runtime
     ingress = assembly.ingress
@@ -484,9 +493,18 @@ def build_actor_service(
         # `confirmations`.  Keep the mapping here rather than renaming either
         # side, so grepping for the flag finds the whole path.
         finalize_transition=RewardTransitionFinalizer(
-            classifier, confirmations=success_confirmations
+            classifier,
+            confirmations=success_confirmations,
+            # Passed only when there is one: ``latency_probe=None`` and "no
+            # latency_probe argument" mean the same thing to the finalizer, so
+            # omitting it keeps this call working with any finalizer that
+            # predates profiling.
+            **({} if latency_probe is None else {"latency_probe": latency_probe}),
         ),
-        accept_data=ingress,
+        # Only the SERVICE's view of the ingress is wrapped.  The sampler and
+        # the buffer-status provider keep the raw object, so nothing on the
+        # learner thread pays for -- or is attributed to -- a Step handler.
+        accept_data=wrap_ingress_sink(ingress, latency_probe),
         buffer_status_provider=ingress.status,
         allowed_actor_ids=allowed_actor_ids,
         allowed_run_ids=allowed_run_ids,

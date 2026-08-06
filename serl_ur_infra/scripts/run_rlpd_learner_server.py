@@ -70,6 +70,7 @@ from ur_env.rlpd_receive_server import (  # noqa: E402
     DEFAULT_REWARD_THRESHOLD,
     RewardClassifierRuntime,
 )
+from ur_env.server_latency import ServerLatencyProbe  # noqa: E402
 
 
 # Directory sha256 (ur_env.classifier_sidecar.directory_sha256) of the canonical
@@ -871,6 +872,18 @@ def _run_locked(
         args.jsonl_path
         or checkpoint_manager.root / "logs" / "learner.jsonl"
     )
+    # Opt-in per-step latency profiling, off unless HIL_LATENCY_PROFILE is
+    # truthy in THIS process's environment (run_hil_server.sh forwards it to a
+    # freshly started learner only).  There is no CLI flag on purpose: the
+    # launcher's validate_process_contract compares argv token by token, so a
+    # new flag would make every profiled learner fail its own reuse check.
+    # The file is a sibling of the learner JSONL, which is what puts it inside
+    # the run root the analyzer already knows how to find.
+    latency_probe = ServerLatencyProbe.from_env(
+        jsonl_path.with_name("latency_server.jsonl")
+    )
+    if latency_probe.enabled:
+        _emit("rlpd_learner_latency_profile", path=str(latency_probe.path))
     logger = JsonlWandbLogger(
         jsonl_path,
         wandb_mode=args.wandb_mode,
@@ -962,6 +975,7 @@ def _run_locked(
         service = build_actor_service(
             assembly=assembly,
             classifier=classifier,
+            latency_probe=latency_probe,
             success_confirmations=args.success_confirmations,
             allowed_actor_ids=(
                 (args.synthetic_actor_id,) if args.synthetic_e2e else None
@@ -1026,6 +1040,7 @@ def _run_locked(
             bind_address=_grpc_bind_address(args.host, args.port),
             max_workers=args.max_workers,
             max_message_bytes=args.max_message_bytes,
+            latency_probe=latency_probe,
         )
         worker = LearnerWorker(
             assembly.learner,
@@ -1218,6 +1233,10 @@ def _run_locked(
                     error_type=type(exc).__name__,
                     detail=str(exc)[:2_000],
                 )
+        # After the gRPC server has stopped, so no handler can still be holding
+        # a record open, and before the long teardown below: a profiled run that
+        # crashes during the emergency save should still have its samples.
+        latency_probe.close()
         if worker is not None:
             while not worker.join(timeout=5.0):
                 exit_code = max(exit_code, 4)

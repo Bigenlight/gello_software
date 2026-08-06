@@ -107,6 +107,11 @@ def _rig(tmp_path: Path, *, wandb_mode: str) -> dict[str, str]:
         "REWARD_THRESHOLD": "0.5",
         "REWARD_MODEL_ID": "cube-in-cup-all3-ckpt150+sidecar-v1",
         "WANDB_MODE": wandb_mode,
+        # Empty == the production default: HIL_LATENCY_PROFILE unset on
+        # laptop3, so the launch block forwards no profiling env var at all.
+        # test_server_latency_wiring.py expands this same block with "1" and
+        # asserts the argv is byte-identical either way.
+        "LATENCY_PROFILE": "",
         "checkpoint_root": str(run_root / "checkpoints"),
         "jsonl_path": str(run_root / "logs" / "learner.jsonl"),
         "memory_path": str(run_root / "logs" / "memory-preflight.jsonl"),

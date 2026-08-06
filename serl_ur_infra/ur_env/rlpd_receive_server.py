@@ -44,6 +44,7 @@ from ur_env.observation_schema import (
     CANONICAL_OBSERVATION_SPEC,
     validate_canonical_observation,
 )
+from ur_env.server_latency import disabled_probe
 
 
 IMAGE_KEYS = ("cam1", "cam2")
@@ -784,10 +785,17 @@ class RewardTransitionFinalizer:
         *,
         confirmations: int = DEFAULT_CLASSIFIER_CONFIRMATIONS,
         warn: Optional[Callable[[str], None]] = None,
+        latency_probe: Optional[Any] = None,
     ) -> None:
         self.classifier = classifier
         self.confirmations = _positive_int(confirmations, name="confirmations")
         self._warn = warn or _emit_operator_warning
+        # Opt-in latency profiling (ur_env/server_latency.py).  Absent by
+        # default and absent in every receive-only harness, in which case every
+        # call below is a shared no-op context manager.
+        self._latency = (
+            latency_probe if latency_probe is not None else disabled_probe()
+        )
         # Pre-filled with 0.0 so the window is ALWAYS full: while it is still
         # filling, min() == 0.0, which cannot exceed a threshold in [0, 1] and
         # therefore cannot declare success on fewer than `confirmations`
@@ -849,6 +857,18 @@ class RewardTransitionFinalizer:
         data: dict[str, Any],
         classifier_sidecar: Optional[Mapping[str, Any]] = None,
     ) -> tuple[dict[str, Any], TransitionOutcome]:
+        # A thin wrapper so the profiled region is the whole finalization
+        # without reindenting it.  Keep the two-positional-argument signature:
+        # ActorSessionService._bind_finalizer inspects it to decide whether this
+        # finalizer predates the classifier sidecar.
+        with self._latency.phase("reward_finalize"):
+            return self._finalize(data, classifier_sidecar)
+
+    def _finalize(
+        self,
+        data: dict[str, Any],
+        classifier_sidecar: Optional[Mapping[str, Any]] = None,
+    ) -> tuple[dict[str, Any], TransitionOutcome]:
         finalized = copy.deepcopy(data)
         if set(finalized) != {"meta", "transition"}:
             raise ActorProtocolError("data must contain exactly meta and transition")
@@ -901,14 +921,19 @@ class RewardTransitionFinalizer:
             # `classify` raises from `_classifier_model_input` BEFORE it ever
             # touches the model: those say the tensors are malformed, and this
             # except clause is narrow enough not to catch them.
-            frames = self._classifier_frames(classifier_sidecar)
+            # (The two `classifier` phases below share ONE name on purpose: the
+            # sink accumulates same-named phases, so classifier_ms ends up
+            # decode + inference without moving this try/except boundary.)
+            with self._latency.phase("classifier"):
+                frames = self._classifier_frames(classifier_sidecar)
             try:
                 # Everything from here on is the classifier judging its own
                 # input and its own output — the model call, the sigmoid, the
                 # confirmation window, the model id it advertises.  A failure
                 # in any of them means "no verdict for this frame", which is a
                 # state this class already has.
-                result = self.classifier.classify(frames)
+                with self._latency.phase("classifier"):
+                    result = self.classifier.classify(frames)
                 probability, classifier_success = self._confirm(result)
                 threshold = float(result.threshold)
                 reward_model_id = _required_text(
@@ -958,6 +983,13 @@ class RewardTransitionFinalizer:
             terminal=done or truncated,
             fault_detail=fault_detail,
         )
+        # After _end_transition, so a fault raised on THIS transition is already
+        # counted.  The flag is the process-wide state (the runtime latches
+        # itself dead on its first fault), which is what makes a latency file
+        # readable months later: a classifier_ms of ~0 means "never ran", and
+        # this says whether that is the sidecar cadence or a dead model.
+        if self._latency.enabled and self.classifier_degraded:
+            self._latency.set("classifier_degraded", True)
 
         return finalized, TransitionOutcome(
             transition_id=transition_id,

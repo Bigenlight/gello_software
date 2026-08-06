@@ -35,6 +35,11 @@ from ur_env.actor_network import (
 )
 from ur_env.proto import actor_transport_pb2 as pb
 from ur_env.proto import actor_transport_pb2_grpc as pb_grpc
+from ur_env.server_latency import (
+    BEGIN_EPISODE_RPC,
+    STEP_RPC,
+    disabled_probe,
+)
 
 
 DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
@@ -882,8 +887,28 @@ class GrpcActorNetwork:
 
 
 class GrpcActorServicer(pb_grpc.ActorTransportServicer):
-    def __init__(self, service: ActorSessionService) -> None:
+    """Serve the transport contract, optionally timing each handler.
+
+    ``latency_probe`` is the server half of the opt-in profiler
+    (``ur_env/server_latency.py``).  When it is absent -- every caller that does
+    not profile, which is all of them by default -- the handlers below run their
+    original statements inside shared no-op context managers: no timing calls,
+    no allocation, no file.  The phases measured HERE are the ones only the
+    transport can see (proto decode, reply build, the whole handler); the rest
+    are contributed from inside ``ActorSessionService.step`` by the collaborators
+    the probe wraps.
+    """
+
+    def __init__(
+        self,
+        service: ActorSessionService,
+        *,
+        latency_probe: Optional[Any] = None,
+    ) -> None:
         self._service = service
+        self._latency = (
+            latency_probe if latency_probe is not None else disabled_probe()
+        )
 
     def Health(self, request, context):
         alive, ready, detail = self._service.health()
@@ -925,64 +950,140 @@ class GrpcActorServicer(pb_grpc.ActorTransportServicer):
             _abort(context, exc)
 
     def BeginEpisode(self, request, context):
-        try:
-            _validate_wire_protocol(request.protocol_version)
-            command = BeginEpisodeCommand(
-                protocol_version=request.protocol_version,
-                actor_id=request.actor_id,
-                run_id=request.run_id,
-                session_id=request.session_id,
-                episode_id=int(request.episode_id),
-                request_id=int(request.request_id),
-                created_monotonic_ns=int(request.created_monotonic_ns),
-                observation=observation_from_proto(request.observation),
-                deterministic=bool(request.deterministic),
-                fingerprint=request.SerializeToString(deterministic=True),
-            )
-            return _action_to_proto(self._service.begin_episode(command))
-        except PolicyInferenceError as exc:
-            return pb.ActionReply(ok=False, error=str(exc))
-        except Exception as exc:
-            _abort(context, exc)
+        # One lightweight record: this RPC happens once per episode, it has no
+        # transition to key on, and its cost is dominated by the same policy
+        # inference Step already reports.  ``total`` is what an operator needs
+        # to see the 372.8 -> 82.2 ms tail improvement in a file.
+        with self._latency.rpc(BEGIN_EPISODE_RPC) as _record:
+            # Same guarded shape as Step's ``_describe_step_request``: these ids
+            # are read off the request BEFORE validation, so a malformed message
+            # must cost this row its ids, never the handler.
+            if _record.enabled:
+                self._describe_begin_request(_record, request)
+            try:
+                _validate_wire_protocol(request.protocol_version)
+                command = BeginEpisodeCommand(
+                    protocol_version=request.protocol_version,
+                    actor_id=request.actor_id,
+                    run_id=request.run_id,
+                    session_id=request.session_id,
+                    episode_id=int(request.episode_id),
+                    request_id=int(request.request_id),
+                    created_monotonic_ns=int(request.created_monotonic_ns),
+                    observation=observation_from_proto(request.observation),
+                    deterministic=bool(request.deterministic),
+                    fingerprint=request.SerializeToString(deterministic=True),
+                )
+                return _action_to_proto(self._service.begin_episode(command))
+            except PolicyInferenceError as exc:
+                return pb.ActionReply(ok=False, error=str(exc))
+            except Exception as exc:
+                _abort(context, exc)
 
     def Step(self, request, context):
+        with self._latency.rpc(STEP_RPC) as _record:
+            # Ids come off the REQUEST, before anything can fail, so a handler
+            # that dies in decode still emits a row the analyzer can join.
+            if _record.enabled:
+                self._describe_step_request(_record, request)
+            try:
+                with _record.phase("request_decode"):
+                    _validate_wire_protocol(request.protocol_version)
+                    command = StepCommand(
+                        protocol_version=request.protocol_version,
+                        actor_id=request.actor_id,
+                        run_id=request.run_id,
+                        session_id=request.session_id,
+                        request_id=int(request.request_id),
+                        created_monotonic_ns=int(request.created_monotonic_ns),
+                        data=data_from_proto(request.data),
+                        next_observation=observation_from_proto(
+                            request.next_observation
+                        ),
+                        request_action=bool(request.request_action),
+                        deterministic=bool(request.deterministic),
+                        fingerprint=request.SerializeToString(deterministic=True),
+                    )
+                # Everything the service does: the lock it waits on, its
+                # validation and deep copies, and the wrapped collaborators that
+                # report trunk_encode / reward_finalize / classifier /
+                # replay_insert from inside it.
+                with _record.phase("service_step"):
+                    result = self._service.step(command)
+                with _record.phase("response_build"):
+                    reply = pb.StepReply(
+                        ack=pb.Ack(
+                            accepted=result.ack.accepted,
+                            transition_id=result.ack.transition_id,
+                            session_id=result.ack.session_id,
+                            request_id=result.ack.request_id,
+                            deduplicated=result.ack.deduplicated,
+                            error=result.ack.error,
+                        ),
+                        has_action=result.action is not None,
+                        outcome=transition_outcome_to_proto(result.outcome),
+                    )
+                    if result.action is not None:
+                        reply.action.CopyFrom(_action_to_proto(result.action))
+                    elif result.action_error:
+                        reply.action.CopyFrom(
+                            pb.ActionReply(ok=False, error=result.action_error)
+                        )
+                if _record.enabled:
+                    self._describe_step_result(_record, result)
+                return reply
+            except Exception as exc:
+                _abort(context, exc)
+
+    @staticmethod
+    def _describe_begin_request(record: Any, request: Any) -> None:
+        """Copy the joinable ids off the request.  Only called when profiling."""
+
         try:
-            _validate_wire_protocol(request.protocol_version)
-            command = StepCommand(
-                protocol_version=request.protocol_version,
-                actor_id=request.actor_id,
-                run_id=request.run_id,
-                session_id=request.session_id,
-                request_id=int(request.request_id),
-                created_monotonic_ns=int(request.created_monotonic_ns),
-                data=data_from_proto(request.data),
-                next_observation=observation_from_proto(request.next_observation),
-                request_action=bool(request.request_action),
-                deterministic=bool(request.deterministic),
-                fingerprint=request.SerializeToString(deterministic=True),
-            )
-            result = self._service.step(command)
-            reply = pb.StepReply(
-                ack=pb.Ack(
-                    accepted=result.ack.accepted,
-                    transition_id=result.ack.transition_id,
-                    session_id=result.ack.session_id,
-                    request_id=result.ack.request_id,
-                    deduplicated=result.ack.deduplicated,
-                    error=result.ack.error,
-                ),
-                has_action=result.action is not None,
-                outcome=transition_outcome_to_proto(result.outcome),
+            record.set("run_id", request.run_id)
+            record.set("episode_id", int(request.episode_id))
+            record.set("request_id", int(request.request_id))
+        except Exception:  # noqa: BLE001 - a row with fewer ids beats no RPC
+            pass
+
+    @staticmethod
+    def _describe_step_request(record: Any, request: Any) -> None:
+        """Copy the joinable ids off the request.  Only called when profiling."""
+
+        try:
+            meta = request.data.meta
+            record.set("transition_id", meta.transition_id)
+            record.set("request_id", int(request.request_id))
+            record.set("run_id", request.run_id)
+            record.set("episode_id", int(request.data.transition.episode_id))
+            record.set("env_step", int(meta.env_step))
+            record.set("intervened", bool(meta.intervened))
+        except Exception:  # noqa: BLE001 - a row with fewer ids beats no RPC
+            pass
+
+    @staticmethod
+    def _describe_step_result(record: Any, result: Any) -> None:
+        """Copy outcome flags and the inference time the service ALREADY timed.
+
+        ``server_inference_ms`` is measured in ``ActorSessionService._infer``
+        and shipped to the actor in the reply; re-timing the policy call here
+        would produce a second, slightly different number for the same work.
+        """
+
+        try:
+            record.set("accepted", bool(result.ack.accepted))
+            record.set("deduplicated", bool(result.ack.deduplicated))
+            record.set("terminal", bool(result.outcome.terminal))
+            record.set(
+                "classifier_evaluated", bool(result.outcome.classifier_evaluated)
             )
             if result.action is not None:
-                reply.action.CopyFrom(_action_to_proto(result.action))
-            elif result.action_error:
-                reply.action.CopyFrom(
-                    pb.ActionReply(ok=False, error=result.action_error)
+                record.set(
+                    "policy_inference_ms",
+                    round(float(result.action.server_inference_ms), 3),
                 )
-            return reply
-        except Exception as exc:
-            _abort(context, exc)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _validate_wire_protocol(protocol_version: str) -> None:
@@ -1011,6 +1112,7 @@ def create_grpc_server(
     bind_address: str = "127.0.0.1:0",
     max_workers: int = 4,
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES,
+    latency_probe: Optional[Any] = None,
 ) -> tuple[Any, int]:
     """Create (but do not start) a gRPC server and return its bound port."""
     if max_workers <= 0 or max_message_bytes <= 0:
@@ -1024,7 +1126,9 @@ def create_grpc_server(
             ("grpc.max_send_message_length", int(max_message_bytes)),
         ),
     )
-    pb_grpc.add_ActorTransportServicer_to_server(GrpcActorServicer(service), server)
+    pb_grpc.add_ActorTransportServicer_to_server(
+        GrpcActorServicer(service, latency_probe=latency_probe), server
+    )
     port = server.add_insecure_port(bind_address)
     if port == 0:
         raise ActorTransportError(f"failed to bind gRPC server at {bind_address}")

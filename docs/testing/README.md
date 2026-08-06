@@ -229,6 +229,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`07_FAILURE_INJECTION.md`](07_FAILURE_INJECTION.md) | 장애 주입 매트릭스 E1~E14 (유발·기대·확인·PASS·복구) + 결과 기록표 |
 | [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전·데이터·운영 갭 **G1~G31**과 완화책. G22/G23은 operator 상태기계로 닫혔고 G30은 현재 preposition 기본값, G31은 global max-step 종료 edge를 기록 |
 | [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, 학습 서버(`junhyeong_ai`) 기동. **§5.4 = Terminal 1 터널 소유권 실패 모드** |
+| [`10_LATENCY_PROFILING.md`](10_LATENCY_PROFILING.md) | **opt-in per-step 레이턴시 계측**(`HIL_LATENCY_PROFILE=1`) — §8 P1이 요구하는 phase 귀속. 양쪽 호스트가 각자 JSONL을 쓰고 `transition_id`로 오프라인 join, 분석기 `scripts/analyze_hil_latency.py`가 p50/p90/p99/max·loop budget·learner 경합·포화 비율을 낸다. 🪤 **재사용된 learner(`HIL_SERVER_RESULT=reused`)는 서버 쪽을 안 남긴다.** 🛑 **시계 규칙: 호스트 간 타임스탬프는 절대 빼지 않는다** — network+queue는 `step_rpc − server total`로 **유도**한다. 🛑 실기 미검증(**재는 방법**이지 측정 결과가 아니다) |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
 
