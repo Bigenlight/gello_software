@@ -52,18 +52,28 @@ class _GripperBackend:
 
     dry_run = True
 
-    def __init__(self, start_percent=1.0, opens=True):
+    def __init__(self, start_percent=1.0, opens=True, drop_first=0):
         self.q = Q6.copy()
         #: 0.0 = OPEN .. 1.0 = CLOSED (robotiq_gripper_modbus_node contract)
         self.gripper = float(start_percent)
         #: False = a stuck gripper that never reports open
         self.opens = bool(opens)
+        #: How many leading commands vanish before one takes effect. This is
+        #: the measured defect, not a hypothetical: DDS drops a datagram sent
+        #: before the subscription matched, and the Robotiq driver's rate
+        #: limiter discards a setpoint that lands inside command_min_period
+        #: *without* recording that it did — so the command is gone and every
+        #: downstream view stays self-consistent about the stale position.
+        self.drop_first = int(drop_first)
         self.gripper_commands = []
         self.commands = []
 
     # ---- gripper ---- #
     def send_gripper_percent(self, fraction):
         self.gripper_commands.append(float(fraction))
+        if self.drop_first > 0:
+            self.drop_first -= 1
+            return
         if self.opens:
             self.gripper = float(fraction)
 
@@ -185,7 +195,8 @@ def test_a_stuck_gripper_warns_and_reports_failure(capsys):
     downstream will say so."""
     env, backend = _env(backend=_GripperBackend(start_percent=1.0, opens=False))
     assert env.open_gripper_for_reset(timeout_s=0.15) is False
-    assert backend.gripper_commands == [0.0]  # it did try
+    assert backend.gripper_commands  # it did try
+    assert set(backend.gripper_commands) == {0.0}  # and only ever asked OPEN
     out = capsys.readouterr().out
     assert "WARNING" in out and "gripper" in out
     env.close()
@@ -199,6 +210,83 @@ def test_a_stuck_gripper_does_not_break_reset(capsys):
     obs, info = env.reset()
     assert info == {"succeed": False}
     assert obs is not None
+    env.close()
+
+
+# --------------------------------------------------------------------------- #
+# a lost command is re-asserted (FIX D)                                        #
+#                                                                              #
+# Real-hardware measurement 2026-08-06                                         #
+# (ros2_ur_ws/gello_logs/diag_gripper_halfopen_20260806_173307): 7 of 14 open  #
+# cycles parked at 0.043 .. 0.42 instead of 0.012 because the single publish   #
+# carrying the final setpoint was thrown away. Re-asserting for ~1 s: 0 of 6   #
+# failed. This boundary is the worst place to lose one — every offline demo    #
+# starts OPEN and gripper_position is state[0].                                #
+# --------------------------------------------------------------------------- #
+def test_a_dropped_open_is_re_asserted_until_it_takes():
+    """The defect itself: the first command vanishes and nobody can tell.
+
+    Without the re-assert this times out and the episode starts half-closed
+    with only a printed warning to show for it.
+    """
+    backend = _GripperBackend(start_percent=1.0, drop_first=1)
+    env, backend = _env(backend=backend)
+    assert env.open_gripper_for_reset(timeout_s=1.0) is True
+    assert len(backend.gripper_commands) >= 2, "a lost open was never repeated"
+    assert backend.gripper <= env.GRIPPER_OPEN_CONFIRM
+    env.close()
+
+
+def test_the_re_assert_only_ever_commands_open():
+    """It must never re-command a CLOSING setpoint.
+
+    Fingers that stop short of closed are a successful grasp (grip_pos maxes at
+    ~0.506 holding an object), so a retry there would be squeezing, not fixing.
+    """
+    backend = _GripperBackend(start_percent=1.0, opens=False)
+    env, backend = _env(backend=backend)
+    env.open_gripper_for_reset(timeout_s=0.3)
+    assert backend.gripper_commands
+    assert set(backend.gripper_commands) == {0.0}
+    env.close()
+
+
+def test_the_re_assert_stops_as_soon_as_feedback_confirms():
+    """Bounded by the confirmation, not by the window: the RL loop pays nothing
+    extra at the boundary when the very first open lands."""
+    env, backend = _env(backend=_GripperBackend(start_percent=1.0))
+    assert env.open_gripper_for_reset(timeout_s=1.0) is True
+    assert backend.gripper_commands == [0.0]
+    env.close()
+
+
+def test_a_zero_reassert_rate_restores_the_single_publish():
+    """The knob must be able to give back exactly the old behaviour."""
+    backend = _GripperBackend(start_percent=1.0, opens=False)
+    env, backend = _env(backend=backend)
+    env.GRIPPER_REASSERT_HZ = 0.0
+    assert env.open_gripper_for_reset(timeout_s=0.3) is False
+    assert backend.gripper_commands == [0.0]
+    env.close()
+
+
+def test_the_reset_never_re_asserts_a_disabled_gripper_channel():
+    """ACTION_SCALE[2] == 0 still means "do not touch the hardware"."""
+    env, backend = _env(config=_ArmOnlyConfig(), backend=_GripperBackend(1.0, opens=False))
+    assert env.open_gripper_for_reset(timeout_s=0.3) is True
+    assert backend.gripper_commands == []
+    env.close()
+
+
+def test_the_re_assert_rate_is_honoured():
+    """~10 Hz by default: fast enough to beat the driver's 50 ms rate limiter,
+    slow enough that the ROS traffic stays negligible."""
+    backend = _GripperBackend(start_percent=1.0, opens=False)
+    env, backend = _env(backend=backend)
+    env.GRIPPER_REASSERT_HZ = 10.0
+    env.open_gripper_for_reset(timeout_s=0.55)
+    # first publish + ~5 re-asserts; allow scheduler slop in both directions.
+    assert 3 <= len(backend.gripper_commands) <= 9, backend.gripper_commands
     env.close()
 
 

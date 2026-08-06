@@ -121,3 +121,58 @@ def test_jd_start_allow_unstreamed_opt_in_only_for_switch_only():
     assert (
         _jd_overrides(start_mode="init_align")["jd_start_allow_unstreamed"] is False
     )
+
+
+# --------------------------------------------------------------------------- #
+# DISCRETE GRIPPER MODE argument derivation.                                    #
+# --------------------------------------------------------------------------- #
+def _gripper_overrides(mode="continuous", close_at="", open_at=""):
+    """Evaluate _gripper_bridge_parameter_overrides against a bare context."""
+    ctx = LaunchContext()
+    ctx.launch_configurations["gripper_mode"] = mode
+    ctx.launch_configurations["gripper_close_at"] = close_at
+    ctx.launch_configurations["gripper_open_at"] = open_at
+    return _mod._gripper_bridge_parameter_overrides(ctx)
+
+
+def test_gripper_mode_maps_to_discrete_mode_and_leaves_yaml_alone():
+    """gripper_mode is the ONLY key set by default: the thresholds keep the
+    empty-string 'not overridden' sentinel so the yaml values win untouched.
+    The default must still be plain continuous passthrough."""
+    assert _gripper_overrides() == {"discrete_mode": False}
+    assert _gripper_overrides(mode="discrete") == {"discrete_mode": True}
+
+
+def test_gripper_thresholds_reach_the_node_as_real_floats():
+    """Same int-coercion guard as jd_gain: the launch value is resolved here and
+    converted with an explicit float(), never handed to launch_ros as a
+    substitution for yaml.safe_load() to type-infer."""
+    ov = _gripper_overrides(mode="discrete", close_at="0.75", open_at="0.25")
+    assert ov == {
+        "discrete_mode": True,
+        "discrete_close_at": 0.75,
+        "discrete_open_at": 0.25,
+    }
+    assert all(isinstance(ov[k], float)
+               for k in ("discrete_close_at", "discrete_open_at"))
+    assert isinstance(ov["discrete_mode"], bool)
+
+
+@pytest.mark.parametrize(
+    "close_at, open_at",
+    [
+        ("0.25", "0.75"),   # inverted: open_at >= close_at
+        ("0.7", "0.7"),     # equal: no hysteresis band at all
+        ("1.0", "0.3"),     # close_at not < 1.0 -> trigger can never latch CLOSED
+        ("0.7", "0.0"),     # open_at not > 0.0
+        ("0.7", ""),        # half-override: the relation cannot be checked
+        ("", "0.3"),        # half-override, the other way
+        ("0.7", "abc"),     # not a number
+    ],
+)
+def test_gripper_threshold_range_is_refused_at_launch_time(close_at, open_at):
+    """A threshold the trigger can no longer cross makes the gripper stop
+    responding SILENTLY, so a bad pair must abort the launch before anything
+    spawns rather than reach the node."""
+    with pytest.raises(RuntimeError):
+        _gripper_overrides(mode="discrete", close_at=close_at, open_at=open_at)

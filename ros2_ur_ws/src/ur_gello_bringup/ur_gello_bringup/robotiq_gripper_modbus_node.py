@@ -24,10 +24,20 @@ Interfaces
       continuous streaming setpoint. Rate-limited + deadbanded, then issues a SINGLE
       non-blocking ``g.move()`` per accepted setpoint (no status-poll loop), so the
       single-client :54321 bus stays quiet while a leader (e.g. GELLO) streams.
+      The rate limiter COALESCES: a setpoint arriving inside the closed window is
+      remembered as ``_pending_pct`` and flushed by a timer when the window opens,
+      so the LAST sample of a stream is always the one that reaches the gripper.
 
-Commands (action + service) are serialized against each other via a mutually-exclusive
-callback group — the :54321 forwarder is single-client, so concurrent goals must not
-interleave. Status polling runs in a separate group.
+Commands (action + service + streaming flush) are serialized against each other by
+``_bus_cmd_lock`` — the :54321 forwarder is single-client, so concurrent goals must
+not interleave. The mutually-exclusive callback group is NOT sufficient on its own:
+rclpy runs an action's ``execute_callback`` as a bare executor task
+(``rclpy/action/server.py`` ``notify_execute`` -> ``executor.create_task``, and
+``Executor.create_task`` appends ``(task, None, None)`` — no entity, hence no
+callback group), so under a MultiThreadedExecutor it runs concurrently with every
+callback in the group. Measured on Humble: 60 group callbacks fired inside one
+1 s ``execute_callback``. Status polling runs in a separate group on purpose and
+relies on the driver's own transaction lock.
 
 Powered-off robot: tool voltage is off when the robot is POWER_OFF, so the gripper
 won't answer. The node keeps retrying the connection in the background and connects
@@ -103,6 +113,24 @@ class RobotiqGripperModbusNode(Node):
         self._cmd_min_period = (1.0 / cmd_rate) if cmd_rate > 0.0 else 0.0
         self._last_cmd_pct = None     # last percent actually written to the bus
         self._last_cmd_time = 0.0     # time.monotonic() of last accepted write
+        # Freshest setpoint that has NOT been written yet (None => nothing owed).
+        # A rate limiter that drops the newest sample loses the end of every
+        # stream; this holds it until the window opens.
+        #
+        # Written by the subscription and read/cleared by the flush timer, which
+        # ARE mutually exclusive (both are real entities in self._cmd_cb, so the
+        # executor's can_execute/beginning_execution gate applies). The action's
+        # execute_callback is NOT — see the module docstring — so every path that
+        # owns the bus takes _bus_cmd_lock before touching this or _last_cmd_pct.
+        self._pending_pct = None
+        # Held by whoever currently owns the single-client :54321 bus for a
+        # COMMAND (action goal, set_closed, streaming flush). The status poll
+        # deliberately does not take it: it has its own callback group and the
+        # driver's transaction lock already keeps frames from interleaving.
+        # The flush only ever tries it non-blockingly, so a long action goal can
+        # never block a self._cmd_cb thread (which would starve the action's own
+        # cancel handling, since that is served from the same group).
+        self._bus_cmd_lock = threading.Lock()
 
         # --- Driver state ---
         self._g = None
@@ -131,6 +159,18 @@ class RobotiqGripperModbusNode(Node):
         self.create_subscription(Float32, "~/command_percent",
                                  self._on_command_percent, 10,
                                  callback_group=self._cmd_cb)
+        # Coalescing flush timer for the streaming setpoint. It lives in
+        # self._cmd_cb so it cannot interleave with the subscription that feeds
+        # _pending_pct; _bus_cmd_lock (not the group) is what keeps its write off
+        # the bus while an action goal or set_closed owns it. It is a pure no-op
+        # when nothing is pending, so the single-client bus stays completely
+        # silent at rest.
+        self._cmd_flush_timer = None
+        if self._cmd_min_period > 0.0:
+            self._cmd_flush_timer = self.create_timer(
+                self._cmd_min_period / 2.0, self._try_flush_pending,
+                callback_group=self._cmd_cb,
+            )
         self._js_pub = self.create_publisher(JointState, "~/joint_states", 10)
         self._pct_pub = self.create_publisher(Float32, "~/position_percent", 10)
 
@@ -180,6 +220,13 @@ class RobotiqGripperModbusNode(Node):
                         if self._stop.is_set():
                             g.close()
                             return
+                        # The activate() auto-calibration sweep leaves the fingers
+                        # wherever it ends, so any cached command is now a lie about
+                        # where the gripper is. Forget it BEFORE publishing the
+                        # connection, so the first streaming sample after this point
+                        # can never be swallowed by the deadband. (_pending_pct is
+                        # deliberately kept: a desire should survive a reconnect.)
+                        self._last_cmd_pct = None
                         self._g = g
                         self._connected = True
                     self.get_logger().info(f"Gripper connected & ready: {ready}")
@@ -205,6 +252,10 @@ class RobotiqGripperModbusNode(Node):
         with self._conn_lock:
             self._connected = False
             g, self._g = self._g, None
+            # Invalidate the streaming cache: the reconnect will re-activate, whose
+            # auto-cal sweep moves the fingers, and a steady stream of the same
+            # value would otherwise never re-assert it past the deadband.
+            self._last_cmd_pct = None
         try:
             if g is not None:
                 g.close()
@@ -249,53 +300,68 @@ class RobotiqGripperModbusNode(Node):
             return result
 
         cur, obj, stalled = target, 0, False
-        try:
-            g.move(target, self._speed, force)
-            # Keep the streaming path's bookkeeping in sync: without this, a
-            # later GELLO stream sample that happens to land near the PRE-action
-            # _last_cmd_pct (not where this action just moved the gripper) is
-            # wrongly treated as "no change" by the command_percent deadband and
-            # is silently dropped -- streaming never re-asserts, and the gripper
-            # stays wherever this action left it.
-            self._last_cmd_pct = target / 255.0
-            self._last_cmd_time = time.monotonic()
-            deadline = time.time() + self._move_timeout
-            while rclpy.ok():
-                if goal_handle.is_cancel_requested:
-                    try:
-                        g.stop()  # hold current position
-                    except _IOERR:
-                        self._drop_connection()
-                    goal_handle.canceled()
-                    result.position = self._pos_to_m(cur)
-                    result.effort = float(force)
-                    result.stalled = stalled
-                    result.reached_goal = False
-                    return result
-                st = g.read_status()
-                cur, obj = st["gPO"], st["gOBJ"]
-                fb = GripperCommand.Feedback()
-                fb.position = self._pos_to_m(cur)
-                fb.effort = float(force)
-                fb.stalled = obj in (1, 2)
-                fb.reached_goal = abs(cur - target) <= 3
-                goal_handle.publish_feedback(fb)
-                if obj in (1, 2):
-                    stalled = True
-                    break
-                if obj == 3 or abs(cur - target) <= 3:
-                    break
-                if time.time() > deadline:
-                    break
-                time.sleep(0.02)
-        except _IOERR as exc:
-            self.get_logger().error(f"gripper move failed: {exc}")
-            self._drop_connection()
-            result.position = self._pos_to_m(cur)
-            result.stalled = stalled
-            result.reached_goal = False
-            goal_handle.abort()
-            return result
+        # Own the bus for the whole goal. rclpy runs this callback as an executor
+        # task OUTSIDE self._cmd_cb (module docstring), so without this a streaming
+        # flush lands between our move() and our status polls: the gripper chases
+        # the leader instead of the goal, reached_goal never trips, and worse,
+        # _last_cmd_pct ends up recording the streaming value while the fingers sit
+        # at OUR target -- after which the deadband swallows the leader's next
+        # sample and the gripper parks short. That is the exact defect the
+        # coalescing rate limiter exists to prevent.
+        with self._bus_cmd_lock:
+            try:
+                g.move(target, self._speed, force)
+                # Keep the streaming path's bookkeeping in sync: without this, a
+                # later GELLO stream sample that happens to land near the PRE-action
+                # _last_cmd_pct (not where this action just moved the gripper) is
+                # wrongly treated as "no change" by the command_percent deadband and
+                # is silently dropped -- streaming never re-asserts, and the gripper
+                # stays wherever this action left it.
+                # Dropping _pending_pct is part of the same bookkeeping: a setpoint
+                # that was still waiting for its rate-limit window when this goal
+                # arrived is now STALE, and flushing it after this move would silently
+                # undo the position the action just commanded. (A sample that arrives
+                # DURING the goal is fresher than the goal and is deliberately kept.)
+                self._pending_pct = None
+                self._last_cmd_pct = target / 255.0
+                self._last_cmd_time = time.monotonic()
+                deadline = time.time() + self._move_timeout
+                while rclpy.ok():
+                    if goal_handle.is_cancel_requested:
+                        try:
+                            g.stop()  # hold current position
+                        except _IOERR:
+                            self._drop_connection()
+                        goal_handle.canceled()
+                        result.position = self._pos_to_m(cur)
+                        result.effort = float(force)
+                        result.stalled = stalled
+                        result.reached_goal = False
+                        return result
+                    st = g.read_status()
+                    cur, obj = st["gPO"], st["gOBJ"]
+                    fb = GripperCommand.Feedback()
+                    fb.position = self._pos_to_m(cur)
+                    fb.effort = float(force)
+                    fb.stalled = obj in (1, 2)
+                    fb.reached_goal = abs(cur - target) <= 3
+                    goal_handle.publish_feedback(fb)
+                    if obj in (1, 2):
+                        stalled = True
+                        break
+                    if obj == 3 or abs(cur - target) <= 3:
+                        break
+                    if time.time() > deadline:
+                        break
+                    time.sleep(0.02)
+            except _IOERR as exc:
+                self.get_logger().error(f"gripper move failed: {exc}")
+                self._drop_connection()
+                result.position = self._pos_to_m(cur)
+                result.stalled = stalled
+                result.reached_goal = False
+                goal_handle.abort()
+                return result
 
         result.position = self._pos_to_m(cur)
         result.effort = float(force)
@@ -317,26 +383,55 @@ class RobotiqGripperModbusNode(Node):
             response.success = False
             response.message = f"not connected (would move to POS={target}); robot powered on?"
             return response
-        try:
-            g.move(target, self._speed, self._force)
-            # Same streaming-resync fix as _execute (see its comment): keep
-            # _last_cmd_pct current so a subsequent GELLO stream sample isn't
-            # dropped by the command_percent deadband against a stale value.
-            self._last_cmd_pct = target / 255.0
-            self._last_cmd_time = time.monotonic()
-            response.success = True
-            response.message = f"{'closing' if request.data else 'opening'} (POS={target})"
-        except _IOERR as exc:
-            response.success = False
-            response.message = f"move failed: {exc}"
-            self._drop_connection()
+        # Own the bus for this command, same as _execute: an action goal is NOT in
+        # our callback group (module docstring), so the group alone does not keep
+        # the two apart on the single-client :54321 forwarder.
+        with self._bus_cmd_lock:
+            try:
+                g.move(target, self._speed, self._force)
+                # Same streaming-resync fix as _execute (see its comment): keep
+                # _last_cmd_pct current so a subsequent GELLO stream sample isn't
+                # dropped by the command_percent deadband against a stale value, and
+                # discard any setpoint still waiting on its rate-limit window so it
+                # cannot flush afterwards and undo this move.
+                self._pending_pct = None
+                self._last_cmd_pct = target / 255.0
+                self._last_cmd_time = time.monotonic()
+                response.success = True
+                response.message = f"{'closing' if request.data else 'opening'} (POS={target})"
+            except _IOERR as exc:
+                response.success = False
+                response.message = f"move failed: {exc}"
+                self._drop_connection()
         return response
 
     # ------------------------------------------------------------------ #
     # Streaming setpoint (~/command_percent): 0.0=OPEN .. 1.0=CLOSED
     # ------------------------------------------------------------------ #
     def _on_command_percent(self, msg):
-        """Accept a streaming gripper setpoint and issue ONE non-blocking write.
+        """Record the freshest streaming setpoint, then try to put it on the bus.
+
+        This callback NEVER discards a sample. Discarding the newest sample is what
+        made the gripper park short of the commanded position: a ~30 Hz leader
+        stream is accepted at ~20 Hz, so the final sample of a release (the one
+        that says "fully open") landed inside a closed rate-limit window about half
+        the time and was lost forever — nobody re-asserts, and _last_cmd_pct stays
+        self-consistent with what was actually written, so nothing ever notices.
+        Now the newest desire is always remembered and ``_try_flush_pending`` (also
+        driven by a timer) writes it as soon as the window opens.
+        """
+        self._pending_pct = min(max(float(msg.data), 0.0), 1.0)
+        self._try_flush_pending()
+
+    def _try_flush_pending(self):
+        """Write ``_pending_pct`` if the bus is allowed to take it right now.
+
+        Called from ``_on_command_percent`` and from the flush timer; both are in
+        ``self._cmd_cb`` so this never runs concurrently with itself or with the
+        subscription that feeds ``_pending_pct``. An action goal is NOT in that
+        group (module docstring), so ``_bus_cmd_lock`` is what keeps this off the
+        bus while a goal or ``set_closed`` owns it — tried non-blockingly, so a
+        long goal defers the flush instead of blocking a callback-group thread.
 
         Rate-limited (>= command_min_period between writes) and deadbanded (ignore
         sub-threshold changes) so a continuous leader stream does not storm the
@@ -345,25 +440,50 @@ class RobotiqGripperModbusNode(Node):
         poll here — exactly one FC16 write per accepted setpoint; the driver lock
         serializes it against the status timer and other command callbacks.
         """
-        pct = min(max(float(msg.data), 0.0), 1.0)
+        if self._pending_pct is None:
+            return  # nothing owed => zero bus traffic at rest (single-client bus)
+        if not self._bus_cmd_lock.acquire(blocking=False):
+            return  # an action goal / set_closed owns the bus; stay pending
+        try:
+            self._flush_locked()
+        finally:
+            self._bus_cmd_lock.release()
+
+    def _flush_locked(self):
+        """Body of :meth:`_try_flush_pending`, with ``_bus_cmd_lock`` held."""
+        pct = self._pending_pct
+        if pct is None:
+            return
 
         # DEADBAND: ignore sub-threshold changes vs the last written setpoint.
+        # The desire is already on the wire, so nothing is owed any more.
         if self._last_cmd_pct is not None and \
                 abs(pct - self._last_cmd_pct) < self._cmd_deadband:
+            self._pending_pct = None
             return
 
         # RATE-LIMIT: throttle bus writes, but let a large jump through immediately.
+        # (_last_cmd_pct is None => never written / invalidated by a reconnect, which
+        # is NOT a jump from 0.0; the elapsed-time test below lets it straight out.)
         now = time.monotonic()
-        big_jump = abs(pct - (self._last_cmd_pct or 0.0)) >= 0.5
+        big_jump = (self._last_cmd_pct is not None
+                    and abs(pct - self._last_cmd_pct) >= 0.5)
         if not big_jump and (now - self._last_cmd_time) < self._cmd_min_period:
-            return
+            return  # KEEP it pending -- the flush timer will write it
 
         g = self._g  # local ref: a concurrent _drop_connection may null self._g
         if not self._connected or g is None:
             self.get_logger().warn(
-                "[no gripper] dropped streaming setpoint; robot powered on?",
+                "[no gripper] streaming setpoint deferred; robot powered on?",
                 throttle_duration_sec=10.0,
             )
+            # KEEP it pending. There is no bus to storm -- the socket is closed, so
+            # this branch issues zero I/O -- and the reconnect loop is the retry.
+            # Forgetting here re-creates the whole defect this class of fix exists
+            # to kill: the last sample of a release lands during a 1-3 s reconnect,
+            # the bridge is silent at rest, and the gripper parks short forever.
+            # It cannot go stale either: the subscription keeps overwriting
+            # _pending_pct with the leader's live value throughout the outage.
             return
 
         pos = int(round(pct * 255.0))
@@ -372,7 +492,13 @@ class RobotiqGripperModbusNode(Node):
         except _IOERR as exc:
             self.get_logger().warn(f"streaming move failed: {exc}")
             self._drop_connection()
+            # Cache AND pending untouched: the cache must only ever reflect a
+            # SUCCESSFUL write, and the desire is still owed -- it goes out once
+            # the reconnect completes.
             return
+        # Only now is the desire discharged. (Nothing fresher can have arrived:
+        # the subscription is in the same mutually-exclusive group as this.)
+        self._pending_pct = None
         self._last_cmd_pct = pct
         self._last_cmd_time = now
 

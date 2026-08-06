@@ -74,6 +74,20 @@
 # #    # Supply a per-robot kinematics calibration YAML:                     #
 # #    CALIB=/path/to/ur7e_calibration.yaml ./run_ur7e_gello_real.sh        #
 # #                                                                          #
+# #    # DISCRETE gripper — snap the leader trigger to FULLY OPEN / FULLY    #
+# #    # CLOSED (0.3 / 0.7 with hysteresis) instead of passing it through    #
+# #    # raw. Fixes the ~1-2x per session where the spring-loaded trigger    #
+# #    # rests partway open (worst seen 0.243) and the Robotiq only opens    #
+# #    # ~76%. Default is continuous = unchanged behaviour.                  #
+# #    # Evidence: docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1              #
+# #    HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef \            #
+# #        gripper_mode:=discrete                                            #
+# #                                                                          #
+# #    # Retune the two thresholds (BOTH required together; the launch file  #
+# #    # refuses anything but 0.0 < open_at < close_at < 1.0):               #
+# #    ./run_ur7e_gello_real.sh gripper_mode:=discrete \                     #
+# #        gripper_open_at:=0.25 gripper_close_at:=0.75                      #
+# #                                                                          #
 # #    # Combine env toggles (and pass extra launch args after --):          #
 # #    HEADLESS=true ROBOT_IP=192.168.10.11 ./run_ur7e_gello_real.sh \       #
 # #        launch_rviz:=false                                                #
@@ -120,8 +134,14 @@ echo "### REAL UR7e teleop | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>}"
 echo "### headless_mode=${HEADLESS_STATE}"
 # Resolve the EFFECTIVE start_mode for the banner exactly as the launch file does,
 # so the printed warning can never disagree with what the arm is about to do.
+# GRIPPER_MODE is resolved here for the BANNER ONLY (same as CONTROL_MODE): the
+# launch file owns the argument and its defaults; nothing below adds to ARGS.
 CONTROL_MODE=joint
-for _a in "$@"; do case "$_a" in control_mode:=*) CONTROL_MODE="${_a#control_mode:=}" ;; esac; done
+GRIPPER_MODE=continuous
+for _a in "$@"; do case "$_a" in
+    control_mode:=*) CONTROL_MODE="${_a#control_mode:=}" ;;
+    gripper_mode:=*) GRIPPER_MODE="${_a#gripper_mode:=}" ;;
+esac; done
 EFF_START_MODE="${START_MODE}"
 if [ -z "${EFF_START_MODE}" ]; then
     case "${CONTROL_MODE}" in
@@ -152,6 +172,16 @@ case "${EFF_START_MODE}" in
         fi
         ;;
 esac
+echo "### gripper_mode=${GRIPPER_MODE}"
+if [ "${GRIPPER_MODE}" = "discrete" ]; then
+    echo "### gripper_mode=discrete — the leader trigger is SNAPPED to the endpoints:"
+    echo "###   >=0.7 -> fully CLOSED, <=0.3 -> fully OPEN, in between HOLDS (hysteresis)."
+    echo "###   Watch /gello_gripper_bridge/discrete_state (shown live in ./run_eef_gui.sh):"
+    echo "###   if it never leaves UNKNOWN the trigger is not crossing a threshold."
+else
+    echo "### gripper_mode=continuous — raw trigger passthrough (unchanged default). Pass"
+    echo "###   gripper_mode:=discrete if the gripper sometimes 'doesn't fully open' (§5.1)."
+fi
 echo "### Robotiq 2F-85 gripper INCLUDED (Modbus over driver socat bridge /tmp/ttyUR)."
 echo "### ROBOT MUST BE POWERED ON. Tool voltage is supplied by the DRIVER"
 echo "### (tool_voltage:=24), NOT the pendant Installation tab. Keep fingers clear —"

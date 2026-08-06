@@ -337,6 +337,16 @@ HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef
 
 `run_ur7e_gello_real.sh`는 `robot_ip`(기본 `192.168.10.11`) / `headless_mode`를 스스로 붙이고, **커맨드라인 끝에 붙인 인자를 `ros2 launch`로 그대로 전달**한다(스크립트 말미 `exec ros2 launch ... "${ARGS[@]}" "$@"`). `HEADLESS=true`가 `headless_mode:=true`로 번역된다. ros2 launch는 중복 인자에서 뒤가 이기므로 필요하면 `robot_ip:=` 등도 뒤에 덧붙여 덮어쓸 수 있다.
 
+#### 그리퍼 DISCRETE 모드 — 같은 명령줄에 붙인다 (opt-in, 기본 꺼짐)
+
+```bash
+HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef gripper_mode:=discrete
+```
+
+`gripper_mode`(`continuous`|`discrete`, 기본 `continuous`)는 **그리퍼 브릿지 전용 인자**라 EEF 델타 경로에는 아무 영향이 없다 — H2("그리퍼는 EEF 상태와 무관하게 GELLO를 따라간다")도 그대로다. 고치는 것은 하나다: 방아쇠 스프링이 덜 돌아와 **그리퍼가 "끝까지 안 열리는"** 증상. 켜면 EEF GUI에 이산 상태(`DISABLED`/`UNKNOWN`/`OPEN`/`CLOSED`) 표시등이 뜬다.
+
+**임계값·히스테리시스·`UNKNOWN`이 왜 있는지·녹화에 미치는 영향은 [`GELLO_UR7E_GRIPPER.md` §8](./GELLO_UR7E_GRIPPER.md#8-그리퍼-discrete-모드-gello-텔레오퍼-전용-opt-in)에 있다.** 여기서 반복하지 않는다.
+
 > **`start_mode`는 스크립트가 붙이지 않는다 (2026-07-24 수정).** 예전 스크립트는 `start_mode:=gello`를 **항상** 붙였고, 그러면 §3.5의 `control_mode:=eef → switch_only` 자동 유도가 **명시 인자에 덮여서 무력화**된다 — 즉 `control_mode:=eef`를 줘도 팔이 기동하자마자 리더 관절 자세로 스윙한다(정확히 3D 펜 모드가 없애려던 그 동작). 지금은 환경변수 `START_MODE`가 **비어 있을 때 인자를 아예 붙이지 않아서** 런치의 자동 유도가 살아 있다. 배너가 `control_mode=... | start_mode=...`로 **실효값**을 출력하므로 기동 시 그 줄을 확인할 것. `START_MODE=gello ./run_ur7e_gello_real.sh ...`로 옛 동작을 강제할 수는 있고, 그때는 배너가 경고를 찍는다.
 
 **Remote 모드에서 적용되지 않는 펜던트 절차:**

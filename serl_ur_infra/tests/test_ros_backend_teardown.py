@@ -162,6 +162,9 @@ def _make_backend(
     b._executor = _FakeExecutor()
     b._cmd_pub = _FakePub(b._node, delay=publish_delay)
     b._gripper_pub = _FakePub(b._node)
+    b._grip_pending = None
+    b.grip_reassert_s = URRosBackend.grip_reassert_s
+    b.grip_reassert_hz = URRosBackend.grip_reassert_hz
 
     b._q = (Q6.copy(), time.monotonic())
     b._dq = None
@@ -347,8 +350,13 @@ def test_first_command_is_exact_measured_joint_seed(monkeypatch):
 
 
 def test_send_gripper_percent_is_a_noop_after_close(monkeypatch):
-    """A late gripper command must not reach a destroyed node's publisher."""
+    """A late gripper command must not reach a destroyed node's publisher.
+
+    The re-assert is disabled here so the count is exactly the historical one;
+    the re-assert's own teardown behaviour is covered separately below.
+    """
     b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 0.0
     b.send_gripper_percent(1.0)
     assert len(b._gripper_pub.publishes) == 1
 
@@ -357,6 +365,333 @@ def test_send_gripper_percent_is_a_noop_after_close(monkeypatch):
 
     assert len(b._gripper_pub.publishes) == 1
     assert b._gripper_pub.after_destroy == []
+
+
+# --------------------------------------------------------------------------- #
+# gripper setpoint re-assert (FIX D)                                           #
+#                                                                              #
+# One publish is not a command. DDS drops a datagram sent before the            #
+# subscription matched, and robotiq_gripper_modbus_node's rate limiter          #
+# discards a setpoint that lands inside command_min_period WITHOUT updating     #
+# its cache — so the driver stays self-consistent and nothing downstream can    #
+# see the loss. Measured 2026-08-06: 7 of 14 one-shot opens parked short.       #
+# --------------------------------------------------------------------------- #
+def test_a_gripper_setpoint_is_re_asserted_by_the_worker(monkeypatch):
+    """The value is repeated on the 250 Hz worker, not sent once and forgotten."""
+    b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 0.4
+    b.grip_reassert_hz = 20.0
+    try:
+        b.send_gripper_percent(0.0)
+        assert len(b._gripper_pub.publishes) == 1  # the immediate one
+        time.sleep(0.25)
+        payloads = [p for p, _ in b._gripper_pub.publishes]
+        assert len(payloads) >= 3, payloads
+        assert set(payloads) == {0.0}, "a re-assert must repeat, not invent"
+    finally:
+        b.close()
+
+
+def test_the_re_assert_stops_when_its_window_expires(monkeypatch):
+    """No periodic traffic at rest — the :54321 bus is single-client."""
+    b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 0.1
+    b.grip_reassert_hz = 20.0
+    try:
+        b.send_gripper_percent(1.0)
+        time.sleep(0.25)
+        settled = len(b._gripper_pub.publishes)
+        assert b._grip_pending is None, "pending setpoint outlived its window"
+        time.sleep(0.15)
+        assert len(b._gripper_pub.publishes) == settled
+    finally:
+        b.close()
+
+
+def test_a_newer_setpoint_supersedes_the_pending_one(monkeypatch):
+    """LATEST WINS: a stale re-assert must never fight a newer command.
+
+    Without this the policy channel could have an "open" re-assert still firing
+    after it asked to close one GRIPPER_SLEEP later.
+    """
+    b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 1.0
+    b.grip_reassert_hz = 20.0
+    try:
+        b.send_gripper_percent(0.0)  # OPEN
+        time.sleep(0.1)
+        b.send_gripper_percent(1.0)  # CLOSED
+        n_at_switch = len(b._gripper_pub.publishes)
+        time.sleep(0.2)
+        after = [p for p, _ in b._gripper_pub.publishes[n_at_switch:]]
+        assert after, "the newer setpoint should still be re-asserting"
+        assert set(after) == {1.0}, f"stale OPEN re-asserted after CLOSE: {after}"
+    finally:
+        b.close()
+
+
+#: Every Event.wait()/join() below is bounded by this. A concurrency test that
+#: can hang is worse than no test: it would wedge the suite instead of failing.
+#: Nothing waits on it in the happy path — it is the ceiling, not the schedule.
+_RACE_TIMEOUT_S = 5.0
+
+#: The closer thread is named so the instrumented lock can tell "the thread this
+#: test is watching had to wait" from "the 250 Hz worker took its own lock".
+_CLOSER_THREAD = "test-gripper-closer"
+
+
+class _ContendedLock:
+    """A Lock that reports the moment ``_CLOSER_THREAD`` has to wait for it.
+
+    The race below is about what a second thread does *while* one publisher
+    holds the lock, so the test needs to know when that second thread has
+    reached its decision point. Waiting on the lock IS that point when the
+    publish is serialised, so this is the deterministic signal that replaces a
+    sleep. Only the named thread is watched — the upsampler takes this lock on
+    every one of its 250 Hz ticks and would otherwise flag contention that has
+    nothing to do with the race.
+    """
+
+    def __init__(self, on_contended):
+        self._lock = threading.Lock()
+        self._on_contended = on_contended
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self._lock.acquire(False):
+            return True
+        if threading.current_thread().name == _CLOSER_THREAD:
+            self._on_contended()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self):
+        self._lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc):
+        self.release()
+        return False
+
+
+class _GatedGripperPub:
+    """Records the wire, and freezes the worker in the middle of ONE re-assert.
+
+    A publish is not instantaneous: with a real rmw it is a C call, and the
+    worker can be descheduled anywhere inside it. This holds the first re-assert
+    (the repeat of the value already on the wire) open until the test releases
+    it, which turns "the worker is between its decision and its datagram" from a
+    ~microsecond window into a deterministic one the closer thread runs inside.
+    """
+
+    def __init__(self, held, release, re_assert_done, closer_committed):
+        self.sent = []
+        self._held = held
+        self._release = release
+        self._re_assert_done = re_assert_done
+        self._closer_committed = closer_committed
+        self._gated = False
+        self.release_timed_out = False
+
+    def publish(self, msg):
+        value = float(msg.data)
+        gated = not self._gated and value == 0.0 and len(self.sent) == 1
+        if gated:
+            self._gated = True
+            self._held.set()
+            if not self._release.wait(_RACE_TIMEOUT_S):
+                self.release_timed_out = True
+        self.sent.append(value)
+        # Both signals fire AFTER the append, never before. Releasing the worker
+        # on a signal raised ahead of its own append is how this test silently
+        # stopped testing anything: the stale repeat then lands (or does not)
+        # depending on when the scheduler runs the worker, not on whether the
+        # publish is serialised — and the reverted fix passed.
+        if gated:
+            self._re_assert_done.set()
+        if value == 1.0:
+            self._closer_committed.set()
+
+
+def test_a_newer_setpoint_wins_the_wire_not_just_the_state(monkeypatch):
+    """LATEST WINS on the WIRE — the ordering property, not the stored one.
+
+    ``test_a_newer_setpoint_supersedes_the_pending_one`` only spaces the two
+    commands apart, so it checks the state machine and never opens the window
+    that costs a grasp. This one does.
+
+    The defect: the worker decided to re-assert, released the lock, and
+    published outside it. A ``send_gripper_percent(1.0)`` completing in that gap
+    put wire order ``[0.0, 1.0, 0.0]`` on the bus — an OPEN landing after a
+    newer CLOSE. The driver's big-jump exemption (``|dv| >= 0.5``) waves exactly
+    that inversion through, so the fingers open for one re-assert period in the
+    middle of a hold: a dropped object, from code whose stored state was
+    correct the whole time.
+
+    The fix publishes under the same ``_lock`` on both sides. This test drives
+    the real ``_upsample_loop`` worker and a real second thread, and pins the
+    only observable that distinguishes the two: what reached the wire, in what
+    order. Every wait is bounded, and the assertion tolerates the trailing
+    repeats of the winning setpoint — it fails only on a stale value landing
+    after a newer one.
+    """
+    b = _make_backend(monkeypatch, dry_run=False, start_threads=False)
+    b.grip_reassert_s = 1.0
+    b.grip_reassert_hz = 10.0
+
+    worker_in_re_assert = threading.Event()
+    release_worker = threading.Event()
+    re_assert_done = threading.Event()
+    closer_committed = threading.Event()
+
+    pub = _GatedGripperPub(
+        worker_in_re_assert, release_worker, re_assert_done, closer_committed
+    )
+    b._gripper_pub = pub
+    b._lock = _ContendedLock(closer_committed.set)
+
+    b._up_thread.start()
+    b._spin_thread.start()
+
+    closer = threading.Thread(
+        target=b.send_gripper_percent,
+        args=(1.0,),
+        name=_CLOSER_THREAD,
+        daemon=True,
+    )
+    try:
+        b.send_gripper_percent(0.0)  # OPEN, arms a 1 s re-assert
+        assert list(pub.sent) == [0.0]
+
+        # 1. wait until the worker is INSIDE its re-assert publish
+        assert worker_in_re_assert.wait(_RACE_TIMEOUT_S), "worker never re-asserted"
+
+        # 2. the newer setpoint, from a second thread, inside that window
+        closer.start()
+
+        # 3. wait until that thread has committed: either it published (the
+        #    publish is outside the lock -> the inversion is already on the
+        #    wire) or it is parked on the lock (the publish is serialised).
+        #    Both outcomes set the same event, so neither version can be
+        #    released early and pass by timing.
+        assert closer_committed.wait(_RACE_TIMEOUT_S), "closer never reached the lock"
+
+        # 4. let the held re-assert finish, and wait for BOTH publishes to be
+        #    on the wire before reading it. Reading after the join alone is not
+        #    enough: the released worker still has to be scheduled, so the
+        #    stale repeat could simply not have landed yet.
+        release_worker.set()
+        assert re_assert_done.wait(_RACE_TIMEOUT_S), "the re-assert never finished"
+        closer.join(_RACE_TIMEOUT_S)
+        assert not closer.is_alive(), "the newer setpoint never completed"
+        wire = list(pub.sent)
+
+        assert pub.release_timed_out is False
+        assert wire[0] == 0.0
+        assert 1.0 in wire, f"the newer setpoint never reached the wire: {wire}"
+        tail = wire[wire.index(1.0):]
+        assert set(tail) == {1.0}, (
+            f"a stale OPEN landed after a newer CLOSE: {wire} — the re-assert "
+            "must publish under the same lock as send_gripper_percent()"
+        )
+    finally:
+        release_worker.set()  # never leave the worker parked in publish()
+        b.close()
+
+
+def test_the_shipped_re_assert_defaults_are_on(monkeypatch):
+    """The values that actually ship, pinned.
+
+    Every other test in this section sets ``grip_reassert_s``/``_hz``
+    explicitly, so the class defaults were covered by nothing: either of them
+    silently becoming 0.0 restores the one-shot publish that parked the gripper
+    short in 7 of 14 real release cycles, and the whole suite still passes.
+
+    1.0 s at 10 Hz is the window measured on the real stack (0 of 6 failures);
+    see GRIPPER_REASSERT_S in ros_backend for both loss mechanisms. Retuning is
+    fine — updating this pin deliberately is the point; drifting past it is not.
+    """
+    assert URRosBackend.grip_reassert_s > 0.0, "the shipped re-assert is disabled"
+    assert URRosBackend.grip_reassert_hz > 0.0, "the shipped re-assert is disabled"
+    assert URRosBackend.grip_reassert_s == rb.GRIPPER_REASSERT_S == 1.0
+    assert URRosBackend.grip_reassert_hz == rb.GRIPPER_REASSERT_HZ == 10.0
+
+    # ...and the defaults are live, not just present: _make_backend copies the
+    # class attributes, so this arms and repeats on the shipped numbers alone.
+    b = _make_backend(monkeypatch, dry_run=False, start_threads=False)
+    assert b.grip_reassert_s == URRosBackend.grip_reassert_s
+    assert b.grip_reassert_hz == URRosBackend.grip_reassert_hz
+
+    before = time.monotonic()
+    b.send_gripper_percent(0.0)
+    assert b._grip_pending is not None, "the shipped defaults armed no re-assert"
+    value, deadline, _next_at = b._grip_pending
+    assert value == 0.0
+    assert deadline >= before + URRosBackend.grip_reassert_s
+
+    b._tick_gripper_reassert(time.monotonic() + 1.0 / URRosBackend.grip_reassert_hz)
+    assert [p for p, _ in b._gripper_pub.publishes] == [0.0, 0.0]
+
+
+def test_the_re_assert_is_off_when_the_window_is_zero(monkeypatch):
+    """0.0 must restore exactly today's behaviour: one publish, nothing armed."""
+    b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 0.0
+    try:
+        b.send_gripper_percent(0.0)
+        time.sleep(0.15)
+        assert len(b._gripper_pub.publishes) == 1
+        assert b._grip_pending is None
+    finally:
+        b.close()
+
+
+def test_disabling_mid_flight_drops_the_pending_setpoint(monkeypatch):
+    """Turning the feature off must not leave an old value looping."""
+    b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 1.0
+    b.grip_reassert_hz = 20.0
+    try:
+        b.send_gripper_percent(0.0)
+        assert b._grip_pending is not None
+        b.grip_reassert_s = 0.0
+        b.send_gripper_percent(1.0)
+        assert b._grip_pending is None
+        n = len(b._gripper_pub.publishes)
+        time.sleep(0.15)
+        assert len(b._gripper_pub.publishes) == n
+    finally:
+        b.close()
+
+
+def test_no_re_assert_survives_close(monkeypatch):
+    """close() stops the worker before it destroys the node — the safety
+    property _upsample_loop already had, extended to the gripper channel."""
+    b = _make_backend(monkeypatch, dry_run=False)
+    b.grip_reassert_s = 5.0
+    b.grip_reassert_hz = 50.0
+    b.send_gripper_percent(1.0)
+    time.sleep(0.1)
+    assert len(b._gripper_pub.publishes) > 1
+
+    b.close()
+    n_at_close = len(b._gripper_pub.publishes)
+    time.sleep(0.2)
+
+    assert len(b._gripper_pub.publishes) == n_at_close
+    assert b._gripper_pub.after_destroy == []
+
+
+def test_dry_run_publishes_nothing_and_arms_nothing(monkeypatch):
+    b = _make_backend(monkeypatch, dry_run=True)
+    try:
+        b.send_gripper_percent(0.0)
+        time.sleep(0.1)
+        assert b._gripper_pub.publishes == []
+        assert b._grip_pending is None
+    finally:
+        b.close()
 
 
 def test_send_joint_command_is_a_noop_after_close(monkeypatch):

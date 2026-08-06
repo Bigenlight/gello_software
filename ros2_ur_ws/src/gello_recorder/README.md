@@ -182,6 +182,51 @@ GUI 창의 녹화 컨트롤 **바로 위**에는 **Teleop 바**가 있습니다.
 
 > 안전 게이트(fresh 리더, quasi-still, 관절별 gap ≤ 1.5 rad), zero-jump 재시딩, 소프트스타트 글라이드, 그리고 각 거부 메시지의 정확한 의미는 `ur_gello_bringup` 의 **README "Pause / Resume (scene reset with both hands free)"** 절과 `docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md` §6 에 정리되어 있습니다. Teleop 바는 그 브릿지 서비스들의 GUI 프런트엔드일 뿐입니다.
 
+### 4-2. Task recorder GUI (`task_recorder_gui`) — GO HOME 버튼이 있는 태스크 전용 레코더
+
+**녹화 동작은 `gello_recorder_gui` 와 100% 같습니다.** 같은 `take_<NN>_<YYYYmmdd_HHMMSS>/` 폴더, 같은 `vectors.h5` 9개 테이블, 같은 `cam1.mp4` / `cam2.mp4`, 같은 카메라 warm-up 게이팅, 같은 Teleop 바 — 위 4·4-1 절과 아래 Output Layout 절이 그대로 적용됩니다. 환경변수도 **완전히 동일**합니다 (`CAM1_SERIAL` / `CAM2_SERIAL` / `COLOR_PROFILE` / `CAMERA_WARMUP_S` / `RECORDER_OUTPUT_ROOT`). 이 GUI 는 그 위에 **버튼 하나**를 더합니다.
+
+**왜 필요한가:** 한 태스크의 모든 take 가 **같은 HOME 자세에서 시작**해야 하기 때문입니다. 여기서 HOME 은 HIL-SERL 이 매 episode 마다 복귀하는 **RESET 자세**(`serl_ur_infra/ur_experiments/cube_in_cup.py` 의 `RESET_JOINTS`, cube_in_cup 태스크 기준)와 같은 관절값입니다. 사람이 GELLO 로 매번 눈대중으로 맞추면 take 마다 시작 분포가 흩어지고, 그 데이터로 학습한 정책은 실제 세션의 RESET 자세에서 시작하지 않습니다.
+
+```bash
+# 터미널 1: EEF 텔레옵
+cd /home/laptop3/gello_software/ros2_ur_ws
+HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef
+
+# 터미널 2: EEF 조작 GUI (ENGAGE/DISENGAGE)
+./run_eef_gui.sh
+
+# 터미널 3: 이 레코더
+./run_task_recorder.sh
+```
+
+**GO HOME 버튼이 하는 일 (순서대로):**
+
+1. **텔레옵 일시정지** — 팔·그리퍼 두 브릿지의 pause(무조건 Trigger)를 호출합니다. 트래젝토리로 팔을 옮기는 동안 리더를 쫓는 것이 하나도 없어야 하기 때문입니다.
+2. **컨트롤러 strict 전환** — `forward_position_controller` → `scaled_joint_trajectory_controller`.
+3. **HOME 으로 이동** — `FollowJointTrajectory` 포인트 **1개**. 소요시간은 **거리 비례**입니다: 관절별 gap 의 최댓값 ÷ **0.8 rad/s**, **2–10 초로 클램프**. 짧은 복귀는 빠르고 먼 복귀도 과속하지 않습니다. (HIL 쪽 `run_hil_preposition.sh` 의 **고정 8초**보다 대부분 빠릅니다 — 같은 자세로 가지만 소요시간 모델이 다릅니다.)
+4. **그리퍼 열기** — `/robotiq_gripper/command_percent` 에 `0.0`(Float32)을 발행하고 `/robotiq_gripper/position_percent` 가 **≤ 0.15** 로 떨어지는지 확인합니다. 모든 take 가 열린 그리퍼에서 시작하도록.
+5. **컨트롤러 복귀** — 다시 `forward_position_controller`.
+
+**끝난 뒤 브릿지는 PAUSED 로 남습니다 — 의도된 동작입니다.** 이동 직후에 팔이 리더를 다시 쫓기 시작하면, 오퍼레이터가 GELLO 를 놓아둔 자리로 방금 맞춘 HOME 자세가 즉시 무너집니다. 재개는 **터미널 2 의 EEF GUI `ENGAGE`** 로 합니다 (ENGAGE 가 `eef_resume` → `pos_scale` 커밋 → `eef_engage` 를 자동으로 연결합니다).
+
+> ⚠️ **그리퍼를 재개하기 전에 GELLO 방아쇠를 연 채로 잡고 있으세요.** 그리퍼 브릿지의 resume 은 **살아 있는 GELLO 방아쇠 값**을 향해 ~2초간 램프합니다. 방아쇠를 쥔 채로 재개하면 방금 연 2F-85 가 그대로 다시 닫힙니다.
+
+**두 번 클릭 확인 (Resume Teleop 과 같은 방식).** 실 로봇을 움직이는 버튼이므로 첫 클릭은 **무장(arm)만** 합니다 — 버튼이 주황색 경고 문구로 바뀌고 **3초 안에** 다시 눌러야 실제 요청이 나갑니다. 시간이 지나면 원상복귀하고, 로봇은 움직이지 않습니다. 무장된 3초 동안에는 버튼이 **강제로 활성 상태로 유지**되어 확인 클릭이 5 Hz 새로고침에 먹히지 않습니다.
+
+**버튼이 비활성화되는 경우는 둘뿐입니다:** **녹화 중**(take 중간에 팔을 HOME 으로 끌고 가면 그 take 는 못 쓰게 됩니다)과 **이미 GO HOME 이 진행 중일 때.** 진행 중에는 반대로 **Start Recording 이 잠깁니다** — 이동 장면이 take 앞에 녹화되지 않도록.
+
+**상태 라벨**은 버튼 옆에서 진행 단계를 그대로 보여줍니다: `IDLE` · `PAUSING` · `SWITCHING_TO_JTC` · `MOVING` · `OPENING_GRIPPER` · `RESTORING_FPC` · `DONE` · `FAILED`. 진행 중은 주황, `DONE` 은 초록, `FAILED` 는 빨강이며 실패 사유 메시지가 함께 표시됩니다.
+
+**그리퍼 확인 실패는 경고로만 처리합니다.** `position_percent` 가 제한시간 안에 `≤ 0.15` 로 안 떨어져도 시퀀스는 **실패로 끝나지 않고** 컨트롤러 복귀까지 정상 진행합니다. 그리퍼 피드백 토픽이 없거나 느린 경우가 있고, 그것 때문에 이미 HOME 에 도착한 팔을 `FAILED` 로 남길 이유가 없기 때문입니다. **대신 그리퍼가 실제로 열렸는지는 눈으로 확인하세요** — 경고는 상태 라벨/상태바에만 남습니다.
+
+> ⚠️ **HOME 관절값은 `cube_in_cup.py` 의 `RESET_JOINTS` 를 손으로 복사한 사본입니다.**
+> 이 패키지는 `ur_gello_bringup` 과도, `serl_ur_infra` 와도 의존성이 없도록 일부러 분리돼
+> 있어서 (README 맨 위 참조) 그 값을 import 하지 않습니다. **`RESET_JOINTS` 가 바뀌면 이쪽도
+> 같이 바꿔야 하며, 안 바꾸면 조용히 어긋납니다** — 아무 에러도 나지 않고 take 들만 HIL
+> 세션의 RESET 자세와 다른 곳에서 시작하게 됩니다. 두 값이 같은지는 눈으로 대조하는 것이
+> 유일한 방법입니다.
+
 ---
 
 ## 5. Output Layout — 세션/테이크 폴더 안에 생기는 것

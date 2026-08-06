@@ -1855,7 +1855,16 @@ class UR7eEnv(gym.Env):
         Scale/direction contract with robotiq_gripper_modbus_node:
         command_percent / position_percent are 0.0 = OPEN .. 1.0 = CLOSED.
         VERIFY(hw): on first hardware bring-up confirm direction and scale by
-        eye — a silent inversion here is a crush-or-drop hazard."""
+        eye — a silent inversion here is a crush-or-drop hazard.
+
+        NOT re-asserted here, unlike open_gripper_for_reset. This channel is
+        already re-issuing: it is called once per step and both branches are
+        gated on curr_gripper_pos, so as long as the policy keeps asking, an
+        open that did not take is commanded again one GRIPPER_SLEEP later. The
+        single-datagram risk is covered underneath by URRosBackend, whose
+        send_gripper_percent re-asserts the newest setpoint without blocking.
+        Adding a retry HERE would have to touch the close branch too, and a
+        close that "stopped short" is a successful grasp, not a lost command."""
         now = time.time()
         if now - self.last_gripper_act < self.config.GRIPPER_SLEEP:
             return
@@ -1870,6 +1879,19 @@ class UR7eEnv(gym.Env):
     #: 0.15 band _send_gripper_command uses for its "already open" test, so the
     #: reset confirmation and the policy channel agree on what open means.
     GRIPPER_OPEN_CONFIRM: float = 0.15
+
+    #: Rate at which the reset open is RE-ASSERTED while it waits to be
+    #: confirmed. A single publish is not a reliable command: DDS can drop it
+    #: before the subscription matches, and robotiq_gripper_modbus_node's rate
+    #: limiter discards a setpoint that lands inside its command_min_period
+    #: without recording that it did — so nothing downstream can notice the
+    #: loss. Measured on the real gripper 2026-08-06: 7 of 14 one-shot opens
+    #: parked short (0.043 .. 0.42 instead of 0.012); re-asserting for ~1 s at
+    #: ~10 Hz failed 0 of 6. 0.0 restores the historical single publish.
+    GRIPPER_REASSERT_HZ: float = 10.0
+
+    #: Poll period of the confirmation loop below.
+    GRIPPER_CONFIRM_POLL_S: float = 0.05
 
     def open_gripper_for_reset(self, timeout_s: float = 2.0) -> bool:
         """Open the gripper at the episode boundary. Returns True if confirmed.
@@ -1894,21 +1916,51 @@ class UR7eEnv(gym.Env):
 
         The scale is the robotiq_gripper_modbus_node contract documented on
         _send_gripper_command: command_percent 0.0 = OPEN .. 1.0 = CLOSED.
+
+        The open is RE-ASSERTED at GRIPPER_REASSERT_HZ until position_percent
+        confirms it, rather than published once and merely waited on.  One
+        publish is not a reliable command (GRIPPER_REASSERT_HZ documents the two
+        measured loss paths), and this call site is the worst possible place to
+        lose one: it runs at every episode boundary, and a lost open leaves the
+        gripper parked half-way with nothing anywhere reporting a discrepancy —
+        the driver believes the last value it wrote, and it is right.
+
+        The loop only ever commands 0.0 (OPEN).  It can therefore never
+        re-command a CLOSING setpoint because the fingers stopped short, which
+        would fight a successful grasp (grip_pos maxes at ~0.506 on an object).
         """
         if self.fake_env or float(self.action_scale[2]) == 0.0:
             return True
 
+        hz = float(self.GRIPPER_REASSERT_HZ or 0.0)
+        reassert_period = (1.0 / hz) if hz > 0.0 else None
+        poll_s = max(float(self.GRIPPER_CONFIRM_POLL_S), 0.0)
+
         self.backend.send_gripper_percent(0.0)  # 0.0 = OPEN
         # Charge the debounce so the policy's first step cannot immediately
-        # re-close on top of an actuation that is still travelling.
-        self.last_gripper_act = time.time()
+        # re-close on top of an actuation that is still travelling.  Re-charged
+        # on every re-assert below, so the debounce always covers the actuation
+        # that is actually in flight rather than the first one attempted.
+        now = time.time()
+        self.last_gripper_act = now
+        deadline = now + float(timeout_s)
+        next_send = (now + reassert_period) if reassert_period else None
 
-        deadline = time.time() + float(timeout_s)
-        while time.time() < deadline:
+        while True:
             pos, age = self.backend.get_gripper_percent()
             if pos is not None and age < 1.0 and pos <= self.GRIPPER_OPEN_CONFIRM:
+                # Feedback, not hope: the gripper is measurably open, so further
+                # re-asserts would buy nothing.  Any re-assert the backend still
+                # has armed is for this same 0.0 and expires on its own.
                 return True
-            time.sleep(0.05)
+            now = time.time()
+            if now >= deadline:
+                break
+            if next_send is not None and now >= next_send:
+                self.backend.send_gripper_percent(0.0)  # 0.0 = OPEN
+                self.last_gripper_act = now
+                next_send = now + reassert_period
+            time.sleep(poll_s)
 
         pos, age = self.backend.get_gripper_percent()
         # A warning, not a raise: the arm is already at the reset pose and the

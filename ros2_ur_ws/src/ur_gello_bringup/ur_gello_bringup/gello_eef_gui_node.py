@@ -14,10 +14,30 @@ The whole window behaves like a computer MOUSE for the leader arm:
                           or RE-ARM -> ENGAGE after a release),
     DPI slider          = pos_scale (sensitivity / gain k), 0.1 fine .. 1.0 1:1.
 
+The gripper row additionally carries a LIVE DISCRETE-LATCH INDICATOR fed by
+/gello_gripper_bridge/discrete_state (DISABLED / UNKNOWN / OPEN / CLOSED /
+RAMPING) and /gello_gripper_bridge/discrete_trigger (the raw clamped trigger).
+It is a readout, never a control. Its job is to make one specific SILENT failure
+loud: in gripper_mode:=discrete the gripper only moves when the trigger CROSSES a
+threshold, so a mis-set threshold stops the gripper responding with no error
+anywhere. See docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1.
+
+WHY THE LATCH ALONE IS NOT ENOUGH (the whole reason the trigger value is here).
+A latch stuck on UNKNOWN is only the *startup* face of that failure. The nastier
+face is a latch that looks perfectly normal: with discrete_open_at set too low, a
+trigger resting at 0.243 crosses NOTHING, so the latch keeps its previous value
+and the topic keeps publishing a confident CLOSED. The operator opens their hand,
+the gripper stays shut, and the indicator agrees with the gripper. Nothing in
+"CLOSED" distinguishes "latched CLOSED because you are squeezing" from "latched
+CLOSED because your trigger can no longer reach the open threshold". So the
+indicator also shows the LIVE TRIGGER VALUE next to the latch, and flags the
+trigger DWELLING strictly inside the hysteresis band -- that dwell is the
+signature of the mis-set threshold, and it is visible while the latch is not.
+
 ARCHITECTURE (copied from the proven gello_recorder_gui pattern, NOT invented):
-  * :class:`EefGuiNode` (an rclpy Node) owns ALL ROS I/O -- the ~/eef/state
-    subscription and every service / set-parameter call. It is spun on a
-    background daemon thread with a plain ``rclpy.spin``. Every service call is
+  * :class:`EefGuiNode` (an rclpy Node) owns ALL ROS I/O -- the ~/eef/state and
+    ~/discrete_state subscriptions and every service / set-parameter call. It is
+    spun on a background daemon thread with a plain ``rclpy.spin``. Every call is
     ``call_async`` + ``add_done_callback`` under a lock with a ``_pending``
     guard -- NEVER ``spin_until_future_complete`` on the Qt thread.
   * :class:`MainWindow` (Qt, main thread) polls the node's thread-safe getters
@@ -47,7 +67,7 @@ from rclpy.node import Node
 from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from PyQt5.QtCore import Qt, QTimer
@@ -81,6 +101,60 @@ _STATE_STYLE = {
 _GRAY = "#888888"
 _RED = "#cc3333"
 _GREEN = "#22aa22"
+
+# Per-value colour / text-colour / word for the DISCRETE GRIPPER LATCH indicator
+# (/gello_gripper_bridge/discrete_state). Keys are the topic's vocabulary.
+#
+# WHY THIS INDICATOR EXISTS (safety, not cosmetics): in discrete mode the bridge
+# only moves the gripper when the trigger CROSSES a threshold. If a threshold is
+# ever mis-set so the trigger can no longer reach it, the gripper simply STOPS
+# RESPONDING -- no error, no log, nothing to notice until you need it to grip.
+# The latch state makes the STARTUP face of that failure visible: a trigger
+# squeezed with this stuck on UNKNOWN IS the symptom. It does NOT make the other
+# face visible on its own -- a latch held at a normal-looking OPEN/CLOSED by a
+# trigger that can no longer reach either threshold -- which is what the live
+# trigger readout and the in-band dwell flag below are for (module docstring).
+#
+# COLOURS: OPEN/CLOSED are two saturated, unmistakably different hues, readable
+# across the room. UNKNOWN (amber on dark text), RAMPING (violet) and DISABLED
+# (flat light slate) are distinct from BOTH and from each other -- and
+# deliberately NOT red: NONE of them is a fault. UNKNOWN just means no threshold
+# has been crossed yet since startup, RAMPING is the bounded post-resume slew
+# window, and DISABLED is the ordinary continuous mode nearly every session runs
+# in.
+_GRIP_DISCRETE_STYLE = {
+    "OPEN": ("#2e7d32", "white", "GRIP: OPEN"),
+    "CLOSED": ("#1565c0", "white", "GRIP: CLOSED"),
+    "UNKNOWN": ("#f9a825", "#333333", "GRIP: UNKNOWN (no threshold crossed yet)"),
+    "RAMPING": ("#6a1b9a", "white", "GRIP: RAMPING (post-resume slew)"),
+    "DISABLED": ("#cfd8dc", "#455a64", "GRIP: continuous (discrete off)"),
+}
+# Stale / never-received / unrecognised word -> same "no signal" grey the big
+# ~/eef/state banner uses, so the two read as one convention.
+_GRIP_DISCRETE_NOSIGNAL = (_GRAY, "white", "GRIP: no signal")
+
+# The tokens that mean "discrete mode is actually running". DISABLED is the only
+# member of the vocabulary that is not one -- with the latch out of use there are
+# no thresholds to sit between, so the in-band flag is meaningless there.
+_GRIP_DISCRETE_ACTIVE = ("UNKNOWN", "OPEN", "CLOSED", "RAMPING")
+
+# IN-BAND DWELL: how long the trigger may sit STRICTLY between the two thresholds
+# before the indicator flags it. Same 1.5 s the bridge uses for its own throttled
+# warning, deliberately -- two independent detectors of one condition that
+# disagree about when it started would just make the operator distrust both.
+_GRIP_IN_BAND_DWELL_S = 1.5
+# The flag reuses the EXACT amber/dark-text pair UNKNOWN already uses (derived,
+# not re-typed, so it cannot drift): the two are the same class of message --
+# "discrete mode is not resolving your intent" -- and neither is a fault, so
+# neither may be red.
+_GRIP_IN_BAND_STYLE = _GRIP_DISCRETE_STYLE["UNKNOWN"][:2]
+
+# Attempts at the one-time discrete-threshold GetParameters read before the GUI
+# gives up and degrades to "no in-band flagging". Bounded because a bridge that
+# is up but has no such parameters (an older one) would otherwise be re-asked
+# forever; ~10 tries on the 3 s poll is ~30 s, plenty for a bridge that is just
+# slow to start.
+_GRIP_THRESH_MAX_TRIES = 10
 
 # Button chrome: a filled, bordered, rounded, hover-reactive control that
 # reads unmistakably as "clickable" -- so it is NOT confused with the flat,
@@ -123,6 +197,35 @@ class EefGuiNode(Node):
         self._state: Optional[dict] = None
         self._state_t: Optional[float] = None
 
+        # Latest /gello_gripper_bridge/discrete_state word + receipt time. Plain
+        # String (NOT json, unlike ~/eef/state); one of
+        # DISABLED / UNKNOWN / OPEN / CLOSED / RAMPING at state_publish_rate_hz
+        # (5 Hz).
+        self._grip_discrete: Optional[str] = None
+        self._grip_discrete_t: Optional[float] = None
+
+        # Latest /gello_gripper_bridge/discrete_trigger value + receipt time.
+        # Float32, same 5 Hz, the RAW CLAMPED trigger (0=open..1=closed) the
+        # latch is thresholding -- i.e. the evidence the latch is a conclusion
+        # about. Absent (older bridge) is a supported state: the readout just
+        # shows "trig --" and no in-band flagging happens.
+        self._grip_trigger: Optional[float] = None
+        self._grip_trigger_t: Optional[float] = None
+        # monotonic() when the trigger last ENTERED the hysteresis band, or None
+        # when it is not in the band / the band is unknown. Advanced only from
+        # received samples (see _update_in_band_locked).
+        self._grip_in_band_since: Optional[float] = None
+
+        # The bridge's discrete thresholds, read ONCE at startup over
+        # GetParameters. None = never obtained -> no in-band flagging at all
+        # (the GUI does not know the band, so it says nothing about it rather
+        # than guessing 0.3/0.7 and flagging against a band the bridge is not
+        # using -- a confident wrong flag is worse than no flag).
+        self._grip_open_at: Optional[float] = None
+        self._grip_close_at: Optional[float] = None
+        self._grip_thresh_pending = False
+        self._grip_thresh_tries = 0
+
         # In-flight service bookkeeping (a single _pending guard is enough for a
         # solo-operator GUI: one deliberate action at a time).
         self._pending = False
@@ -154,11 +257,28 @@ class EefGuiNode(Node):
             SetParameters, f"{BRIDGE}/set_parameters")
         self._get_params = self.create_client(
             GetParameters, f"{BRIDGE}/get_parameters")
+        # SAME established GetParameters pattern, pointed at the GRIPPER bridge,
+        # purely to learn its discrete thresholds. Read-only: this GUI has no
+        # SetParameters client for the gripper and must never acquire one -- the
+        # thresholds are calibration, not an operator control (see the doc's
+        # note about the three places those numbers live).
+        self._get_grip_params = self.create_client(
+            GetParameters, f"{GRIPPER}/get_parameters")
 
         self.create_subscription(String, f"{BRIDGE}/eef/state", self._on_state, 10)
+        # Read-only observers of the gripper bridge's discrete latch AND of the
+        # raw trigger the latch is derived from. Either being absent (in an
+        # older bridge, or simply never published) is a supported state: the
+        # indicator just shows "no signal" / "trig --".
+        self.create_subscription(
+            String, f"{GRIPPER}/discrete_state", self._on_grip_discrete, 10)
+        self.create_subscription(
+            Float32, f"{GRIPPER}/discrete_trigger", self._on_grip_trigger, 10)
 
-        self.get_logger().info("gello_eef_gui_node up; listening on %s/eef/state"
-                               % BRIDGE)
+        self.get_logger().info(
+            "gello_eef_gui_node up; listening on %s/eef/state + "
+            "%s/discrete_state + %s/discrete_trigger"
+            % (BRIDGE, GRIPPER, GRIPPER))
 
     # ------------------------------------------------------------- ROS in ---
     def _on_state(self, msg: String) -> None:
@@ -170,6 +290,52 @@ class EefGuiNode(Node):
             self._state = d
             self._state_t = time.monotonic()
 
+    def _on_grip_discrete(self, msg: String) -> None:
+        word = str(msg.data).strip().upper()
+        with self._lock:
+            self._grip_discrete = word
+            self._grip_discrete_t = time.monotonic()
+
+    def _on_grip_trigger(self, msg: Float32) -> None:
+        try:
+            value = float(msg.data)
+        except (TypeError, ValueError):
+            return
+        if value != value:  # NaN -> not a reading; keep the last good one
+            return
+        now = time.monotonic()
+        with self._lock:
+            prev_t = self._grip_trigger_t
+            self._grip_trigger = value
+            self._grip_trigger_t = now
+            self._update_in_band_locked(value, now, prev_t)
+
+    def _update_in_band_locked(self, value: float, now: float,
+                               prev_t: Optional[float]) -> None:
+        """Advance the "trigger stuck inside the hysteresis band" dwell timer.
+
+        Called from the trigger subscription with ``self._lock`` HELD.
+
+        The dwell is derived here, in the GUI, from received values and their
+        arrival times -- there is no bridge topic for it and none was invented.
+        Two deliberate properties:
+
+        * STRICTLY inside. A sample exactly ON a threshold is a crossing (the
+          bridge's latch is ``>=`` / ``<=``), so it resolves the latch and ends
+          the dwell rather than continuing it.
+        * NEVER extrapolated across a reception gap. If the stream goes quiet
+          for longer than the staleness window the dwell RESTARTS, because
+          "continuously in band" is not something a silent topic can testify to
+          -- the trigger may well have swept through an endpoint unobserved.
+        """
+        lo, hi = self._grip_open_at, self._grip_close_at
+        if lo is None or hi is None or not (lo < value < hi):
+            self._grip_in_band_since = None
+            return
+        if (self._grip_in_band_since is None
+                or prev_t is None or (now - prev_t) > _STATE_STALE_S):
+            self._grip_in_band_since = now
+
     # --------------------------------------------------- thread-safe getters
     def get_snapshot(self) -> dict:
         """Copy of the panel state for the Qt polling timer (thread-safe)."""
@@ -177,6 +343,12 @@ class EefGuiNode(Node):
         with self._lock:
             age = None if self._state_t is None else now - self._state_t
             state = dict(self._state) if self._state is not None else None
+            grip_age = (None if self._grip_discrete_t is None
+                        else now - self._grip_discrete_t)
+            trig_age = (None if self._grip_trigger_t is None
+                        else now - self._grip_trigger_t)
+            in_band_s = (None if self._grip_in_band_since is None
+                         else now - self._grip_in_band_since)
             return {
                 "state": state,
                 "age_s": age,
@@ -186,6 +358,11 @@ class EefGuiNode(Node):
                 "last_msg": self._last_msg,
                 "v_max": self._v_max,
                 "w_max": self._w_max,
+                "grip_discrete": self._grip_discrete,
+                "grip_discrete_age_s": grip_age,
+                "grip_trigger": self._grip_trigger,
+                "grip_trigger_age_s": trig_age,
+                "grip_in_band_s": in_band_s,
             }
 
     def current_state_name(self) -> Optional[str]:
@@ -202,6 +379,29 @@ class EefGuiNode(Node):
         with self._lock:
             self._state = dict(d)
             self._state_t = time.monotonic()
+
+    # Test hook: inject a fake ~/discrete_state word (no ROS traffic needed).
+    def set_discrete_state_for_test(self, word: str) -> None:
+        with self._lock:
+            self._grip_discrete = str(word).strip().upper()
+            self._grip_discrete_t = time.monotonic()
+
+    # Test hook: inject a fake ~/discrete_trigger sample, dwell tracking and all
+    # (no ROS traffic needed). Goes through the SAME _update_in_band_locked the
+    # subscription uses, so a test cannot accidentally prove a different rule.
+    def set_discrete_trigger_for_test(self, value: float) -> None:
+        now = time.monotonic()
+        with self._lock:
+            prev_t = self._grip_trigger_t
+            self._grip_trigger = float(value)
+            self._grip_trigger_t = now
+            self._update_in_band_locked(float(value), now, prev_t)
+
+    # Test hook: pretend the startup GetParameters read returned these.
+    def set_discrete_thresholds_for_test(self, open_at, close_at) -> None:
+        with self._lock:
+            self._grip_open_at = None if open_at is None else float(open_at)
+            self._grip_close_at = None if close_at is None else float(close_at)
 
     # ------------------------------------------------------ service firing --
     def _begin(self) -> bool:
@@ -474,6 +674,97 @@ class EefGuiNode(Node):
                 self._w_max = w
             self._vw_pending = False
 
+    # -- one-time discrete-threshold fetch off the GRIPPER bridge ------------
+    def refresh_grip_thresholds(self) -> None:
+        """Best-effort ONE-TIME read of discrete_open_at / discrete_close_at.
+
+        The GUI does not know the hysteresis band and must not assume it, so it
+        asks the one node that does. Exactly the shape refresh_vw already uses
+        -- ``call_async`` + ``add_done_callback`` under the same test-and-set
+        guard, NEVER ``spin_until_future_complete``, NEVER any spinning from a
+        Qt callback: this is only ever driven by the poll QTimer, which does
+        nothing but fire the request.
+
+        It stops on the first success (they are launch-time calibration, not
+        something to poll), and after _GRIP_THRESH_MAX_TRIES it gives up for
+        good. Every failure mode -- no bridge, an older bridge without the
+        parameters, a malformed pair, an exception in the reply -- lands in the
+        same place: thresholds stay None and the indicator simply never flags an
+        in-band dwell. It degrades, it does not block and it does not raise.
+        """
+        if not rclpy.ok() or not self._get_grip_params.service_is_ready():
+            return
+        with self._lock:
+            if (self._grip_thresh_pending
+                    or self._grip_open_at is not None
+                    or self._grip_thresh_tries >= _GRIP_THRESH_MAX_TRIES):
+                return
+            self._grip_thresh_pending = True
+            self._grip_thresh_tries += 1
+        req = GetParameters.Request()
+        req.names = ["discrete_open_at", "discrete_close_at"]
+        fut = self._get_grip_params.call_async(req)
+        fut.add_done_callback(self._grip_thresholds_done)
+
+    def _grip_thresholds_done(self, future) -> None:
+        lo = hi = None
+        try:
+            resp = future.result()
+            vals = getattr(resp, "values", None)
+            if vals and len(vals) >= 2:
+                lo = _param_number(vals[0])
+                hi = _param_number(vals[1])
+        except Exception:  # noqa: BLE001 -- best-effort, never crash spin
+            lo = hi = None
+        # Accept ONLY a pair that satisfies the bridge's own contract
+        # (0 < open_at < close_at < 1). A bridge that fell back to continuous
+        # over a bad pair is not running a band, so flagging against one would
+        # be a lie; an unset/absent parameter arrives as None and lands here too.
+        ok = (lo is not None and hi is not None and 0.0 < lo < hi < 1.0)
+        with self._lock:
+            if ok:
+                self._grip_open_at = lo
+                self._grip_close_at = hi
+            self._grip_thresh_pending = False
+        if ok:
+            self.get_logger().info(
+                "discrete thresholds from %s: open_at=%.3f close_at=%.3f "
+                "(in-band dwell flagging enabled)" % (GRIPPER, lo, hi))
+        else:
+            with self._lock:
+                tries, cap = self._grip_thresh_tries, _GRIP_THRESH_MAX_TRIES
+            if tries >= cap:
+                self.get_logger().warn(
+                    "no usable discrete_open_at/discrete_close_at from %s after "
+                    "%d tries; the indicator will show the live trigger but will "
+                    "NOT flag in-band dwell" % (GRIPPER, tries))
+
+    def grip_thresholds(self):
+        """(open_at, close_at) or (None, None) — for the Qt tooltip."""
+        with self._lock:
+            return self._grip_open_at, self._grip_close_at
+
+
+def _param_number(value) -> Optional[float]:
+    """Pull a float out of a ParameterValue, or None if it is not a number.
+
+    An UNDECLARED / absent parameter comes back as PARAMETER_NOT_SET, whose
+    double_value is a perfectly innocent-looking 0.0 -- reading that field
+    unconditionally would silently hand back a threshold of 0.0. Hence the
+    explicit type check.
+    """
+    try:
+        t = int(value.type)
+        if t == ParameterType.PARAMETER_DOUBLE:
+            out = float(value.double_value)
+        elif t == ParameterType.PARAMETER_INTEGER:
+            out = float(value.integer_value)
+        else:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return None if out != out else out  # reject NaN
+
 
 def _double_set_request(name: str, value: float) -> SetParameters.Request:
     req = SetParameters.Request()
@@ -512,6 +803,9 @@ class MainWindow(QMainWindow):
         self._last_shown_msg = None
         self._last_left_engaged_prompted = False
         self._prev_state = None
+        # (open_at, close_at) the gripper tooltip was last rendered with. Set
+        # BEFORE _build_ui, which builds that tooltip.
+        self._grip_tooltip_band = self._node.grip_thresholds()
 
         self.setWindowTitle("GELLO -> UR7e  EEF mouse")
         self._build_ui()
@@ -521,10 +815,19 @@ class MainWindow(QMainWindow):
         self._timer.start(100)  # ~10 Hz
 
         self._vw_timer = QTimer(self)
-        self._vw_timer.timeout.connect(self._node.refresh_vw)
-        self._vw_timer.start(3000)  # best-effort v_max/w_max poll
+        self._vw_timer.timeout.connect(self._poll_node_params)
+        self._vw_timer.start(3000)  # best-effort v_max/w_max + threshold poll
 
         self._refresh_eef()
+
+    def _poll_node_params(self):
+        """Timer slot: ask the node to (re)fetch its best-effort parameters.
+
+        Both calls only FIRE an async request and return; neither blocks, spins
+        or raises here on the Qt thread. refresh_grip_thresholds self-retires
+        once it has the thresholds (or after its bounded retries)."""
+        self._node.refresh_vw()
+        self._node.refresh_grip_thresholds()
 
     # ------------------------------------------------------------------ UI --
     def _build_ui(self):
@@ -579,9 +882,17 @@ class MainWindow(QMainWindow):
         self._grip_resume_btn = QPushButton("Gripper Resume")
         self._grip_resume_btn.setStyleSheet(_BTN)
         self._grip_resume_btn.clicked.connect(self._on_grip_resume)
+        # DISCRETE LATCH indicator: a READOUT, not a control. Styled FLAT and
+        # square (no border-radius, no border, no hover) so it can never be
+        # mistaken for the rounded, bordered buttons beside it -- the same
+        # banner-vs-button separation the H1 and the big state label use.
+        self._grip_discrete_lbl = QLabel("GRIP: no signal")
+        self._grip_discrete_lbl.setAlignment(Qt.AlignCenter)
+        self._grip_discrete_lbl.setToolTip(self._grip_tooltip())
         grow.addWidget(self._grip_hint)
         grow.addWidget(self._grip_pause_btn)
         grow.addWidget(self._grip_resume_btn)
+        grow.addWidget(self._grip_discrete_lbl)
         grow.addStretch(1)
         root.addLayout(grow)
 
@@ -773,6 +1084,11 @@ class MainWindow(QMainWindow):
         self._apply_buttons(st, pending, grip_pending)
         self._apply_readout(state, live, age, snap)
         self._apply_gripper_hazard(st)
+        self._apply_grip_discrete(snap["grip_discrete"],
+                                  snap["grip_discrete_age_s"],
+                                  snap["grip_trigger"],
+                                  snap["grip_trigger_age_s"],
+                                  snap["grip_in_band_s"])
         self._update_slider_label()
 
         # Surface the latest service reply once.
@@ -892,6 +1208,70 @@ class MainWindow(QMainWindow):
         else:
             label.setText(f"{name}: stale ({age:.2f}s)")
             label.setStyleSheet(f"color: {_RED}; font-weight: bold;")
+
+    def _grip_tooltip(self):
+        lo, hi = self._node.grip_thresholds()
+        band = (f"{lo:.2f}..{hi:.2f}" if lo is not None and hi is not None
+                else "unknown (thresholds not readable from the bridge)")
+        return (
+            "Discrete gripper latch (/gello_gripper_bridge/discrete_state) plus "
+            "the live trigger (…/discrete_trigger).\n"
+            "OPEN / CLOSED = the trigger crossed a threshold and the output was "
+            "snapped to that endpoint.\n"
+            "UNKNOWN = no threshold crossed yet (NOT a fault) — but if it never "
+            "leaves UNKNOWN while you squeeze, a threshold is mis-set.\n"
+            "RAMPING = the bounded post-resume slew window (NOT a fault).\n"
+            "DISABLED = continuous mode, thresholds not in use.\n"
+            f"trig N.NN = the raw trigger value the latch is thresholding; band "
+            f"= {band}.\n"
+            "'in band' = the trigger has sat STRICTLY inside the band for over "
+            f"{_GRIP_IN_BAND_DWELL_S:.1f} s, so it is crossing NOTHING: the latch "
+            "keeps publishing its last value and the gripper silently stops "
+            "responding. A normal-looking OPEN/CLOSED does NOT rule this out — "
+            "the trigger value and this flag are what rule it out.")
+
+    def _apply_grip_discrete(self, word, age, trigger, trigger_age, in_band_s):
+        """Paint the discrete-latch indicator from the polled snapshot.
+
+        Staleness is treated exactly like the ~/eef/state banner's, INDEPENDENTLY
+        for each of the two topics: nothing for _STATE_STALE_S (2 s, i.e. 10
+        missed 5 Hz publishes) -> greyed "no signal" for the latch / "trig --"
+        for the value, never a stale reading left standing. An unrecognised word
+        is treated the same way rather than rendered raw, so a vocabulary change
+        on the bridge side shows up as a dead lamp instead of a confident lie.
+
+        The IN-BAND flag deliberately OVERRIDES the latch colour: when it fires,
+        the latch word is exactly the thing that is misleading the operator
+        ("CLOSED" while the hand is open), so the indicator must stop looking
+        settled. It never overrides the latch TEXT though -- both are shown,
+        because "CLOSED + in band" is the diagnosis and either half alone is not.
+        """
+        fresh = (word is not None and age is not None and age < _STATE_STALE_S)
+        bg, fg, text = _GRIP_DISCRETE_STYLE.get(
+            word, _GRIP_DISCRETE_NOSIGNAL) if fresh else _GRIP_DISCRETE_NOSIGNAL
+
+        trig_fresh = (trigger is not None and trigger_age is not None
+                      and trigger_age < _STATE_STALE_S)
+        text = f"{text}  trig {trigger:.2f}" if trig_fresh else f"{text}  trig --"
+
+        # Flag only while discrete mode is actually running (DISABLED has no
+        # band) AND the trigger is still arriving: a dwell counted against a
+        # dead topic would keep growing forever off one last stale sample.
+        if (fresh and word in _GRIP_DISCRETE_ACTIVE and trig_fresh
+                and in_band_s is not None and in_band_s > _GRIP_IN_BAND_DWELL_S):
+            bg, fg = _GRIP_IN_BAND_STYLE
+            text = f"{text}  in band {in_band_s:.1f}s"
+
+        self._grip_discrete_lbl.setText(text)
+        self._grip_discrete_lbl.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; font-weight: bold; "
+            "font-size: 13pt; padding: 9px 14px;")
+        # The tooltip quotes the band, which only becomes known once the startup
+        # GetParameters read lands. Rebuild it when (and only when) that changes.
+        band = self._node.grip_thresholds()
+        if band != self._grip_tooltip_band:
+            self._grip_tooltip_band = band
+            self._grip_discrete_lbl.setToolTip(self._grip_tooltip())
 
     def _apply_gripper_hazard(self, st):
         # H2: the moment the state LEAVES ENGAGED, warn + highlight Gripper Pause.

@@ -15,6 +15,19 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <!-- task_recorder_gui's GO-HOME path only: switch/list controllers
+       (controller_manager_msgs), the FollowJointTrajectory action and its
+       JointTolerance (control_msgs), and the trajectory message itself
+       (trajectory_msgs). Nothing in the recording path imports these, so the
+       package stays robot-agnostic for every other entry point. -->
+  <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <!-- task_recorder_gui also asks the gripper bridge for its discrete_* params
+       via GetParameters, to stamp each take's gripper_mode.json. rclpy pulls
+       rcl_interfaces in anyway, but this package declares even the message
+       packages it uses, so declare it rather than rely on that. -->
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>python3-h5py</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>

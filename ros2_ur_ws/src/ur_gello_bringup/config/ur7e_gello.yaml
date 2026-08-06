@@ -261,5 +261,92 @@ gello_gripper_bridge:
     # (PAUSED/WAITING/RAMPING/FOLLOWING).
     state_publish_rate_hz: 5.0
     # Actual gripper position feedback topic (Robotiq modbus node, 0=open..1=closed);
-    # used to SEED ~/resume for a zero-jump first output.
+    # used to SEED ~/resume for a zero-jump first output, and read by the
+    # reconcile watchdog below.
     actual_topic: "/robotiq_gripper/position_percent"
+    # --- DELIVERY ROBUSTNESS (measured 2026-08-06) -----------------------------
+    # THE DEFECT: this bridge publishes each setpoint EXACTLY ONCE, when it
+    # changes by more than `deadband`. One lost message therefore strands the
+    # operator's intent forever — the deadband compares against what we MEANT to
+    # send, so the bridge never notices. On real hardware a fast trigger release
+    # parked the gripper at 0.043 / 0.055 / 0.11 / 0.42 instead of full open
+    # (0.0118) in 7 of 14 cycles; re-asserting the final setpoint for 1 s made it
+    # 0 of 6. Evidence: gello_logs/diag_gripper_halfopen_20260806_173307/.
+    # The primary fix is in the driver (its command rate limiter must COALESCE
+    # the freshest sample, not DROP it). These two are defence in depth, and they
+    # are the pair that was actually validated 0/6 on the robot.
+    #
+    # SETTLE RE-ASSERT: for this many seconds after the OUTPUT LAST CHANGED,
+    # re-publish the same value at settle_reassert_hz, then go silent. It never
+    # looks at the measured position, so it cannot be provoked by a grasp — it
+    # only repeats what the operator's own trigger asked for. 0.0 => the timer is
+    # not created at all and the node publishes once per change, exactly as
+    # before. AT REST IT PUBLISHES NOTHING: the Modbus link at :54321 is
+    # single-client and must not carry steady-state traffic.
+    settle_reassert_s: 1.0
+    settle_reassert_hz: 10.0  # 10 duplicates max per gesture, under the driver's 20 Hz
+    # RECONCILE: watch actual_topic and, when the gripper sits MORE CLOSED than
+    # the last value this bridge commanded by more than reconcile_tol for longer
+    # than reconcile_after_s (while FOLLOWING and unpaused), re-assert that
+    # command ONCE — then at most once per reconcile_after_s while it persists.
+    # Also covers third-party publishers on the same topic (task recorder GO
+    # HOME, RL reset, run_hil_preposition.sh) moving the gripper behind our back.
+    #
+    # ONE-SIDED ON PURPOSE — DO NOT MAKE THIS SYMMETRIC. The mirror case (fingers
+    # more OPEN than commanded) is exactly what a SUCCESSFUL GRASP looks like:
+    # a 2F-85 holding an object stops where the object is and grip_pos maxes out
+    # near 0.506 (UNITS_REFERENCE §5.1). Position alone cannot tell that apart
+    # from a lost close command, so this watchdog refuses to guess and never
+    # re-commands a closing setpoint. Every message it does send is an OPENING
+    # command relative to the measured state, so grip force can only fall.
+    # Set either knob to 0.0 to disable (restores today's behaviour exactly).
+    reconcile_tol: 0.05      # ~13 raw counts; > the driver's 0.01 command deadband
+    reconcile_after_s: 0.5   # dwell AND minimum period between re-asserts
+    #
+    # THIRD BEHAVIOUR, NO KNOB: the resume force-publish. Zeroing the four
+    # parameters above restores the pre-2026-08-06 behaviour EXACTLY for the
+    # settle re-assert and for reconcile, and NOT for this one. ~/resume seeds
+    # _last_pub from the measured position without publishing it, so a leader
+    # already resting within `deadband` of that seed used to be suppressed
+    # forever and the gripper received nothing while ~/state said FOLLOWING.
+    # The bridge now forces exactly one publish after an accepted resume. It is
+    # a bug fix rather than a feature, and the value it sends is whatever the
+    # operator's own live trigger is asking for, so there is deliberately no
+    # way to switch the hang back on.
+    # --- DISCRETE (snap-to-endpoint) MODE --------------------------------------
+    # CONVENTION, unchanged and shared by every value on this axis: 0.0 = OPEN,
+    # 1.0 = CLOSED — the GELLO trigger, this node's output, and
+    # /robotiq_gripper/command_percent all use it (invert: false above).
+    #
+    # false (default) = CONTINUOUS passthrough, the pre-existing behaviour. true =
+    # the trigger is folded to the two endpoints:
+    #     trigger >= discrete_close_at -> exactly 1.0 (CLOSED)
+    #     trigger <= discrete_open_at  -> exactly 0.0 (OPEN)
+    #     in between                   -> HOLD the previous state
+    # The hold is HYSTERESIS and is not optional: a single threshold chatters at
+    # the boundary. Applied to the COMMAND only — the measured position feedback
+    # is never discretised (it is the only channel that distinguishes a real grasp
+    # from a missed one; see §5.1's second warning).
+    #
+    # WHY: the trigger is spring + encoder and is already ~binary (90.95% of
+    # 52,607 samples over 125 takes are <0.02 or >0.98), but roughly ONCE OR TWICE
+    # PER SESSION it RESTS PARTWAY OPEN — worst measured 0.229 (07-07) and 0.243
+    # (07-20) — and this bridge faithfully forwards that, so the Robotiq only
+    # opens ~76% and the operator sees a gripper that "didn't fully open".
+    # NOT a calibration problem: all 125 takes still reach exactly 0.000.
+    # Evidence + per-date table: docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1.
+    # 0.3 / 0.7 are the SAME constants recorded_demo.py already uses for the
+    # offline RL demo conversion — reused deliberately, do NOT re-derive them.
+    # INVARIANT: 0.0 < discrete_open_at < discrete_close_at < 1.0. Every observed
+    # stray resting value sat BELOW 0.3 (never in 0.30-0.50 in 125 takes), but the
+    # worst-case margin was only 0.057 — re-read that table after a gripper
+    # recalibration before moving either threshold.
+    # Launch overrides: gripper_mode:=discrete, and gripper_open_at:= /
+    # gripper_close_at:= (which must be passed together; ur7e_gello_real.launch.py
+    # range-checks them before anything spawns).
+    # ~/discrete_state (String, at state_publish_rate_hz above) reports
+    # DISABLED / UNKNOWN / OPEN / CLOSED — the EEF operator GUI shows it live, so a
+    # threshold the trigger can no longer cross is visible instead of silent.
+    discrete_mode: false
+    discrete_close_at: 0.7   # trigger >= this -> latch CLOSED (output exactly 1.0)
+    discrete_open_at: 0.3    # trigger <= this -> latch OPEN   (output exactly 0.0)

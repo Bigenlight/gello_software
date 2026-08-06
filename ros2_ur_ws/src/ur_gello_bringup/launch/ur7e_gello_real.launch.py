@@ -103,6 +103,33 @@ Example:
     ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
         robot_ip:=192.168.10.11 control_mode:=eef \
         pos_scale:=0.0 v_max:=0.01 w_max:=0.05        # staged bring-up stage P6
+    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
+        robot_ip:=192.168.10.11 gripper_mode:=discrete  # snap-to-endpoint gripper
+
+DISCRETE GRIPPER MODE (gripper_mode / gripper_close_at / gripper_open_at):
+    gripper_mode:=discrete folds the GELLO trigger to the two endpoints before
+    it reaches /robotiq_gripper/command_percent: >= gripper_close_at -> exactly
+    1.0 (CLOSED), <= gripper_open_at -> exactly 0.0 (OPEN), and in between the
+    previous state is HELD (hysteresis -- a single threshold would chatter at
+    the boundary). Default 'continuous' is today's raw passthrough, byte-for-
+    byte unchanged.
+
+    WHY: the trigger is spring + encoder and is already ~binary (90.95% of
+    52,607 samples across 125 takes are below 0.02 or above 0.98), but roughly
+    once or twice per session it RESTS PARTWAY OPEN -- worst measured 0.229 and
+    0.243 -- and the bridge faithfully forwards that, so the Robotiq only opens
+    ~76% and the operator sees a gripper that "didn't fully open". Not a
+    calibration problem: all 125 takes still reach exactly 0.000. Full evidence
+    and the per-date table: docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1.
+
+    The two thresholds are optional and follow the same empty-string "not
+    overridden" sentinel as the eef / joint_delta ones (the yaml wins when
+    omitted), but they must be supplied TOGETHER and satisfy
+    0.0 < open_at < close_at < 1.0, which is RANGE-CHECKED at launch time
+    before anything spawns -- a threshold the trigger can no longer cross makes
+    the gripper stop responding SILENTLY. The latched state is published on
+    /gello_gripper_bridge/discrete_state and shown live in the EEF operator GUI
+    (run_eef_gui.sh) so that failure is visible immediately.
 
 STAGED EEF BRING-UP OVERRIDES (pos_scale / v_max / w_max):
     docs/ros2/GELLO_UR7E_EEF_MODE.md §3 prescribes a low-gain, gated first
@@ -226,6 +253,23 @@ _EEF_DOUBLE_OVERRIDES = ("v_max", "w_max", "pos_scale")
 # while stepping through the staged bring-up, so it must go through the same
 # .perform(context) + float() treatment. See _eef_bridge_parameter_overrides().
 _JD_DOUBLE_OVERRIDES = ("jd_gain",)
+
+# DISCRETE GRIPPER threshold overrides: {launch argument -> node parameter}.
+#
+# The names deliberately DIFFER on the two sides. The launch-argument namespace
+# is flat and shared with the ARM bridge's overrides above, where a bare
+# `close_at:=` / `open_at:=` would not say which node it lands on; the gripper_
+# prefix does. On the node side the parameters live inside the
+# gello_gripper_bridge namespace already, so they are named for what they do.
+#
+# Same DOUBLE-parameter treatment as the eef / joint_delta overrides: the value
+# is resolved with .perform(context) and converted with an explicit float(), so
+# it can never reach the node as an INTEGER. See
+# _eef_bridge_parameter_overrides() for the full rationale.
+_GRIPPER_DOUBLE_OVERRIDES = {
+    "gripper_close_at": "discrete_close_at",
+    "gripper_open_at": "discrete_open_at",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -412,6 +456,103 @@ def _joint_delta_bridge_parameter_overrides(context):
             "started."
         )
     return overrides
+
+
+def _gripper_bridge_parameter_overrides(context):
+    """Build the GELLO->gripper bridge's launch-level parameter dict.
+
+    Maps `gripper_mode:=continuous|discrete` onto the bridge's `discrete_mode`
+    bool, and the optional `gripper_close_at:=` / `gripper_open_at:=` onto its
+    `discrete_close_at` / `discrete_open_at` doubles.
+
+    DISCRETE MODE, in one line: the leader trigger is folded to the two
+    endpoints -- trigger >= discrete_close_at -> exactly 1.0 (CLOSED),
+    trigger <= discrete_open_at -> exactly 0.0 (OPEN), in between the previous
+    state is HELD (hysteresis; a single threshold chatters at the boundary).
+    WHY it exists: the spring+encoder trigger is already ~binary, but roughly
+    once or twice per session it RESTS PARTWAY OPEN (worst measured 0.229 and
+    0.243) and the bridge faithfully forwards that, so the Robotiq only opens
+    ~76%. Evidence: docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1.
+
+    discrete_mode is set on EVERY launch, unlike the eef / joint_delta doubles
+    above: `gripper_mode` has a REAL default ("continuous") rather than the
+    empty "not overridden" sentinel, exactly like `control_mode` on the arm
+    bridge, so the launch always pins it. With no new arguments that pins the
+    value the yaml already carries -> today's behaviour, unchanged.
+
+    The two THRESHOLDS keep the empty-string sentinel: omitted -> key absent ->
+    the yaml value wins, and no yaml number is duplicated here where it could
+    silently drift.
+    """
+    mode = LaunchConfiguration("gripper_mode").perform(context).strip()
+    if mode not in ("continuous", "discrete"):
+        # DeclareLaunchArgument(choices=...) already refuses anything else at
+        # launch; this keeps the helper honest when called on a bare context.
+        raise RuntimeError(
+            f"Launch argument gripper_mode:={mode!r} is not one of "
+            "'continuous' / 'discrete'."
+        )
+    overrides = {"discrete_mode": mode == "discrete"}
+
+    for arg_name, param_name in _GRIPPER_DOUBLE_OVERRIDES.items():
+        raw = LaunchConfiguration(arg_name).perform(context).strip()
+        if not raw:
+            # Not supplied -> do NOT set the parameter -> yaml value wins.
+            continue
+        try:
+            overrides[param_name] = float(raw)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Launch argument {arg_name}:={raw!r} is not a number. It "
+                f"overrides the '{param_name}' double parameter in the "
+                "gello_gripper_bridge block of config/ur7e_gello.yaml; pass a "
+                f"numeric value (e.g. {arg_name}:=0.3) or omit the argument to "
+                "keep the yaml value."
+            ) from exc
+
+    # RANGE-CHECK HERE, AT LAUNCH TIME. A mis-set threshold does not crash
+    # anything -- it makes the gripper SILENTLY STOP RESPONDING (the trigger can
+    # no longer cross it), which is the worst failure mode this feature can have.
+    # Failing here aborts the launch before anything spawns.
+    close_at = overrides.get("discrete_close_at")
+    open_at = overrides.get("discrete_open_at")
+    if (close_at is None) != (open_at is None):
+        # BOTH OR NEITHER. The invariant is a RELATION between the two, so half
+        # an override cannot be checked without duplicating the yaml number for
+        # the other half -- which this file deliberately never does (a
+        # duplicated default silently drifts). Refusing keeps the invariant
+        # checkable, and the fix is one extra argument.
+        raise RuntimeError(
+            "Launch arguments gripper_close_at / gripper_open_at must be given "
+            "TOGETHER or not at all (got "
+            f"gripper_close_at={close_at}, gripper_open_at={open_at}). They "
+            "define ONE window and the invariant 0.0 < open_at < close_at < 1.0 "
+            "is a relation between them, so a half-override cannot be "
+            "range-checked. Pass both, or neither and keep the yaml values."
+        )
+    if close_at is not None and not (0.0 < open_at < close_at < 1.0):
+        raise RuntimeError(
+            f"Launch arguments gripper_open_at:={open_at} / "
+            f"gripper_close_at:={close_at} are out of range -- they must "
+            "satisfy 0.0 < open_at < close_at < 1.0 (defaults 0.3 / 0.7, see "
+            "docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1). A threshold the "
+            "trigger cannot cross makes the gripper stop responding silently. "
+            "Nothing was started."
+        )
+    return overrides
+
+
+def _validate_gripper_arguments(context):
+    """Resolve + range-check the gripper arguments AT LAUNCH TIME, at t=0.
+
+    The gripper bridge is only built when the move-to-start handshake EXITS
+    (OnProcessExit) -- i.e. after the arm has already moved. Validating there
+    would report a typo'd threshold minutes late, with the robot mid-session.
+    This OpaqueFunction is visited immediately, before the driver include, so a
+    bad argument aborts the launch before anything spawns. It adds no actions.
+    """
+    _gripper_bridge_parameter_overrides(context)
+    return []
 
 
 def generate_launch_description():
@@ -631,6 +772,59 @@ def generate_launch_description():
                 "yaml value. Staged bring-up: P4 0.0 (the arm must not move at "
                 "all after engage), P5 0.25, P6 0.5, P7 1.0. Ignored in "
                 "control_mode:=joint / control_mode:=eef."
+            ),
+        ),
+        # ---------------------------------------------------------------- #
+        # DISCRETE GRIPPER MODE. Independent of control_mode: it lands on the
+        # gello_gripper_bridge node in every mode. Default 'continuous' is
+        # today's behaviour, unchanged.
+        # ---------------------------------------------------------------- #
+        DeclareLaunchArgument(
+            "gripper_mode",
+            default_value="continuous",
+            choices=["continuous", "discrete"],
+            description=(
+                "gello_gripper_bridge trigger handling. 'continuous' "
+                "(default): the leader trigger value is passed through as-is "
+                "onto /robotiq_gripper/command_percent -- UNCHANGED behaviour. "
+                "'discrete': the trigger is folded to the two endpoints, "
+                ">= gripper_close_at -> exactly 1.0 (CLOSED), "
+                "<= gripper_open_at -> exactly 0.0 (OPEN), in between the "
+                "previous state is HELD (hysteresis, so the boundary cannot "
+                "chatter). WHY: the spring+encoder trigger is already ~binary, "
+                "but roughly once or twice per session it RESTS PARTWAY OPEN "
+                "(worst measured 0.229 / 0.243) and the bridge faithfully "
+                "forwards that, so the Robotiq only opens ~76% and the "
+                "operator sees a gripper that 'didn't fully open'. Evidence: "
+                "docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md §5.1. The latched "
+                "state is published on /gello_gripper_bridge/discrete_state "
+                "and shown live in the EEF operator GUI."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "gripper_close_at",
+            default_value="",
+            description=(
+                "DISCRETE GRIPPER ONLY. Trigger value at/above which the "
+                "gripper latches CLOSED, overriding discrete_close_at in the "
+                "gello_gripper_bridge block of config/ur7e_gello.yaml (0.7). "
+                "Empty (default) = use the yaml value. Must be supplied "
+                "TOGETHER with gripper_open_at and satisfy "
+                "0.0 < open_at < close_at < 1.0; range-checked at launch."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "gripper_open_at",
+            default_value="",
+            description=(
+                "DISCRETE GRIPPER ONLY. Trigger value at/below which the "
+                "gripper latches OPEN, overriding discrete_open_at in the "
+                "gello_gripper_bridge block of config/ur7e_gello.yaml (0.3). "
+                "Empty (default) = use the yaml value. Must be supplied "
+                "TOGETHER with gripper_close_at and satisfy "
+                "0.0 < open_at < close_at < 1.0; range-checked at launch. "
+                "Observed worst-case margin to 0.3 was 0.057 (§5.1) -- re-read "
+                "that table before moving it."
             ),
         ),
     ]
@@ -930,13 +1124,29 @@ def generate_launch_description():
     #     (width 0=OPEN..1=CLOSED -> command_percent 0=open..1=closed,
     #     invert=False). GELLO stays passive; this node only reads a topic and
     #     publishes a Float32 (no hardware access).
+    #
+    #     gripper_mode:=discrete additionally snaps the trigger to the two
+    #     endpoints (see _gripper_bridge_parameter_overrides). Built by a
+    #     factory rather than a module-level Node so the launch arguments can be
+    #     resolved to a real Python bool/floats -- the same int-coercion trap the
+    #     eef / joint_delta overrides go through. The factory is called from the
+    #     handshake-exit handler below, which already carries a LaunchContext;
+    #     the VALIDATION of those arguments happens far earlier, at t=0, via the
+    #     _validate_gripper_arguments OpaqueFunction.
     # ------------------------------------------------------------------ #
-    gello_gripper_bridge_node = Node(
-        package="ur_gello_bringup",
-        executable="gello_gripper_bridge",
-        parameters=[params_file],
-        output="screen",
-    )
+    def _make_gello_gripper_bridge_node(context):
+        return Node(
+            package="ur_gello_bringup",
+            executable="gello_gripper_bridge",
+            parameters=[
+                params_file,
+                # Layered LAST -> wins over the yaml. Always carries
+                # discrete_mode; carries a threshold only if the operator
+                # actually passed that launch argument.
+                _gripper_bridge_parameter_overrides(context),
+            ],
+            output="screen",
+        )
 
     # ------------------------------------------------------------------ #
     # Start-up sequencing.
@@ -1005,7 +1215,7 @@ def generate_launch_description():
                     )
                 ),
                 gripper_modbus_node,
-                gello_gripper_bridge_node,
+                _make_gello_gripper_bridge_node(context),
             ]
         # Quote the SAME resume service the handshake would have called, so the
         # manual-recovery hint is correct in eef mode (~/eef_resume) too.
@@ -1036,6 +1246,10 @@ def generate_launch_description():
     return LaunchDescription(
         declared_arguments
         + [
+            # FIRST, before the driver include: resolve + range-check the
+            # gripper arguments so a bad threshold aborts at t=0 rather than at
+            # handshake exit, with the arm already moved.
+            OpaqueFunction(function=_validate_gripper_arguments),
             ur_control_launch,
             gello_publisher_delayed,
             bridge_paused_delayed,

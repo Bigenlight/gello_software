@@ -84,6 +84,10 @@
 # 낙하 지점을 임의의 중간 자세가 아니라 항상 같은 RESET 자세로 고정하기 위해서다.
 # 그리퍼 노드가 없으면 조용히 건너뛴다. OPEN_GRIPPER=0 으로 끌 수 있다.
 # (같은 이유로 UR7eEnv.reset() 도 매 에피소드 경계에서 연다 — 이건 세션 시작용이다.)
+# OPEN 명령은 한 번이 아니라 GRIPPER_OPEN_HOLD_S(기본 1s) 동안
+# GRIPPER_OPEN_RATE_HZ(기본 10Hz)로 반복 발행한다 — 한 발은 DDS discovery 와
+# 드라이버 rate limiter 에 유실될 수 있다. 근거는 [5b/6] 블록 위 주석에 있다.
+# GRIPPER_OPEN_HOLD_S=0 이면 예전 one-shot 동작이다.
 #
 # 사용법
 # ------
@@ -155,8 +159,59 @@ TGT_CTRL="forward_position_controller"
 
 NODE_PID=""
 SENT_ABORT=0
+# [5b/6] 의 배경 그리퍼 발행 프로세스. 아래 두 helper 와 cleanup 만 건드린다.
+GRIPPER_PUB_PID=""
+
+# --- 그리퍼 OPEN 반복 발행 ---------------------------------------------------
+# 왜 한 번이 아니라 반복인가 (2026-08-06 실측, diag_gripper_halfopen_20260806_173307):
+#   (a) 살아 있는 노드를 상대로도 `ros2 topic pub -1` 이 7회 중 3회 유실됐다.
+#       매번 새 publisher 를 만들고 부수므로 DDS discovery 가 끝나기 전에
+#       메시지가 나간다. 발행이 한 번뿐이면 그 유실을 만회할 기회가 없다.
+#   (b) robotiq_gripper_modbus_node 의 rate limiter 는 창 안에 들어온 **가장
+#       최신** 샘플을 버린다. 즉 "완전히 열어라"라고 말하는 마지막 한 발이
+#       사라진다.
+# 그래서 하나의 오래 사는 publisher 로 짧은 창 동안 같은 값을 계속 어서트한다.
+# 반복해도 안전한 이유: 값은 OPEN(0.0) 뿐이고, 재어서트가 방해할 수 있는 것은
+# **닫는** setpoint(=물체 파지)인데 여기서는 그런 값을 절대 보내지 않는다.
+# GRIPPER_OPEN_HOLD_S=0 이면 예전 one-shot 동작으로 정확히 되돌아간다.
+#
+# 고아 방지가 두 겹인 이유. cleanup()/EXIT trap 은 Ctrl-C(=foreground process
+# group SIGINT, 여기 background job 도 같은 group 이다)와 SIGTERM 을 덮지만
+# **SIGKILL 은 못 덮는다** — 그때 이 publisher 는 살아남아 10 Hz 로 0.0 을
+# 영원히 어서트하고, 그러면 세션 내내 정책의 CLOSE 를 초당 10번 뒤집으면서
+# single-client Modbus 버스를 놓고 드라이버와 싸운다. 그래서 `-t`(횟수 상한)로
+# 프로세스 자체에 수명을 박아 둔다: trap 이 못 도는 경우에도 몇 초 뒤 스스로
+# 끝난다. 상한은 이 스크립트가 실제로 쓰는 최대 시간
+# (HOLD_S + GRIPPER_OPEN_WAIT_S)보다 넉넉히 길어서 정상 경로에는 영향이 없다.
+# `-w 0` 은 명시적이어야 한다 — `-t` 를 주면 --wait-matching-subscriptions 의
+# 기본값이 0 에서 1 로 바뀌어 구독자가 생길 때까지 블록하기 때문이다.
+gripper_open_publish_start() {
+    gripper_open_publish_stop
+    local _times
+    _times="$(awk -v hz="$GRIPPER_OPEN_RATE_HZ" -v hold="$GRIPPER_OPEN_HOLD_S" \
+        -v wait_s="${GRIPPER_OPEN_WAIT_S:-3}" \
+        'BEGIN { n = int(hz * (hold + wait_s + 5)) + 1; if (n < 1) n = 1; print n }')"
+    ros2 topic pub -r "$GRIPPER_OPEN_RATE_HZ" "$GRIPPER_CMD_TOPIC" \
+        std_msgs/msg/Float32 "{data: 0.0}" -t "$_times" -w 0 >/dev/null 2>&1 &
+    GRIPPER_PUB_PID=$!
+}
+
+gripper_open_publish_stop() {
+    [[ -n "$GRIPPER_PUB_PID" ]] || return 0
+    if kill -0 "$GRIPPER_PUB_PID" 2>/dev/null; then
+        kill -INT "$GRIPPER_PUB_PID" 2>/dev/null
+        sleep 0.3
+        kill -0 "$GRIPPER_PUB_PID" 2>/dev/null && \
+            kill -TERM "$GRIPPER_PUB_PID" 2>/dev/null
+    fi
+    wait "$GRIPPER_PUB_PID" 2>/dev/null
+    GRIPPER_PUB_PID=""
+}
 
 cleanup() {
+    # 먼저 멈춘다: Ctrl-C 로 빠져나갈 때 0.0 을 계속 쏘는 고아 프로세스를
+    # 남기지 않는다.
+    gripper_open_publish_stop
     if [[ -n "$NODE_PID" ]] && kill -0 "$NODE_PID" 2>/dev/null; then
         echo ""
         echo "[cleanup] gello_move_to_start 종료 중 (PID $NODE_PID)..."
@@ -451,13 +506,43 @@ NODE_PID=""
 GRIPPER_CMD_TOPIC="${GRIPPER_CMD_TOPIC:-/robotiq_gripper/command_percent}"
 GRIPPER_STATE_TOPIC="${GRIPPER_STATE_TOPIC:-/robotiq_gripper/position_percent}"
 GRIPPER_OPEN_WAIT_S="${GRIPPER_OPEN_WAIT_S:-3}"
+# 최소 반복 발행 창(s)과 그 주기(Hz). 실기에서 검증된 값은 ~1s @ ~10Hz 다
+# (재어서트 없이 14회 중 7회 실패 → 재어서트 1s 로 6회 중 0회 실패).
+# 0 이면 예전 one-shot(`--once`) 동작으로 정확히 되돌아간다.
+GRIPPER_OPEN_HOLD_S="${GRIPPER_OPEN_HOLD_S:-1}"
+GRIPPER_OPEN_RATE_HZ="${GRIPPER_OPEN_RATE_HZ:-10}"
+# 여기서 FATAL 을 내지 않는 이유: 이 스크립트의 본업은 팔 사전 배치이고,
+# 그리퍼 튜너블 오타 하나로 preposition 을 막을 이유가 없다(같은 이유로 그리퍼
+# 노드가 없으면 조용히 건너뛴다). 경고하고 기본값으로 되돌린다.
+if [[ ! "$GRIPPER_OPEN_HOLD_S" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "!! GRIPPER_OPEN_HOLD_S=$GRIPPER_OPEN_HOLD_S 은 음이 아닌 숫자가 아니다 — 1 로 되돌린다"
+    GRIPPER_OPEN_HOLD_S=1
+fi
+if [[ ! "$GRIPPER_OPEN_RATE_HZ" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+   ! awk -v v="$GRIPPER_OPEN_RATE_HZ" 'BEGIN { exit !(v > 0) }'; then
+    echo "!! GRIPPER_OPEN_RATE_HZ=$GRIPPER_OPEN_RATE_HZ 은 양수가 아니다 — 10 으로 되돌린다"
+    GRIPPER_OPEN_RATE_HZ=10
+fi
 if [[ "${OPEN_GRIPPER:-1}" == "1" ]]; then
     banner "[5b/6] 그리퍼 OPEN"
     if timeout 3 ros2 topic info "$GRIPPER_CMD_TOPIC" >/dev/null 2>&1; then
-        timeout 5 ros2 topic pub --once "$GRIPPER_CMD_TOPIC" \
-            std_msgs/msg/Float32 "{data: 0.0}" >/dev/null 2>&1 \
-            && echo "OPEN 명령 발행 ($GRIPPER_CMD_TOPIC = 0.0)" \
-            || echo "!! OPEN 명령 발행 실패 — 그리퍼 상태를 눈으로 확인하라"
+        if awk -v v="$GRIPPER_OPEN_HOLD_S" 'BEGIN { exit !(v > 0) }'; then
+            # 반복 발행(기본). 확인 루프가 도는 동안에도 계속 돌고, 확인되거나
+            # 창이 끝나면 gripper_open_publish_stop 이 멈춘다.
+            gripper_open_publish_start
+            sleep "$GRIPPER_OPEN_HOLD_S"
+            if kill -0 "$GRIPPER_PUB_PID" 2>/dev/null; then
+                echo "OPEN 명령 반복 발행 중 ($GRIPPER_CMD_TOPIC = 0.0 @ ${GRIPPER_OPEN_RATE_HZ}Hz, 최소 ${GRIPPER_OPEN_HOLD_S}s)"
+            else
+                echo "!! OPEN 반복 발행이 조기 종료했다 — 그리퍼 상태를 눈으로 확인하라"
+            fi
+        else
+            # GRIPPER_OPEN_HOLD_S=0: 예전 one-shot 동작(유실 위험을 감수한다).
+            timeout 5 ros2 topic pub --once "$GRIPPER_CMD_TOPIC" \
+                std_msgs/msg/Float32 "{data: 0.0}" >/dev/null 2>&1 \
+                && echo "OPEN 명령 발행 ($GRIPPER_CMD_TOPIC = 0.0, one-shot)" \
+                || echo "!! OPEN 명령 발행 실패 — 그리퍼 상태를 눈으로 확인하라"
+        fi
         # Robotiq은 물리적으로 ~0.5s 걸린다. 확인만 하고 실패해도 진행한다.
         _g_deadline=$(( SECONDS + GRIPPER_OPEN_WAIT_S ))
         _g_ok=0
@@ -472,6 +557,7 @@ if [[ "${OPEN_GRIPPER:-1}" == "1" ]]; then
             fi
             sleep 0.3
         done
+        gripper_open_publish_stop
         (( _g_ok == 1 )) || echo "!! ${GRIPPER_OPEN_WAIT_S}s 안에 OPEN 확인 실패 — 눈으로 확인하라"
     else
         echo "그리퍼 노드 없음 ($GRIPPER_CMD_TOPIC) — 건너뛴다."

@@ -64,6 +64,37 @@ SPIN_POLL_S = 0.1
 CLOSE_JOIN_TIMEOUT_S = 2.0
 
 
+# A single gripper datagram is not a reliable command. Two independent
+# mechanisms swallow it, both measured on the real stack (2026-08-06,
+# ros2_ur_ws/gello_logs/diag_gripper_halfopen_20260806_173307):
+#
+#   * DDS discovery. A publish issued before the subscription has matched is
+#     dropped with no error anywhere — ``ros2 topic pub -1`` lost 3 of 7 sends.
+#   * robotiq_gripper_modbus_node's rate limiter DISCARDS the freshest setpoint
+#     when it arrives inside ``command_min_period`` of the last accepted one,
+#     and does NOT update its ``_last_cmd_pct`` cache when it does. The driver's
+#     own view therefore stays self-consistent: it believes the gripper is where
+#     it last wrote, and it is right. Only the publisher knows something else was
+#     wanted — and a one-shot publisher never says so again. 7 of 14 open cycles
+#     parked at 0.043..0.42 instead of 0.012; re-asserting the setpoint for 1 s
+#     failed 0 of 6 times.
+#
+# So the command path re-asserts the newest setpoint for a short window instead
+# of sending it once. Three properties make this cheap and safe:
+#
+#   * NO extra Modbus traffic. The driver deadbands an unchanged setpoint before
+#     it touches the single-client :54321 bus, so repeats cost ROS traffic only.
+#   * NOTHING at rest. The re-assert exists only while a command is in flight;
+#     with no pending setpoint the 250 Hz worker publishes nothing at all.
+#   * LATEST WINS. A new setpoint replaces the pending one, so a re-assert can
+#     never fight a command issued after it.
+#
+# Setting GRIPPER_REASSERT_S (or _HZ) to 0.0 restores exactly the historical
+# one-publish-per-call behaviour.
+GRIPPER_REASSERT_S = 1.0
+GRIPPER_REASSERT_HZ = 10.0
+
+
 # UR joint order used by ur_gello_bringup command path.
 UR_JOINT_NAMES = [
     "shoulder_pan_joint",
@@ -354,6 +385,14 @@ class AccelerationLimitedJointStream:
 
 
 class URRosBackend:
+    #: How long, and how fast, a gripper setpoint is re-asserted after it is
+    #: issued (see GRIPPER_REASSERT_S above for why one publish is not enough).
+    #: Instance attributes, so a caller or a test can retune or disable them
+    #: without touching the module: either at 0.0 gives back the historical
+    #: single publish exactly.
+    grip_reassert_s: float = GRIPPER_REASSERT_S
+    grip_reassert_hz: float = GRIPPER_REASSERT_HZ
+
     def __init__(
         self,
         ros_cfg: Dict[str, str],
@@ -438,6 +477,10 @@ class URRosBackend:
         self._gripper_pub = self._node.create_publisher(
             Float32, ros_cfg["gripper_command_topic"], 10
         )
+        # Newest gripper setpoint still owed a re-assert, as
+        # (value, window_deadline, next_publish_at) on the monotonic clock.
+        # None = nothing pending, which is also the resting state.
+        self._grip_pending: Optional[Tuple[float, float, float]] = None
 
         # Own executor rather than rclpy.spin(node) (which uses the GLOBAL
         # executor): close() can then stop *our* spin loop with
@@ -703,15 +746,94 @@ class URRosBackend:
                     msg = Float64MultiArray()
                     msg.data = [float(v) for v in stream]
                     self._cmd_pub.publish(msg)
+            # Same worker, same lifetime guarantees: close() stops this loop
+            # before it destroys the node, so no re-assert can outlive the
+            # backend either. Costs nothing when no setpoint is pending.
+            self._tick_gripper_reassert(t0)
             time.sleep(max(0.0, period - (time.monotonic() - t0)))
 
     def send_gripper_percent(self, fraction: float):
-        """Robotiq command_percent convention: 0.0 = OPEN .. 1.0 = CLOSED."""
+        """Robotiq command_percent convention: 0.0 = OPEN .. 1.0 = CLOSED.
+
+        Publishes immediately AND arms a bounded re-assert of the same value on
+        the 250 Hz worker (``grip_reassert_s`` at ``grip_reassert_hz``), because
+        one datagram is not a reliable command — see GRIPPER_REASSERT_S for the
+        two measured loss mechanisms and why the repeats cost no bus traffic.
+
+        Non-blocking by construction: the caller publishes once and returns, so
+        this is usable from the RL step loop (~2 Hz measured) and from the
+        follower thread without adding latency to either.
+
+        Re-asserting is NOT a position watchdog. It repeats the value that was
+        COMMANDED and never reads ``position_percent``, so it cannot re-command
+        a closing setpoint because the fingers stopped short — that is a
+        successful grasp, and nothing here can turn it into a squeeze.
+        """
         if self.dry_run or not self._node_alive:
             return
+        value = float(np.clip(fraction, 0.0, 1.0))
+        window = float(self.grip_reassert_s or 0.0)
+        hz = float(self.grip_reassert_hz or 0.0)
+        now = time.monotonic()
         msg = Float32()
-        msg.data = float(np.clip(fraction, 0.0, 1.0))
-        self._gripper_pub.publish(msg)
+        msg.data = value
+        # Publish and re-arm under ONE lock hold, and let the worker publish
+        # under the same one. LATEST WINS is otherwise only true of the stored
+        # state, not of the wire: the worker decides to re-assert, leaves the
+        # lock, and is then descheduled; this call publishes CLOSE and stores
+        # it; the worker wakes and publishes its stale OPEN *after* it. The
+        # driver's big-jump exemption (|dv| >= 0.5) waves that inversion
+        # straight through to the single-client bus, so the fingers open for
+        # one re-assert period in the middle of a grasp. Serialising the two
+        # publishers is what makes the newest setpoint the last one on the
+        # wire. This is the ONLY publish held under the lock: it is ~2 Hz and
+        # the joint stream deliberately stays outside (see _upsample_loop).
+        with self._lock:
+            self._gripper_pub.publish(msg)
+            if window <= 0.0 or hz <= 0.0:
+                # Disabled: still drop any older pending setpoint, so turning
+                # the feature off mid-flight cannot leave a stale value looping.
+                self._grip_pending = None
+            else:
+                # LATEST WINS: this setpoint supersedes whatever was pending.
+                # Without that, a re-assert of "open" could keep firing after
+                # the policy has asked to close 0.6 s later.
+                self._grip_pending = (value, now + window, now + 1.0 / hz)
+
+    def _tick_gripper_reassert(self, now: float) -> None:
+        """Re-publish the pending gripper setpoint; called by the 250 Hz worker.
+
+        Publishes INSIDE the lock, which is what makes "latest wins" true of
+        the wire and not merely of the stored state — see send_gripper_percent
+        for the inversion that costs a grasp otherwise. ``_node_alive`` is
+        re-checked immediately before, so close() cannot be raced into
+        publishing onto a destroyed node.
+
+        The unlocked pre-check keeps the resting state free: with nothing
+        pending this costs one attribute read per 250 Hz tick and never
+        contends for the lock at all.
+        """
+        pending = getattr(self, "_grip_pending", None)
+        if pending is None:
+            return  # resting state: no traffic at all
+        with self._lock:
+            pending = self._grip_pending
+            if pending is None:
+                return
+            value, deadline, next_at = pending
+            if now >= deadline:
+                self._grip_pending = None
+                return
+            if now < next_at:
+                return
+            hz = float(self.grip_reassert_hz or 0.0)
+            period = (1.0 / hz) if hz > 0.0 else (deadline - now)
+            self._grip_pending = (value, deadline, now + period)
+            if self.dry_run or not self._node_alive:
+                return
+            msg = Float32()
+            msg.data = value
+            self._gripper_pub.publish(msg)
 
     # ------------------------------------------------------------------ #
     # teardown                                                            #
