@@ -83,6 +83,8 @@ EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTED_REWARD_AUTHORITY
 |---|---|---|---|
 | **BC T1** 서버+터널 | `./run_bc_server.sh` | `BC_SERVER_RESULT=started` + `[bc-server] ready …` + 프롬프트 안 돌아옴 | [BC §4.1](BC_DEPLOY_KO.md) |
 | **FM T1** 서버+터널 | `./run_fm_server.sh` | `FM_SERVER_RESULT=started` + `[fm-server] ready …` + 프롬프트 안 돌아옴 | [FM §2.1](FM_DEPLOY_KO.md) |
+| **로컬 T1(BC)** laptop3 GPU 직접 서빙 (터널 없음, 1회 세팅 필요) | `./run_bc_server_local.sh` | `LOCAL_SERVER_RESULT=started` + `[bc-server] ready …` + 프롬프트 안 돌아옴 | [로컬 §4.1](LOCAL_POLICY_EVAL_KO.md) |
+| **로컬 T1(FM)** laptop3 GPU 직접 서빙 (터널 없음, 1회 세팅 필요) | `./run_fm_server_local.sh` | `LOCAL_SERVER_RESULT=started` + `[fm-server] ready …` + 프롬프트 안 돌아옴 | [로컬 §4.1](LOCAL_POLICY_EVAL_KO.md) |
 | **T2** 하드웨어 (BC/FM 공통) | `./run_hil_hardware.sh` | READY 배너 + 세 토픽 rate 충족 | [BC §4.3](BC_DEPLOY_KO.md) |
 | **T3** 세션 (핀 3종 + sidecar off) | `<핀 3종> ./run_hil_session.sh --no-classifier-sidecar` | preflight `[1]`~`[11]` 통과 → GUI `WAIT_SCENE_READY` | [BC §4.4](BC_DEPLOY_KO.md) |
 | **dry handshake** (로봇 안 씀, 권장) | `<핀 3종> ./run_hil_actor.sh --fake-env --no-classifier-sidecar` | 핸드셰이크 오류 없이 `BeginEpisode`까지 가고 종료. 센서 WARN은 정상 | [BC §4.2](BC_DEPLOY_KO.md) |
@@ -174,6 +176,7 @@ FM_WHICH=final ./run_fm_server.sh     # 기본 best, final도 서빙 가능
 | **이 파일** | 전체 그림, 무엇을 실행할지 고를 때 (5분) |
 | [`BC_DEPLOY_KO.md`](BC_DEPLOY_KO.md) | **BC 세션을 실제로 돌릴 때.** 단계별 절차·성공 표식·실패 대응·평가 프로토콜·금지사항 |
 | [`FM_DEPLOY_KO.md`](FM_DEPLOY_KO.md) | **FM 세션을 돌릴 때.** BC 런북의 **델타**다 — BC를 먼저 읽는다 |
+| [`LOCAL_POLICY_EVAL_KO.md`](LOCAL_POLICY_EVAL_KO.md) | **같은 artifact를 서버 대신 laptop3 GPU에서 서빙할 때.** 1회 세팅 2단계 · 순수 추론 벤치 · 로컬 E2E · 서버 대비 속도 비교표 |
 | [`POLICY_EVAL_CODE_MAP_KO.md`](POLICY_EVAL_CODE_MAP_KO.md) | 코드가 어떻게 얽혀 있는지, 기록 파일의 필드가 무엇인지 (엔지니어용) |
 | [`../docs/testing/09_HIL_ACTOR_RUNBOOK.md`](../docs/testing/09_HIL_ACTOR_RUNBOOK.md) | 하드웨어·preflight·controller·실패 대응의 **정본**. 평가 스택은 이것을 그대로 쓴다 |
 | [`DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](DATA_AND_MODELS_JUNHYEONG_AI_KO.md) | 서버 호스트·GPU·데이터/모델 경로의 정본 |
