@@ -98,3 +98,44 @@ EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTED_REWARD_AUTHORITY
 - **MANUAL 성공 판정 기준을 양쪽에서 똑같이** 적용한다("컵 안에 들어가 손을 떼도 유지"처럼
   한 문장으로 미리 못 박고 세션 내내 바꾸지 않는다).
 - 두 세션의 기록표를 **나란히** 담당자에게 넘긴다. 성공 __/10 두 개가 이 실험의 결론이다.
+
+## 5. (선택) 스텝 latency 계측 — `HIL_STEP_TIMING=1`
+
+BC 런북 §4.6과 **완전히 같은 기능**이고 스크립트 이름과 핀만 FM 값이다. 한 스텝의 시간이
+**통신 / 모델 / 기록 / 로봇 관측** 중 어디에 쓰였는지 스텝 단위로 분해해 남긴다. **기본은 OFF**라
+켜지 않으면 평소 실행과 아무것도 달라지지 않는다. 서버(T1)와 액터(T3)를 **각각** 켜며, 한쪽만
+켜도 그쪽 분해는 나온다 — **둘 다 켜야 순수 통신 시간(`wire_ms`)이 계산된다.**
+
+```bash
+# T1 — §2.1 명령 앞에 환경변수 하나만 더한다
+HIL_STEP_TIMING=1 ./run_fm_server.sh
+
+# T3 — §2.2 명령 앞에 환경변수 하나만 더한다 (핀 3개는 그대로)
+HIL_STEP_TIMING=1 EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTED_REWARD_AUTHORITY=local EXPECTED_REWARD_MODEL_ID=operator-manual-success-v1 ./run_hil_session.sh --no-classifier-sidecar
+```
+
+**성공 표식:** T1은 `[fm-server] ready …` 줄에 **`step_timing=1` 토큰**이 붙고, T3는 actor 기동
+로그에 `[actor] step timing ON -> <경로>` 한 줄이 나온다.
+
+**무엇이 남나**
+
+- 서버: `~/hil-serl-data/fm_eval/fm_eval_<ts>/served/timing.jsonl` (`inference.jsonl` 옆)
+- laptop3: `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl`
+  (경로를 직접 주려면 `--step-timing-path`)
+
+⚠️ **서버 쪽은 코드가 서버 runtime에 pull된 뒤 T1을 새로 띄워야 반영된다** — 살아 있는 옛 서버
+프로세스를 그대로 쓰면 `timing.jsonl`이 생기지 않는다. 서버 스크립트를 직접 기동한다면
+`--step-timing` 플래그가 같은 일을 한다. 기동 smoke 2회는 여기에도 섞이지 않는다(§4와 같다).
+
+**분석:** BC와 **같은 분석기**를 쓰고, 액터 파일만 더한다. 서버 `timing.jsonl`은 `--served`
+아래에서 자동으로 찾는다.
+
+```bash
+cd /home/laptop3/gello_software && /home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/analyze_bc_rollout.py --served <served 디렉터리> --actor-timing ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl
+```
+
+리포트에 **§2 Inference log 아래로** `### Latency breakdown (step timing)` 절이 붙어 phase별
+count/mean/p50/p95/max와 `wire_ms`가 나온다. 기록 파일이 없으면 `NOT RECORDED` 한 줄로 빠진다.
+
+⚠️ 액터 기록의 `env_step_ms`에는 `env.step`의 **~100 ms 자체 페이싱 sleep**이 포함돼 있다.
+필드 단위 스키마는 [`POLICY_EVAL_CODE_MAP_KO.md`](POLICY_EVAL_CODE_MAP_KO.md) §3.3이 정본이다.

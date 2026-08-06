@@ -9,7 +9,8 @@ A BC rollout leaves its evidence in two places that never talk to each other:
       ``ur_env/bc_recording_sink.py::EpisodeRecordingSink`` -- ``metadata.json``,
       the append-only ``actions.jsonl``, one ``<run_id>/episode_XXXX.pkl`` per
       completed episode, and (when the BC server was started without
-      ``--no-inference-log``) ``inference.jsonl``.
+      ``--no-inference-log``) ``inference.jsonl``.  When the server was started
+      with ``HIL_STEP_TIMING=1`` there is also a per-RPC ``timing.jsonl``.
 
   (b) the LAPTOP3 robot-side diagnostic recording written by
       ``ros2_ur_ws/src/gello_recorder`` -- ``vectors.h5`` (the nine
@@ -36,6 +37,12 @@ USAGE
     # add a per-step deep dive for one episode
     $PY serl_ur_infra/scripts/analyze_bc_rollout.py \
         --served ~/bc_rollouts/run_20260731_2200 --episode 3
+
+    # add the laptop3 actor step-timing log (HIL_STEP_TIMING=1) so the wire
+    # time can be separated from the server's own handler time
+    $PY serl_ur_infra/scripts/analyze_bc_rollout.py \
+        --served ~/bc_rollouts/run_20260731_2200 \
+        --actor-timing ros2_ur_ws/gello_logs/step_timing_20260731_2200.jsonl
 
 THE TIME BASE -- READ THIS BEFORE TRUSTING SECTION 4
 ----------------------------------------------------
@@ -98,6 +105,9 @@ SERVED_METADATA = "metadata.json"
 SERVED_ACTIONS = "actions.jsonl"
 #: written by the BC server's InferenceLoggingPolicy (sibling work); optional.
 SERVED_INFERENCE = "inference.jsonl"
+#: per-RPC step timing written beside inference.jsonl when the server was
+#: started with HIL_STEP_TIMING=1 (sibling work); optional.
+SERVED_TIMING = "timing.jsonl"
 #: RecordingSession opens exactly this name under its session dir.
 ROBOT_VECTORS = "vectors.h5"
 #: operator/status stream that rides alongside the h5; optional.
@@ -788,6 +798,347 @@ def _cross_check(
 
 
 # ---------------------------------------------------------------------------
+# (a)+(b) both sides -- step timing (timing.jsonl + --actor-timing)
+# ---------------------------------------------------------------------------
+
+#: Phases of the SERVER-side timing.jsonl, in the order they nest:
+#: ``handler_ms`` is the whole service-handler span and the other three are the
+#: pieces of it (``overhead_ms = handler - infer - sink``).
+SERVER_TIMING_PHASES = ("handler_ms", "infer_ms", "sink_ms", "overhead_ms")
+#: The only server field that is NEVER null in the frozen schema.  ``infer_ms``
+#: is null on a terminal step and ``sink_ms``/``overhead_ms`` follow it, so
+#: those absences shrink one phase's sample rather than voiding the row.
+SERVER_TIMING_REQUIRED = ("handler_ms",)
+
+#: Phases of the ACTOR-side jsonl.  ``loop_ms`` spans iteration start -> RPC
+#: complete and the rest sit inside or beside it; ``post_prev_ms`` is the gap
+#: BETWEEN iterations, so it is not part of ``loop_ms``.
+ACTOR_TIMING_PHASES = (
+    "env_step_ms", "build_ms", "sidecar_ms", "rpc_ms",
+    "round_trip_ms", "server_inference_ms", "loop_ms", "post_prev_ms",
+)
+#: The actor fields the frozen schema types as non-nullable.  A row missing one
+#: of them is a partially-written or foreign line, not a legitimately absent
+#: measurement, so it is dropped and counted.
+ACTOR_TIMING_REQUIRED = ("env_step_ms", "build_ms", "rpc_ms", "loop_ms")
+
+
+def _timing_stats(values: Sequence[float]) -> dict[str, Any]:
+    """count/mean/p50/p95/max for one phase, empty-safe.
+
+    Same ``_finite`` + ``_percentile`` idiom as ``summarize_inference``: a phase
+    that was never recorded reports ``count: 0`` with ``None`` statistics rather
+    than a zero that would read as "it took no time".
+    """
+
+    array = np.asarray(list(values), dtype=np.float64) if len(values) else np.zeros(0)
+    finite = _finite(array)
+    return {
+        "count": int(finite.size),
+        "mean": float(finite.mean()) if finite.size else None,
+        "p50": _percentile(finite, 50.0),
+        "p95": _percentile(finite, 95.0),
+        "max": float(finite.max()) if finite.size else None,
+    }
+
+
+def _timing_keys(row: Mapping[str, Any]) -> tuple[str | None, tuple[str, int, int] | None]:
+    """The two join keys a timing row can offer.
+
+    ``transition_id`` is the authoritative one -- it is minted once per
+    transition and carried across the wire.  The tuple is the fallback for a
+    writer that has not stamped it (or a row where it is null), and it is only
+    usable when all three of its parts parse.
+    """
+
+    raw = row.get("transition_id")
+    text = "" if raw is None else str(raw).strip()
+    transition_id = text or None
+    try:
+        fallback = (str(row["run_id"]), int(row["episode_id"]), int(row["step_id"]))
+    except (KeyError, TypeError, ValueError):
+        fallback = None
+    return transition_id, fallback
+
+
+def _timing_floats(
+    row: Mapping[str, Any], phases: Sequence[str], required: Sequence[str]
+) -> dict[str, float | None] | None:
+    """Parse one row's phases, or return ``None`` if a required one is unusable."""
+
+    parsed: dict[str, float | None] = {}
+    for name in phases:
+        parsed[name] = _float_or_none(row.get(name))
+    for name in required:
+        if parsed.get(name) is None:
+            return None
+    return parsed
+
+
+def _collect_server_timing(
+    result: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fold ``timing.jsonl`` into per-phase stats plus the rows the join needs."""
+
+    summary: dict[str, Any] = {
+        "present": bool(result.get("present")),
+        "path": result.get("path"),
+        "error": result.get("error"),
+        "bad_lines": int(result.get("bad_lines", 0)),
+        "lines": 0,
+        "step_rows": 0,
+        "begin_episode_rows": 0,
+        "other_kind_rows": 0,
+        "skipped_rows": 0,
+        "error_rows": 0,
+        "deduplicated_rows": 0,
+        "terminal_rows": 0,
+        "phases": {name: _timing_stats([]) for name in SERVER_TIMING_PHASES},
+        "begin_episode": {"count": 0, "mean": None, "max": None},
+    }
+    entries: list[dict[str, Any]] = []
+    if not summary["present"]:
+        return summary, entries
+
+    rows = list(result.get("rows") or [])
+    summary["lines"] = len(rows)
+    samples: dict[str, list[float]] = {name: [] for name in SERVER_TIMING_PHASES}
+    begin_samples: list[float] = []
+
+    for row in rows:
+        kind = str(row.get("kind", "") or "")
+        if kind == "begin_episode":
+            summary["begin_episode_rows"] += 1
+            handler = _float_or_none(row.get("handler_ms"))
+            if handler is None:
+                summary["skipped_rows"] += 1
+                continue
+            begin_samples.append(handler)
+            continue
+        if kind != "step":
+            summary["other_kind_rows"] += 1
+            continue
+        parsed = _timing_floats(row, SERVER_TIMING_PHASES, SERVER_TIMING_REQUIRED)
+        if parsed is None:
+            summary["skipped_rows"] += 1
+            continue
+        summary["step_rows"] += 1
+        for name in SERVER_TIMING_PHASES:
+            value = parsed[name]
+            if value is not None:
+                samples[name].append(value)
+        if row.get("error"):
+            summary["error_rows"] += 1
+        summary["deduplicated_rows"] += int(bool(row.get("deduplicated", False)))
+        summary["terminal_rows"] += int(bool(row.get("terminal", False)))
+        transition_id, fallback = _timing_keys(row)
+        entries.append(
+            {
+                "handler_ms": parsed["handler_ms"],
+                "transition_id": transition_id,
+                "fallback": fallback,
+            }
+        )
+
+    summary["phases"] = {name: _timing_stats(samples[name]) for name in SERVER_TIMING_PHASES}
+    begin = _timing_stats(begin_samples)
+    summary["begin_episode"] = {
+        "count": begin["count"], "mean": begin["mean"], "max": begin["max"]
+    }
+    return summary, entries
+
+
+def _collect_actor_timing(
+    result: Mapping[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fold the laptop3 actor step-timing jsonl into per-phase stats."""
+
+    summary: dict[str, Any] = {
+        "present": bool(result.get("present")),
+        "path": result.get("path"),
+        "error": result.get("error"),
+        "bad_lines": int(result.get("bad_lines", 0)),
+        "lines": 0,
+        "step_rows": 0,
+        "skipped_rows": 0,
+        "attached_sidecar_rows": 0,
+        "intervened_rows": 0,
+        "terminal_rows": 0,
+        "phases": {name: _timing_stats([]) for name in ACTOR_TIMING_PHASES},
+    }
+    entries: list[dict[str, Any]] = []
+    if not summary["present"]:
+        return summary, entries
+
+    rows = list(result.get("rows") or [])
+    summary["lines"] = len(rows)
+    samples: dict[str, list[float]] = {name: [] for name in ACTOR_TIMING_PHASES}
+
+    for row in rows:
+        parsed = _timing_floats(row, ACTOR_TIMING_PHASES, ACTOR_TIMING_REQUIRED)
+        if parsed is None:
+            summary["skipped_rows"] += 1
+            continue
+        summary["step_rows"] += 1
+        for name in ACTOR_TIMING_PHASES:
+            value = parsed[name]
+            if value is not None:
+                samples[name].append(value)
+        summary["attached_sidecar_rows"] += int(bool(row.get("attached_sidecar", False)))
+        summary["intervened_rows"] += int(bool(row.get("intervened", False)))
+        summary["terminal_rows"] += int(bool(row.get("terminal", False)))
+        transition_id, fallback = _timing_keys(row)
+        entries.append(
+            {
+                "rpc_ms": parsed["rpc_ms"],
+                "round_trip_ms": parsed["round_trip_ms"],
+                "transition_id": transition_id,
+                "fallback": fallback,
+            }
+        )
+
+    summary["phases"] = {name: _timing_stats(samples[name]) for name in ACTOR_TIMING_PHASES}
+    return summary, entries
+
+
+def _join_step_timing(
+    server_entries: Sequence[Mapping[str, Any]],
+    actor_entries: Sequence[Mapping[str, Any]],
+    *,
+    server_present: bool,
+    actor_present: bool,
+) -> dict[str, Any]:
+    """Pair actor rows to server step rows and derive the communication cost.
+
+    ``wire_ms = actor.rpc_ms - server.handler_ms`` is the ONLY number here that
+    needs both files: everything the actor measured includes the server's own
+    handler span, so subtracting it leaves the tunnel, the gRPC framing and any
+    queueing -- the "communication" figure.  It can legitimately be small or
+    even slightly negative on a fast link (the two spans are stamped by two
+    different clocks and do not nest exactly), so it is reported as a
+    distribution rather than asserted to be positive.
+
+    The join is one-to-one: a server row already claimed by an actor row is not
+    offered again, so a retried/deduplicated RPC pairs with one actor row and
+    shows up in ``unmatched_server`` rather than double-counting.
+    """
+
+    out: dict[str, Any] = {
+        "present": bool(server_present and actor_present),
+        "joined_count": 0,
+        "matched_by_transition_id": 0,
+        "matched_by_fallback_key": 0,
+        "unmatched_actor": 0,
+        "unmatched_server": 0,
+        "wire_ms": _timing_stats([]),
+        "serialize_gap_ms": _timing_stats([]),
+        "note": None,
+    }
+
+    # serialize_gap needs only the actor side, so it is computed even when the
+    # server file is missing.
+    gaps = [
+        float(entry["rpc_ms"]) - float(entry["round_trip_ms"])
+        for entry in actor_entries
+        if entry.get("round_trip_ms") is not None
+    ]
+    out["serialize_gap_ms"] = _timing_stats(gaps)
+
+    by_transition: dict[str, list[int]] = {}
+    by_fallback: dict[tuple[str, int, int], list[int]] = {}
+    for index, entry in enumerate(server_entries):
+        if entry.get("transition_id") is not None:
+            by_transition.setdefault(entry["transition_id"], []).append(index)
+        if entry.get("fallback") is not None:
+            by_fallback.setdefault(entry["fallback"], []).append(index)
+
+    consumed: set[int] = set()
+
+    def _take(bucket: list[int] | None) -> int | None:
+        while bucket:
+            index = bucket.pop(0)
+            if index in consumed:
+                continue
+            consumed.add(index)
+            return index
+        return None
+
+    wires: list[float] = []
+    for entry in actor_entries:
+        index = None
+        matched_by = None
+        transition_id = entry.get("transition_id")
+        if transition_id is not None:
+            index = _take(by_transition.get(transition_id))
+            if index is not None:
+                matched_by = "transition_id"
+        if index is None and entry.get("fallback") is not None:
+            index = _take(by_fallback.get(entry["fallback"]))
+            if index is not None:
+                matched_by = "fallback"
+        if index is None:
+            continue
+        out["joined_count"] += 1
+        if matched_by == "transition_id":
+            out["matched_by_transition_id"] += 1
+        else:
+            out["matched_by_fallback_key"] += 1
+        wires.append(float(entry["rpc_ms"]) - float(server_entries[index]["handler_ms"]))
+
+    out["wire_ms"] = _timing_stats(wires)
+    out["unmatched_actor"] = len(actor_entries) - out["joined_count"]
+    out["unmatched_server"] = len(server_entries) - out["joined_count"]
+
+    if not server_present and not actor_present:
+        out["note"] = "neither side recorded step timing"
+    elif not server_present:
+        out["note"] = (
+            "no server-side timing.jsonl, so the actor's rpc_ms cannot be split "
+            "into server handler time and wire time"
+        )
+    elif not actor_present:
+        out["note"] = (
+            "no --actor-timing file, so the server's handler span cannot be "
+            "compared against what the actor observed"
+        )
+    elif out["joined_count"] == 0:
+        out["note"] = (
+            "no actor row matched a server step row, by transition_id or by "
+            "(run_id, episode_id, step_id)"
+        )
+    return out
+
+
+def summarize_step_timing(
+    server_result: Mapping[str, Any], actor_result: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge the two OPT-IN step-timing logs into one latency breakdown.
+
+    Both inputs are ``_read_jsonl`` results and both are optional: absent files
+    degrade to ``present: False`` sections, exactly like ``inference.jsonl``.
+    Rows whose non-nullable fields are missing or non-numeric are counted as
+    ``skipped_rows`` rather than aborting -- a step-timing log is appended to
+    while the actor runs, so a torn final line is the normal shape of a session
+    that was Ctrl-C'd.
+    """
+
+    server, server_entries = _collect_server_timing(server_result or {})
+    actor, actor_entries = _collect_actor_timing(actor_result or {})
+    joined = _join_step_timing(
+        server_entries,
+        actor_entries,
+        server_present=bool(server["present"]),
+        actor_present=bool(actor["present"]),
+    )
+    return {
+        "present": bool(server["present"] or actor["present"]),
+        "server": server,
+        "actor": actor,
+        "joined": joined,
+    }
+
+
+# ---------------------------------------------------------------------------
 # (b) robot side -- vectors.h5 + status.jsonl
 # ---------------------------------------------------------------------------
 
@@ -1080,6 +1431,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     metadata = _read_json(served / SERVED_METADATA)
     actions = _read_jsonl(served / SERVED_ACTIONS)
     inference_raw = _read_jsonl(served / SERVED_INFERENCE)
+    timing_raw = _read_jsonl(served / SERVED_TIMING)
+
+    # The actor-side step timing is a laptop3-local file, so it is named by flag
+    # rather than found beside the served dir.  ``getattr`` because every input
+    # here is optional and a caller that predates the flag must still work.
+    actor_timing = getattr(args, "actor_timing", None)
+    actor_timing_raw = (
+        _read_jsonl(Path(actor_timing).expanduser())
+        if actor_timing
+        else {"path": None, "present": False, "rows": [], "bad_lines": 0,
+              "bad_line_numbers": [], "error": None}
+    )
 
     action_summary = summarize_actions(actions["rows"])
 
@@ -1089,6 +1452,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
     pickles = scan_served_pickles(served, deep_dive=deep_dive)
     inference = summarize_inference(inference_raw, actions["rows"])
+    latency = summarize_step_timing(timing_raw, actor_timing_raw)
 
     robot: dict[str, Any] | None = None
     status: dict[str, Any] | None = None
@@ -1203,6 +1567,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "totals": _totals(episodes, action_summary["totals"]),
         "episodes": episodes,
         "inference": inference,
+        "latency": latency,
         "robot": _robot_report_view(robot),
         "status": status,
         "deep_dive": {
@@ -1264,6 +1629,176 @@ def _sort_key(episode_id: str) -> tuple[int, Any]:
 # ---------------------------------------------------------------------------
 # Markdown rendering
 # ---------------------------------------------------------------------------
+
+
+#: What each server/actor phase means, rendered beside its numbers so a reader
+#: never has to open the writer to find out what was being timed.
+_SERVER_PHASE_LABELS = {
+    "handler_ms": "handler_ms — whole service handler span",
+    "infer_ms": "infer_ms — policy inference (null on terminal steps)",
+    "sink_ms": "sink_ms — recording-sink write",
+    "overhead_ms": "overhead_ms — handler − infer − sink (decode/validate/copy)",
+}
+_ACTOR_PHASE_LABELS = {
+    "env_step_ms": "env_step_ms — env.step (INCLUDES the ~100 ms pacing sleep)",
+    "build_ms": "build_ms — transition/observation assembly",
+    "sidecar_ms": "sidecar_ms — classifier sidecar encode (null when none)",
+    "rpc_ms": "rpc_ms — client-observed Step RPC, incl. proto build/parse",
+    "round_trip_ms": "round_trip_ms — transport's own round-trip measure",
+    "server_inference_ms": "server_inference_ms — inference time echoed by the server",
+    "loop_ms": "loop_ms — iteration start → RPC complete",
+    "post_prev_ms": "post_prev_ms — previous emit → this iteration start",
+}
+
+
+def _timing_rows(
+    phases: Mapping[str, Any], labels: Mapping[str, str], order: Sequence[str]
+) -> list[list[Any]]:
+    rows = []
+    for name in order:
+        stats = phases.get(name) or {}
+        rows.append(
+            [
+                labels.get(name, name),
+                stats.get("count", 0),
+                _num(stats.get("mean"), 2),
+                _num(stats.get("p50"), 2),
+                _num(stats.get("p95"), 2),
+                _num(stats.get("max"), 2),
+            ]
+        )
+    return rows
+
+
+def _render_step_timing(latency: Mapping[str, Any] | None) -> list[str]:
+    """The ``### Latency breakdown (step timing)`` subsection.
+
+    Built as its own list of lines because it has to appear in the same place
+    whether or not ``inference.jsonl`` exists: the two logs are written by
+    different switches and neither implies the other.
+    """
+
+    lines: list[str] = []
+    add = lines.append
+    add("### Latency breakdown (step timing)")
+    add("")
+
+    latency = latency or {}
+    server = latency.get("server") or {}
+    actor = latency.get("actor") or {}
+    joined = latency.get("joined") or {}
+
+    if not server.get("present") and not actor.get("present"):
+        add(f"{NOT_RECORDED} — no timing.jsonl / --actor-timing (start the "
+            "server and actor with HIL_STEP_TIMING=1 to record step timing)")
+        add("")
+        return lines
+
+    # ---- server side -------------------------------------------------------
+    if not server.get("present"):
+        add(f"{NOT_RECORDED} — no `{SERVED_TIMING}` in the served dir; the "
+            "server-side phase split is unavailable.")
+        add("")
+    else:
+        add(f"**Server** (`{SERVED_TIMING}`): {server.get('step_rows', 0)} step "
+            f"line(s), {server.get('begin_episode_rows', 0)} begin_episode "
+            f"line(s), {server.get('skipped_rows', 0)} unusable row(s), "
+            f"{server.get('bad_lines', 0)} malformed line(s); "
+            f"{server.get('error_rows', 0)} row(s) carried an error, "
+            f"{server.get('deduplicated_rows', 0)} were deduplicated, "
+            f"{server.get('terminal_rows', 0)} were terminal.")
+        add("")
+        lines.extend(
+            _md_table(
+                ["server phase", "n", "mean ms", "p50 ms", "p95 ms", "max ms"],
+                _timing_rows(
+                    server.get("phases") or {}, _SERVER_PHASE_LABELS,
+                    SERVER_TIMING_PHASES,
+                ),
+            )
+        )
+        add("")
+        if server.get("error"):
+            add(f"> read error: {server['error']}")
+            add("")
+        begin = server.get("begin_episode") or {}
+        add(f"`BeginEpisode`: {begin.get('count', 0)} call(s), mean "
+            f"{_num(begin.get('mean'), 2)} ms, max {_num(begin.get('max'), 2)} ms.")
+        add("")
+
+    # ---- actor side --------------------------------------------------------
+    if not actor.get("present"):
+        add(f"{NOT_RECORDED} — `--actor-timing` was not given (or the file was "
+            "missing); the laptop3 loop breakdown is unavailable.")
+        add("")
+    else:
+        add(f"**Actor** (`{actor.get('path')}`): {actor.get('step_rows', 0)} "
+            f"iteration(s), {actor.get('skipped_rows', 0)} unusable row(s), "
+            f"{actor.get('bad_lines', 0)} malformed line(s); "
+            f"{actor.get('attached_sidecar_rows', 0)} carried a classifier "
+            "sidecar.")
+        add("")
+        lines.extend(
+            _md_table(
+                ["actor phase", "n", "mean ms", "p50 ms", "p95 ms", "max ms"],
+                _timing_rows(
+                    actor.get("phases") or {}, _ACTOR_PHASE_LABELS,
+                    ACTOR_TIMING_PHASES,
+                ),
+            )
+        )
+        add("")
+        if actor.get("error"):
+            add(f"> read error: {actor['error']}")
+            add("")
+        add("`env_step_ms` INCLUDES the environment's ~100 ms self-pacing sleep, "
+            "so it is a wall-clock window and not the work done inside it — do "
+            "not read it as CPU cost.")
+        add("")
+
+    # ---- the join ----------------------------------------------------------
+    add("#### Wire time (actor ↔ server)")
+    add("")
+    if joined.get("note"):
+        add(f"{NOT_RECORDED} — {joined['note']}.")
+        add("")
+    join_rows = [
+        ("joined rows", joined.get("joined_count", 0)),
+        ("matched by transition_id", joined.get("matched_by_transition_id", 0)),
+        ("matched by (run_id, episode_id, step_id)",
+         joined.get("matched_by_fallback_key", 0)),
+        ("actor rows with no server row", joined.get("unmatched_actor", 0)),
+        ("server rows with no actor row", joined.get("unmatched_server", 0)),
+    ]
+    lines.extend(_md_table(["field", "value"], join_rows))
+    add("")
+    lines.extend(
+        _md_table(
+            ["metric", "n", "mean ms", "p50 ms", "p95 ms", "max ms"],
+            _timing_rows(
+                {
+                    "wire_ms": joined.get("wire_ms") or {},
+                    "serialize_gap_ms": joined.get("serialize_gap_ms") or {},
+                },
+                {
+                    "wire_ms": "wire_ms — actor rpc_ms − server handler_ms",
+                    "serialize_gap_ms":
+                        "serialize_gap_ms — actor rpc_ms − round_trip_ms",
+                },
+                ("wire_ms", "serialize_gap_ms"),
+            ),
+        )
+    )
+    add("")
+    add("`wire_ms` is what the actor waited for that the server did not spend "
+        "in its handler: tunnel, gRPC framing and queueing — the communication "
+        "number. The two spans are stamped by two different clocks and do not "
+        "nest exactly, so a small negative value is measurement noise, not a "
+        "message arriving before it was sent. `serialize_gap_ms` needs only the "
+        "actor file: it is the client-side proto build/parse that sits outside "
+        "the transport's own round-trip measure.")
+    add("")
+    return lines
 
 
 def render_markdown(report: Mapping[str, Any], args: argparse.Namespace) -> str:
@@ -1439,6 +1974,8 @@ def render_markdown(report: Mapping[str, Any], args: argparse.Namespace) -> str:
             "(the BC server was started with `--no-inference-log`, or this "
             "rollout predates the inference logger).")
         add("")
+        # Step timing is a different switch: it can be there when this is not.
+        lines.extend(_render_step_timing(report.get("latency")))
     else:
         latency = inference["latency_ms"]
         rows = [
@@ -1459,6 +1996,8 @@ def render_markdown(report: Mapping[str, Any], args: argparse.Namespace) -> str:
         ]
         lines.extend(_md_table(["field", "value"], rows))
         add("")
+
+        lines.extend(_render_step_timing(report.get("latency")))
 
         cross = inference["cross_check"] or {}
         add("### Inferred vs executed action")
@@ -1754,6 +2293,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "laptop3 recorder session dir; vectors.h5/status.jsonl are looked up "
             "both directly under it and under its robot/ subdirectory"
+        ),
+    )
+    parser.add_argument(
+        "--actor-timing",
+        default=None,
+        help=(
+            "laptop3 actor step-timing jsonl produced by HIL_STEP_TIMING=1 (one "
+            "line per actor loop iteration); joined against the served dir's "
+            "timing.jsonl to separate wire time from server handler time"
         ),
     )
     parser.add_argument(

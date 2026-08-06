@@ -33,7 +33,8 @@
 # BC_LOCAL_PORT=50153 (what the actor dials) · BC_REMOTE_PORT=50054 (50053 is
 # refused) · BC_ARTIFACT_DIR=<data root>/diagnostics/<bc-init artifact> ·
 # BC_START_TIMEOUT_S=300 · BC_ACCEPT_HEAD_MISMATCH=0 (1 downgrades the HEAD
-# refusal to a warning).
+# refusal to a warning) · HIL_STEP_TIMING= (1/true/yes makes the server also
+# write <run dir>/served/timing.jsonl; off by default).
 # =============================================================================
 set -euo pipefail
 
@@ -50,6 +51,19 @@ BC_REMOTE_PORT="${BC_REMOTE_PORT:-50054}"
 BC_ARTIFACT_DIR="${BC_ARTIFACT_DIR:-$BC_REMOTE_DATA_ROOT/diagnostics/bc_cube_in_cup_raw_0731_bce_group_holdout_20epoch_20260731_213638.bc-init}"
 BC_START_TIMEOUT_S="${BC_START_TIMEOUT_S:-300}"
 BC_ACCEPT_HEAD_MISMATCH="${BC_ACCEPT_HEAD_MISMATCH:-0}"
+
+# Opt-in per-step server timing, off unless asked for.  Normalised HERE rather
+# than on the server so a typo is reported to the operator instead of arriving
+# as a silent OFF in a run they believe is instrumented.
+step_timing="${HIL_STEP_TIMING:-}"
+case "${step_timing,,}" in
+    "") step_timing="" ;;
+    1|true|yes) step_timing="1" ;;
+    *)
+        echo "WARNING: HIL_STEP_TIMING='$step_timing' is not 1/true/yes; step timing stays OFF." >&2
+        step_timing=""
+        ;;
+esac
 
 # The ready/FATAL markers live ONLY inside the remote poll script below, and
 # that is not tidiness: ssh flattens its command argv into a single string that
@@ -200,11 +214,17 @@ fi
 echo "Starting BC policy server on $BC_SSH_HOST (GPU $BC_GPU_INDEX, port $BC_REMOTE_PORT)"
 echo "  artifact: $BC_ARTIFACT_DIR"
 echo "  run dir : $RUN_DIR"
+if [[ -n "$step_timing" ]]; then
+    echo "[bc-launcher] step timing ON -> $RUN_DIR/served/timing.jsonl"
+fi
 rsh bash -s -- "$BC_REMOTE_REPO" "$RUN_DIR" "$BC_REMOTE_PYTHON" \
-    "$BC_ARTIFACT_DIR" "$BC_REMOTE_PORT" "$BC_GPU_INDEX" <<'REMOTE_START' || \
+    "$BC_ARTIFACT_DIR" "$BC_REMOTE_PORT" "$BC_GPU_INDEX" "$step_timing" <<'REMOTE_START' || \
     die "remote BC server launch failed; nothing was started and nothing else was touched"
 set -euo pipefail
-repo="$1"; run_dir="$2"; py="$3"; artifact="$4"; port="$5"; gpu="$6"
+# $7 via ${7:-}: ssh flattens its argv into one command string, so an EMPTY
+# trailing argument (timing off) disappears before the remote shell re-splits
+# it, and a bare "$7" would then trip `set -u`.
+repo="$1"; run_dir="$2"; py="$3"; artifact="$4"; port="$5"; gpu="$6"; step_timing="${7:-}"
 
 [[ -d "$repo" ]] || { echo "REMOTE ERROR: repo is missing: $repo" >&2; exit 1; }
 [[ -x "$py" ]] || { echo "REMOTE ERROR: python is missing: $py" >&2; exit 1; }
@@ -223,6 +243,7 @@ cd "$repo"
 nohup env \
     CUDA_VISIBLE_DEVICES="$gpu" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    HIL_STEP_TIMING="$step_timing" \
     PYTHONPATH="$repo/serl_ur_infra:$repo/third_party/hil-serl/serl_launcher" \
     "$py" serl_ur_infra/scripts/run_bc_policy_server.py \
     --artifact-dir "$artifact" \

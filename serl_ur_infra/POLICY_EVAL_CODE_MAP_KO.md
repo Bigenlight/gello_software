@@ -5,7 +5,9 @@
 
 한 줄 요약: **production HIL-SERL의 gRPC 서버(`ActorSessionService`)를 그대로 쓰고, 정책
 callable과 `accept_data` sink만 갈아 끼운 것**이 BC/FM 평가 스택 전부다. actor·하드웨어·GUI
-코드는 한 줄도 바뀌지 않았다.
+코드는 한 줄도 바뀌지 않았다 — **유일한 예외가 옵트인 스텝 타이밍 계측**(`HIL_STEP_TIMING=1`,
+기본 OFF)이고 그것도 액터 파이썬에 기록 경로 하나가 붙었을 뿐 **셸 스크립트는 여전히 무수정**이다
+(→ §3.3).
 
 ```
 actor(laptop3, 무수정) ──Step(픽셀 관측)──► 50153 터널 ──► 50054 BC / 50055 FM
@@ -33,6 +35,8 @@ actor(laptop3, 무수정) ──Step(픽셀 관측)──► 50153 터널 ──
 | `bc_recording_sink.py` | `EpisodeRecordingSink` | `ActorSessionService`의 `accept_data(data, intervened)` 구현. Step RPC 안, ACK **전에** 동기 호출된다. terminal 전이가 와야 episode pickle을 쓴다(중도 사망 시 그 episode의 pickle은 없고 `actions.jsonl`만 남는다 — 의도된 트레이드오프). **`open(path, "xb")` — 절대 `"wb"` 금지**: `(run_id, episode_id)` 중복은 서버가 구분 못 하는 두 episode를 봤다는 뜻이고 덮어쓰면 재현 불가능한 기록이 사라진다. `metadata.json`이 이미 있으면 `artifact_sha256`/`model_id` 일치를 요구한다(record root에 두 정책 혼입 금지). |
 | 🛑 같은 파일 | **`prime_observation` 부재가 의도** | `ActorSessionService._prime_replay_observation`이 **sink에서** `getattr(self._accept_data, "prime_observation", None)`을 찾고(있으면 정책 입력을 픽셀 → frozen-trunk feature로 **바꾼다**), 없으면 `None`으로 떨어진다(`actor_network.py:1490`). BC agent와 FM extractor 둘 다 **원본 픽셀**을 받아야 하므로 이 클래스에 그 속성을 **추가하면 안 된다**. `FmServedPolicy`·`InferenceLoggingPolicy`도 같은 이유로 금지(전자는 위임 `__getattr__`조차 두지 않는다). |
 | `bc_inference_log.py` | `InferenceLoggingPolicy` | 정책 callable을 감싸 **호출당 1줄** JSONL. **fail-open이 load-bearing**: 이 객체는 실기 UR7e 추론 경로 한복판에 있고, 여기서 던진 예외는 `ActorSessionService._infer`가 `PolicyInferenceError`로 바꿔 **팔이 뻗은 채 episode가 죽는다**. 그래서 로깅 블록 전체를 잡아 `log_error_count`에 세고 **stderr에 딱 한 번** 경고한다. 생성자는 파일시스템을 건드리지 않고(스트림은 첫 추론에 lazy open, append 전용), **결과 튜플은 객체 동일성 그대로 반환**한다(하류 `validate_action`이 정책이 만든 것을 그대로 봐야 한다). 이미지는 절대 안 남기고 state는 정확히 19-D일 때만. `__getattr__`이 감싼 정책에 위임하므로 `model_id`/`policy_version` 등은 그대로 읽힌다. |
+| `step_timing.py` | `FailOpenJsonlWriter` · `StepTimingRecorder` · `TimingSink` · `ServiceStepTimingProxy` | **옵트인 스텝 latency 계측**(`HIL_STEP_TIMING=1`, 기본 OFF, **stdlib 전용**). `FailOpenJsonlWriter`는 `bc_inference_log.py`와 **같은 fail-open 패턴** — 기록이 실패해도 서빙을 절대 죽이지 않는다. `ServiceStepTimingProxy`는 `GrpcActorServicer`가 쓰는 **5개 메서드 표면**(`health` / `get_server_info` / `get_buffer_status` / `begin_episode` / `step`)을 그대로 노출한다. 스키마·조인 규칙은 **§3.3이 정본**이다. |
+| 🛑 같은 파일 | `TimingSink`의 `prime_observation` 거부 | sink 래퍼는 위 🛑 규칙의 **반대편 함정**을 막는다: `prime_observation`을 가진 sink를 감싸면 `ActorSessionService._prime_replay_observation`의 `getattr`이 실패해 **feature-priming이 조용히 사라진다**. 그래서 그런 sink는 **생성 시 `ValueError`로 거부**하고, `TimingSink` 자신은 `prime_observation`도 위임 `__getattr__`도 두지 않는다. BC/FM sink(`EpisodeRecordingSink`)에는 애초에 그 속성이 없으므로 평가 스택에서는 항상 통과한다. |
 
 ### 1.2 서버 entrypoint (`serl_ur_infra/scripts/`)
 
@@ -91,6 +95,12 @@ FM은 BC의 클론이고 차이는 **`FM_WHICH`(best/final)** 와 **`FM_ALLOW_PO
 | `vectors.h5` `t_rel_s` | `time.time() - t0`(`RecordingSession.__init__`의 t0) = **상대 시계** | `synchronized.t_wall`(생 `time.time()`)로 `median(t_wall - t_rel_s)` = epoch 복원. 없으면 레코더 `metadata.json`의 `start_wall`(**naive 로컬시각**)로 강등 |
 
 어느 쪽이 쓰였는지는 리포트 §4가 산문으로 명시한다 — 코드를 다시 열 필요가 없게.
+
+**스텝 타이밍 입력**: 서버 `timing.jsonl`은 `--served` 디렉터리에서 **자동 발견**하고, 액터 쪽은
+`--actor-timing <액터 jsonl>`로 직접 준다. 둘 중 하나라도 있으면 리포트 **§2 Inference log 아래**에
+`### Latency breakdown (step timing)` 절이 붙어 phase별 count/mean/p50/p95/max와 `wire_ms`를 찍는다.
+**아무 파일도 없으면 `NOT RECORDED` 한 줄로 우아하게 빠지고** 나머지 리포트는 그대로 나온다
+(증거 절반이 없어도 리포트가 나온다는 §1.6의 규칙 그대로).
 
 ### 1.6 테스트 8파일
 
@@ -165,6 +175,7 @@ orbax 체크포인트가 **아니다**(`production_checkpoint_compatible: false`
 | `metadata.json` | `{artifact_sha256, model_id, created_at_utc}` — 존재하면 앞 둘의 **일치를 요구**한다 |
 | `actions.jsonl` | 전이 1개당 1줄: `{ts, run_id, episode_id, step_id, env_step, actions[7], intervened, dones, truncated, success, rewards}`. **이미지 없음**(tail 가능해야 한다) |
 | `inference.jsonl` | 추론 1회당 1줄: `{ts, latency_ms, deterministic, policy_version, action[7], state[19]\|null}`. `--no-inference-log`면 없음. **`actions.jsonl`과 줄 수가 다른 게 정상** — 캐시된 Step 응답·warm-up·actor가 버린 추론이 여기에만 남는다 |
+| `timing.jsonl` | 옵트인 스텝 latency 분해(`HIL_STEP_TIMING=1`, 기본 OFF). 필드는 **§3.3**이 정본 |
 | `<run_id>/episode_XXXX.pkl` | **완료된 episode당 1개**, pickle protocol 4. `{"meta":…, "transition":…}` wrapper dict의 **평범한 `list`** → `ur_env/learner/demo.py::load_demo_object`가 `set(item)=={"meta","transition"}`을 특수 처리하므로 **리포의 strict 로더로 그대로 읽힌다** |
 
 `meta`: `schema_version, run_id, actor_id, session_id, transition_id, env_step, timestamp_ns, policy_version, policy_action, intervened, auto_success, operator_success, policy_actions_synthetic` / `transition`: `episode_id, step_id, observation_id, next_observation_id, actions, rewards, masks, dones, truncated, observations, next_observations, success, classifier_*`. **`run_id`는 `meta`가, `episode_id`/`step_id`는 `transition`이 권위**다.
@@ -181,6 +192,68 @@ orbax 체크포인트가 **아니다**(`production_checkpoint_compatible: false`
   robot/metadata.json   Ctrl-C 정상 종료 시 finalized
   status.jsonl          {ts, topic, raw, parsed} — parsed는 실패 시 null, raw는 항상 보존
 ```
+
+### 3.3 스텝 타이밍 — `HIL_STEP_TIMING=1` (기본 OFF, writer: `step_timing.py`)
+
+한 스텝의 시간이 **통신 / 모델 / 기록 / 로봇 관측** 중 어디에 쓰였는지 스텝 단위로 분해한다.
+서버(T1)와 액터(T3)를 **각각** 켜며, 한쪽만 켜도 그쪽 분해는 나온다 — **둘 다 켜야 순수 통신
+시간(`wire_ms`)이 계산된다.**
+
+| 켜는 곳 | 방법 | 산출물 |
+| --- | --- | --- |
+| 서버(T1) | `HIL_STEP_TIMING=1 ./run_bc_server.sh` / `./run_fm_server.sh` (런처가 ssh 너머 서버 프로세스까지 전달) · 서버 스크립트 직접 기동이면 `--step-timing` | `<run dir>/served/timing.jsonl` (`inference.jsonl` 옆) |
+| 액터(T3) | 평소 세션 명령 앞에 `HIL_STEP_TIMING=1`만 — 환경변수가 `run_hil_session.sh` → `run_hil_actor.sh` → actor 파이썬까지 그대로 흐르므로 **셸 스크립트는 무수정** | `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl` (또는 `--step-timing-path`) |
+
+켜졌다는 표식: 서버는 **ready 라인에 `step_timing=1` 토큰**이 추가되고, 액터는 기동 로그에
+`[actor] step timing ON -> <경로>` 한 줄.
+
+**서버 `timing.jsonl`** — Step RPC당 1줄 + BeginEpisode당 1줄.
+
+| 필드 | 뜻 |
+| --- | --- |
+| `ts` | 기록 시각 |
+| `kind` | `"step"` \| `"begin_episode"` |
+| `run_id` · `episode_id` · `step_id` · `env_step` · `transition_id` | 식별자 (조인 키는 `transition_id`) |
+| `handler_ms` | **서비스 핸들러 총시간** (아래 셋의 상위 집합) |
+| `infer_ms` | 정책 추론 — `ActionResult.server_inference_ms` 유래. **terminal 스텝은 `null`** |
+| `sink_ms` | 기록 sink 쓰기 (`EpisodeRecordingSink`) |
+| `overhead_ms` | `handler_ms − infer_ms − sink_ms` = **관측 디코드 / 검증 / 복사** |
+| `terminal` · `deduplicated` · `error` | 그 Step의 성격 표식 |
+
+**액터 jsonl** — **Step RPC를 완료한 루프 반복당 1줄**.
+
+| 필드 | 뜻 |
+| --- | --- |
+| `ts` | 기록 시각 |
+| `run_id` · `episode_id` · `step_id` · `env_step` · `transition_id` | 식별자 |
+| `env_step_ms` | `env.step` — ⚠️ **~100 ms 자체 페이싱 sleep이 포함된다.** "환경 처리 비용"으로 읽으면 안 된다 |
+| `build_ms` | 전이 조립 (`build_data`) |
+| `sidecar_ms` | 분류기 sidecar JPEG 인코드. **미부착 스텝은 `null`** (평가 세션은 `--no-classifier-sidecar`라 항상 `null`) |
+| `rpc_ms` | **클라이언트가 관측한** Step RPC 왕복 — proto 조립/파싱 포함 |
+| `round_trip_ms` | 전송계층이 자체 측정한 왕복 |
+| `server_inference_ms` | 서버가 회신한 추론 시간 |
+| `loop_ms` | 반복 시작 → RPC 완료 |
+| `post_prev_ms` | 직전 반복 emit → 이번 반복 시작. **RPC 이후 북키핑과 주기적 pickle 덤프가 여기 잡힌다** |
+| `attached_sidecar` · `intervened` · `terminal` | 플래그 |
+
+**조인 키와 파생값**
+
+```
+transition_id = "<run_id>:<env_step>"           # 서버·액터 공통 조인 키
+wire_ms       = 액터 rpc_ms − 서버 handler_ms   # 터널 + gRPC 프레이밍 + 큐잉 = 순수 통신
+```
+
+**설계 사실 — 알고 있어야 할 것**
+
+- **proto / `SCHEMA_VERSION` 무변경.** 신규 데이터는 전부 **서버·액터 로컬 jsonl**이고 조인은
+  오프라인에서 `transition_id`로 한다. 그래서 한쪽만 켜도, 한쪽만 배포돼도 와이어가 깨지지 않는다.
+- **`infer_ms` ≠ `inference.jsonl`의 `latency_ms`.** 앞은 **서비스 측정**이라 inference-log 래퍼의
+  쓰기 비용까지 들어가고, 뒤는 **순수 모델 호출**만이다. µs 단위 차이지만 **같은 값이 아니다.**
+- **기동 smoke 추론은 `timing.jsonl`에 섞이지 않는다** — smoke는 service가 아니라 policy를 **직접**
+  호출하기 때문이다.
+- **production HIL learner 서버(`run_rlpd_learner_server.py`, `:50053`)는 이 기능과 무관하게 무수정**이다.
+- 기본이 OFF라 **평소 실행에는 오버헤드가 없고**, 켰을 때의 비용은 **스텝당 JSONL 한 줄 쓰기**
+  수준이다. 그 이상은 아직 실측이 없다 — 숫자를 지어내지 말 것.
 
 ---
 

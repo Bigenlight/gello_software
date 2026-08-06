@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import math
+import os
 import socket
 import sys
 import time
@@ -42,6 +43,10 @@ from ur_env.remote_actor import (  # noqa: E402
     EnvTimestampAdapter,
     run_remote_actor,
     run_remote_actor_probe,
+)
+from ur_env.step_timing import (  # noqa: E402
+    STEP_TIMING_ENV,
+    step_timing_enabled,
 )
 
 
@@ -155,6 +160,18 @@ def _parse_args() -> argparse.Namespace:
             "so the buffer stays self-consistent. 0 (default) disables it."
             " Requires --arm; no-submit probe mode always validates the "
             "unmodified server action."
+        ),
+    )
+    parser.add_argument(
+        "--step-timing-path",
+        type=str,
+        default=None,
+        help=(
+            "Write one JSON line per completed Step RPC to this path: the "
+            "per-step latency breakdown (env.step, transition build, classifier "
+            f"sidecar, RPC, loop). Setting {STEP_TIMING_ENV}=1 instead turns the "
+            "same instrumentation on under a generated path. Off by default; "
+            "the writer fails open and never affects the run."
         ),
     )
     return parser.parse_args()
@@ -427,6 +444,36 @@ def _load_config_mapping(ur_config_module: str | None) -> dict:
     return mapping
 
 
+def _resolve_step_timing_path(args: argparse.Namespace) -> str | None:
+    """Explicit flag, else the environment, else off.
+
+    The environment fallback is deliberate and lives only here: the production
+    shells (``run_hil_session.sh`` -> ``run_hil_actor.sh``) pass the environment
+    through untouched, so this is the one way to turn timing on for a real
+    session without editing them.  ``ur_env.remote_actor`` stays free of
+    environment reads.
+    """
+
+    # getattr, not attribute access: callers that hand-roll the namespace
+    # instead of going through _parse_args predate this flag.
+    explicit = getattr(args, "step_timing_path", None)
+    if explicit:
+        path = explicit
+        source = "--step-timing-path"
+    elif step_timing_enabled(os.environ.get(STEP_TIMING_ENV)):
+        path = os.path.join(
+            os.getcwd(),
+            "gello_logs",
+            "step_timing",
+            f"actor_step_timing_{time.strftime('%Y%m%d_%H%M%S')}.jsonl",
+        )
+        source = STEP_TIMING_ENV
+    else:
+        return None
+    print(f"[remote-actor] step timing ({source}) -> {path}", flush=True)
+    return path
+
+
 def main() -> int:
     args = _parse_args()
     if args.arm and args.fake_env:
@@ -553,6 +600,7 @@ def main() -> int:
                 _sidecar_settings(config, args)
             ),
             operator_session=operator_session,
+            step_timing_path=_resolve_step_timing_path(args),
         )
         print(
             f"[remote-actor] run={summary.run_id} steps={summary.env_steps} "

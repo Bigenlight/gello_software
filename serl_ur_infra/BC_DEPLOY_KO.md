@@ -186,6 +186,49 @@ T3보다 먼저 띄우지 않는다). **종료:** 평가가 끝나면 이 창에
 > T4는 거기에 **로봇 원시 데이터와 고주기 신호**를 더하는 것이다.
 > `inference.jsonl`에는 조건이 하나 붙는다 — §7을 볼 것.
 
+### 4.6 (선택) 스텝 latency 계측 — `HIL_STEP_TIMING=1`
+
+한 스텝의 시간이 **통신 / 모델 / 기록 / 로봇 관측** 중 어디에 쓰였는지 스텝 단위로 분해해 남긴다.
+**기본은 OFF**이고, 켜지 않으면 평소 실행과 아무것도 달라지지 않는다. 서버(T1)와 액터(T3)를
+**각각** 켜며, 한쪽만 켜도 그쪽 분해는 나온다 — 다만 **둘 다 켜야 순수 통신 시간(`wire_ms`)이
+계산된다.**
+
+```bash
+# T1 — §4.1 명령 앞에 환경변수 하나만 더한다
+HIL_STEP_TIMING=1 ./run_bc_server.sh
+
+# T3 — §4.4 명령 앞에 환경변수 하나만 더한다 (핀 3개는 그대로)
+HIL_STEP_TIMING=1 EXPECTED_MODEL_ID=bc-cube-in-cup-raw0731-bcinit-v1 EXPECTED_REWARD_AUTHORITY=local EXPECTED_REWARD_MODEL_ID=operator-manual-success-v1 ./run_hil_session.sh --no-classifier-sidecar
+```
+
+**성공 표식:** T1은 `[bc-server] ready …` 줄에 **`step_timing=1` 토큰**이 붙고, T3는 actor 기동
+로그에 `[actor] step timing ON -> <경로>` 한 줄이 나온다.
+
+**무엇이 남나**
+
+- 서버: `~/hil-serl-data/bc_eval/bc_eval_<ts>/served/timing.jsonl` (`inference.jsonl` 옆)
+- laptop3: `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl`
+  (경로를 직접 주려면 `--step-timing-path`)
+
+⚠️ **서버 쪽은 코드가 서버 runtime에 pull된 뒤 T1을 새로 띄워야 반영된다** — 살아 있는 옛 서버
+프로세스를 그대로 쓰면 `timing.jsonl`이 생기지 않는다(`inference.jsonl`과 같은 함정, §7).
+서버 스크립트를 직접 기동한다면 `--step-timing` 플래그가 같은 일을 한다.
+
+**분석:** 평소 분석기(§7)에 액터 파일만 더한다. 서버 `timing.jsonl`은 `--served` 아래에서 자동으로
+찾는다.
+
+```bash
+cd /home/laptop3/gello_software && /home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/analyze_bc_rollout.py --served <served 디렉터리> --actor-timing ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl
+```
+
+리포트에 **§2 Inference log 아래로** `### Latency breakdown (step timing)` 절이 추가되어 phase별
+count/mean/p50/p95/max와 `wire_ms`를 찍는다. 기록 파일이 없으면 그 절은 `NOT RECORDED` 한 줄로
+빠지고 나머지 리포트는 그대로 나온다.
+
+⚠️ 액터 기록의 `env_step_ms`에는 `env.step`의 **~100 ms 자체 페이싱 sleep**이 포함돼 있다 —
+"환경 처리 비용"으로 읽지 말 것. 필드 단위 스키마는
+[`POLICY_EVAL_CODE_MAP_KO.md`](POLICY_EVAL_CODE_MAP_KO.md) §3.3이 정본이다.
+
 ---
 
 ## 5. 평가 프로토콜

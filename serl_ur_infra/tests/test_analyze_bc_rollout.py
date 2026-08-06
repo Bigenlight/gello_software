@@ -721,3 +721,355 @@ def test_pinned_flags_are_accepted(tmp_path, flag):
     # which is the one string a CLI contract legitimately owns.
     assert result.returncode == 0, result.stderr
     assert flag in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# 6. Step timing -- the OPT-IN latency breakdown                                #
+# --------------------------------------------------------------------------- #
+# A BC evaluation can be run with HIL_STEP_TIMING=1, which leaves a second pair
+# of logs: ``timing.jsonl`` in the served dir (written by the SERVER, one row per
+# Step RPC and one per BeginEpisode) and a separate actor-side jsonl on laptop3
+# (one row per loop iteration).  Neither exists by default.
+#
+# The number that needs BOTH files is ``wire_ms = actor.rpc_ms -
+# server.handler_ms``: everything the actor measured includes the server's own
+# handler span, so subtracting it leaves the tunnel and the framing.  That
+# subtraction is the only arithmetic the analyzer performs across hosts, and the
+# fixture below is built so its answer is known by construction rather than
+# recomputed by the test.
+#
+#     transition          server handler_ms    actor rpc_ms    wire_ms
+#     <RUN_ID>:0:0                    10.0            15.0        5.0
+#     <RUN_ID>:0:1                    20.0            26.0        6.0
+#     <RUN_ID>:0:2 (terminal)         30.0            37.0        7.0
+#                                                     mean        6.0
+#
+# The third server row is terminal and therefore has ``infer_ms``/``sink_ms``
+# null (a terminal Step requests no action and runs no sink), which is what
+# makes the per-phase sample counts differ from the row count -- the property
+# a "count == lines" implementation would get wrong.
+
+#: Server rows: handler_ms, infer_ms, sink_ms, terminal.
+_TIMING_STEPS = (
+    (10.0, 4.0, 1.0, False),
+    (20.0, 5.0, 2.0, False),
+    (30.0, None, None, True),
+)
+#: Actor rpc_ms per step, in the same order.
+_ACTOR_RPC_MS = (15.0, 26.0, 37.0)
+#: The known answers.
+_WIRE_MS = tuple(
+    rpc - step[0] for rpc, step in zip(_ACTOR_RPC_MS, _TIMING_STEPS)
+)
+_WIRE_MEAN = sum(_WIRE_MS) / len(_WIRE_MS)
+#: BeginEpisode is timed too, but it is not a step and must not pollute the
+#: step phases; its handler_ms is deliberately below every step's.
+_BEGIN_EPISODE_MS = 12.0
+
+_TIMING_TRANSITION_IDS = tuple(
+    f"{RUN_ID}:0:{index}" for index in range(len(_TIMING_STEPS))
+)
+
+#: The one stable string the "we have no step timing" line has to contain: the
+#: environment variable an operator would set to get it next time.  Asserting on
+#: the switch rather than on the prose keeps the wording free to change.
+NOT_RECORDED_SUBSTRING = "HIL_STEP_TIMING"
+
+
+def _server_timing_lines() -> list[str]:
+    """``timing.jsonl`` in the frozen server schema (3 steps + 1 BeginEpisode)."""
+
+    rows: list[dict[str, Any]] = []
+    for index, (handler, infer, sink, terminal) in enumerate(_TIMING_STEPS):
+        rows.append(
+            {
+                "ts": 1_800_000_000.0 + index,
+                "kind": "step",
+                "run_id": RUN_ID,
+                "episode_id": 0,
+                "step_id": index,
+                "env_step": index,
+                "transition_id": _TIMING_TRANSITION_IDS[index],
+                "handler_ms": handler,
+                "infer_ms": infer,
+                "sink_ms": sink,
+                "overhead_ms": handler - (infer or 0.0) - (sink or 0.0),
+                "terminal": terminal,
+                "deduplicated": False,
+                "error": None,
+            }
+        )
+    rows.append(
+        {
+            "ts": 1_799_999_999.0,
+            "kind": "begin_episode",
+            "run_id": RUN_ID,
+            "episode_id": None,
+            "step_id": None,
+            "env_step": None,
+            "transition_id": None,
+            "handler_ms": _BEGIN_EPISODE_MS,
+            "infer_ms": None,
+            "sink_ms": None,
+            "overhead_ms": _BEGIN_EPISODE_MS,
+            "terminal": None,
+            "deduplicated": None,
+            "error": None,
+        }
+    )
+    return [json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows]
+
+
+def _actor_timing_lines() -> list[str]:
+    """The laptop3 side, in the frozen actor schema, with matching ids."""
+
+    rows = []
+    for index, rpc in enumerate(_ACTOR_RPC_MS):
+        terminal = _TIMING_STEPS[index][3]
+        rows.append(
+            {
+                "ts": 1_800_000_000.0 + index,
+                "run_id": RUN_ID,
+                "episode_id": 0,
+                "step_id": index,
+                "env_step": index,
+                "transition_id": _TIMING_TRANSITION_IDS[index],
+                "env_step_ms": 100.0 + index,
+                "build_ms": 1.0 + index,
+                "sidecar_ms": None,
+                "rpc_ms": rpc,
+                "round_trip_ms": rpc - 1.0,
+                "server_inference_ms": _TIMING_STEPS[index][1],
+                "loop_ms": 200.0 + index,
+                "post_prev_ms": None if index == 0 else 50.0,
+                "attached_sidecar": False,
+                "intervened": False,
+                "terminal": terminal,
+            }
+        )
+    return [json.dumps(row, sort_keys=True, separators=(",", ":")) for row in rows]
+
+
+def _write_step_timing(served: Path) -> None:
+    (served / "timing.jsonl").write_text(
+        "\n".join(_server_timing_lines()) + "\n", encoding="utf-8"
+    )
+
+
+def _write_actor_timing(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(_actor_timing_lines()) + "\n", encoding="utf-8")
+    return path
+
+
+def _latency(report: dict[str, Any]) -> dict[str, Any]:
+    latency = report.get("latency")
+    assert isinstance(latency, dict), (
+        "report.json must carry a `latency` section whenever step timing is "
+        f"part of the CLI; found top-level keys {sorted(report)}"
+    )
+    for side in ("server", "actor", "joined"):
+        assert side in latency, f"latency must name the `{side}` side"
+    return latency
+
+
+def _stats(node: Any, name: str) -> dict[str, Any]:
+    """The count/mean/p50/p95/max block for one phase, wherever it is nested.
+
+    Tolerant on purpose: the assertions below are about the NUMBERS, so the
+    analyzer stays free to group its phases under ``phases``, inline them, or
+    rename the grouping.
+    """
+
+    for key, value in _walk(node):
+        if key == name and isinstance(value, dict) and "count" in value:
+            return value
+    raise AssertionError(
+        f"no per-phase stats found for {name!r}; keys present: "
+        f"{sorted({key for key, _ in _walk(node)})}"
+    )
+
+
+def _looks_absent(node: Any) -> bool:
+    """True when this side of the latency report is explicitly marked missing."""
+
+    if node is None or node == {}:
+        return True
+    if not isinstance(node, dict):
+        return False
+    for key, value in _walk(node):
+        if key.lower() in {"present", "recorded", "found", "available"}:
+            if value is False:
+                return True
+    return False
+
+
+def test_step_timing_logs_produce_a_joined_latency_breakdown(tmp_path):
+    """Both sides present: the report must split rpc time from handler time."""
+
+    served = _build_served_dir(tmp_path / "bc_eval")
+    _write_step_timing(served)
+    actor_timing = _write_actor_timing(tmp_path / "laptop3" / "step_timing.jsonl")
+    out_dir = tmp_path / "out"
+
+    _run_analyzer(
+        "--served", served, "--actor-timing", actor_timing, "--out", out_dir
+    )
+    report = _read_report(out_dir)
+    latency = _latency(report)
+
+    joined = latency["joined"]
+    wire = _stats(joined, "wire_ms")
+    assert wire["count"] == len(_ACTOR_RPC_MS), (
+        "all three actor rows share a transition_id with a server step row, so "
+        "all three must join"
+    )
+    assert wire["mean"] == pytest.approx(_WIRE_MEAN), (
+        "wire_ms is actor rpc_ms minus server handler_ms, averaged: "
+        f"expected {_WIRE_MEAN}, fixture wires are {list(_WIRE_MS)}"
+    )
+    assert wire["max"] == pytest.approx(max(_WIRE_MS))
+
+
+def test_step_timing_phase_counts_follow_the_samples_not_the_line_count(tmp_path):
+    """A terminal step has no inference and no sink; the counts must show it."""
+
+    served = _build_served_dir(tmp_path / "bc_eval")
+    _write_step_timing(served)
+    actor_timing = _write_actor_timing(tmp_path / "laptop3" / "step_timing.jsonl")
+    out_dir = tmp_path / "out"
+
+    _run_analyzer(
+        "--served", served, "--actor-timing", actor_timing, "--out", out_dir
+    )
+    latency = _latency(_read_report(out_dir))
+
+    server = latency["server"]
+    handler = _stats(server, "handler_ms")
+    # INTERPRETATION: the frozen spec does not say whether the BeginEpisode row
+    # joins the step phases, so both readings are accepted -- but the maximum
+    # pins that the step rows are all there either way.
+    assert handler["count"] in (len(_TIMING_STEPS), len(_TIMING_STEPS) + 1), (
+        f"expected 3 step rows (or 4 including BeginEpisode), got {handler['count']}"
+    )
+    assert handler["max"] == pytest.approx(30.0)
+
+    infer = _stats(server, "infer_ms")
+    assert infer["count"] == 2, "only the two non-terminal rows ran the policy"
+    assert infer["mean"] == pytest.approx(4.5)
+
+    sink = _stats(server, "sink_ms")
+    assert sink["count"] == 2, "only the two non-terminal rows reached the sink"
+    assert sink["mean"] == pytest.approx(1.5)
+
+    actor = latency["actor"]
+    rpc = _stats(actor, "rpc_ms")
+    assert rpc["count"] == len(_ACTOR_RPC_MS)
+    assert rpc["mean"] == pytest.approx(sum(_ACTOR_RPC_MS) / len(_ACTOR_RPC_MS))
+
+
+def test_the_markdown_carries_the_latency_subsection(tmp_path):
+    """Under section 2 -- the operator reads latency next to the inference log."""
+
+    served = _build_served_dir(tmp_path / "bc_eval")
+    _write_step_timing(served)
+    actor_timing = _write_actor_timing(tmp_path / "laptop3" / "step_timing.jsonl")
+    out_dir = tmp_path / "out"
+
+    _run_analyzer(
+        "--served", served, "--actor-timing", actor_timing, "--out", out_dir
+    )
+    markdown = _read_markdown(out_dir)
+
+    assert "Latency breakdown (step timing)" in markdown
+    heading = markdown.index("Latency breakdown (step timing)")
+    section_two = markdown.index("## 2. Inference log")
+    assert heading > section_two, (
+        "the latency breakdown is a subsection of the inference-log section"
+    )
+    section_three = markdown.find("## 3.")
+    if section_three != -1:
+        assert heading < section_three, (
+            "the latency breakdown must not drift into the robot-side section"
+        )
+
+
+def test_a_rollout_without_step_timing_says_so_and_still_reports(tmp_path):
+    """Default OFF: neither log exists, and the analyzer must not crash on it."""
+
+    served = _build_served_dir(tmp_path / "bc_eval")
+    assert not (served / "timing.jsonl").exists(), "fixture sanity check"
+    out_dir = tmp_path / "out"
+
+    result = _run_analyzer("--served", served, "--out", out_dir)
+    assert result.returncode == 0
+
+    latency = _latency(_read_report(out_dir))
+    assert _looks_absent(latency["server"]), (
+        "a missing timing.jsonl must be marked absent, not rendered as zeros: "
+        f"{latency['server']}"
+    )
+    assert _looks_absent(latency["actor"]), (
+        f"no --actor-timing was given: {latency['actor']}"
+    )
+
+    markdown = _read_markdown(out_dir)
+    assert NOT_RECORDED_SUBSTRING in markdown, (
+        "the operator has to be told HOW to record this next time, not just "
+        "that it is missing"
+    )
+
+
+def test_an_actor_timing_path_that_does_not_exist_is_survivable(tmp_path):
+    """A mistyped path must degrade to "absent", never take the report down."""
+
+    served = _build_served_dir(tmp_path / "bc_eval")
+    _write_step_timing(served)
+    out_dir = tmp_path / "out"
+
+    result = _run_analyzer(
+        "--served",
+        served,
+        "--actor-timing",
+        tmp_path / "nope" / "missing.jsonl",
+        "--out",
+        out_dir,
+    )
+    assert result.returncode == 0
+
+    latency = _latency(_read_report(out_dir))
+    assert _looks_absent(latency["actor"])
+    # ...and the half that IS there is still summarised.
+    assert _stats(latency["server"], "handler_ms")["count"] >= len(_TIMING_STEPS)
+
+
+def test_torn_step_timing_lines_are_skipped_without_crashing(tmp_path):
+    """These logs are appended to live; a Ctrl-C leaves a half-written line."""
+
+    served = _build_served_dir(tmp_path / "bc_eval")
+    _write_step_timing(served)
+    actor_timing = _write_actor_timing(tmp_path / "laptop3" / "step_timing.jsonl")
+    for path in (served / "timing.jsonl", actor_timing):
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write("\n")
+            stream.write("not json at all\n")
+            stream.write('{"kind": "step", "handler_ms":\n')
+    out_dir = tmp_path / "out"
+
+    _run_analyzer(
+        "--served", served, "--actor-timing", actor_timing, "--out", out_dir
+    )
+    latency = _latency(_read_report(out_dir))
+
+    assert _stats(latency["joined"], "wire_ms")["mean"] == pytest.approx(_WIRE_MEAN), (
+        "the intact rows must still join and average to the same number"
+    )
+
+
+def test_the_actor_timing_flag_is_pinned(tmp_path):
+    """The runbook and the launcher both type this name."""
+
+    result = _run_analyzer("--help", expect_success=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "--actor-timing" in result.stdout

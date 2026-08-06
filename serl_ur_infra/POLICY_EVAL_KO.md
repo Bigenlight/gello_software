@@ -87,6 +87,8 @@ EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTED_REWARD_AUTHORITY
 | **T3** 세션 (핀 3종 + sidecar off) | `<핀 3종> ./run_hil_session.sh --no-classifier-sidecar` | preflight `[1]`~`[11]` 통과 → GUI `WAIT_SCENE_READY` | [BC §4.4](BC_DEPLOY_KO.md) |
 | **dry handshake** (로봇 안 씀, 권장) | `<핀 3종> ./run_hil_actor.sh --fake-env --no-classifier-sidecar` | 핸드셰이크 오류 없이 `BeginEpisode`까지 가고 종료. 센서 WARN은 정상 | [BC §4.2](BC_DEPLOY_KO.md) |
 | **T4** 로봇측 녹화 (선택, BC/FM 공용) | `./run_bc_rollout_recorder.sh` | `### BC ROLLOUT RECORDER` + `ROLLOUT_DIR ->` 경로. **Ctrl-C로만 종료** | [BC §4.5](BC_DEPLOY_KO.md) |
+| **step timing — T1** 서버측 분해 (선택) | `HIL_STEP_TIMING=1 ./run_bc_server.sh` (FM은 `./run_fm_server.sh`) | ready 라인에 **`step_timing=1` 토큰**이 붙는다 | [BC §4.6](BC_DEPLOY_KO.md) · [FM §5](FM_DEPLOY_KO.md) |
+| **step timing — T3** 액터측 분해 (선택) | `HIL_STEP_TIMING=1 <핀 3종> ./run_hil_session.sh --no-classifier-sidecar` | actor 기동 로그에 `[actor] step timing ON -> <경로>` 한 줄 | [BC §4.6](BC_DEPLOY_KO.md) · [FM §5](FM_DEPLOY_KO.md) |
 | **분석** (담당자, 세션 후) | 아래 블록 | `<served>/analysis/rollout_report.md` + `report.json` 생성 | [코드 지도](POLICY_EVAL_CODE_MAP_KO.md) |
 
 ```bash
@@ -96,8 +98,9 @@ cd /home/laptop3/gello_software
   --robot  ros2_ur_ws/gello_logs/bc_rollouts/rollout_<타임스탬프>
 ```
 
-`--robot`은 선택이다(없으면 서버 기록만으로 리포트를 만든다). 그 밖의 옵션은
-`--out` / `--episode <id>` / `--deep-dive-rows N` / `--print`.
+`--robot`은 선택이다(없으면 서버 기록만으로 리포트를 만든다). step timing을 켰다면
+`--actor-timing <액터 jsonl>`을 더한다 — 서버 `timing.jsonl`은 `--served` 디렉터리에서 **자동으로
+찾는다.** 그 밖의 옵션은 `--out` / `--episode <id>` / `--deep-dive-rows N` / `--print`.
 
 **artifact 교체 — T1만 내렸다 올리면 되고 코드 수정은 0이다.**
 
@@ -116,6 +119,8 @@ FM_WHICH=final ./run_fm_server.sh     # 기본 best, final도 서빙 가능
 | 서버 `~/hil-serl-data/bc_eval/bc_eval_<ts>/served/`<br>서버 `~/hil-serl-data/fm_eval/fm_eval_<ts>/served/` | episode별 pickle + `actions.jsonl` + `inference.jsonl`. **T4 없이도 항상 생성된다** |
 | 서버 `…/<ts>/server.log` | 서버 기동·ready·추론 로그. 실패 시 런처가 마지막 40줄을 찍어 준다 |
 | laptop3 `ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>/` | `robot/vectors.h5`(native + synchronized 테이블) · `robot/cam1.mp4`/`cam2.mp4` · `robot/metadata.json` · `status.jsonl`(세션 상태 타임라인) |
+| 서버 `…/served/timing.jsonl` | 서버측 스텝 latency 분해 — Step RPC당 1줄 + BeginEpisode당 1줄. **T1을 `HIL_STEP_TIMING=1`로 띄웠을 때만** 생성된다(기본 OFF) |
+| laptop3 `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl` | 액터측 스텝 latency 분해 — Step RPC를 완료한 루프 반복당 1줄. **T3에 `HIL_STEP_TIMING=1`을 붙였을 때만** 생성된다(`--step-timing-path`로 경로 지정 가능) |
 
 ⚠️ **`inference.jsonl`은 `084ec1a` 이후에 기동한 서버에서만 나온다.** 그 전에 뜬 서버 프로세스를
 재사용하면 이 파일이 없다.
@@ -156,6 +161,9 @@ FM_WHICH=final ./run_fm_server.sh     # 기본 best, final도 서빙 가능
 | **learner와 완전 분리** | learner가 꺼져 있어도 평가는 정상 동작한다. 반대로 평가는 learner의 replay·lineage에 **아무것도 남기지 않는다** |
 | **성공 라벨** | MANUAL `MARK SUCCESS`가 유일하다. 판정 문장을 세션 전에 한 줄로 못 박고 끝까지 바꾸지 않는다(BC/FM A/B의 전제) |
 | **T1 Ctrl-C** | 터널 + **자기가 띄운 그 정책 서버**를 함께 내린다. 세션 도중에 누르면 actor가 다음 RPC에서 죽는다. 종료 순서는 **T3 → T2 → T1** |
+| **step timing 기본 OFF** | 켜지 않으면 아무 파일도 안 남고 평소 실행에 오버헤드도 없다. T1과 T3를 **각각** 켜야 하며, 한쪽만 켜면 그쪽 분해만 나온다 — **둘 다 켜야 `wire_ms`(순수 통신)가 계산된다** |
+| **서버 쪽은 T1 재기동 필요** | 코드가 서버 runtime에 pull된 뒤 **T1을 새로 띄워야** `timing.jsonl`이 나온다. 살아 있는 옛 서버 프로세스를 그대로 쓰면 안 남는다(`inference.jsonl` 때와 같은 함정) |
+| **`env_step_ms`는 sleep 포함** | 액터 기록의 `env_step_ms`에는 `env.step`의 **~100 ms 자체 페이싱 sleep**이 들어 있다. "환경 처리 비용"으로 읽으면 안 된다 |
 
 ---
 

@@ -26,6 +26,7 @@ from ur_env.actor_network import (
     validate_timestamp_ns,
 )
 from ur_env.classifier_sidecar import CLASSIFIER_SIDECAR_KEY, build_sidecar
+from ur_env.latency_profile import LatencyProfiler
 from ur_env.operator_session import (
     ActorStatusTracker,
     FAULT,
@@ -481,6 +482,31 @@ CLASSIFIER_DEGRADED_DETAIL_LIMIT = 240
 #: rebuild a per-step cadence one edge at a time.
 CLASSIFIER_DEGRADED_EDGE_LIMIT = 4
 
+#: Where opt-in latency profiling writes when the operator set no
+#: ``HIL_LATENCY_PROFILE_DIR``.  Derived from this file's own location rather
+#: than written out as an absolute path, so a second checkout does not silently
+#: pour its samples into the first one's directory.  ``ur_env/`` sits at
+#: ``<repo>/serl_ur_infra/ur_env``, and every other operator log on the laptop
+#: lands under ``<repo>/ros2_ur_ws/gello_logs/``.  Resolving this is pure string
+#: work: nothing is created here or at import, and a disabled profiler never
+#: looks at the value at all.
+DEFAULT_LATENCY_PROFILE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "ros2_ur_ws",
+    "gello_logs",
+    "hil_latency",
+)
+
+#: ``info`` keys the actor forwards verbatim into its latency records.  They are
+#: measured by ``UR7eEnv`` (``ur7e_env.py:1145-1147``) and answer the P1
+#: acceptance question "did the human out-run what we recorded?" -- copied, never
+#: recomputed, so the profile can never disagree with the transition.
+_INTERVENTION_PASSTHROUGH = (
+    "intervention_saturation",
+    "intervention_saturated",
+    "intervention_follow_ticks",
+)
+
 
 class _ClassifierDegradedProbe:
     """Decide whether the reward path is degraded, and say why.
@@ -866,6 +892,63 @@ def _park_follower(env: Any) -> None:
     controls.disarm_intervention_follow()
 
 
+def _elapsed_ms(started: Optional[float]) -> Optional[float]:
+    """Span in ms, or ``None`` when the mark was never taken (timing is off)."""
+
+    if started is None:
+        return None
+    return (time.perf_counter() - started) * 1000.0
+
+
+def _timing_intervened(data: Mapping[str, Any]) -> Optional[bool]:
+    """``meta.intervened`` as a bool, ``None`` when it cannot be determined.
+
+    Read defensively rather than from the loop's ``intervened`` local, which is
+    computed after the timing record is emitted.  A missing field degrades one
+    JSONL field; it may never end the run.
+    """
+
+    meta = data.get("meta") or {}
+    flag = meta.get("intervened")
+    return None if flag is None else bool(flag == 1)
+
+
+def _set_span(record: Any, name: str, started: Optional[float]) -> None:
+    """Record ``<name>_ms`` for a region timed without a ``with`` block.
+
+    ``LatencyRecord.phase`` is the usual way to time a region, but three of the
+    actor's phases are single multi-line call expressions (``build_data``, the
+    sidecar ``try``), and re-indenting those bodies into a ``with`` would churn
+    dozens of lines of a loop another session is actively editing.  The emitted
+    field is identical either way -- ``phase`` is a context manager whose only
+    job is to write ``<name>_ms``.
+
+    ``started`` is ``None`` whenever profiling is off, so a disabled call site
+    costs one comparison and never reads a clock.
+    """
+
+    if started is None:
+        return
+    record.set(f"{name}_ms", round((time.perf_counter() - started) * 1000.0, 3))
+
+
+def _latency_request_id(result: Any) -> Optional[int]:
+    """The Step RPC's ``request_id``, or ``None`` when the peer omits it.
+
+    Read from the ack rather than the action because a terminal Step carries no
+    action at all (``request_action=False``), and that is exactly the row an
+    analyst joining the two hosts' files most wants to find.  Every read is
+    defensive: this runs at loop rate in a live session, and a profiling field
+    is never worth an ``AttributeError`` reaching the arm.
+    """
+
+    ack = getattr(result, "ack", None)
+    request_id = getattr(ack, "request_id", None)
+    if request_id is None:
+        request_id = getattr(getattr(result, "action", None), "request_id", None)
+    return None if request_id is None else int(request_id)
+
+
 def run_remote_actor(
     network: ActorNetwork,
     env: Any,
@@ -878,11 +961,26 @@ def run_remote_actor(
     policy_action_transform: Optional[Callable[[Any], Any]] = None,
     sidecar_scheduler: Optional[Any] = None,
     operator_session: Optional[Any] = None,
+    step_timing_path: Optional[str] = None,
+    latency_profiler: Optional[LatencyProfiler] = None,
 ) -> ActorRunSummary:
-    """Run the actor, reporting FAULT/STOPPED when an operator session exists."""
+    """Run the actor, reporting FAULT/STOPPED when an operator session exists.
+
+    ``latency_profiler`` is opt-in per-step phase timing.  It is built HERE
+    rather than inside the loop so that the ``finally`` below owns its whole
+    lifetime: the sink buffers, and the sessions worth profiling are precisely
+    the ones that end by exception (a Step deadline, an operator Ctrl-C), where
+    a tail lost on the way out is the tail that explains the failure.  Passing
+    one in is for tests; ``None`` resolves ``HIL_LATENCY_PROFILE`` from the
+    environment and yields a profiler that touches no filesystem when unset.
+    """
 
     resolved_run_id = run_id or uuid.uuid4().hex
     reporter = _OperatorReporter(operator_session, resolved_run_id)
+    if latency_profiler is None:
+        latency_profiler = LatencyProfiler.from_env(
+            "actor", DEFAULT_LATENCY_PROFILE_DIR
+        )
     try:
         return _run_remote_actor_impl(
             network,
@@ -895,6 +993,8 @@ def run_remote_actor(
             policy_action_transform=policy_action_transform,
             sidecar_scheduler=sidecar_scheduler,
             operator_session=operator_session,
+            step_timing_path=step_timing_path,
+            latency_profiler=latency_profiler,
             reporter=reporter,
         )
     except KeyboardInterrupt:
@@ -913,6 +1013,12 @@ def run_remote_actor(
             terminal_reason="FAULT",
         )
         raise
+    finally:
+        # Mirrors the entrypoint's ``finally: env.close()``
+        # (``scripts/run_remote_rlpd_actor.py``): the buffered tail only reaches
+        # disk on close, and ``close`` is idempotent and safe when disabled, so
+        # this costs a disabled run one method call per session.
+        latency_profiler.close()
 
 
 def _run_remote_actor_impl(
@@ -927,6 +1033,8 @@ def _run_remote_actor_impl(
     policy_action_transform: Optional[Callable[[Any], Any]],
     sidecar_scheduler: Optional[Any],
     operator_session: Optional[Any],
+    step_timing_path: Optional[str] = None,
+    latency_profiler: Optional[LatencyProfiler] = None,
     reporter: _OperatorReporter,
 ) -> ActorRunSummary:
     """Run synchronous remote inference and lossless transition delivery.
@@ -990,6 +1098,31 @@ def _run_remote_actor_impl(
     plain_latency = _RoundTripStats()
     degraded_probe = _ClassifierDegradedProbe(network)
     degraded_edges = 0
+    timing_writer = None
+    prev_emit_t: Optional[float] = None
+    if step_timing_path:
+        # Imported here, not at module scope: step timing is opt-in and must not
+        # become an import dependency of the default path.
+        from ur_env.step_timing import FailOpenJsonlWriter
+
+        timing_writer = FailOpenJsonlWriter(step_timing_path)
+        print(f"[actor] step timing ON -> {step_timing_path}", flush=True)
+    if latency_profiler is None:
+        # A caller that hand-rolled the keyword arguments still gets an object,
+        # not a ``None`` to guard at every call site below.  A disabled profiler
+        # resolves no path and never touches the filesystem.
+        latency_profiler = LatencyProfiler("actor", None, enabled=False)
+    if latency_profiler.enabled:
+        print(
+            f"[remote-actor] latency profiling ON -> {latency_profiler.path}",
+            flush=True,
+        )
+    # Iteration START, so ``iter_interval_ms`` spans the WHOLE loop -- the
+    # pickle dumps, the operator waits and the next reset included.  Measuring
+    # end to start would report a period the session never actually ran at, and
+    # the gap between the 10 Hz nominal and the measured 1.95 Hz is exactly what
+    # this field exists to size.
+    prev_iter_t: Optional[float] = None
 
     # A real armed topic actor does not obtain or execute a policy action just
     # because the launcher handed off the controller.  First HOME, then wait for
@@ -1134,6 +1267,23 @@ def _run_remote_actor_impl(
         )
 
     for env_step in range(max_steps):
+        t_loop0 = time.perf_counter() if timing_writer is not None else None
+        post_prev_ms = (
+            None
+            if t_loop0 is None or prev_emit_t is None
+            else (t_loop0 - prev_emit_t) * 1000.0
+        )
+        # Re-read per iteration rather than hoisted: the profiler self-disables
+        # on an I/O failure, and this is what makes the loop stop paying for
+        # clocks the moment its sink is gone.
+        record = latency_profiler.record()
+        profiling = record.enabled
+        t_iter0 = time.perf_counter() if profiling else None
+        if t_iter0 is not None and prev_iter_t is not None:
+            record.set(
+                "iter_interval_ms", round((t_iter0 - prev_iter_t) * 1000.0, 3)
+            )
+        prev_iter_t = t_iter0
         policy_action = validate_action(
             action_result.action,
             action_shape=action_shape,
@@ -1147,7 +1297,16 @@ def _run_remote_actor_impl(
                 action_shape=action_shape,
                 name="transformed policy action",
             )
+        t_env0 = time.perf_counter() if timing_writer is not None else None
+        # Clocked separately from ``t_env0``: the two sinks are independent
+        # opt-ins and neither may go blind because the other is off.  Both on at
+        # once costs one extra ``perf_counter`` per phase.
+        # This span INCLUDES the env's own 100 ms pacing -- it is the executed
+        # step, not the compute in it.
+        t_env_lat = time.perf_counter() if profiling else None
         next_observation, reward, done, truncated, info = env.step(policy_action)
+        env_step_ms = _elapsed_ms(t_env0)
+        _set_span(record, "env_step", t_env_lat)
         next_timestamp_ns = validate_timestamp_ns(info.get("timestamp_ns"))
         next_observation_id = f"{session_id}:{step_id + 1}"
 
@@ -1210,6 +1369,8 @@ def _run_remote_actor_impl(
             # the discarded episode into a terminal win.
             auto_success = False
             operator_success = False
+        t_build0 = time.perf_counter() if timing_writer is not None else None
+        t_build_lat = time.perf_counter() if profiling else None
         data = build_data(
             actor_id=actor_id,
             run_id=run_id,
@@ -1239,6 +1400,10 @@ def _run_remote_actor_impl(
             info=info,
             action_shape=action_shape,
         )
+        build_ms = _elapsed_ms(t_build0)
+        # ``build_data`` validates the action and the transition on the way
+        # through, so this one span is the spec's "build_data + validate".
+        _set_span(record, "transition_build", t_build_lat)
         provisional_terminal = aborted or bool(done) or bool(truncated)
 
         # ---- classifier sidecar ---------------------------------------- #
@@ -1250,10 +1415,15 @@ def _run_remote_actor_impl(
         # scheduler additionally gates on the arm being stationary, so the
         # frame we ship is not a motion-blurred one.
         attached = False
+        sidecar_ms = None
         outgoing_observation = next_observation
         if frame_source is not None and sidecar_scheduler.should_attach(
             next_observation.get("state"), provisional_terminal
         ):
+            t_sidecar0 = (
+                time.perf_counter() if timing_writer is not None else None
+            )
+            t_sidecar_lat = time.perf_counter() if profiling else None
             try:
                 # build_sidecar takes the UNCROPPED full-resolution BGR frames
                 # and does the 128x128 resize + re-encode itself.  The resize
@@ -1275,6 +1445,11 @@ def _run_remote_actor_impl(
                         flush=True,
                     )
             else:
+                sidecar_ms = _elapsed_ms(t_sidecar0)
+                # Only on the branch that actually attaches: a build that threw
+                # shipped no pixels, and charging its cost to ``sidecar_encode``
+                # would put failure time in a phase named after work done.
+                _set_span(record, "sidecar_encode", t_sidecar_lat)
                 # Shallow copy, and ONLY for the wire.  ``next_observation``
                 # itself must stay canonical: it is deep-copied into the local
                 # backup pickle below, and ur_env/learner/demo.py validates
@@ -1299,6 +1474,75 @@ def _run_remote_actor_impl(
             sidecar_latency.add(rpc_ms)
         else:
             plain_latency.add(rpc_ms)
+        if timing_writer is not None:
+            # ``loop_ms`` is iteration start -> RPC complete, so everything that
+            # follows (pickle dumps, operator waits, the next reset) lands in the
+            # NEXT record's ``post_prev_ms`` instead of being averaged away here.
+            timing_writer.write(
+                {
+                    "ts": time.time(),
+                    "run_id": run_id,
+                    "episode_id": episode_id,
+                    "step_id": step_id,
+                    "env_step": env_step,
+                    "transition_id": f"{run_id}:{env_step}",
+                    "env_step_ms": env_step_ms,
+                    "build_ms": build_ms,
+                    "sidecar_ms": sidecar_ms,
+                    "rpc_ms": rpc_ms,
+                    "round_trip_ms": getattr(
+                        result.action, "round_trip_ms", None
+                    ),
+                    "server_inference_ms": getattr(
+                        result.action, "server_inference_ms", None
+                    ),
+                    "loop_ms": (time.perf_counter() - t_loop0) * 1000.0,
+                    "post_prev_ms": post_prev_ms,
+                    "attached_sidecar": attached,
+                    "intervened": _timing_intervened(data),
+                    # Same expression the loop's own ``terminal`` uses below.
+                    "terminal": bool(
+                        aborted
+                        or result.outcome.done
+                        or result.outcome.truncated
+                    ),
+                }
+            )
+            prev_emit_t = time.perf_counter()
+        if profiling:
+            # Committed HERE, not at the bottom of the loop: a terminal
+            # iteration leaves by ``continue``/``break`` after the episode
+            # boundary, so a commit down there would silently drop exactly the
+            # steps that ended an episode -- the interesting ones.  Everything
+            # after this point is charged to the NEXT record's
+            # ``iter_interval_ms``, which is measured start to start.
+            record.set("run_id", run_id)
+            record.set("episode_id", episode_id)
+            record.set("env_step", env_step)
+            record.set("step_id", step_id)
+            # From the shipped payload, not rebuilt from parts: the file is
+            # joined against the server's by this key, so it has to be the exact
+            # string that went out on the wire.
+            record.set("transition_id", data["meta"]["transition_id"])
+            record.set("request_id", _latency_request_id(result))
+            record.set("intervened", _timing_intervened(data))
+            record.set("sidecar_attached", attached)
+            # The round trip the loop ALREADY measured for ``_RoundTripStats``.
+            # Timing the same RPC a second time would report a number no phase
+            # ever spent, and the two would disagree under load.
+            record.set("step_rpc_ms", round(rpc_ms, 3))
+            server_inference_ms = getattr(
+                result.action, "server_inference_ms", None
+            )
+            if server_inference_ms is not None:
+                # Measured on the OTHER host's clock; kept only so the analyzer
+                # can derive network+queue as ``step_rpc_ms - server_total_ms``
+                # offline.  Never subtract it from anything here.
+                record.set("server_inference_ms", float(server_inference_ms))
+            for key in _INTERVENTION_PASSTHROUGH:
+                if key in info:
+                    record.set(key, info[key])
+            record.commit()
         # Reaching here proves the server ACKed this transition. In particular,
         # terminal reset can never happen after an unacknowledged Step.
         outcome = result.outcome
@@ -1476,6 +1720,8 @@ def _run_remote_actor_impl(
         OWNER_NONE,
         message="actor run stopped",
     )
+    if timing_writer is not None:
+        timing_writer.close()
     return ActorRunSummary(
         run_id=run_id,
         env_steps=max_steps,

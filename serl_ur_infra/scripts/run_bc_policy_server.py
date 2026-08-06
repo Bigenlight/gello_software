@@ -89,6 +89,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="do not write <record-root>/inference.jsonl",
     )
+    # Off by default, unlike the inference log: it instruments the request path
+    # of a live session, so it is opted into per investigation.
+    parser.add_argument(
+        "--step-timing",
+        action="store_true",
+        help=(
+            "write <record-root>/timing.jsonl (also enabled by "
+            "HIL_STEP_TIMING=1)"
+        ),
+    )
     # Empty string means "do not touch CUDA_VISIBLE_DEVICES" -- CPU-only smokes.
     parser.add_argument("--gpu-index", default="0")
     return parser.parse_args()
@@ -157,6 +167,19 @@ def _serve(args: argparse.Namespace) -> int:
         verify_resnet_asset,
     )
     from ur_env.observation_schema import CANONICAL_OBSERVATION_SCHEMA_HASH
+    from ur_env.step_timing import (
+        SERVER_TIMING_FILENAME,
+        STEP_TIMING_ENV,
+        FailOpenJsonlWriter,
+        ServiceStepTimingProxy,
+        StepTimingRecorder,
+        TimingSink,
+        step_timing_enabled,
+    )
+
+    step_timing = args.step_timing or step_timing_enabled(
+        os.environ.get(STEP_TIMING_ENV)
+    )
 
     model_id = args.model_id or BC_MODEL_ID
     reward_model_id = args.reward_model_id or BC_REWARD_MODEL_ID
@@ -226,6 +249,17 @@ def _serve(args: argparse.Namespace) -> int:
     )
     _log(f"recording sink ready root={record_root}")
 
+    # ``sink`` keeps naming the recorder itself: the shutdown summary reads its
+    # counters, and TimingSink deliberately has no __getattr__ to forward them.
+    accept_data = sink
+    timing_writer = None
+    timing_recorder = None
+    if step_timing:
+        timing_writer = FailOpenJsonlWriter(record_root / SERVER_TIMING_FILENAME)
+        timing_recorder = StepTimingRecorder(timing_writer)
+        accept_data = TimingSink(sink, timing_recorder)
+        _log(f"step timing path={record_root / SERVER_TIMING_FILENAME}")
+
     # Wrapped here and not earlier: the log path lives under record_root, which
     # does not exist until the line above, and VersionedPolicyRuntime's
     # constructor smoke inferences must stay out of the rollout log.
@@ -249,8 +283,12 @@ def _serve(args: argparse.Namespace) -> int:
         reward_authority="local",
         reward_model_id=reward_model_id,
         observation_schema_hash=CANONICAL_OBSERVATION_SCHEMA_HASH,
-        accept_data=sink,
+        accept_data=accept_data,
     )
+    if timing_recorder is not None:
+        # After the smoke inferences above, which call the policy directly:
+        # timing.jsonl stays a record of actor requests only.
+        service = ServiceStepTimingProxy(service, timing_recorder)
     server, bound_port = create_grpc_server(
         service, bind_address=_grpc_bind_address(args.host, args.port)
     )
@@ -265,12 +303,16 @@ def _serve(args: argparse.Namespace) -> int:
 
     server.start()
     # EXACT line the launcher greps for; absence of it means startup failed.
-    print(
+    ready_line = (
         f"{_LOG_PREFIX} ready host={args.host} port={bound_port} "
         f"model_id={model_id} parameter_sha256={artifact_sha256} "
-        f"record_root={record_root}",
-        flush=True,
+        f"record_root={record_root}"
     )
+    if timing_writer is not None:
+        # Appended, never inserted: the launcher matches the fixed prefix
+        # '[bc-server] ready ', so a trailing token cannot break the grep.
+        ready_line += " step_timing=1"
+    print(ready_line, flush=True)
     try:
         while not shutdown.wait(1.0):
             pass
@@ -287,6 +329,9 @@ def _serve(args: argparse.Namespace) -> int:
         # getattr fallback: a shutdown report must not raise on a wrapper that
         # never got to count anything.
         stopped += f" inference_calls={getattr(inference_logger, 'call_count', 0)}"
+    if timing_writer is not None:
+        stopped += f" timing_records={getattr(timing_writer, 'write_count', 0)}"
+        timing_writer.close()
     _log(stopped)
     return 0
 

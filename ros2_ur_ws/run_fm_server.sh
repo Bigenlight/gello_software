@@ -38,7 +38,9 @@
 # refused outright, 50054 unless FM_ALLOW_PORT_50054=1) ·
 # FM_ARTIFACT_DIR=<data root>/diagnostics/<fm-init artifact> · FM_WHICH=best
 # (which trained parameter set to serve) · FM_START_TIMEOUT_S=300 ·
-# FM_ACCEPT_HEAD_MISMATCH=0 (1 downgrades the HEAD refusal to a warning).
+# FM_ACCEPT_HEAD_MISMATCH=0 (1 downgrades the HEAD refusal to a warning) ·
+# HIL_STEP_TIMING= (1/true/yes makes the server also write
+# <run dir>/served/timing.jsonl; off by default).
 # =============================================================================
 set -euo pipefail
 
@@ -57,6 +59,19 @@ FM_WHICH="${FM_WHICH:-best}"
 FM_START_TIMEOUT_S="${FM_START_TIMEOUT_S:-300}"
 FM_ACCEPT_HEAD_MISMATCH="${FM_ACCEPT_HEAD_MISMATCH:-0}"
 FM_ALLOW_PORT_50054="${FM_ALLOW_PORT_50054:-0}"
+
+# Opt-in per-step server timing, off unless asked for.  Normalised HERE rather
+# than on the server so a typo is reported to the operator instead of arriving
+# as a silent OFF in a run they believe is instrumented.
+step_timing="${HIL_STEP_TIMING:-}"
+case "${step_timing,,}" in
+    "") step_timing="" ;;
+    1|true|yes) step_timing="1" ;;
+    *)
+        echo "WARNING: HIL_STEP_TIMING='$step_timing' is not 1/true/yes; step timing stays OFF." >&2
+        step_timing=""
+        ;;
+esac
 
 # The ready/FATAL markers live ONLY inside the remote poll script below, and
 # that is not tidiness: ssh flattens its command argv into a single string that
@@ -216,11 +231,17 @@ fi
 echo "Starting FM policy server on $FM_SSH_HOST (GPU $FM_GPU_INDEX, port $FM_REMOTE_PORT)"
 echo "  artifact: $FM_ARTIFACT_DIR (--which $FM_WHICH)"
 echo "  run dir : $RUN_DIR"
+if [[ -n "$step_timing" ]]; then
+    echo "[fm-launcher] step timing ON -> $RUN_DIR/served/timing.jsonl"
+fi
 rsh bash -s -- "$FM_REMOTE_REPO" "$RUN_DIR" "$FM_REMOTE_PYTHON" \
-    "$FM_ARTIFACT_DIR" "$FM_REMOTE_PORT" "$FM_GPU_INDEX" "$FM_WHICH" <<'REMOTE_START' || \
+    "$FM_ARTIFACT_DIR" "$FM_REMOTE_PORT" "$FM_GPU_INDEX" "$FM_WHICH" "$step_timing" <<'REMOTE_START' || \
     die "remote FM server launch failed; nothing was started and nothing else was touched"
 set -euo pipefail
-repo="$1"; run_dir="$2"; py="$3"; artifact="$4"; port="$5"; gpu="$6"; which="$7"
+# $8 via ${8:-}: ssh flattens its argv into one command string, so an EMPTY
+# trailing argument (timing off) disappears before the remote shell re-splits
+# it, and a bare "$8" would then trip `set -u`.
+repo="$1"; run_dir="$2"; py="$3"; artifact="$4"; port="$5"; gpu="$6"; which="$7"; step_timing="${8:-}"
 
 [[ -d "$repo" ]] || { echo "REMOTE ERROR: repo is missing: $repo" >&2; exit 1; }
 [[ -x "$py" ]] || { echo "REMOTE ERROR: python is missing: $py" >&2; exit 1; }
@@ -239,6 +260,7 @@ cd "$repo"
 nohup env \
     CUDA_VISIBLE_DEVICES="$gpu" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    HIL_STEP_TIMING="$step_timing" \
     PYTHONPATH="$repo/serl_ur_infra:$repo/third_party/hil-serl/serl_launcher" \
     "$py" serl_ur_infra/scripts/run_fm_policy_server.py \
     --artifact-dir "$artifact" \
