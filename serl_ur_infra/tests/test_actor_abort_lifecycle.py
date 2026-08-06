@@ -176,13 +176,21 @@ class _Env:
 
 
 class _ServerLikeNetwork:
-    """Apply the server's finalization rules to whatever the client ships.
+    """Apply the server's finalization AND session rules to what the client ships.
 
     Mirrors ``RewardClassifierRuntime.__call__``: server-authoritative reward,
     ``effective_success = operator_success or (auto_success and classifier)``,
     and the success override of ``masks``/``dones``/``truncated``.  A
     non-success proposal passes through untouched, which is the behaviour the
     abort depends on.
+
+    Also mirrors ``ActorSessionService``'s session registry
+    (``actor_network.py:612-619`` / ``:802-810``): one live session per run
+    key, released ONLY by a terminal Step -- the proto has no close RPC.  This
+    is load-bearing.  An earlier abort path ended an episode without shipping
+    anything and then reopened; a fake without these two refusals certified it,
+    and the real server killed the actor with ``FAILED_PRECONDITION: session
+    ... is still active`` on the operator's next START press (2026-07-31).
     """
 
     def __init__(self, events=None, *, classifier_success=False):
@@ -190,6 +198,8 @@ class _ServerLikeNetwork:
         self.classifier_success = bool(classifier_success)
         self.begin_calls = []
         self.step_calls = []
+        self.active_session_id = ""
+        self.next_episode_id = 0
 
     @staticmethod
     def _action(version=0):
@@ -199,6 +209,16 @@ class _ServerLikeNetwork:
         )
 
     def begin_episode(self, observation, **kwargs):
+        if self.active_session_id:
+            raise RuntimeError(
+                f"session {self.active_session_id!r} is still active"
+            )
+        episode_id = kwargs.get("episode_id")
+        if episode_id != self.next_episode_id:
+            raise RuntimeError(
+                f"episode_id must be {self.next_episode_id}, got {episode_id}"
+            )
+        self.active_session_id = kwargs.get("session_id") or "unnamed"
         self.begin_calls.append((observation, dict(kwargs)))
         return self._action(len(self.begin_calls) - 1)
 
@@ -229,6 +249,11 @@ class _ServerLikeNetwork:
             classifier_threshold=0.0,
             reward_model_id="",
         )
+        if done or truncated:
+            # The finalized outcome, not the client's proposal, is what
+            # releases the session -- same as ``actor_network.py:802-810``.
+            self.active_session_id = ""
+            self.next_episode_id += 1
         action = None if (done or truncated) else self._action(1)
         return SimpleNamespace(outcome=outcome, action=action)
 
@@ -238,25 +263,20 @@ class _Operator:
 
     One-shot exactly like ``RosOperatorSession.consume_operator_abort``: the
     first MATCHING read spends the token and every later read returns False.
-    That is load-bearing now that the actor reads the token twice per iteration
-    -- once before ``env.step`` and once after -- because WHICH read spends it
-    is the behaviour under test.  A fake that returned True for every matching
-    call would be aborted by the pre-step read of the episode's very first
-    iteration and could never exercise the post-step window at all.
+    The actor reads the token exactly once per iteration, after ``env.step``,
+    so WHICH iteration's read spends it is the behaviour under test.
 
     ``abort_press_offset`` says WHEN the operator pressed, counted in matching
     reads that go by first:
 
-    * ``0`` (default) -- pressed while the episode's first ``env.step`` was
-      running.  The pre-step read of that iteration misses it; the post-step
-      read of the same iteration takes it.  This is the original abort case: a
-      real transition happened and is relabelled a truncation.
-    * ``1`` -- pressed during that iteration's blocking Step RPC (~412 ms of the
-      512 ms production loop).  The next read is the FOLLOWING iteration's
-      pre-step read, which must discard the pending policy action instead of
-      executing it.
-    * ``-1`` -- pressed before the episode's first step, at the scene-ready gate
-      or during BeginEpisode.  The very first read takes it.
+    * ``0`` (default) -- pressed any time up to the end of the episode's first
+      ``env.step`` (scene-ready gate, BeginEpisode, or the step itself).  The
+      first iteration's read takes it: a real transition happened and is
+      relabelled a truncation.
+    * ``1`` -- pressed during the first iteration's blocking Step RPC.  The
+      read of that iteration has already returned, so the FOLLOWING iteration
+      executes the pending policy action and its read takes the token: the
+      abort costs at most one more bounded action, by design.
     """
 
     auto_success = False
@@ -277,7 +297,7 @@ class _Operator:
         self.success_at = success_at
         self.abort_calls = []
         self.success_calls = []
-        self._abort_reads_until_press = 1 + int(abort_press_offset)
+        self._abort_reads_until_press = int(abort_press_offset)
         self._abort_spent = False
 
     def publish(self, status):
@@ -670,9 +690,9 @@ def test_abort_traverses_the_home_approval_gate_and_reopens_an_episode():
     # Episode id advanced and a new episode was opened after the scene reset.
     assert summary.episodes_started == 2
     assert network.begin_calls[1][1]["episode_id"] == 1
-    # Two reads per iteration (pre-step and post-step), each against the
-    # episode that was live when it ran.
-    assert operator.abort_calls == [("run", 0)] * 2 + [("run", 1)] * 2
+    # One read per iteration, each against the episode that was live when it
+    # ran.
+    assert operator.abort_calls == [("run", 0), ("run", 1)]
 
     states = [status.state for status in operator.statuses]
     assert HOMING in states
@@ -703,9 +723,9 @@ def test_abort_in_a_later_episode_uses_that_episodes_token():
     _run(env, network, operator, max_steps=2)
 
     # Episode 0 ran to the end of the run without a terminal; episode 1 never
-    # started, so only the episode-0 token was offered -- twice per iteration --
+    # started, so only the episode-0 token was offered -- once per iteration --
     # and it never matched.
-    assert operator.abort_calls == [("run", 0)] * 4
+    assert operator.abort_calls == [("run", 0)] * 2
     assert _shipped(network, 0)["transition"]["truncated"] is False
     assert len(operator.home_wait_statuses) == 0
 
@@ -777,8 +797,6 @@ def test_a_second_abort_in_the_same_run_is_labelled_again():
             key = (run_id, episode_id)
             if key in self._spent:
                 return False
-            if self.abort_calls.count(key) < 2:  # the pre-step read misses it
-                return False
             self._spent.add(key)
             return True
 
@@ -824,7 +842,7 @@ def test_mismatched_token_is_offered_but_not_spent():
 
     _run(env, network, operator, max_steps=2)
 
-    assert operator.abort_calls == [("run", 0)] * 4  # two reads per iteration
+    assert operator.abort_calls == [("run", 0)] * 2  # one read per iteration
     assert operator.pending == ("other-run", 7)  # still latched
     assert "quiesce" not in events  # no terminal at all, so no follower stop
     for index in range(2):
@@ -905,23 +923,22 @@ def test_no_operator_session_never_reaches_the_abort_path():
 
 
 # --------------------------------------------------------------------- #
-# Latency: "immediate" is bounded by one loop period, not zero
+# Latency: "immediate" is bounded by one loop period plus one action
 # --------------------------------------------------------------------- #
 
 
-def test_press_during_the_step_rpc_discards_the_pending_policy_action():
-    """A press in the RPC window must not cost one more full policy action.
+def test_press_during_the_step_rpc_costs_exactly_one_more_action():
+    """A press in the RPC window executes ONE more action, then truncates it.
 
-    The deadman gates the background follower and
-    ``GelloIntervention.action()`` -- NOT the policy path (``grep -n deadman``
-    over ``ur7e_env.py`` and ``ros_backend.py`` finds docstrings only).  About
-    412 ms of the 512 ms production loop is the blocking Step RPC, so a press
-    landing there used to latch after the post-step read had already returned,
-    and the next iteration ran ``env.step(policy_action)`` BEFORE reading it: up
-    to a full ``ACTION_SCALE`` step -- 1.25 cm plus rotation, target persisting
-    for ``target_stale_s`` = 0.30 s -- executed after the operator said stop.
-
-    The pre-step read spends the token before ``env.step`` instead.
+    This is the accepted trade, not an accident.  The read has to sit after
+    ``env.step`` because a terminal Step is the server's only session-close
+    signal, and a terminal Step must carry a transition that really happened
+    (``transition.actions == policy_action`` for non-intervened rows).  An
+    earlier pre-step read that discarded the pending action closed the episode
+    with nothing to ship, left the server session latched, and killed the
+    actor on the next BeginEpisode (2026-07-31).  The extra action is bounded
+    by the governor and the workspace box, and the GUI's deadman release stops
+    GELLO follow independently of this read.
     """
 
     events = []
@@ -931,17 +948,14 @@ def test_press_during_the_step_rpc_discards_the_pending_policy_action():
 
     _run(env, network, operator, max_steps=2)
 
-    # THE assertion: one env.step, not two.  The pending action never ran.
-    assert events.count("step") == 1
-    assert env.step_count == 1
-    # Read three times: pre/post of the first iteration (press had not landed),
-    # then the second iteration's pre-step read, which honoured it.
-    assert operator.abort_calls == [("run", 0)] * 3
-    # No transition was invented for a step that never happened, and the one
-    # real transition keeps the label it earned.
-    assert len(network.step_calls) == 1
+    # The pending action DID run -- and its transition is the truncated one.
+    assert events.count("step") == 2
+    assert env.step_count == 2
+    assert operator.abort_calls == [("run", 0)] * 2
+    assert len(network.step_calls) == 2
     assert _shipped(network, 0)["transition"]["truncated"] is False
-    assert _shipped(network, 0)["transition"]["dones"] is False
+    assert _shipped(network, 1)["transition"]["truncated"] is True
+    assert _shipped(network, 1)["transition"]["dones"] is False
     # The episode still ends properly: parked, home gate, HOME.
     assert events.index("quiesce") < events.index("wait_home")
     assert operator.home_wait_statuses[0].terminal_reason == "OPERATOR_ABORT"
@@ -949,8 +963,13 @@ def test_press_during_the_step_rpc_discards_the_pending_policy_action():
     assert env.reset_options[-1] == {"operator_approved_home": True}
 
 
-def test_pre_step_abort_reopens_the_next_episode_without_a_stray_step():
-    """The pre-step path is a full episode boundary, not a special case."""
+def test_deferred_abort_is_a_full_episode_boundary():
+    """The RPC-window press closes the episode and the NEXT one opens cleanly.
+
+    The session-aware fake makes this the regression test for the 2026-07-31
+    incident: reopening without a shipped terminal Step raises
+    ``session ... is still active`` here, exactly like the real server.
+    """
 
     events = []
     env = _Env(events)
@@ -959,24 +978,25 @@ def test_pre_step_abort_reopens_the_next_episode_without_a_stray_step():
 
     summary = _run(env, network, operator, max_steps=3)
 
-    # Iteration 0 stepped episode 0; iteration 1 aborted before stepping;
-    # iteration 2 stepped the NEW episode.  Two steps, never three.
-    assert events.count("step") == 2
+    # Iteration 0 stepped episode 0; iteration 1 executed the pending action
+    # and truncated it; iteration 2 stepped the NEW episode.
+    assert events.count("step") == 3
     assert summary.episodes_started == 2
     assert network.begin_calls[1][1]["episode_id"] == 1
-    assert _shipped(network, 1)["transition"]["episode_id"] == 1
-    assert _shipped(network, 1)["transition"]["step_id"] == 0
+    assert _shipped(network, 2)["transition"]["episode_id"] == 1
+    assert _shipped(network, 2)["transition"]["step_id"] == 0
     # The token is one-shot: the new episode's step was not aborted too.
-    assert _shipped(network, 1)["transition"]["truncated"] is False
+    assert _shipped(network, 2)["transition"]["truncated"] is False
     assert len(operator.home_wait_statuses) == 1
 
 
-def test_pre_step_abort_spends_the_queued_success_token():
-    """Same rule as the post-step abort: a queued click cannot outlive it.
+def test_every_abort_ships_the_terminal_step_that_releases_the_session():
+    """No abort shape may end an episode with the server session still live.
 
-    ``abort_press_offset=-1`` puts the press before the episode's first
-    ``env.step`` -- during the scene-ready gate or the BeginEpisode RPC -- which
-    is also the only shape in which an episode ends having shipped nothing.
+    Presses ahead of the first step (scene-ready gate, BeginEpisode) are
+    honoured after that step, as a truncation of it -- there is no longer a
+    shape in which an episode ends having shipped nothing.  The queued MARK
+    SUCCESS is spent and discarded on the same terminal.
     """
 
     events = []
@@ -986,16 +1006,20 @@ def test_pre_step_abort_spends_the_queued_success_token():
         events,
         abort_at=("run", 0),
         success_at=("run", 0),
-        abort_press_offset=-1,
+        abort_press_offset=0,
     )
 
     _run(env, network, operator, max_steps=1)
 
     assert operator.success_calls == [("run", 0)]
-    # Nothing ran and nothing was shipped: no step, no transition, no invented
-    # hold action standing in for one.
-    assert events.count("step") == 0
-    assert network.step_calls == []
+    assert events.count("step") == 1
+    assert len(network.step_calls) == 1
+    assert _shipped(network, 0)["transition"]["truncated"] is True
+    assert _shipped(network, 0)["meta"]["operator_success"] is False
+    # The terminal Step released the server's session slot -- the property the
+    # 2026-07-31 incident violated.
+    assert network.active_session_id == ""
+    assert network.next_episode_id == 1
     # It is still an episode boundary, with the follower parked ahead of the
     # deadman-blind home gate.
     assert events.index("quiesce") < events.index("wait_home")

@@ -760,15 +760,15 @@ def _consume_operator_abort(
 ) -> bool:
     """Spend this episode's one-shot ABORT token, if one is latched.
 
-    Factored out because the loop reads the token TWICE per iteration -- once
-    before ``env.step`` and once after -- and both reads must be identical,
-    including the ``getattr`` guard that keeps an operator session predating the
-    abort control working unchanged.
+    The loop reads the token exactly once per iteration, AFTER ``env.step`` --
+    see the comment at the read site for why an earlier read cannot exist.
+    The ``getattr`` guard keeps an operator session predating the abort
+    control working unchanged.
 
     The token is one-shot and episode-scoped in
-    ``RosOperatorSession.consume_operator_abort``: a press therefore lands in
-    exactly one of the two windows and is spent exactly once, and a token
-    latched against another ``(run_id, episode_id)`` is never stolen.
+    ``RosOperatorSession.consume_operator_abort``: a press is spent exactly
+    once, and a token latched against another ``(run_id, episode_id)`` is
+    never stolen.
     """
 
     if operator_session is None:
@@ -1047,8 +1047,8 @@ def _run_remote_actor_impl(
     def _close_episode(reason: str, *, final_step: bool) -> None:
         """Park the follower, hold at the terminal pose, HOME once approved.
 
-        Shared by every way an episode can end -- server terminal, post-step
-        abort, pre-step abort -- so those cannot drift apart.  The park is here
+        Shared by every way an episode can end -- server terminal, operator
+        abort -- so those cannot drift apart.  The park is here
         rather than after the gate because WAIT_HOME_APPROVAL blocks this thread
         indefinitely and never consults the deadman, so an operator still
         gripping GELLO would otherwise keep driving the arm for the whole wait
@@ -1134,77 +1134,6 @@ def _run_remote_actor_impl(
         )
 
     for env_step in range(max_steps):
-        # ---- operator abort: PRE-step read ----------------------------- #
-        # The first of this iteration's two reads of the same one-shot token,
-        # and the reason it has to exist: the deadman gates only the background
-        # follower and ``GelloIntervention.action()`` -- the POLICY path never
-        # consults it (``grep -n deadman`` over ur7e_env.py and ros_backend.py
-        # finds docstrings only).  About 412 ms of the 512 ms production loop is
-        # spent inside the blocking Step RPC below.  A press landing in that
-        # window latched too late for the post-step read that had already
-        # returned, so the loop advanced and ran ``env.step(policy_action)``
-        # BEFORE reading it: up to one full ACTION_SCALE step (1.25 cm plus
-        # rotation) executed after the operator said stop, with the target
-        # persisting for ``target_stale_s`` = 0.30 s.  Reading here spends the
-        # token before ``env.step`` instead, so that press discards the pending
-        # policy action unexecuted.  Both reads are kept -- a press lands in
-        # exactly one window, and the token is one-shot, so it cannot be spent
-        # twice.
-        if _consume_operator_abort(operator_session, run_id, episode_id):
-            # No ``env.step``, therefore NO TRANSITION.  Nothing was executed
-            # and there is no next observation to pair with an action, so there
-            # is nothing to ship: the episode's last shipped transition keeps
-            # ``truncated=False`` and ``masks=1.0`` and the critic bootstraps
-            # from a state the robot really reached.  That is strictly better
-            # than the alternative of stepping a zero/hold action to keep a
-            # transition flowing, which would mint a row no policy ever chose,
-            # stamp it as policy data (``policy_actions_synthetic`` is a
-            # run-level flag about the transform, not about this), and teach the
-            # critic from an action the operator's abort explicitly cancelled.
-            # Nothing desynchronises: ``observation``/``observation_id``/
-            # ``source_timestamp_ns``/``step_id`` were all advanced at the
-            # bottom of the previous iteration, and this iteration adds no
-            # transition of its own to keep consistent.
-            _park_follower(env)
-            # Same rule as the post-step abort: spend any queued MARK SUCCESS
-            # for the episode being discarded and throw the value away, so a
-            # click made before the abort cannot outlive the episode it was
-            # meant for.  Nothing here can consume it later -- there is no
-            # transition to attach it to.
-            _consume_operator_success(operator_session, run_id, episode_id)
-            # ``aborted`` short-circuits ahead of every field of the outcome,
-            # and there is no outcome here: no Step RPC was made.
-            reason = _terminal_reason(None, aborted=True)
-            reporter.position(
-                episode_id=episode_id,
-                episode_step=step_id,
-                env_step=env_step,
-            )
-            reporter.publish(
-                HOLD,
-                OWNER_HOLD,
-                message=(
-                    f"{reason} before the pending policy action; the action "
-                    "was discarded unexecuted"
-                ),
-                success=False,
-                terminal_reason=reason,
-            )
-            final_step = env_step + 1 >= max_steps
-            if not final_step:
-                episode_id += 1
-                step_id = 0
-                reporter.position(
-                    episode_id=episode_id,
-                    episode_step=0,
-                    env_step=env_step,
-                )
-            _close_episode(reason, final_step=final_step)
-            if final_step:
-                break
-            _open_episode(reason)
-            continue
-
         policy_action = validate_action(
             action_result.action,
             action_shape=action_shape,
@@ -1222,17 +1151,26 @@ def _run_remote_actor_impl(
         next_timestamp_ns = validate_timestamp_ns(info.get("timestamp_ns"))
         next_observation_id = f"{session_id}:{step_id + 1}"
 
-        # ---- operator abort: POST-step read ---------------------------- #
-        # The second of this iteration's two reads.  It exists because this is
-        # the only point at which a transition that DID happen can still be
-        # relabelled before it is built and shipped: a press landing while
-        # ``env.step`` was running belongs to the step it interrupted, and
-        # truncating that transition is the honest record of it.  A press
-        # landing in the Step RPC window instead is caught by the pre-step read
-        # at the top of the next iteration, which discards the pending action
-        # rather than executing it.  Between the two, "immediate" is bounded by
-        # the remainder of the current window -- never by a whole extra policy
-        # action.
+        # ---- operator abort: the ONLY read ----------------------------- #
+        # One read per iteration, deliberately AFTER ``env.step``.  This is the
+        # only point where the abort can end the episode honestly AND legally:
+        # a transition that really happened is relabelled ``done=False,
+        # truncated=True`` and shipped, and that terminal Step doubles as the
+        # server's session-close signal -- ``ActorSessionService`` clears
+        # ``active_session_id`` only when a terminal Step arrives; the proto
+        # has no close/cancel RPC.  There used to be a second, PRE-step read
+        # that ended the episode without shipping anything; the server then
+        # refused the next ``BeginEpisode`` ("session ... is still active") and
+        # the actor died on the operator's START press (2026-07-31).  A
+        # no-transition close cannot be repaired client-side: the server also
+        # requires ``transition.actions == policy_action`` for non-intervened
+        # rows, so a zero/hold finishing step is either rejected or a false
+        # record.  The accepted cost of the single read is bounded: a press
+        # landing in the Step RPC window executes at most one more policy
+        # action (<= 1 ACTION_SCALE, governor- and workspace-box-bounded)
+        # before this read truncates the transition it produced.  The deadman
+        # release that precedes the GUI's Trigger still stops GELLO follow at
+        # the next follower tick (~33 ms) independently of this read.
         aborted = _consume_operator_abort(operator_session, run_id, episode_id)
         if aborted:
             # FIRST, ahead of every RPC, pickle and blocking operator wait
