@@ -202,7 +202,7 @@ orbax 체크포인트가 **아니다**(`production_checkpoint_compatible: false`
 | 켜는 곳 | 방법 | 산출물 |
 | --- | --- | --- |
 | 서버(T1) | `HIL_STEP_TIMING=1 ./run_bc_server.sh` / `./run_fm_server.sh` (런처가 ssh 너머 서버 프로세스까지 전달) · 서버 스크립트 직접 기동이면 `--step-timing` | `<run dir>/served/timing.jsonl` (`inference.jsonl` 옆) |
-| 액터(T3) | 평소 세션 명령 앞에 `HIL_STEP_TIMING=1`만 — 환경변수가 `run_hil_session.sh` → `run_hil_actor.sh` → actor 파이썬까지 그대로 흐르므로 **셸 스크립트는 무수정** | `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl` (또는 `--step-timing-path`) |
+| 액터(T3) | 평소 세션 명령 앞에 `HIL_STEP_TIMING=1`만 — 환경변수가 `run_hil_session.sh` → `run_hil_actor.sh` → actor 파이썬까지 그대로 흐르므로 **셸 스크립트는 무수정** | `gello_logs/step_timing/actor_step_timing_<ts>.jsonl` (또는 `--step-timing-path`) |
 
 켜졌다는 표식: 서버는 **ready 라인에 `step_timing=1` 토큰**이 추가되고, 액터는 기동 로그에
 `[actor] step timing ON -> <경로>` 한 줄.

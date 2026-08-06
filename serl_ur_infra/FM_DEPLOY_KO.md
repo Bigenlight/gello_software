@@ -120,7 +120,7 @@ HIL_STEP_TIMING=1 EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTE
 **무엇이 남나**
 
 - 서버: `~/hil-serl-data/fm_eval/fm_eval_<ts>/served/timing.jsonl` (`inference.jsonl` 옆)
-- laptop3: `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl`
+- laptop3: `gello_logs/step_timing/actor_step_timing_<ts>.jsonl`
   (경로를 직접 주려면 `--step-timing-path`)
 
 ⚠️ **서버 쪽은 코드가 서버 runtime에 pull된 뒤 T1을 새로 띄워야 반영된다** — 살아 있는 옛 서버
@@ -131,7 +131,7 @@ HIL_STEP_TIMING=1 EXPECTED_MODEL_ID=fm-cube-in-cup-raw0731-h16-euler8-v1 EXPECTE
 아래에서 자동으로 찾는다.
 
 ```bash
-cd /home/laptop3/gello_software && /home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/analyze_bc_rollout.py --served <served 디렉터리> --actor-timing ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl
+cd /home/laptop3/gello_software && /home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/analyze_bc_rollout.py --served <served 디렉터리> --actor-timing gello_logs/step_timing/actor_step_timing_<ts>.jsonl
 ```
 
 리포트에 **§2 Inference log 아래로** `### Latency breakdown (step timing)` 절이 붙어 phase별

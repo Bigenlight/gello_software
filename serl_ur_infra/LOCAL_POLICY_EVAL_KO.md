@@ -199,7 +199,7 @@ served 디렉터리가 **로컬**이므로 서버에서 받아오는 단계가 �
 cd /home/laptop3/gello_software
 /home/laptop3/venvs/gello-hil-actor/bin/python serl_ur_infra/scripts/analyze_bc_rollout.py \
   --served /home/laptop3/hil-serl-data/bc_eval/<이름>_local_<ts>/served \
-  --actor-timing ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl
+  --actor-timing gello_logs/step_timing/actor_step_timing_<ts>.jsonl
 ```
 
 서버 `timing.jsonl`은 `--served` 아래에서 자동으로 찾는다. 필드 스키마는

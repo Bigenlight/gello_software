@@ -122,7 +122,7 @@ FM_WHICH=final ./run_fm_server.sh     # 기본 best, final도 서빙 가능
 | 서버 `…/<ts>/server.log` | 서버 기동·ready·추론 로그. 실패 시 런처가 마지막 40줄을 찍어 준다 |
 | laptop3 `ros2_ur_ws/gello_logs/bc_rollouts/rollout_<ts>/` | `robot/vectors.h5`(native + synchronized 테이블) · `robot/cam1.mp4`/`cam2.mp4` · `robot/metadata.json` · `status.jsonl`(세션 상태 타임라인) |
 | 서버 `…/served/timing.jsonl` | 서버측 스텝 latency 분해 — Step RPC당 1줄 + BeginEpisode당 1줄. **T1을 `HIL_STEP_TIMING=1`로 띄웠을 때만** 생성된다(기본 OFF) |
-| laptop3 `ros2_ur_ws/gello_logs/step_timing/actor_step_timing_<ts>.jsonl` | 액터측 스텝 latency 분해 — Step RPC를 완료한 루프 반복당 1줄. **T3에 `HIL_STEP_TIMING=1`을 붙였을 때만** 생성된다(`--step-timing-path`로 경로 지정 가능) |
+| laptop3 `gello_logs/step_timing/actor_step_timing_<ts>.jsonl` | 액터측 스텝 latency 분해 — Step RPC를 완료한 루프 반복당 1줄. **T3에 `HIL_STEP_TIMING=1`을 붙였을 때만** 생성된다(`--step-timing-path`로 경로 지정 가능) |
 
 ⚠️ **`inference.jsonl`은 `084ec1a` 이후에 기동한 서버에서만 나온다.** 그 전에 뜬 서버 프로세스를
 재사용하면 이 파일이 없다.
