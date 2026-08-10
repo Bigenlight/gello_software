@@ -16,10 +16,24 @@
 > **예외 딱 하나** — ssh `ControlPath` 수정(`15a467e`)은 **main에 올렸다.** 그건 kanu 전용이
 > 아니라 이 시험이 **찾아낸 main 브랜치의 결함**이었다(§7).
 >
-> **`junhyeong_ai`는 처음부터 끝까지 손대지 않았다** — ssh 쓰기 0회, pull 0회.
+> **`junhyeong_ai`에 한 일은 `git pull --ff-only` 한 번뿐이다.** 데이터 루트
+> (`~/hil-serl-data`)에 쓰기 **0회**, 프로세스 **0개** — 실측으로 확인했다
+> (`find ~/hil-serl-data -newermt 2026-08-10` 무출력). 그 pull(18:19:28,
+> `6bc7644` → `15a467e`)은 위의 main 수정을 받아 간 것이고 **빼면 안 되는 것이다**:
+> launcher가 laptop3 HEAD와 learner 호스트 HEAD를 비교하므로, main으로 돌아왔을 때
+> 두 쪽이 어긋나 있으면 정상 서버로 새 lineage를 시작할 수 없다.
+> ⚠️ junhyeong_ai는 **테스트 브랜치를 fetch한 적이 없다**(의도적) — 그래서 테스트 브랜치에
+> 서 있는 동안 junhyeong_ai를 부르면 큰 배너가 뜬다. **§5 함정 6.**
 >
 > 🛑 **실기 미검증.** 아래 절차는 **dry run까지만** 검증됐다(§4는 그 dry run의 실측이다).
 > **kanu 모드로 로봇 세션을 돌린 적은 아직 없다.**
+>
+> ⚠️ **쓰기 전에 전제부터 확인할 것.** 이 문서의 존재 이유는 "junhyeong_ai GPU가 무기한
+> 점유됐다"이다. 그 전제는 **날짜가 붙은 관측**이지 항구적 사실이 아니다 — 2026-08-10 18:35
+> 재확인 시점에 junhyeong_ai GPU 0은 **완전히 비어 있었다**(15 MiB / 16303 MiB, 0 %,
+> compute app 0개). 비어 있으면 **kanu를 빌릴 이유가 없다**: main 브랜치로 평소대로 돌리는
+> 쪽이 언제나 더 빠르고 검증도 더 많이 됐다. 확인:
+> `ssh junhyeong_ai nvidia-smi --query-compute-apps=pid,used_memory --format=csv`
 
 ---
 
@@ -155,6 +169,12 @@ kanu GPU 1에서 실제로 learner를 띄우고 잰 값이다. **junhyeong_ai �
 파라미터가 이미 존재한다. 다만 T3는 T1의 READY를 기다리는 것이 정상 절차다 — 이 사실은
 "params가 없다"는 진단을 배제할 때 쓴다.
 
+📌 **`logs/latency_server.jsonl`은 dry run 뒤에 없다. 정상이다.** `LatencyProfiler`는
+디렉터리 생성도 파일 열기도 **첫 커밋 때 지연 수행**하는데, 로봇이 없으면 Step RPC가 0건이라
+커밋할 표본이 없다. **profiling이 켜졌다는 증거는 파일이 아니라 로그 한 줄**이다 —
+learner 기동 로그의 `{"event":"rlpd_learner_latency_profile","path":"…/latency_server.jsonl"}`
+(dry run에서 확인함). 실기 세션에서는 첫 전이와 함께 파일이 생긴다.
+
 ---
 
 ## 5. 함정
@@ -192,6 +212,32 @@ run root가 `~/hil-serl-data/runs/` 아래에 계속 쌓인다. 시험이 길어
 "실제 루프 주기가 얼마가 되는가"는 여전히 **미측정**이다
 ([`HIL_LOCAL_INFERENCE_KO.md`](HIL_LOCAL_INFERENCE_KO.md) §5.6과 같은 상태).
 
+### 6) 🪤 이 브랜치에 서 있는 동안 **junhyeong_ai를 부르면 무서운 배너가 뜬다**
+
+테스트 브랜치에서 평소의 `./run_hil_server.sh`(= junhyeong_ai)를 그냥 치면 이렇게 나온다
+(2026-08-10 실측):
+
+```
+  !!  LEARNER HOST / LAPTOP3 CODE IDENTITY MISMATCH  !!
+  laptop3 : 35efda2…  (test/kanu-learner-fallback)
+  remote  : 15a467e…  (feat/gello-ur7e-humble-22.04)
+  relation: remote_never_fetched
+```
+
+**이건 고장이 아니라 사실이다.** junhyeong_ai는 테스트 브랜치를 **fetch한 적이 없고**, 그게
+의도다(그 서버는 main만 본다). 다만 배너 문구가 `HIL_SERL_KANU_RUNBOOK_KO.md` §1.1의 **옛
+origin 사고**("fetch가 성공하고 아무것도 안 가져왔다")를 서술하도록 쓰여 있어서, 여기서는
+**맞는 relation에 틀린 서사**가 붙는다.
+
+| 무엇을 하려는가 | 결과 |
+| --- | --- |
+| `./run_hil_server.sh --check` | 배너 + 정상 보고. **죽지 않는다** (`--check`와 reuse는 불일치로 죽지 않는다) |
+| `./run_hil_server.sh` (새 lineage) | **`remote_die`로 거부된다.** 새 lineage에서만 치명적인 것이 설계다 |
+
+🛑 **`HIL_ACCEPT_HEAD_MISMATCH=1`로 뚫지 말 것.** 그러면 junhyeong_ai의 learner가 main 코드로
+도는데 laptop3 actor는 테스트 브랜치 코드로 도는 lineage가 **영구히** 생긴다. 올바른 조치는
+**§6대로 main으로 checkout하는 것**이고, 그러면 laptop3 = junhyeong_ai = `15a467e`로 맞는다.
+
 ---
 
 ## 6. 되돌리기 — **되돌릴 것이 거의 없다**
@@ -211,7 +257,7 @@ ssh kanu 'cd /home/junhyeong/gello_software_hil_schema3_stage_20260730 \
 | kanu checkout | 같은 방식으로 main으로. **급하지 않다** — 그 브랜치는 kanu에서 learner가 돌 때만 하중을 받는다 |
 | kanu `~/hil-serl-data/classifier_ckpt/checkpoint_150` | **그냥 둔다.** 내용이 정확한 사본이고(SHA 검증됨) 아무도 안 읽으면 그냥 43 MB짜리 죽은 데이터다. 지우면 다음에 다시 복사해야 한다 |
 | kanu `~/workspace/youngwoong/**` | **원래부터 무변경.** 되돌릴 것 없음 |
-| `junhyeong_ai` | **처음부터 끝까지 무변경.** 되돌릴 것 없음 |
+| `junhyeong_ai` | **되돌릴 것 없음** — 단 "무변경"은 아니다. checkout이 `15a467e`(main)로 **한 번 pull됐고 그대로 두는 것이 맞다.** laptop3가 main으로 돌아오면 양쪽이 `15a467e`로 일치해 §5 함정 6이 저절로 사라진다. 데이터 루트와 프로세스는 처음부터 무변경 |
 | GitHub | 테스트 브랜치는 남겨 둔다(다시 필요할 때 checkout 하나로 돌아온다) |
 
 ---
