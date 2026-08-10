@@ -683,7 +683,7 @@ _say "[6] 학습 서버 접속점 $SERVER_HOST:$SERVER_PORT"
 if [ "$POLICY_MODE" = "local" ]; then
     SERVER_ENDPOINT_HINT="local policy proxy는 run_hil_session.sh(HIL_POLICY_MODE=local)가 띄운다. 단독으로 띄우려면: ./run_hil_local_policy.sh (그 proxy는 다시 127.0.0.1:50153 터널을 필요로 하므로 run_hil_server.sh도 떠 있어야 한다)"
 else
-    SERVER_ENDPOINT_HINT="터널은 run_hil_server.sh(Terminal 1)가 연다. 직접 열려면: ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:$SERVER_PORT:127.0.0.1:50053 junhyeong_ai (그리고 그 서버에서 learner가 떠 있어야 한다)"
+    SERVER_ENDPOINT_HINT="터널은 run_hil_server.sh(Terminal 1)가 연다. 직접 열려면: ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:$SERVER_PORT:127.0.0.1:50053 ${HIL_SSH_HOST:-junhyeong_ai} (그리고 그 서버에서 learner가 떠 있어야 한다)"
 fi
 if [ "$VENV_OK" -ne 1 ]; then
     p_skip "venv가 없어 건너뜀"
