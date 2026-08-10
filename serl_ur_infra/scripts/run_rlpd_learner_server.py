@@ -248,7 +248,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--utd-ratio",
         type=int,
-        default=10,
+        default=5,
         help=(
             "outer learner steps permitted per newly accepted online "
             "transition after replay warm-up; CTA remains independently 2:1. "

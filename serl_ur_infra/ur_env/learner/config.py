@@ -24,7 +24,7 @@ class LearnerConfig:
     seed: int = 42
     batch_size: int = 256
     online_fraction: float = 0.5
-    utd_ratio: int = 10
+    utd_ratio: int = 5
     cta_ratio: int = 2
     training_starts: int = 100
     publish_period: int = 50

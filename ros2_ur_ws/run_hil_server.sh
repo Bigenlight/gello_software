@@ -804,7 +804,7 @@ number("--intervention-capacity", "10000")
 number("--feature-memory-reserve-gib", "2")
 number("--demo-extraction-batch-size", "64")
 number("--grasp-penalty", "-0.02")
-number("--utd-ratio", "10")
+number("--utd-ratio", "5")
 number("--max-workers", "4")
 number("--max-message-bytes", "16777216")
 exact("--require-jax-backend", "gpu")
@@ -1214,7 +1214,7 @@ nohup env \
     --feature-memory-reserve-gib 2 \
     --demo-extraction-batch-size 64 \
     --grasp-penalty -0.02 \
-    --utd-ratio 10 \
+    --utd-ratio 5 \
     --max-workers 4 \
     --max-message-bytes 16777216 \
     --require-jax-backend gpu \
