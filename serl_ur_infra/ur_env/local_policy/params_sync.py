@@ -65,6 +65,7 @@ venv (no jax, no flax) can import this file.  jax/flax/numpy appear only inside
 from __future__ import annotations
 
 from dataclasses import dataclass
+import getpass
 import hashlib
 import json
 import logging
@@ -93,6 +94,8 @@ from ur_env.latency_profile import LatencyProfiler
 
 __all__ = [
     "AppliedParams",
+    "CONTROL_PATH_BASENAME",
+    "CONTROL_PATH_SUFFIX_ALLOWANCE",
     "DEFAULT_LATENCY_PROFILE_DIR",
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_SSH_CONTROL_DIR",
@@ -101,11 +104,14 @@ __all__ = [
     "LATENCY_ROLE",
     "LATEST_FILENAME",
     "MANIFEST_SCHEMA_VERSION",
+    "MAX_CONTROL_PATH_LENGTH",
+    "MAX_UNIX_SOCKET_PATH",
     "NO_PARAMS_VERSION",
     "PARAMS_DIR_NAME",
     "POLL_INTERVAL_ENV_VAR",
     "SSH_CONTROL_DIR_ENV_VAR",
     "SSH_HOST_ENV_VAR",
+    "UNRESOLVED_EXPANSION_FLOOR",
     "FrozenTrunkParamsCodec",
     "LocalDirectoryFetcher",
     "ParamsFetcher",
@@ -119,13 +125,19 @@ __all__ = [
     "ParamsSyncClient",
     "ParamsSyncError",
     "ParamsTransportError",
+    "RemoteIdentity",
     "SshParamsFetcher",
     "blob_filename",
+    "clear_remote_identity_cache",
+    "expand_control_path",
+    "fallback_control_dir",
     "graft_frozen_trunk",
     "manifest_for_blob",
+    "measure_control_path",
     "prune_frozen_trunk",
     "remote_params_dir",
     "resolve_poll_interval",
+    "resolve_remote_identity",
     "serialize_trainable_params",
 ]
 
@@ -185,17 +197,58 @@ DEFAULT_LATENCY_PROFILE_DIR = str(
     _REPO_ROOT / "ros2_ur_ws" / "gello_logs" / "hil_latency"
 )
 
-#: Where the ssh ControlMaster socket lives.  Next to the other operator-scratch
-#: directories under ``ros2_ur_ws/gello_logs/`` (git-ignored as a whole), so it
-#: shares their lifetime and nobody has to remember a second cleanup location.
-#: A unix socket path is capped near 104 bytes by the kernel, which this leaves
-#: roughly 25 bytes of headroom under for a default-depth checkout; a deeper one
-#: gets a warning, not a silent connection failure.
-DEFAULT_SSH_CONTROL_DIR = str(
-    _REPO_ROOT / "ros2_ur_ws" / "gello_logs" / "hil_params_sync"
-)
+#: Where the ssh ControlMaster socket lives.  Deliberately SHORT, and outside
+#: the checkout, because the checkout-relative location this used to name --
+#: ``<repo>/ros2_ur_ws/gello_logs/hil_params_sync`` -- did not fit.
+#:
+#: Measured 2026-08-10 on laptop3: that directory is 66 characters, the template
+#: adds ``/cm-`` and ``%r@%h`` expands to ``junhyeong@166.104.146.29`` (24), so
+#: the real ControlPath was **94** characters and the socket ssh actually binds
+#: was **111** -- four over the 107 a ``sun_path`` can hold.  EVERY poll died
+#: with ``unix_listener: path too long`` / rc=255.  The module degraded exactly
+#: as designed (warn, keep the stale parameters) and the proxy then blamed a
+#: missing ``HIL_PARAMS_EXPORT``, which is the wrong story about the right
+#: symptom.
+#:
+#: ``~/.ssh/hil_cm`` is 25 characters, is where an operator already looks for ssh
+#: state, and is stable across checkouts -- which is correct rather than a
+#: collision, because the socket is keyed by remote ``user@host`` and one
+#: multiplexed connection per learner host is the whole point.
+DEFAULT_SSH_CONTROL_DIR = os.path.expanduser("~/.ssh/hil_cm")
 
-_CONTROL_PATH_WARN_LENGTH = 100
+#: Socket basename under the control directory.  ``%r``/``%h`` are ssh's tokens,
+#: expanded by ssh at connect time and by :func:`expand_control_path` when this
+#: module needs to know how long the result will be.
+CONTROL_PATH_BASENAME = "cm-%r@%h"
+
+#: ``struct sockaddr_un.sun_path`` is 108 bytes INCLUDING the NUL terminator, so
+#: 107 characters is the longest path any Unix-domain socket can be bound at.
+MAX_UNIX_SOCKET_PATH = 107
+
+#: ssh does not bind the ControlPath you configure.  ``mux.c`` binds
+#: ``<ControlPath>.XXXXXXXXXXXXXXXX`` -- a dot plus 16 ``mkstemp`` characters --
+#: and renames it into place, so 17 of those 107 belong to ssh, not to us.
+#: Verified 2026-08-10 against the real learner host (OpenSSH_8.9p1): an
+#: expanded ControlPath of 90 characters binds and leaves an ``srw-------``
+#: socket, while 91 fails with ``unix_listener: path
+#: "<...>/cm-junhyeong@166.104.146.29.lQJfUMMSrFNtxTyL" too long for Unix domain
+#: socket``.  That suffix is the 17.
+CONTROL_PATH_SUFFIX_ALLOWANCE = 17
+
+#: The longest EXPANDED ControlPath that still leaves ssh room for its suffix.
+#: 107 - 17 = **90**: 90 binds, 91 does not.  The old guard compared the
+#: unexpanded TEMPLATE (75 characters) against 100 and therefore stayed silent
+#: while every poll failed -- three mistakes stacked into one silent outage.
+MAX_CONTROL_PATH_LENGTH = MAX_UNIX_SOCKET_PATH - CONTROL_PATH_SUFFIX_ALLOWANCE
+
+#: When ``ssh -G`` cannot be consulted the expansion is a guess built from the
+#: alias and the local username, which is typically SHORTER than the truth --
+#: and an optimistic guard is exactly how the original outage got through.  So
+#: an unresolved ``%r@%h`` is never credited with being narrower than the widest
+#: identity this deployment actually has (``junhyeong@166.104.146.29``, 24).
+#: Being wrong in this direction costs a socket in ``/tmp``; being wrong in the
+#: other direction costs the whole feature.
+UNRESOLVED_EXPANSION_FLOOR = 24
 
 #: Remote paths are built by us from an operator-supplied run root, then handed
 #: to ``ssh``/``scp``, which may or may not expand them through a remote shell
@@ -556,6 +609,207 @@ _MISSING_FILE_MARKERS = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# ControlPath measurement
+#
+# The socket ssh binds is not the string an operator configures.  It is that
+# string with ``%r``/``%h`` expanded to values that appear NOWHERE in the alias
+# they typed, plus a 17-character suffix ssh adds while binding.  Measuring
+# anything else -- as this module used to -- is measuring the wrong string.
+# --------------------------------------------------------------------------- #
+
+
+class RemoteIdentity(NamedTuple):
+    """What an ssh alias actually resolves to, for ControlPath measurement.
+
+    ``resolved`` says whether ``ssh -G`` answered or this is a guess.  A guess
+    is still usable -- it is just one the guard refuses to trust downward, via
+    :data:`UNRESOLVED_EXPANSION_FLOOR`.
+    """
+
+    user: str
+    hostname: str
+    port: str
+    resolved: bool = True
+
+
+_IDENTITY_CACHE: dict[tuple[str, str], RemoteIdentity] = {}
+_IDENTITY_CACHE_LOCK = threading.Lock()
+
+_SSH_CONFIG_KEYS = ("user", "hostname", "port")
+
+#: ``%`` followed by one character.  Deliberately not anchored to the tokens we
+#: know: an unknown token must survive into the output at its literal width
+#: rather than vanish, because vanishing under-measures.
+_CONTROL_PATH_TOKEN = re.compile(r"%(.)")
+
+
+def clear_remote_identity_cache() -> None:
+    """Forget every cached ``ssh -G`` answer.  Exists for tests."""
+
+    with _IDENTITY_CACHE_LOCK:
+        _IDENTITY_CACHE.clear()
+
+
+def _local_identity_guess(host: str) -> RemoteIdentity:
+    try:
+        user = getpass.getuser()
+    except Exception:  # pragma: no cover - no passwd entry and no env
+        user = "user"
+    return RemoteIdentity(
+        user=str(user), hostname=str(host), port="22", resolved=False
+    )
+
+
+def _parse_ssh_config(text: Any) -> dict[str, str]:
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    found: dict[str, str] = {}
+    for line in str(text or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        key = parts[0].lower()
+        if key in _SSH_CONFIG_KEYS and key not in found:
+            found[key] = parts[1].strip()
+    return found
+
+
+def resolve_remote_identity(
+    host: str,
+    *,
+    ssh_binary: str = "ssh",
+    timeout_s: float = 5.0,
+    runner: Optional[Callable[..., Any]] = None,
+    use_cache: bool = True,
+) -> RemoteIdentity:
+    """Ask ``ssh -G`` what ``host`` resolves to: ``user``, ``hostname``, ``port``.
+
+    ``ssh -G`` prints the effective configuration WITHOUT connecting -- it is a
+    local, sub-50 ms config parse -- and it is the only way to learn what
+    ``cm-%r@%h`` will actually become, because ssh expands ``%h`` to the resolved
+    ``HostName`` and ``%r`` to the resolved ``User``, neither of which is visible
+    in the alias an operator types.  ``junhyeong_ai`` (12 characters) becomes
+    ``junhyeong@166.104.146.29`` (24).
+
+    Never raises.  A missing binary, a timeout, or unparseable output yields a
+    ``resolved=False`` guess; the caller compensates with
+    :data:`UNRESOLVED_EXPANSION_FLOOR` rather than trusting it.
+    """
+
+    alias = str(host).strip()
+    if not alias:
+        raise ValueError("host must not be empty")
+    key = (str(ssh_binary), alias)
+    if use_cache:
+        with _IDENTITY_CACHE_LOCK:
+            cached = _IDENTITY_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    identity = _local_identity_guess(alias)
+    call = runner if runner is not None else subprocess.run
+    try:
+        completed = call(
+            [str(ssh_binary), "-G", "--", alias],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout_s,
+        )
+    except Exception as exc:  # noqa: BLE001 - measurement, never a session
+        _LOGGER.debug(
+            "%s -G %s did not answer (%s); estimating the ControlPath length",
+            ssh_binary,
+            alias,
+            exc,
+        )
+    else:
+        if int(getattr(completed, "returncode", 1) or 0) == 0:
+            parsed = _parse_ssh_config(getattr(completed, "stdout", ""))
+            if parsed.get("hostname"):
+                identity = RemoteIdentity(
+                    user=parsed.get("user") or identity.user,
+                    hostname=parsed["hostname"],
+                    port=parsed.get("port") or "22",
+                    resolved=True,
+                )
+
+    if use_cache:
+        with _IDENTITY_CACHE_LOCK:
+            _IDENTITY_CACHE[key] = identity
+    return identity
+
+
+def expand_control_path(
+    template: Union[str, os.PathLike],
+    identity: RemoteIdentity,
+    *,
+    host: str,
+) -> str:
+    """Expand a ``ControlPath`` template the way ssh will.
+
+    ``%%``, ``%r``, ``%h``, ``%n`` and ``%p`` are expanded exactly.  ``%C`` --
+    ssh's SHA-1 hash of ``%l%h%p%r`` -- becomes 40 placeholder characters,
+    because its VALUE is irrelevant here and its WIDTH is the whole point
+    (verified: ``ssh -G -o ControlPath=/tmp/%C`` prints 40 hex characters).
+    Any other token is left literally in place: an unknown token is a character
+    or two either way, whereas dropping it would under-measure.
+    """
+
+    replacements = {
+        "%": "%",
+        "r": str(identity.user),
+        "h": str(identity.hostname),
+        "n": str(host),
+        "p": str(identity.port),
+        "C": "0" * 40,
+    }
+
+    def _substitute(match: "re.Match[str]") -> str:
+        return replacements.get(match.group(1), match.group(0))
+
+    return _CONTROL_PATH_TOKEN.sub(_substitute, os.fspath(template))
+
+
+def measure_control_path(
+    template: Union[str, os.PathLike],
+    identity: RemoteIdentity,
+    *,
+    host: str,
+) -> tuple[str, int]:
+    """``(expanded, length_to_compare_against MAX_CONTROL_PATH_LENGTH)``.
+
+    The two differ only when the identity is a guess AND the template actually
+    contains an identity token: then the measured length is padded up to
+    :data:`UNRESOLVED_EXPANSION_FLOOR` so an unresolvable alias cannot talk the
+    guard into approving a path that will not bind.
+    """
+
+    text = os.fspath(template)
+    expanded = expand_control_path(text, identity, host=host)
+    measured = len(expanded)
+    if not identity.resolved and ("%r" in text or "%h" in text):
+        width = len(str(identity.user)) + 1 + len(str(identity.hostname))
+        measured += max(0, UNRESOLVED_EXPANSION_FLOOR - width)
+    return expanded, measured
+
+
+def fallback_control_dir() -> Path:
+    """A short, private, per-user socket directory outside any checkout.
+
+    ``/tmp`` (or ``TMPDIR``) is a fine home for a Unix socket -- ssh's own
+    ``ControlPath`` examples live there -- and it is short, which is the entire
+    requirement.  The uid is in the name so two operators on one machine cannot
+    collide on a 0700 directory that the loser could then never write.
+    """
+
+    try:
+        uid = os.geteuid()
+    except AttributeError:  # pragma: no cover - non-POSIX
+        uid = 0
+    return Path(tempfile.gettempdir()) / f"hil_cm_{uid}"
+
+
 class SshParamsFetcher:
     """Default transport: ssh/scp over one multiplexed connection.
 
@@ -569,10 +823,20 @@ class SshParamsFetcher:
     comfortably longer than the poll interval, so the connection is effectively
     permanent for the session without ever being unkillable.
 
-    The constructor touches no filesystem and opens no connection (the rule
-    ``latency_profile`` and ``bc_inference_log`` already follow): a typo'd host
-    or an unwritable control directory must surface as one warning at the first
-    poll, never as a session that refuses to start.
+    WHY IT CAN TURN ITSELF OFF
+    --------------------------
+    Multiplexing is an optimisation; the parameters are the product.  So a
+    ControlPath that cannot be bound -- too long once expanded, or in a
+    directory this process cannot create -- is answered by moving the socket
+    (to :func:`fallback_control_dir`) and, only if even that will not fit, by
+    dropping ``ControlMaster`` entirely and paying a fresh ~0.44 s handshake per
+    poll.  Slow polls are a performance story; ``rc=255`` on every poll is an
+    outage that reads like a missing ``HIL_PARAMS_EXPORT``.
+
+    The constructor touches no filesystem, runs no subprocess and opens no
+    connection (the rule ``latency_profile`` and ``bc_inference_log`` already
+    follow): a typo'd host or an unwritable control directory must surface as
+    one warning at the first poll, never as a session that refuses to start.
     """
 
     def __init__(
@@ -588,6 +852,7 @@ class SshParamsFetcher:
         scp_binary: str = "scp",
         batch_mode: bool = True,
         runner: Optional[Callable[..., Any]] = None,
+        identity: Optional[RemoteIdentity] = None,
         env: Optional[Mapping[str, str]] = None,
     ) -> None:
         source = os.environ if env is None else env
@@ -612,6 +877,8 @@ class SshParamsFetcher:
         self.scp_binary = str(scp_binary)
         self.batch_mode = bool(batch_mode)
         self._runner = runner if runner is not None else subprocess.run
+        self._identity = identity
+        self.multiplexing_enabled = True
         self._prepared = False
         self._warned_long_control_path = False
 
@@ -621,19 +888,48 @@ class SshParamsFetcher:
     def control_path(self) -> str:
         """``ControlPath`` template.  ``%r``/``%h`` are expanded by ssh."""
 
-        return os.fspath(self.control_dir / "cm-%r@%h")
+        return os.fspath(self.control_dir / CONTROL_PATH_BASENAME)
+
+    def remote_identity(self) -> RemoteIdentity:
+        """What ``self.host`` resolves to.  Resolved once, then remembered."""
+
+        identity = self._identity
+        if identity is None:
+            identity = resolve_remote_identity(
+                self.host, ssh_binary=self.ssh_binary
+            )
+            self._identity = identity
+        return identity
+
+    @property
+    def expanded_control_path(self) -> str:
+        """:attr:`control_path` as ssh will actually see it -- what to measure."""
+
+        return expand_control_path(
+            self.control_path, self.remote_identity(), host=self.host
+        )
 
     def ssh_options(self) -> list[str]:
-        options = [
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            f"ControlPath={self.control_path}",
-            "-o",
-            f"ControlPersist={self.control_persist_s}",
-            "-o",
-            f"ConnectTimeout={self.connect_timeout_s}",
-        ]
+        if not self.multiplexing_enabled:
+            # Say "no" rather than name a path ssh cannot bind: a fresh
+            # handshake per poll is slow, and slow beats rc=255 every poll.
+            options = [
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                f"ConnectTimeout={self.connect_timeout_s}",
+            ]
+        else:
+            options = [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                f"ControlPath={self.control_path}",
+                "-o",
+                f"ControlPersist={self.control_persist_s}",
+                "-o",
+                f"ConnectTimeout={self.connect_timeout_s}",
+            ]
         if self.batch_mode:
             # No password prompt may ever block a poll thread on a robot laptop.
             options[:0] = ["-o", "BatchMode=yes"]
@@ -666,6 +962,9 @@ class SshParamsFetcher:
     # -- use ---------------------------------------------------------------- #
 
     def fetch_text(self, remote_path: str) -> str:
+        # Before argv, not inside ``_run``: ``_prepare`` may move the socket, and
+        # the very first poll is exactly the one that must not use the old path.
+        self._prepare()
         completed = self._run(
             self.text_argv(remote_path),
             timeout=self.text_timeout_s,
@@ -679,6 +978,7 @@ class SshParamsFetcher:
     def fetch_file(
         self, remote_path: str, local_path: Union[str, os.PathLike]
     ) -> None:
+        self._prepare()
         self._run(
             self.file_argv(remote_path, local_path),
             timeout=self.file_timeout_s,
@@ -690,27 +990,90 @@ class SshParamsFetcher:
     def _prepare(self) -> None:
         if self._prepared:
             return
-        try:
-            self.control_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        except OSError as exc:
-            raise ParamsTransportError(
-                f"could not create ssh control directory {self.control_dir}: {exc}"
-            ) from exc
-        if (
-            not self._warned_long_control_path
-            and len(self.control_path) > _CONTROL_PATH_WARN_LENGTH
-        ):
-            # A unix socket path over the kernel limit makes ssh fall back to a
-            # fresh handshake per poll, silently, at 0.44 s each.
-            self._warned_long_control_path = True
-            _LOGGER.warning(
-                "ssh ControlPath is %d characters (%s); multiplexing may fail "
-                "silently -- set %s to a shorter directory",
-                len(self.control_path),
-                self.control_path,
+        self._choose_control_dir()
+        self._prepared = True
+
+    def _choose_control_dir(self) -> None:
+        """Pick a ControlPath that will bind, or give multiplexing up.
+
+        Three outcomes, one warning at most: the configured directory works;
+        the socket moves to :func:`fallback_control_dir`; or multiplexing is
+        switched off.  Never a fourth outcome where ssh is handed a path it
+        will refuse -- that one costs every poll, forever, and says nothing.
+        """
+
+        identity = self.remote_identity()
+        expanded, measured = measure_control_path(
+            self.control_path, identity, host=self.host
+        )
+        if measured <= MAX_CONTROL_PATH_LENGTH:
+            failure = self._make_control_dir(self.control_dir)
+            if failure is None:
+                return
+            reason = (
+                f"ssh control directory {self.control_dir} could not be "
+                f"created ({failure})"
+            )
+        else:
+            reason = (
+                f"ssh ControlPath expands to {measured} characters "
+                f"({expanded!r}), over the {MAX_CONTROL_PATH_LENGTH} that leave "
+                f"room for the {CONTROL_PATH_SUFFIX_ALLOWANCE}-character suffix "
+                f"ssh binds inside a {MAX_UNIX_SOCKET_PATH + 1}-byte sun_path"
+            )
+
+        fallback = fallback_control_dir()
+        _, fallback_measured = measure_control_path(
+            os.fspath(fallback / CONTROL_PATH_BASENAME), identity, host=self.host
+        )
+        failure = (
+            self._make_control_dir(fallback)
+            if fallback_measured <= MAX_CONTROL_PATH_LENGTH
+            else f"it would itself expand to {fallback_measured} characters"
+        )
+        if failure is None:
+            self.control_dir = fallback
+            self._warn_once(
+                "%s; moving the ControlMaster socket to %s.  Set %s to choose "
+                "a different short directory.",
+                reason,
+                self.control_dir,
                 SSH_CONTROL_DIR_ENV_VAR,
             )
-        self._prepared = True
+            return
+
+        self.multiplexing_enabled = False
+        self._warn_once(
+            "%s, and the fallback %s is unusable too (%s); disabling "
+            "ControlMaster, so every poll now pays a fresh ~0.44 s handshake "
+            "instead of failing.  Set %s to a short, writable directory.",
+            reason,
+            fallback,
+            failure,
+            SSH_CONTROL_DIR_ENV_VAR,
+        )
+
+    def _make_control_dir(self, directory: Path) -> Optional[str]:
+        """Create ``directory`` 0700.  ``None`` on success, else the reason."""
+
+        try:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError as exc:
+            return str(exc)
+        try:
+            # ``mkdir(mode=...)`` is a no-op on a directory that already exists,
+            # and ssh refuses a control socket under one others can write.
+            if directory.stat().st_mode & 0o077:
+                directory.chmod(0o700)
+        except OSError as exc:  # pragma: no cover - defensive
+            _LOGGER.debug("could not tighten %s to 0700: %s", directory, exc)
+        return None
+
+    def _warn_once(self, message: str, *args: Any) -> None:
+        if self._warned_long_control_path:
+            return
+        self._warned_long_control_path = True
+        _LOGGER.warning(message, *args)
 
     def _run(self, argv: list[str], *, timeout: float, what: str) -> Any:
         self._prepare()

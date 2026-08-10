@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -50,15 +51,23 @@ _REPO = _INFRA.parent
 sys.path.insert(0, str(_INFRA))
 
 from ur_env.latency_profile import LatencyProfiler  # noqa: E402
+from ur_env.local_policy import params_sync  # noqa: E402
 from ur_env.local_policy.params_sync import (  # noqa: E402
+    CONTROL_PATH_BASENAME,
+    CONTROL_PATH_SUFFIX_ALLOWANCE,
     DEFAULT_POLL_INTERVAL_S,
+    DEFAULT_SSH_CONTROL_DIR,
     FROZEN_TRUNK_SUBTREE_KEY,
     LATENCY_ROLE,
     LATEST_FILENAME,
     MANIFEST_SCHEMA_VERSION,
+    MAX_CONTROL_PATH_LENGTH,
+    MAX_UNIX_SOCKET_PATH,
     NO_PARAMS_VERSION,
     PARAMS_DIR_NAME,
     POLL_INTERVAL_ENV_VAR,
+    SSH_CONTROL_DIR_ENV_VAR,
+    UNRESOLVED_EXPANSION_FLOOR,
     AppliedParams,
     LocalDirectoryFetcher,
     ParamsFetcher,
@@ -70,14 +79,43 @@ from ur_env.local_policy.params_sync import (  # noqa: E402
     ParamsNotFoundError,
     ParamsSyncClient,
     ParamsTransportError,
+    RemoteIdentity,
     SshParamsFetcher,
     blob_filename,
+    expand_control_path,
+    fallback_control_dir,
     graft_frozen_trunk,
     manifest_for_blob,
+    measure_control_path,
     prune_frozen_trunk,
     remote_params_dir,
     resolve_poll_interval,
+    resolve_remote_identity,
 )
+
+
+#: The identity every test in this file sees unless it says otherwise.  It is
+#: SHORT on purpose: without it, ``SshParamsFetcher`` would shell out to a real
+#: ``ssh -G`` (breaking "no process is ever spawned") and would resolve the real
+#: learner alias to ``junhyeong@166.104.146.29``, which on top of a pytest
+#: ``tmp_path`` overruns the 90-character ControlPath budget and would send half
+#: this file's fetchers down the fallback path for reasons unrelated to what
+#: they assert.
+_TEST_IDENTITY = RemoteIdentity(user="u", hostname="h", port="22", resolved=True)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_ssh_identity(monkeypatch):
+    """No test here may consult the machine's real ssh config."""
+
+    monkeypatch.setattr(
+        params_sync,
+        "resolve_remote_identity",
+        lambda host, **kwargs: _TEST_IDENTITY,
+    )
+    params_sync.clear_remote_identity_cache()
+    yield
+    params_sync.clear_remote_identity_cache()
 
 
 # --------------------------------------------------------------------------- #
@@ -957,6 +995,343 @@ def test_ssh_fetcher_warns_once_about_an_oversized_control_path(tmp_path, caplog
         fetcher.fetch_text("/x/a.json")
     warnings = [r for r in caplog.records if "ControlPath" in r.getMessage()]
     assert len(warnings) == 1
+
+
+# --------------------------------------------------------------------------- #
+# ControlPath length: the socket ssh binds, not the string we configure
+#
+# The regression these pin: the default control directory lived in the checkout,
+# the guard measured the unexpanded TEMPLATE against a limit that ignored ssh's
+# mkstemp suffix, and so every poll died with rc=255 "unix_listener: path too
+# long" while the guard said nothing and the proxy blamed HIL_PARAMS_EXPORT.
+# --------------------------------------------------------------------------- #
+
+
+#: The two learner hosts this deployment actually has, as ``ssh -G`` resolves
+#: them (measured 2026-08-10).  The aliases are 12 and 4 characters; what ssh
+#: puts in the socket name is 24 and 23 -- which is the entire trap.
+_REAL_IDENTITIES = {
+    "junhyeong_ai": RemoteIdentity("junhyeong", "166.104.146.29", "22"),
+    "kanu": RemoteIdentity("junhyeong", "166.104.35.33", "22"),
+}
+
+#: The control directory the default used to be, verbatim.
+_OLD_DEFAULT_CONTROL_DIR = str(
+    _REPO / "ros2_ur_ws" / "gello_logs" / "hil_params_sync"
+)
+
+
+def _dir_with_expanded_length(base: Path, length: int) -> Path:
+    """A directory under ``base`` whose ControlPath expands to exactly ``length``."""
+
+    for pad in range(1, 400):
+        candidate = base / ("p" * pad)
+        expanded = expand_control_path(
+            os.fspath(candidate / CONTROL_PATH_BASENAME), _TEST_IDENTITY, host="alias"
+        )
+        if len(expanded) == length:
+            return candidate
+    raise AssertionError(f"no directory under {base} expands to {length}")
+
+
+def test_control_path_budget_is_the_measured_kernel_boundary():
+    # sun_path is 108 bytes including the NUL, so 107 characters can be bound.
+    assert MAX_UNIX_SOCKET_PATH == 107
+    # ssh binds "<ControlPath>.XXXXXXXXXXXXXXXX" -- a dot plus 16 mkstemp
+    # characters -- before renaming it into place.
+    assert CONTROL_PATH_SUFFIX_ALLOWANCE == 17
+    # Verified against the real host on 2026-08-10: 90 binds, 91 fails with
+    # unix_listener: path "...cm-junhyeong@166.104.146.29.lQJfUMMSrFNtxTyL"
+    # too long for Unix domain socket.
+    assert MAX_CONTROL_PATH_LENGTH == 90
+    assert MAX_CONTROL_PATH_LENGTH + CONTROL_PATH_SUFFIX_ALLOWANCE == (
+        MAX_UNIX_SOCKET_PATH
+    )
+
+
+def test_the_old_guard_measured_the_template_and_the_new_one_measures_the_socket():
+    """The exact arithmetic of the outage, reproduced from both directions."""
+
+    identity = _REAL_IDENTITIES["junhyeong_ai"]
+    template = os.path.join(_OLD_DEFAULT_CONTROL_DIR, CONTROL_PATH_BASENAME)
+    expanded, measured = measure_control_path(
+        template, identity, host="junhyeong_ai"
+    )
+
+    # What the old guard looked at: a template that fits comfortably ...
+    assert len(template) == 75
+    assert len(template) <= 100  # the old _CONTROL_PATH_WARN_LENGTH -- silent
+    # ... and what ssh actually binds, which does not.
+    assert expanded.endswith("/cm-junhyeong@166.104.146.29")
+    assert len(expanded) == 94
+    assert measured == 94
+    assert measured + CONTROL_PATH_SUFFIX_ALLOWANCE == 111 > MAX_UNIX_SOCKET_PATH
+    assert measured > MAX_CONTROL_PATH_LENGTH
+
+    # Expansion is not a rounding error: it is 19 characters wider than the
+    # template, and every one of them is invisible in the alias an operator
+    # types.
+    assert len(expanded) - len(template) == 19
+
+
+def test_default_control_dir_fits_both_real_learner_hosts():
+    assert DEFAULT_SSH_CONTROL_DIR == os.path.expanduser("~/.ssh/hil_cm")
+    template = os.path.join(DEFAULT_SSH_CONTROL_DIR, CONTROL_PATH_BASENAME)
+    for host, identity in _REAL_IDENTITIES.items():
+        expanded, measured = measure_control_path(template, identity, host=host)
+        assert measured <= MAX_CONTROL_PATH_LENGTH, (host, expanded, measured)
+        # Not "fits" by a character: fits with room for a longer $HOME or a
+        # future host, so this cannot silently re-break.
+        assert MAX_CONTROL_PATH_LENGTH - measured >= 30, (host, measured)
+        assert measured + CONTROL_PATH_SUFFIX_ALLOWANCE <= MAX_UNIX_SOCKET_PATH
+
+
+def test_expand_control_path_expands_the_tokens_ssh_expands():
+    identity = RemoteIdentity("junhyeong", "166.104.146.29", "2222")
+    assert (
+        expand_control_path("/d/cm-%r@%h:%p", identity, host="alias")
+        == "/d/cm-junhyeong@166.104.146.29:2222"
+    )
+    # %n is the alias as typed; %% is a literal percent.
+    assert expand_control_path("/d/%n%%", identity, host="alias") == "/d/alias%"
+    # %C is ssh's SHA-1 hash: 40 characters wide, and the width is what matters.
+    assert len(expand_control_path("/d/%C", identity, host="alias")) == len("/d/") + 40
+    # An unknown token stays put rather than vanishing -- dropping it would
+    # under-measure, which is the failure direction that caused the outage.
+    assert expand_control_path("/d/%Z", identity, host="alias") == "/d/%Z"
+
+
+def test_ninety_is_accepted_and_ninety_one_falls_back(tmp_path, caplog):
+    """The boundary, from both sides, at the exact character."""
+
+    fallback = tmp_path / "fb"
+    ok_dir = _dir_with_expanded_length(tmp_path, MAX_CONTROL_PATH_LENGTH)
+    over_dir = _dir_with_expanded_length(tmp_path, MAX_CONTROL_PATH_LENGTH + 1)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(params_sync, "fallback_control_dir", lambda: fallback)
+
+        fits = SshParamsFetcher("alias", control_dir=ok_dir, runner=_FakeSsh(), env={})
+        with caplog.at_level(logging.WARNING):
+            fits.fetch_text("/x/a.json")
+        assert fits.control_dir == ok_dir
+        assert len(fits.expanded_control_path) == 90
+        assert not [r for r in caplog.records if "ControlPath" in r.getMessage()]
+
+        caplog.clear()
+        over = SshParamsFetcher("alias", control_dir=over_dir, runner=_FakeSsh(), env={})
+        with caplog.at_level(logging.WARNING):
+            over.fetch_text("/x/a.json")
+        assert over.control_dir == fallback
+        messages = [r.getMessage() for r in caplog.records if "ControlPath" in r.getMessage()]
+        assert len(messages) == 1
+        # The warning names the length that was actually measured, not the
+        # template length -- the thing the old warning could never have said.
+        assert "91 characters" in messages[0]
+        assert str(fallback) in messages[0]
+        assert SSH_CONTROL_DIR_ENV_VAR in messages[0]
+
+
+def test_an_oversized_control_path_moves_the_socket_instead_of_failing(tmp_path):
+    fallback = tmp_path / "fb"
+    runner = _FakeSsh(stdout=b"{}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(params_sync, "fallback_control_dir", lambda: fallback)
+        fetcher = SshParamsFetcher(
+            "alias", control_dir=tmp_path / ("d" * 150), runner=runner, env={}
+        )
+        fetcher.fetch_text("/x/a.json")
+
+    # The socket moved, the directory is private, and multiplexing survived --
+    # the poll never gets the chance to come back rc=255.
+    assert fetcher.control_dir == fallback
+    assert fallback.is_dir()
+    assert fallback.stat().st_mode & 0o077 == 0
+    assert fetcher.multiplexing_enabled
+    argv = runner.calls[0]
+    assert f"ControlPath={os.fspath(fallback / CONTROL_PATH_BASENAME)}" in argv
+    assert "ControlMaster=auto" in argv
+    # And the first poll already used it: no argv anywhere names the old dir.
+    assert not any("d" * 150 in arg for arg in argv)
+
+
+def test_the_real_fallback_dir_is_short_and_per_user():
+    fallback = fallback_control_dir()
+    assert fallback.parent == Path(tempfile.gettempdir())
+    assert fallback.name == f"hil_cm_{os.geteuid()}"
+    for host, identity in _REAL_IDENTITIES.items():
+        _, measured = measure_control_path(
+            os.fspath(fallback / CONTROL_PATH_BASENAME), identity, host=host
+        )
+        assert measured <= MAX_CONTROL_PATH_LENGTH, (host, measured)
+
+
+def test_an_unwritable_control_dir_moves_the_socket_too(tmp_path):
+    """Same answer for the other way a socket directory can be unusable."""
+
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory", encoding="utf-8")
+    fallback = tmp_path / "fb"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(params_sync, "fallback_control_dir", lambda: fallback)
+        fetcher = SshParamsFetcher(
+            "alias", control_dir=blocker / "cm", runner=_FakeSsh(), env={}
+        )
+        # It used to raise ParamsTransportError here, every poll, forever.
+        fetcher.fetch_text("/x/a.json")
+    assert fetcher.control_dir == fallback
+    assert fetcher.multiplexing_enabled
+
+
+def test_multiplexing_switches_off_when_even_the_fallback_is_unusable(tmp_path, caplog):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory", encoding="utf-8")
+    runner = _FakeSsh(stdout=b"{}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(params_sync, "fallback_control_dir", lambda: blocker / "fb")
+        fetcher = SshParamsFetcher(
+            "alias", control_dir=tmp_path / ("d" * 150), runner=runner, env={}
+        )
+        with caplog.at_level(logging.WARNING):
+            assert fetcher.fetch_text("/x/a.json") == "{}"
+
+    # Degraded, not dead: no ControlPath is offered at all, so ssh cannot fail
+    # to bind one, and the fetch still returned the manifest.
+    assert not fetcher.multiplexing_enabled
+    argv = runner.calls[0]
+    assert "ControlMaster=no" in argv
+    assert not any(arg.startswith("ControlPath=") for arg in argv)
+    assert "BatchMode=yes" in argv
+    assert len([r for r in caplog.records if "disabling ControlMaster" in r.getMessage()]) == 1
+
+
+def test_env_override_wins_verbatim_when_it_fits(tmp_path):
+    short = tmp_path / "cm"
+    fetcher = SshParamsFetcher(
+        env={
+            "HIL_SSH_HOST": "alias",
+            SSH_CONTROL_DIR_ENV_VAR: str(short),
+        },
+        runner=_FakeSsh(),
+    )
+    fetcher.fetch_text("/x/a.json")
+    assert fetcher.control_dir == short
+    assert fetcher.control_path == os.fspath(short / CONTROL_PATH_BASENAME)
+
+
+def test_env_override_that_is_too_long_still_falls_back(tmp_path, caplog):
+    """An operator's own directory gets the same treatment, loudly.
+
+    Honouring it verbatim would be honouring a request for rc=255 on every
+    poll.  The warning names the env var, so the operator can see whose
+    setting moved and where to fix it.
+    """
+
+    fallback = tmp_path / "fb"
+    too_long = tmp_path / ("o" * 150)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(params_sync, "fallback_control_dir", lambda: fallback)
+        fetcher = SshParamsFetcher(
+            env={"HIL_SSH_HOST": "alias", SSH_CONTROL_DIR_ENV_VAR: str(too_long)},
+            runner=_FakeSsh(),
+        )
+        with caplog.at_level(logging.WARNING):
+            fetcher.fetch_text("/x/a.json")
+
+    assert fetcher.control_dir == fallback
+    assert fetcher.multiplexing_enabled
+    assert not (too_long).exists()
+    message = [r.getMessage() for r in caplog.records if "ControlPath" in r.getMessage()]
+    assert len(message) == 1
+    assert SSH_CONTROL_DIR_ENV_VAR in message[0]
+
+
+def test_resolve_remote_identity_reads_ssh_dash_g(tmp_path):
+    runner = _FakeSsh(
+        stdout=b"host junhyeong_ai\nuser junhyeong\nhostname 166.104.146.29\nport 22\n"
+    )
+    identity = resolve_remote_identity(
+        "junhyeong_ai", runner=runner, use_cache=False
+    )
+    assert identity == RemoteIdentity("junhyeong", "166.104.146.29", "22", True)
+    assert runner.calls[0] == ["ssh", "-G", "--", "junhyeong_ai"]
+    assert runner.kwargs[0]["stdin"] is subprocess.DEVNULL
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [
+        _FakeSsh(raises=FileNotFoundError("ssh")),
+        _FakeSsh(raises=subprocess.TimeoutExpired("ssh", 5.0)),
+        _FakeSsh(returncode=255, stderr=b"nope"),
+        _FakeSsh(stdout=b"garbage without a hostname\n"),
+    ],
+)
+def test_resolve_remote_identity_never_raises(runner):
+    identity = resolve_remote_identity("some_alias", runner=runner, use_cache=False)
+    assert identity.resolved is False
+    assert identity.hostname == "some_alias"
+
+
+def test_an_unresolved_identity_is_never_credited_with_being_narrow():
+    """A guess must not talk the guard into approving a path that will not bind.
+
+    The guess is built from the alias and the LOCAL username, so it is usually
+    shorter than the truth -- and an optimistic guard is precisely how the
+    original outage got through.
+    """
+
+    guess = RemoteIdentity("a", "b", "22", resolved=False)
+    template = "/d/" + CONTROL_PATH_BASENAME
+    expanded, measured = measure_control_path(template, guess, host="b")
+    assert expanded == "/d/cm-a@b"
+    # Measured as if %r@%h were as wide as the widest identity we really have.
+    assert measured == len(expanded) + (UNRESOLVED_EXPANSION_FLOOR - len("a@b"))
+    assert UNRESOLVED_EXPANSION_FLOOR == len("junhyeong@166.104.146.29")
+
+    # A resolved identity of the same width is measured at face value, and a
+    # template with no identity token is never padded.
+    assert measure_control_path(template, RemoteIdentity("a", "b", "22"), host="b")[1] == (
+        len(expanded)
+    )
+    assert measure_control_path("/d/cm", guess, host="b")[1] == len("/d/cm")
+
+
+def test_the_identity_is_resolved_once_per_fetcher(tmp_path):
+    calls = []
+
+    def _resolver(host, **kwargs):
+        calls.append(host)
+        return _TEST_IDENTITY
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(params_sync, "resolve_remote_identity", _resolver)
+        fetcher = SshParamsFetcher(
+            "alias", control_dir=tmp_path / "cm", runner=_FakeSsh(), env={}
+        )
+        # The constructor runs no subprocess: measurement is first-poll work.
+        assert calls == []
+        fetcher.fetch_text("/x/a.json")
+        fetcher.fetch_text("/x/a.json")
+        fetcher.fetch_file("/x/b.bin", tmp_path / "b")
+    assert calls == ["alias"]
+
+
+def test_an_injected_identity_skips_resolution_entirely(tmp_path):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            params_sync,
+            "resolve_remote_identity",
+            lambda host, **kwargs: pytest.fail("must not resolve"),
+        )
+        fetcher = SshParamsFetcher(
+            "alias",
+            control_dir=tmp_path / "cm",
+            identity=_REAL_IDENTITIES["kanu"],
+            runner=_FakeSsh(),
+            env={},
+        )
+        assert fetcher.expanded_control_path.endswith("cm-junhyeong@166.104.35.33")
 
 
 # --------------------------------------------------------------------------- #
