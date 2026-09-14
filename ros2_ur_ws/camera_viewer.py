@@ -7,8 +7,8 @@ ROS2 Humble sourced:
     python3 camera_viewer.py \
         --cam1-topic /cam1/cam1/color/image_raw/compressed \
         --cam2-topic /cam2/cam2/color/image_raw/compressed \
-        --cam1-label "cam1 - SCENE - 151623020789" \
-        --cam2-label "cam2 - WRIST - 322743060038"
+        --cam1-label "cam1 - SCENE - 143322071682" \
+        --cam2-label "cam2 - WRIST - 143322072540"
 
 Purpose: BEFORE trusting an autonomous real-robot policy deploy, a human needs to
 eyeball both camera feeds at once and confirm which physical camera is which --

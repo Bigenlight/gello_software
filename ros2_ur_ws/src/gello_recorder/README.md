@@ -236,6 +236,7 @@ session_<YYYYmmdd_HHMMSS>/       (GUI는 take_<NN>_<YYYYmmdd_HHMMSS>/)
 ├── vectors.h5        # 모든 벡터 신호 테이블 (HDF5, 아래 9개 테이블)
 ├── cam1.mp4          # RealSense #1 컬러 영상 (CAMS/카메라 사용 시)
 ├── cam2.mp4          # RealSense #2 컬러 영상
+├── depth.h5          # (depth 기록을 켠 경우에만) 두 카메라의 depth PNG — 아래 5-1 절
 └── metadata.json     # 파라미터, 시작 시각, 종료 시 토픽별 메시지 카운트
 ```
 
@@ -257,7 +258,49 @@ session_<YYYYmmdd_HHMMSS>/       (GUI는 take_<NN>_<YYYYmmdd_HHMMSS>/)
 
 > 신호를 발행하지 않은 토픽(예: 특정 브로드캐스터 미로드)은 에러 없이 **빈 컬럼(NaN)**으로 남습니다. 어떤 토픽이 실제로 들어왔는지는 `metadata.json` 의 `message_counts` 로 확인하세요. (`gripper`/`synchronized` 는 그 자체로는 카운트되지 않고, `gripper` 테이블에 쓰는 세 토픽 각각이 `gello_grip`/`grip_cmd`/`grip_pos` 키로 개별 카운트됩니다 — 아래 아키텍처 섹션 참고.)
 
+### 5-1. `depth.h5` — RealSense depth (기본 켜짐, `ENABLE_DEPTH=0` 으로 끔)
+
+depth 기록은 레코더 경로(`gello_recorder_gui` / `task_recorder_gui` / `run_recorder.sh`)에서 **2026-09-14 부터 기본 켜짐**입니다(새 셀프파워 허브에서 2대 color+depth 동시 스트리밍 실측 안정). 끄려면 환경변수 `ENABLE_DEPTH=0` 하나뿐이고 GUI 토글은 없습니다. `ALIGN_DEPTH=1` 은 color 픽셀 정렬 depth 를 대신 기록하지만 노드당 CPU 49 %·25 Hz 로 떨어지는 것이 실측이라 기본 꺼짐입니다. 켜고 끄는 것과 무관하게 위 `vectors.h5` 9개 테이블·`cam1.mp4`/`cam2.mp4` 는 **동일**합니다 — depth 는 별도 파일 `depth.h5` 에만 들어가고 `vectors.h5` 에는 테이블도 컬럼도 추가되지 않습니다(`metadata.json` 에는 `record_depth`/`depth_aligned_to_color` 키가 항상 적힙니다). 꺼져 있으면 `depth.h5` 자체가 생기지 않습니다. 실측 용량은 848x480 두 대 기준 약 **6 MB/s (분당 ~370 MB)** 입니다.
+
+**왜 MP4 가 아니라 HDF5 인가:** depth 는 `uint16` 밀리미터(`depth_scale` 0.001 m) 단일 채널이라 MP4 로는 무손실 저장이 안 되고, 기록 중 재인코딩은 컬러 두 스트림이 이미 다투는 CPU 를 또 씁니다. 그래서 카메라 드라이버가 이미 만들어 보낸 PNG 를 **그대로**(재인코딩 없이) 저장합니다. 소스 토픽은 `/<cam>/<cam>/depth/image_rect_raw/compressedDepth` (`sensor_msgs/CompressedImage`, `format == '16UC1; compressedDepth'`, 실측 ~29 Hz, 848x480 에서 메시지당 80–130 KB; `align_depth.enable:=true` 면 `/<cam>/<cam>/aligned_depth_to_color/image_raw/compressedDepth`, 1280x720 ~200 KB). 페이로드의 앞 12바이트는 `compressed_depth_image_transport` 의 ConfigHeader(`int32` 포맷 enum + `float32` 2개, 16UC1 에서는 무의미)이고 그 뒤가 완전한 PNG 파일입니다 — 저장 시 이 12바이트만 떼어냅니다(`header_bytes_stripped=12`).
+
+```
+depth.h5
+├── cam1/                          attrs: encoding='16UC1', unit='mm', depth_scale_m=0.001,
+│   │                                     container='png', header_bytes_stripped=12,
+│   │                                     source_topic, aligned_to_color, width, height
+│   ├── png          vlen uint8 (N,)   PNG 바이트 그대로 (프레임당 한 셀)
+│   ├── t_rel_s      float64    (N,)   세션 상대 시각 — vectors.h5 와 같은 원점
+│   ├── frame_idx    int64      (N,)   0부터 시작하는 depth 프레임 번호 (== 행 번호)
+│   ├── stamp_s      float64    (N,)   ROS header stamp (초), 모르면 NaN
+│   ├── camera_info/               attrs: width, height, distortion_model, frame_id, D, K, R, P
+│   │                                     (sensor_msgs/CameraInfo, /<cam>/<cam>/depth/camera_info)
+│   └── extrinsics_depth_to_color/ attrs: rotation[9] (column-major, 발행값 그대로),
+│                                         translation[3] (m), layout='column_major'
+└── cam2/                          (동일)
+```
+
+`width`/`height` 는 첫 프레임의 PNG IHDR 에서 읽어 채웁니다(디코드 없음). `aligned_to_color=True` 면 PNG 가 **컬러 프레임 좌표**이고 `camera_info` 도 컬러 intrinsics 입니다. 손상된 페이로드(12바이트 뒤에 PNG 매직이 없음)는 `WARNING` 한 줄을 찍고 건너뛰며 `frame_idx` 도 올라가지 않습니다 — 컬러 프레임의 손상 JPEG 처리와 같은 규약입니다.
+
+**컬러 ↔ depth 정렬:** depth 프레임과 `cam1_frames`/`cam2_frames`/`synchronized` 는 **같은 `t_rel_s` 원점**(`RecordingSession.t()`)을 씁니다. 드라이버가 depth 와 컬러를 따로 발행하므로 프레임 수가 같지 않고 1:1 인덱스 대응도 없습니다 — `t_rel_s` 로 가장 가까운 프레임을 찾으세요(더 정밀하게는 `stamp_s` 로 드라이버 캡처 시각끼리 비교). `metadata.json` 의 `message_counts` 에는 `cam1_depth_frames` / `cam2_depth_frames` 키가 추가됩니다(depth 가 켜진 경우에만).
+
+**읽기(오프라인, `cv2` 필요):**
+
+```python
+from gello_recorder.depth_writer import read_depth_frame, iter_depth_frames, depth_meta
+d = read_depth_frame("take_01_.../depth.h5", "cam1", 0)      # uint16 (H, W), mm
+for idx, t_rel_s, stamp_s, arr in iter_depth_frames("take_01_.../depth.h5", "cam2"):
+    ...
+depth_meta("take_01_.../depth.h5", "cam1")   # attrs + camera_info + extrinsics dict
+```
+
+순수 `h5py` 로 직접 읽으려면 `cv2.imdecode(f["cam1"]["png"][i], cv2.IMREAD_UNCHANGED)` 입니다.
+
 ---
+
+## 6. 공개 — Hugging Face 업로드 (raw + LeRobot, depth 포함)
+
+take 폴더를 하드링크로 스테이징 → `scripts/dataset/make_carrot_raw_stats.py`(raw 통계) → `convert_carrot_to_lerobot.py`(depth를 lerobot 네이티브 depth video로, 선형 12-bit 0~10 m) → `validate_carrot_conversion.py`(독립 검증) → `hf upload` 2회 → `v3.0` 태그. 절차·함정 전체는 [`docs/ros2/GELLO_UR7E_RECORDING.md`](../../../docs/ros2/GELLO_UR7E_RECORDING.md) 「허깅페이스 업로드」절. 2026-09-14 릴리스: [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) · [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3).
 
 ## Architecture & Code Walkthrough
 
@@ -269,7 +312,9 @@ session_<YYYYmmdd_HHMMSS>/       (GUI는 take_<NN>_<YYYYmmdd_HHMMSS>/)
 
 - **`video_writer.py`** — 한 대의 카메라가 발행하는 `sensor_msgs/msg/CompressedImage`(JPEG 바이트)를 하나의 성장하는 MP4 파일로 쓰는 `Mp4FrameWriter`. `cv2` + `numpy`에만 의존, ROS import 없음. 카메라 해상도를 미리 알 필요 없이 첫 프레임을 디코드할 때 `(height, width)`를 자동 감지해 `cv2.VideoWriter`를 lazy하게 연다. 프레임 rate 매칭/중복/드롭은 하지 않고 decode → lazy open → write → frame index 반환만 한다. `python3 video_writer.py`로 self-test 실행 가능.
 
-- **`recording_session.py`** — 위 두 순수 모듈을 조합하는 파일-I/O 코어 `RecordingSession`. "한 번의 녹화(session/take) 분량의 파일 전체"를 소유한다: 9개 테이블이 든 `vectors.h5` + `cam1.mp4` + `cam2.mp4`. **ROS/Qt/thread가 전혀 없다**. `python3 recording_session.py` self-test 있음.
+- **`depth_writer.py`** — RealSense `compressedDepth`(12바이트 ConfigHeader + PNG) 페이로드를 `depth.h5` 에 쓰는 `DepthH5Writer`. 쓰기 경로는 `h5py` + `numpy` 에만 의존하며 **PNG 를 디코드하지 않는다**(헤더만 떼고 vlen `uint8` 셀에 그대로 append, width/height 는 IHDR 바이트에서 읽음). `cv2` 는 오프라인 리더 헬퍼(`read_depth_frame` / `iter_depth_frames` / `depth_meta`)와 self-test 안에서만 lazy import 한다. 순수 함수 `split_compressed_depth(data)` 가 헤더 분리 + PNG 매직 검사를 담당한다. 손상 페이로드는 `Mp4FrameWriter` 와 같은 규약(`WARNING` 한 줄, `-1` 반환, 인덱스 미증가). `python3 depth_writer.py` self-test 있음. 파일 레이아웃은 위 5-1 절.
+
+- **`recording_session.py`** — 위 순수 모듈들을 조합하는 파일-I/O 코어 `RecordingSession`. "한 번의 녹화(session/take) 분량의 파일 전체"를 소유한다: 9개 테이블이 든 `vectors.h5` + `cam1.mp4` + `cam2.mp4` (+ `record_depth=True` 일 때만 `depth.h5`). **ROS/Qt/thread가 전혀 없다**. `python3 recording_session.py` self-test 있음.
 
 - **`gello_ur_recorder_node.py`** & **`gello_gui_node.py`** — 두 개의 rclpy `Node` 진입점. 둘 다 `RecordingSession`을 실제 ROS 구독에 배선한다. 전자(`GelloUrRecorder`)는 헤드리스로 launch부터 Ctrl-C까지 무조건 녹화. 후자(`GelloRecorderGuiNode`)는 구독은 항상 켜두되 Start/Stop으로 디스크 쓰기를 게이팅(멀티 take).
 
@@ -284,7 +329,7 @@ gello_recorder_gui = gello_recorder.gello_recorder_gui:main       # GUI
 
 ### 2. RecordingSession (`recording_session.py`) — 공유 파일-I/O 코어
 
-`RecordingSession`은 녹화 1회(session 또는 take)당 한 번 `RecordingSession(session_dir, camera_fps)`로 생성된다. 생성자는 `session_dir`을 만들고, `session_dir/vectors.h5`를 `'w'` 모드로 연 뒤 `open_h5_table`로 **9개 테이블 전부**를 생성하고, `session_dir/cam1.mp4` / `session_dir/cam2.mp4`에 대해 `Mp4FrameWriter` 두 개를 만든다. 이 세션 자신의 상대 시각 원점 `self.t0 = time.time()`을 기록하며, `t()`는 이 생성 시점 기준 상대 시각이다.
+`RecordingSession`은 녹화 1회(session 또는 take)당 한 번 `RecordingSession(session_dir, camera_fps, record_depth=False)`로 생성된다. 생성자는 `session_dir`을 만들고, `session_dir/vectors.h5`를 `'w'` 모드로 연 뒤 `open_h5_table`로 **9개 테이블 전부**를 생성하고, `session_dir/cam1.mp4` / `session_dir/cam2.mp4`에 대해 `Mp4FrameWriter` 두 개를 만든다. `record_depth=True` 면 추가로 `session_dir/depth.h5` 를 `DepthH5Writer`(그룹 `cam1`/`cam2`)로 연다; 기본값 `False` 에서는 `self._depth = None` 이고 depth 파일은 생기지 않는다(`record_depth` 프로퍼티로 확인). 이 세션 자신의 상대 시각 원점 `self.t0 = time.time()`을 기록하며, `t()`는 이 생성 시점 기준 상대 시각이다.
 
 **9개 테이블의 정확한 헤더(컬럼명 그대로):**
 
@@ -313,12 +358,15 @@ gello_recorder_gui = gello_recorder.gello_recorder_gui:main       # GUI
 - `write_cam1_frame(jpeg_bytes) -> int` — `cam1.mp4`에 프레임 쓰고, 성공 시(`idx >= 0`)에만 `cam1_frames`에 `[t(), idx]` 추가 + `"cam1_frames"` bump. decode 실패 시 `-1` 반환, 로깅도 카운트도 없음. **warm-up 로직 없음** — skip 판단은 호출자 몫.
 - `write_cam2_frame(jpeg_bytes) -> int` — 카메라 2 / `cam2.mp4` / `cam2_frames`에 대해 동일.
 - `write_sample(gello_q, gello_qd, gello_grip, cmd, ur_q, ur_qd, ur_eff, grip_cmd, grip_pos, wrench, tcp, cam1_frame_idx, cam2_frame_idx)` — `synchronized` 행. 컬럼 0/1은 `t_rel_s`(`.4f`) / `t_wall`(`time.time()` `.4f`); 이후 gello_q `.6f`, gello_qd `.5f`, gello_grip `.4f`, cmd `.6f`, ur_q `.6f`, ur_qd `.6f`, ur_eff `.4f`, grip_cmd/grip_pos `.4f`, wrench `.5f`, tcp `.6f`; 마지막에 cam1/cam2 frame index를 **raw(int 또는 None)로** append. **어떤 카운터도 bump하지 않는다.**
-- `flush()` — 공유 `h5py.File`만 flush(비디오 writer는 flush 안 함).
-- `close() -> dict` — `{"duration_s", "message_counts"}` 반환. 스냅샷을 파일 핸들을 건드리기 전에 먼저 뜨고, 두 비디오 writer를 close(idempotent) 후 HDF5 flush+close. 부분 생성 실패나 아무것도 안 쓴 경우에도 안전하게 유효한 dict를 반환한다.
+- **depth 메서드 (depth 가 꺼져 있으면 전부 no-op — `-1`/`None` 반환, 호출자는 분기할 필요 없음):**
+  - `write_cam1_depth_frame(data, stamp_s=nan) -> int` / `write_cam2_depth_frame(...)` — `CompressedImage.data` 를 **그대로**(12바이트 헤더 포함) 넘긴다. `t()` 를 찍고 `DepthH5Writer.write_compressed_depth` 에 위임, 성공(`idx >= 0`) 시에만 `"cam1_depth_frames"` / `"cam2_depth_frames"` bump. 손상 페이로드는 `-1`, 카운트 없음 — `write_cam1_frame` 과 같은 규약.
+  - `set_depth_source(cam_idx, topic, aligned_to_color)` / `set_depth_camera_info(cam_idx, **kw)` / `set_depth_extrinsics(cam_idx, rotation, translation)` — `cam_idx` 는 1 또는 2. 각각 `DepthH5Writer.set_source` / `set_camera_info` / `set_extrinsics_depth_to_color` 로 전달(idempotent, 두 번 부르면 덮어씀).
+- `flush()` — 공유 `h5py.File`(+ 켜져 있으면 `depth.h5`)만 flush(비디오 writer는 flush 안 함).
+- `close() -> dict` — `{"duration_s", "message_counts"}` 반환. 스냅샷을 파일 핸들을 건드리기 전에 먼저 뜨고, 두 비디오 writer를 close(idempotent), depth writer 가 있으면 best-effort close, 그 다음 HDF5 flush+close. 부분 생성 실패나 아무것도 안 쓴 경우에도 안전하게 유효한 dict를 반환한다. dict 의 **형태는 depth 와 무관하게 동일**하고, depth 가 켜진 경우 `message_counts` 에 `cam1_depth_frames`/`cam2_depth_frames` 키만 더해진다.
 
 **Counter-key 서브틀티 (반드시 이해할 것):** `write_gello_grip`은 **스스로 어떤 카운터도 bump하지 않는다**. 세 개의 서로 다른 ROS 토픽(GELLO grip, `grip_cmd`, `grip_pos`)이 모두 이 하나의 공유 `gripper` 테이블 행을 통해 쓰기 때문이다. 하지만 `metadata.json`의 message count는 세 토픽을 **각각 따로** 세야 한다. 그래서 호출자(노드)가 콜백마다 `session.bump("gello_grip")` / `session.bump("grip_cmd")` / `session.bump("grip_pos")` 중 자기 것을 별도로 호출한다. 이 규약을 어기고 `write_gello_grip` 안에 bump를 넣으면 세 토픽 카운트가 뭉개진다. (`message_counts`에는 `"gripper"`나 `"synchronized"` 라는 키 자체는 존재하지 않는다.)
 
-`recording_session.py`의 self-test(`python3 recording_session.py`)는 9개 테이블 전부 + MP4 2개를 round-trip하고, `vectors.h5`를 read-only로 다시 열어 각 테이블 행 수와 spot value(첫 gello 행의 qd가 NaN, gripper 행의 None→NaN, `synchronized` row 1의 값들)를 assert한다. 손상 프레임이 카운터를 bump하지 않는지, `close()`가 idempotent한지, 미완성 객체(`__new__`)에서도 안전한지까지 검증한다.
+`recording_session.py`의 self-test(`python3 recording_session.py`)는 9개 테이블 전부 + MP4 2개를 round-trip하고, `vectors.h5`를 read-only로 다시 열어 각 테이블 행 수와 spot value(첫 gello 행의 qd가 NaN, gripper 행의 None→NaN, `synchronized` row 1의 값들)를 assert한다. 손상 프레임이 카운터를 bump하지 않는지, `close()`가 idempotent한지, 미완성 객체(`__new__`)에서도 안전한지까지 검증한다. 이어서 depth-off 패스에서 `depth.h5` 가 **생기지 않음**을, `record_depth=True` 패스에서 두 카메라 depth round-trip·카운트·`t_rel_s` 단조성·`vectors.h5` 가 여전히 9개 테이블뿐임을 assert한다. (스크립트로 직접 실행할 때는 패키지가 import 경로에 있어야 한다 — ROS overlay 를 source 했거나, 패키지 루트에서 `PYTHONPATH=. python3 gello_recorder/recording_session.py`.) pytest 는 `test/test_depth_writer.py` · `test/test_recording_session_depth.py`.
 
 ### 3. Headless node (`gello_ur_recorder_node.py`)
 

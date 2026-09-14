@@ -28,6 +28,11 @@
        rcl_interfaces in anyway, but this package declares even the message
        packages it uses, so declare it rather than rely on that. -->
   <exec_depend>rcl_interfaces</exec_depend>
+  <!-- Depth recording (2026-09-14): realsense2_camera_msgs/Extrinsics is the
+       depth->color transform written to depth.h5. The import is guarded
+       (Extrinsics = None -> depth frames still recorded, extrinsics skipped),
+       but the package is a real runtime dependency of the depth path. -->
+  <exec_depend>realsense2_camera_msgs</exec_depend>
   <exec_depend>python3-h5py</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>

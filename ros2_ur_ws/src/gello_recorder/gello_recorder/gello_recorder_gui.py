@@ -41,9 +41,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# The node lives in the companion module in this same package. Import is done
-# lazily inside main() so that -m py_compile / --help style tooling on this file
-# doesn't hard-fail while gello_gui_node.py is still being written.
+# The node CLASS lives in the companion module in this same package and is
+# imported lazily inside main() (historical: so this file could be tooled while
+# gello_gui_node.py was still being written). The pure depth-topic helper is
+# re-exported here at module level because run_recorder.sh's headless node and
+# the tests need the SAME single definition without going through main().
+from gello_recorder.gello_gui_node import depth_topics_for  # noqa: F401 (re-export)
 
 
 # --------------------------------------------------------------------------- #
@@ -75,11 +78,61 @@ from PyQt5.QtWidgets import (
 # auto-detected instead of trusted blindly. See
 # ros2_ur_ws/_resolve_camera_serials.sh (the shell equivalent used by
 # launch_cameras.sh / run_recorder.sh) for the full incident history.
-DEFAULT_CAM1_SERIAL = "147122072740"   # plain D435   (ASIC 151623020789)
-DEFAULT_CAM2_SERIAL = "243222072700"   # D435IF       (ASIC 322743060038)
+#
+# 2026-09-14 LAB MOVE: the rig now carries TWO PLAIN D435 bodies (the D435IF
+# is gone), so the model-class rule below cannot separate them.  Measured on
+# the Genesys 4-port hub (bus 4), assignment confirmed from live snapshots
+# (cam2's frame shows the gripper fingers; cam1's shows the table front-on):
+#
+#   port    serial_number     asic_serial_number   device   fw
+#   4-4.3   143322071682      143623022572         D435     5.17.3.10  -> cam1 SCENE
+#   4-4.4   143322072540      143523020769         D435     5.17.0.10  -> cam2 WRIST
+#
+# With two plain units resolve_serials() falls back to sorted-serial order,
+# which happens to match this table -- do not rely on that: keep the defaults
+# below equal to the table so the resolver passes them through silently.
+DEFAULT_CAM1_SERIAL = "143322071682"   # plain D435   (ASIC 143623022572)  SCENE
+DEFAULT_CAM2_SERIAL = "143322072540"   # plain D435   (ASIC 143523020769)  WRIST
 DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"
+
+# Depth is ON by default for the RECORDER (2026-09-14). Both recorder GUIs and
+# run_recorder.sh's headless node now subscribe to the compressedDepth streams
+# and write them to depth.h5 next to the MP4s, so the depth stream finally has
+# a consumer. The 2026-08-12 default-OFF rationale was the then-dying
+# bus-powered USB-C dock (two D435s browned out and enumerated alternately);
+# on the self-powered Genesys USB3 hub the rig moved to on 2026-09-14, 2x
+# color 1280x720x30 + 2x depth 848x480x30 measured stable for minutes: color
+# 30 Hz, compressedDepth ~29 Hz, ~9 % CPU per camera node, zero USB errors.
+# ``ENABLE_DEPTH=0`` opts OUT (a typo in the value also turns depth OFF --
+# only the values below turn it on). HIL's launch_cameras.sh keeps its own
+# default (off): nothing in the HIL actor reads depth. An explicit
+# enable_depth kwarg wins over the env var.
+_DEPTH_ENV_VAR = "ENABLE_DEPTH"
+_DEPTH_ON_VALUES = ("1", "true", "yes", "on")
+_DEPTH_DEFAULT = "1"
+
+# Depth->color ALIGNMENT stays OFF by default and is opt-in via ALIGN_DEPTH.
+# Measured 2026-09-14 (same hub, same profiles): align_depth.enable:=true makes
+# realsense2_camera_node jump from ~9 % to ~49 % CPU and BOTH color and depth
+# drop from 30 Hz to ~25 Hz (the aligned frame is 1280x720, ~200 KB vs
+# 80-130 KB). Unaligned depth + the recorded intrinsics/extrinsics lets the
+# alignment be done offline instead, so the default never pays that cost.
+_ALIGN_ENV_VAR = "ALIGN_DEPTH"
+_ALIGN_DEFAULT = "0"
+
+
+def _depth_enabled_from_env():
+    """True unless ENABLE_DEPTH opts OUT of depth streaming (default: on)."""
+    raw = os.environ.get(_DEPTH_ENV_VAR, _DEPTH_DEFAULT)
+    return raw.strip().lower() in _DEPTH_ON_VALUES
+
+
+def _align_depth_from_env():
+    """True iff ALIGN_DEPTH opts in to depth->color alignment (default: off)."""
+    raw = os.environ.get(_ALIGN_ENV_VAR, _ALIGN_DEFAULT)
+    return raw.strip().lower() in _DEPTH_ON_VALUES
 
 
 def _resolve_camera_serials(want1, want2):
@@ -162,14 +215,23 @@ def _resolve_camera_serials(want1, want2):
 _BIG_BUTTON_STYLE = "font-size: 16pt; padding: 14px 22px; min-height: 48px;"
 
 
-def _launch_realsense(camera_name, serial, color_profile):
-    """Launch one realsense2_camera node via ``ros2 launch`` in its own session.
+def _realsense_argv(camera_name, serial, color_profile, enable_depth=None,
+                    align_depth=None):
+    """Build the ``ros2 launch`` argv for one realsense2_camera node.
 
-    Returns the ``subprocess.Popen`` handle. The process gets its own process
-    group (``start_new_session=True``) so we can later kill the WHOLE group --
-    a bare ``terminate()`` on the ``ros2 launch`` wrapper does NOT reliably reap
-    the ``realsense2_camera_node`` child it spawns, which leaves orphaned camera
-    processes fighting over the USB device on the next run.
+    Split out from :func:`_launch_realsense` so the argv can be asserted on
+    without spawning anything -- getting one of these elements wrong fails at
+    the camera, not at the call, which is expensive to notice.
+
+    ``enable_depth=None`` defers to :func:`_depth_enabled_from_env`; pass a bool
+    to override the env var (see ``_DEPTH_ENV_VAR`` above -- depth is ON by
+    default for the recorder since 2026-09-14). ``align_depth=None`` likewise
+    defers to :func:`_align_depth_from_env` (``ALIGN_DEPTH``, default off --
+    see ``_ALIGN_ENV_VAR`` for the measured cost). The
+    ``align_depth.enable:=`` element is emitted ONLY when depth is enabled:
+    with depth off the argv is byte-identical to what it was before depth
+    recording existed (alignment of a stream that is not running is
+    meaningless, and rs_launch.py's own default for it is already false).
 
     NOTE the ``serial_no`` / ``rgb_camera.color_profile`` argv elements carry
     *embedded* single quotes in the value itself. ``ros2 launch`` type-infers
@@ -178,19 +240,49 @@ def _launch_realsense(camera_name, serial, color_profile):
     dies instantly. Wrapping the value as ``serial_no:='147122072740'`` -- quote
     characters included in the argv string, NOT shell quoting -- forces a string.
 
+    ``enable_depth`` needs no such wrapping: "true"/"false" is exactly what the
+    type inference is supposed to read as a bool.
+
     The example above deliberately uses a *device* serial (the
     ``DEFAULT_CAM1_SERIAL`` above), not an ASIC serial. ``serial_no`` is matched
     against ``camera_info.serial_number``; the ASIC serial is what the kernel USB
     descriptor exposes, so it is what ``journalctl`` shows and it will never
     resolve here. See the port/field table near ``DEFAULT_CAM1_SERIAL``.
     """
+    if enable_depth is None:
+        enable_depth = _depth_enabled_from_env()
+    if align_depth is None:
+        align_depth = _align_depth_from_env()
     argv = [
         "ros2", "launch", "realsense2_camera", "rs_launch.py",
         "camera_name:={}".format(camera_name),
         "camera_namespace:={}".format(camera_name),
         "serial_no:='{}'".format(serial),
         "rgb_camera.color_profile:='{}'".format(color_profile),
+        "enable_depth:={}".format("true" if enable_depth else "false"),
     ]
+    if enable_depth:
+        argv.append(
+            "align_depth.enable:={}".format("true" if align_depth else "false"))
+    return argv
+
+
+def _launch_realsense(camera_name, serial, color_profile, enable_depth=None,
+                      align_depth=None):
+    """Launch one realsense2_camera node via ``ros2 launch`` in its own session.
+
+    Returns the ``subprocess.Popen`` handle. The process gets its own process
+    group (``start_new_session=True``) so we can later kill the WHOLE group --
+    a bare ``terminate()`` on the ``ros2 launch`` wrapper does NOT reliably reap
+    the ``realsense2_camera_node`` child it spawns, which leaves orphaned camera
+    processes fighting over the USB device on the next run.
+
+    Depth is ON by default (opt out with ``ENABLE_DEPTH=0``) and recorded to
+    depth.h5 by the node; depth->color alignment is opt-in via ``ALIGN_DEPTH``.
+    See :func:`_realsense_argv` for the argv contract.
+    """
+    argv = _realsense_argv(camera_name, serial, color_profile, enable_depth,
+                           align_depth)
     # start_new_session=True == preexec_fn=os.setsid: new process group/session.
     return subprocess.Popen(
         argv,
@@ -387,11 +479,13 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Robot / GELLO state")
         layout = QVBoxLayout(box)
 
-        # Camera live/stale indicators.
+        # Camera live/stale indicators (+ one line for the depth streams).
         self._cam1_status = QLabel("cam1: --")
         self._cam2_status = QLabel("cam2: --")
+        self._depth_status = QLabel("depth: --")
         layout.addWidget(self._cam1_status)
         layout.addWidget(self._cam2_status)
+        layout.addWidget(self._depth_status)
 
         sep = QLabel("")
         layout.addWidget(sep)
@@ -523,6 +617,43 @@ class MainWindow(QMainWindow):
         self._update_cam_status(
             self._cam2_status, "cam2", snap.get("cam2_last_frame_age_s")
         )
+        self._update_depth_status(snap)
+
+    def _update_depth_status(self, snap):
+        """One line: 'depth: OFF' or 'depth: ON (cam1 x.xxs / cam2 x.xxs)'.
+
+        Colour follows the STALER of the two depth streams with the same
+        thresholds as the colour panes; '--' means depth is on but that camera
+        has not delivered a single depth frame yet.
+        """
+        if not snap.get("depth_enabled"):
+            self._depth_status.setText("depth: OFF")
+            self._depth_status.setStyleSheet("color: #888888;")
+            return
+        ages = [snap.get("cam1_depth_last_frame_age_s"),
+                snap.get("cam2_depth_last_frame_age_s")]
+        parts = []
+        worst = None
+        for name, age in zip(("cam1", "cam2"), ages):
+            try:
+                age = None if age is None else float(age)
+            except (TypeError, ValueError):
+                age = None
+            parts.append("{} {}".format(name, "--" if age is None else "{:.2f}s".format(age)))
+            if age is None:
+                worst = float("inf")
+            elif worst is None or age > worst:
+                worst = age
+        if worst is None or worst == float("inf"):
+            color = "#cc3333"
+        elif worst < 0.5:
+            color = "#22aa22"
+        elif worst < 2.0:
+            color = "#dd8800"
+        else:
+            color = "#cc3333"
+        self._depth_status.setText("depth: ON ({})".format(" / ".join(parts)))
+        self._depth_status.setStyleSheet("color: {}; font-weight: bold;".format(color))
 
     def _update_cam_status(self, label, name, age):
         if age is None:
@@ -716,6 +847,11 @@ class MainWindow(QMainWindow):
             duration = meta.get("duration_s")
             session_dir = meta.get("session_dir")
             msg = "Saved take: {} ({:.1f}s)".format(session_dir, float(duration))
+            counts = meta.get("message_counts") or {}
+            if "cam1_depth_frames" in counts or "cam2_depth_frames" in counts:
+                msg += " | depth frames cam1 {} / cam2 {}".format(
+                    counts.get("cam1_depth_frames", 0),
+                    counts.get("cam2_depth_frames", 0))
         except (AttributeError, TypeError, ValueError):
             msg = "Take saved."
         self.statusBar().showMessage(msg, 8000)
@@ -752,6 +888,28 @@ class MainWindow(QMainWindow):
 # --------------------------------------------------------------------------- #
 # Entrypoint
 # --------------------------------------------------------------------------- #
+
+def _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth):
+    """Node ctor kwargs for depth recording: ``{}`` when depth is off.
+
+    Shared by ``main()`` here and ``task_recorder_gui.main()`` so both GUIs wire
+    the node from the same :func:`depth_topics_for` names the cameras will
+    actually publish under (aligned or not).
+    """
+    if not enable_depth:
+        return {}
+    d1_img, d1_info, d1_ext = depth_topics_for(cam1_name, align_depth)
+    d2_img, d2_info, d2_ext = depth_topics_for(cam2_name, align_depth)
+    return {
+        "cam1_depth_topic": d1_img,
+        "cam2_depth_topic": d2_img,
+        "cam1_depth_info_topic": d1_info,
+        "cam2_depth_info_topic": d2_info,
+        "cam1_extrinsics_topic": d1_ext,
+        "cam2_extrinsics_topic": d2_ext,
+        "depth_aligned_to_color": bool(align_depth),
+    }
+
 
 def main(args=None):
     # Config from env vars, matching run_recorder.sh's names/defaults.
@@ -804,16 +962,23 @@ def main(args=None):
     # The two color topics the realsense nodes publish under their namespace.
     cam1_topic = "/{0}/{0}/color/image_raw/compressed".format(cam1_name)
     cam2_topic = "/{0}/{0}/color/image_raw/compressed".format(cam2_name)
+    # Depth: decided ONCE here from the env and used for both the camera
+    # launch argv and the node's subscriptions, so they cannot disagree.
+    enable_depth = _depth_enabled_from_env()
+    align_depth = _align_depth_from_env()
+    depth_kwargs = _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth)
 
     # --- 1. Launch the two RealSense camera nodes as subprocesses --------- #
-    cam1_proc = _launch_realsense(cam1_name, cam1_serial, color_profile)
-    cam2_proc = _launch_realsense(cam2_name, cam2_serial, color_profile)
+    cam1_proc = _launch_realsense(cam1_name, cam1_serial, color_profile,
+                                  enable_depth, align_depth)
+    cam2_proc = _launch_realsense(cam2_name, cam2_serial, color_profile,
+                                  enable_depth, align_depth)
 
     # --- 2. Bring up ROS + the node --------------------------------------- #
     rclpy.init(args=args)
 
-    # Imported here (not at module top) so this module still py_compiles while
-    # gello_gui_node.py is being written in parallel.
+    # The node class stays a lazy import (see the module-level note next to
+    # the depth_topics_for re-export for the history of this pattern).
     from gello_recorder.gello_gui_node import GelloRecorderGuiNode
 
     # opencv-python's wheel bundles its own copy of Qt5 (incl. platform plugins)
@@ -832,6 +997,7 @@ def main(args=None):
         camera_fps=camera_fps,
         camera_warmup_s=camera_warmup_s,
         output_root=output_root,
+        **depth_kwargs,
     )
 
     # --- 3. Spin the node on a background daemon thread ------------------- #

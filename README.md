@@ -23,11 +23,17 @@
 - [`Bigenlight/cube_in_cup_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/cube_in_cup_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 23 에피소드
 - [`Bigenlight/cube_in_cup_raw`](https://huggingface.co/datasets/Bigenlight/cube_in_cup_raw) — 원본 per-take h5 + mp4 (24 테이크) + `DATA_DICTIONARY.md` + `dataset_stats.json`
 
+**"Put carrot in pot"** — 54 데모 / 18,557 프레임 / ~10.3분 (2026-09-14 수집, **EEF 텔레옵 모드**, **depth 포함**)
+
+- [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 54 에피소드. RGB 2대 + **depth 2대**(`observation.images.cam1_depth`/`cam2_depth`, 848×480 uint16 mm, lerobot 네이티브 depth video: HEVC gray12le 무손실 + 12-bit **선형** 양자화 0~10 m → ±1.25 mm, 무효 픽셀 0 보존)
+- [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) — 원본 per-take `vectors.h5` + `cam1/2.mp4` + **`depth.h5`**(16-bit PNG, K/D/외부 파라미터 포함) + `DATA_DICTIONARY.md` + `dataset_stats.json`
+- 이 태스크의 변환기·검증기·통계 생성기는 **이 리포 `scripts/dataset/`** 에 있습니다(아래). cam1 = 정면 scene D435, cam2 = 손목 D435로 매핑이 확정된 첫 릴리스입니다.
+
 > **규모 주의:** cube 쪽은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. 단독으로 견고한 정책을 학습시키기엔 부족하며, 현재 학습된 cube 정책은 없습니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다.
 
 ### 데이터셋 만드는 법 (h5 → LeRobot)
 
-변환기는 **이 리포에 없습니다** — 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)의 `convert_to_lerobot.py`입니다. 요점:
+banana/cube 변환기는 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)의 `convert_to_lerobot.py`입니다. **carrot(2026-09-14, depth 포함)부터는 이 리포 [`scripts/dataset/`](scripts/dataset/)에 있습니다** — `convert_carrot_to_lerobot.py`(변환), `validate_carrot_conversion.py`(변환기를 import하지 않는 독립 검증, depth 왕복 오차까지), `make_carrot_raw_stats.py`(raw `dataset_stats.json`). 절차 전체는 [`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md)의 「허깅페이스 업로드」절. 요점:
 
 - 마스터 클럭은 `cam1_frames/t_rel_s` (30fps). 모든 로봇 스트림을 각자의 `t_rel_s` 기준 **nearest-timestamp**로 이 격자에 리샘플링합니다. 샘플링이 균일하지 않으므로 인덱스 산술로 정렬하면 안 됩니다.
 - `observation.state`(7) = `ur_q1..6` + `grip_pos`, `action`(7) = `cmd1..6` + `grip_cmd`. `gello_*` 리더 스트림은 추론 시 관측 불가라 제외합니다.

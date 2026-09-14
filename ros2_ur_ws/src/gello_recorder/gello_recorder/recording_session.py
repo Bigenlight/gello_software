@@ -2,16 +2,27 @@
 """Pure-Python recording-session core for the GELLO -> UR7e diagnostic recorder.
 
 This module owns "one session's worth of files": the shared ``vectors.h5`` (with all
-nine signal tables) plus the two ``cam1.mp4`` / ``cam2.mp4`` video writers. It is the
-file-I/O half of :class:`~gello_recorder.gello_ur_recorder_node.GelloUrRecorder`,
-extracted VERBATIM (same table headers/column order, same per-field float precision,
-same ``_bump`` counter-key strings) so that both the ROS2 node and a future
-interactive GUI can share it without duplicating the logic.
+nine signal tables) plus the two ``cam1.mp4`` / ``cam2.mp4`` video writers, and --
+only when ``record_depth=True`` -- a sibling ``depth.h5`` holding the RealSense
+compressed-depth PNGs (:mod:`gello_recorder.depth_writer`). It is the file-I/O half
+of :class:`~gello_recorder.gello_ur_recorder_node.GelloUrRecorder`, extracted
+VERBATIM (same table headers/column order, same per-field float precision, same
+``_bump`` counter-key strings) so that both the ROS2 node and a future interactive
+GUI can share it without duplicating the logic.
 
 Deliberately ROS-free / Qt-free / thread-free: it imports only ``h5py``, ``time`` and
-the two proven sibling modules (:mod:`gello_recorder.hdf5_writer`,
-:mod:`gello_recorder.video_writer`), so it is fully importable and testable
-standalone -- run ``python3 recording_session.py`` for the built-in self-test.
+the three proven sibling modules (:mod:`gello_recorder.hdf5_writer`,
+:mod:`gello_recorder.video_writer`, :mod:`gello_recorder.depth_writer`), so it is
+fully importable and testable standalone -- run ``python3 recording_session.py`` for
+the built-in self-test.
+
+Depth is strictly additive: with ``record_depth=False`` (the default) NOTHING about
+the on-disk output changes -- ``vectors.h5`` keeps exactly its nine tables, no
+``depth.h5`` is created, and the depth ``write_*``/``set_*`` methods are no-ops that
+return ``-1`` / ``None`` so callers never have to branch. With depth on, the depth
+rows stamp ``t_rel_s`` from the SAME :meth:`t` origin as ``cam1_frames`` /
+``synchronized``, so offline alignment is by ``t_rel_s``; ``vectors.h5`` gains no
+table or column for it.
 
 Contract notes (why this class does NOT parse ROS messages):
   * Every ``write_*`` method takes ALREADY-COMPUTED values. There is no message
@@ -28,8 +39,14 @@ import time
 
 import h5py
 
+from gello_recorder.depth_writer import DepthH5Writer
 from gello_recorder.hdf5_writer import open_h5_table
 from gello_recorder.video_writer import Mp4FrameWriter
+
+_NAN = float("nan")
+
+# cam_idx (1 or 2) -> depth.h5 group name / counter-key prefix.
+_DEPTH_CAM_NAMES = {1: "cam1", 2: "cam2"}
 
 # Canonical UR joint count -- the node uses len(UR_JOINT_ORDER) == 6 to size every
 # per-joint column block. Kept as a local constant so headers below match verbatim.
@@ -37,14 +54,16 @@ _N = 6
 
 
 class RecordingSession:
-    """Owns one session's ``vectors.h5`` + ``cam1.mp4`` + ``cam2.mp4`` and writes rows.
+    """Owns one session's ``vectors.h5`` + ``cam1.mp4`` + ``cam2.mp4`` (+ optional
+    ``depth.h5``) and writes rows.
 
     Pure file-I/O: no ROS, no Qt, no threads. Construct once per recording, call the
     ``write_*`` methods (with already-computed values) as data arrives, then
     :meth:`close` to finalise and get back ``{"duration_s", "message_counts"}``.
     """
 
-    def __init__(self, session_dir: str, camera_fps: float = 30.0):
+    def __init__(self, session_dir: str, camera_fps: float = 30.0,
+                 record_depth: bool = False):
         """Create ``session_dir`` and open every output file for this session.
 
         Opens ``session_dir/vectors.h5`` (mode 'w') with all nine tables via
@@ -54,11 +73,19 @@ class RecordingSession:
         wall-clock origin in ``self.t0``; :meth:`t` is relative to THIS construction,
         not to any node/global clock, so callers must feed this session's :meth:`t`
         into its own write methods.
+
+        ``record_depth=True`` additionally opens ``session_dir/depth.h5`` through
+        :class:`DepthH5Writer` (groups ``cam1`` / ``cam2``); otherwise ``self._depth``
+        is ``None`` and no depth file is ever created.
         """
         import os
 
         self.session_dir = session_dir
         os.makedirs(self.session_dir, exist_ok=True)
+
+        # Depth is opt-in; keep the attribute present either way so close() and the
+        # depth no-op methods can test it without hasattr gymnastics.
+        self._depth = None
 
         # Per-table message counters (keys match the node's _bump() strings verbatim).
         self._counts = {}
@@ -119,6 +146,19 @@ class RecordingSession:
         self._cam2_video = Mp4FrameWriter(
             os.path.join(self.session_dir, "cam2.mp4"), fps=camera_fps
         )
+
+        # --- Optional depth store (compressedDepth PNGs, one group per cam) ------
+        if record_depth:
+            self._depth = DepthH5Writer(
+                os.path.join(self.session_dir, "depth.h5"),
+                cams=tuple(_DEPTH_CAM_NAMES[i] for i in sorted(_DEPTH_CAM_NAMES)),
+            )
+
+    @property
+    def record_depth(self) -> bool:
+        """True when this session was opened with ``record_depth=True`` (a
+        ``depth.h5`` exists and the depth methods actually write)."""
+        return getattr(self, "_depth", None) is not None
 
     # ---- clock + counters ----------------------------------------------------
     def t(self) -> float:
@@ -220,6 +260,62 @@ class RecordingSession:
             self._cam2_w.writerow([f"{now:.4f}", idx])
         return idx
 
+    # ---- depth (all no-ops returning -1 / None when record_depth is False) ---
+    def _write_depth_frame(self, cam_idx: int, data: bytes, stamp_s: float) -> int:
+        """Shared body of the two public depth writers. Stamps ``t_rel_s`` from THIS
+        session's :meth:`t` (same origin as ``cam1_frames``) BEFORE the write, hands
+        the raw ``CompressedImage.data`` to :class:`DepthH5Writer`, and only on success
+        (``idx >= 0``) bumps ``"<cam>_depth_frames"`` -- a corrupt payload leaves both
+        the file and the counter untouched, exactly like :meth:`write_cam1_frame`."""
+        if self._depth is None:
+            return -1
+        cam = _DEPTH_CAM_NAMES[cam_idx]
+        now = self.t()
+        idx = self._depth.write_compressed_depth(cam, data, now, stamp_s)
+        if idx >= 0:
+            self._bump(f"{cam}_depth_frames")
+        return idx
+
+    def write_cam1_depth_frame(self, data: bytes, stamp_s: float = _NAN) -> int:
+        """Append one cam1 ``compressedDepth`` payload (12-byte header + PNG, i.e.
+        ``CompressedImage.data`` verbatim) to ``depth.h5``. ``stamp_s`` is the ROS
+        header stamp in seconds (NaN if unknown). Returns the 0-based depth frame
+        index, ``-1`` on a corrupt payload, and ``-1`` (no-op) when depth is off."""
+        return self._write_depth_frame(1, data, stamp_s)
+
+    def write_cam2_depth_frame(self, data: bytes, stamp_s: float = _NAN) -> int:
+        """Same as :meth:`write_cam1_depth_frame` for camera 2."""
+        return self._write_depth_frame(2, data, stamp_s)
+
+    def set_depth_source(self, cam_idx: int, topic: str, aligned_to_color: bool) -> None:
+        """Record the depth topic name / aligned flag for cam ``cam_idx`` (1 or 2).
+        No-op when depth is off."""
+        if self._depth is None:
+            return None
+        self._depth.set_source(_DEPTH_CAM_NAMES[cam_idx], topic, aligned_to_color)
+        return None
+
+    def set_depth_camera_info(self, cam_idx: int, **kw) -> None:
+        """Forward a ``sensor_msgs/CameraInfo`` (as keyword fields ``width, height,
+        distortion_model, D, K, R, P, frame_id``) to
+        :meth:`DepthH5Writer.set_camera_info` for cam ``cam_idx``. No-op when depth
+        is off."""
+        if self._depth is None:
+            return None
+        self._depth.set_camera_info(_DEPTH_CAM_NAMES[cam_idx], **kw)
+        return None
+
+    def set_depth_extrinsics(self, cam_idx: int, rotation, translation) -> None:
+        """Forward depth->colour extrinsics (rotation[9] column-major, translation[3]
+        m) to :meth:`DepthH5Writer.set_extrinsics_depth_to_color`. No-op when depth
+        is off."""
+        if self._depth is None:
+            return None
+        self._depth.set_extrinsics_depth_to_color(
+            _DEPTH_CAM_NAMES[cam_idx], rotation, translation
+        )
+        return None
+
     def write_sample(self, gello_q, gello_qd, gello_grip, cmd, ur_q, ur_qd, ur_eff,
                      grip_cmd, grip_pos, wrench, tcp, cam1_frame_idx, cam2_frame_idx) -> None:
         """synchronized (main analysis) row. Layout/precision verbatim to ``_on_sample``.
@@ -248,18 +344,23 @@ class RecordingSession:
 
     # ---- flush + finalise ----------------------------------------------------
     def flush(self) -> None:
-        """Flush the shared h5py.File to disk (video writers are not flushed here,
-        matching the node's ``_flush`` which only touches the HDF5 file)."""
+        """Flush the shared h5py.File (and ``depth.h5`` when depth is on) to disk.
+        Video writers are not flushed here, matching the node's ``_flush`` which only
+        touches the HDF5 file(s)."""
         self._h5.flush()
+        if self._depth is not None:
+            self._depth.flush()
 
     def close(self) -> dict:
         """Finalise the session and return ``{"duration_s", "message_counts"}``.
 
         The snapshot is taken BEFORE any file handle is touched so its duration/counts
-        reflect the full session. Then both video writers are closed (idempotent) and
-        the HDF5 file is flushed + closed. Safe to call even if construction partially
-        failed or nothing was ever written -- always returns a valid dict with
-        ``duration_s >= 0`` and a (possibly empty) counts dict."""
+        reflect the full session. Then both video writers are closed (idempotent), the
+        depth store (if any) is closed best-effort, and the HDF5 file is flushed +
+        closed. Safe to call even if construction partially failed or nothing was ever
+        written -- always returns a valid dict with ``duration_s >= 0`` and a
+        (possibly empty) counts dict. The dict SHAPE never changes; with depth on the
+        counts merely gain ``"cam1_depth_frames"`` / ``"cam2_depth_frames"``."""
         try:
             duration_s = round(self.t(), 2)
         except Exception:  # noqa: BLE001 - t0 may be missing on partial construction
@@ -276,6 +377,13 @@ class RecordingSession:
                     vid.close()
                 except Exception:  # noqa: BLE001 - best-effort on shutdown
                     pass
+
+        depth = getattr(self, "_depth", None)
+        if depth is not None:
+            try:
+                depth.close()
+            except Exception:  # noqa: BLE001 - best-effort on shutdown
+                pass
 
         h5 = getattr(self, "_h5", None)
         if h5 is not None:
@@ -483,5 +591,98 @@ if __name__ == "__main__":
     empty = RecordingSession.__new__(RecordingSession)
     snap = empty.close()  # nothing was ever constructed
     assert snap == {"duration_s": 0.0, "message_counts": {}}, snap
+
+    # --- Depth OFF (the pass above): no depth.h5, depth methods are no-ops --------
+    assert not sess.record_depth
+    assert not os.path.exists(os.path.join(session_dir, "depth.h5")), (
+        "depth.h5 must NOT be created when record_depth is False"
+    )
+    assert "cam1_depth_frames" not in result["message_counts"]
+    assert "cam2_depth_frames" not in result["message_counts"]
+
+    # --- Depth ON pass: same session API + depth.h5 with both cams -------------
+    import struct
+
+    from gello_recorder.depth_writer import (
+        COMPRESSED_DEPTH_HEADER_BYTES,
+        depth_meta,
+        read_depth_frame,
+    )
+
+    def make_depth_payload(seed, w=80, h=48):
+        rng = np.random.default_rng(seed)
+        arr = rng.integers(0, 5000, size=(h, w), dtype=np.uint16)
+        ok, buf = cv2.imencode(".png", arr)
+        assert ok, "cv2.imencode failed to produce a PNG"
+        return struct.pack("<iff", 0, 0.0, 0.0) + buf.tobytes(), arr
+
+    depth_dir = os.path.join(scratch, "session_selftest_depth")
+    dsess = RecordingSession(depth_dir, camera_fps=30.0, record_depth=True)
+    assert dsess.record_depth
+    dsess.set_depth_source(1, "/cam1/cam1/depth/image_rect_raw/compressedDepth", False)
+    dsess.set_depth_source(2, "/cam2/cam2/aligned_depth_to_color/image_raw/compressedDepth", True)
+    dsess.set_depth_camera_info(
+        1, width=80, height=48, distortion_model="plumb_bob", D=[0.0] * 5,
+        K=[500, 0, 40, 0, 500, 24, 0, 0, 1], R=list(np.eye(3).ravel()),
+        P=[500, 0, 40, 0, 0, 500, 24, 0, 0, 0, 1, 0],
+        frame_id="cam1_depth_optical_frame",
+    )
+    dsess.set_depth_extrinsics(1, list(np.eye(3).ravel()), [0.015, 0.0, 0.0])
+
+    # Interleave a colour frame so cam1_frames and cam1 depth share the t() origin.
+    assert dsess.write_cam1_frame(make_jpeg(2, 90)) == 0
+    n_d1, n_d2 = 4, 2
+    ref_d1 = []
+    for i in range(n_d1):
+        payload, arr = make_depth_payload(300 + i)
+        idx = dsess.write_cam1_depth_frame(payload, stamp_s=1.7e9 + 0.033 * i)
+        assert idx == i, f"cam1 depth idx {idx} != {i}"
+        ref_d1.append(arr)
+    for i in range(n_d2):
+        payload, _ = make_depth_payload(400 + i)
+        assert dsess.write_cam2_depth_frame(payload) == i
+    # Corrupt depth payload: -1, no count bump (like the corrupt JPEG above).
+    assert dsess.write_cam1_depth_frame(b"definitely not a compressedDepth message") == -1
+
+    dsess.flush()
+    dres = dsess.close()
+    print(f"close() [depth on]    : {json.dumps(dres)}")
+    assert set(dres.keys()) == {"duration_s", "message_counts"}, dres
+    assert dres["message_counts"] == {
+        "cam1_frames": 1,
+        "cam1_depth_frames": n_d1,
+        "cam2_depth_frames": n_d2,
+    }, dres
+
+    # vectors.h5 must still have exactly the nine tables -- depth adds nothing there.
+    with h5py.File(os.path.join(depth_dir, "vectors.h5"), "r") as f:
+        assert sorted(f.keys()) == sorted([
+            "synchronized", "gello_joint_states", "ur_joint_states", "command",
+            "gripper", "wrench", "tcp_pose", "cam1_frames", "cam2_frames",
+        ]), sorted(f.keys())
+        color_t = f["cam1_frames"]["t_rel_s"][0]
+
+    depth_path = os.path.join(depth_dir, "depth.h5")
+    assert os.path.exists(depth_path), "depth.h5 must exist when record_depth=True"
+    with h5py.File(depth_path, "r") as f:
+        assert sorted(f.keys()) == ["cam1", "cam2"], sorted(f.keys())
+        assert f["cam1"]["png"].shape[0] == n_d1
+        assert f["cam2"]["png"].shape[0] == n_d2
+        assert f["cam1"].attrs["width"] == 80 and f["cam1"].attrs["height"] == 48
+        t_d = f["cam1"]["t_rel_s"][:]
+        assert np.all(np.diff(t_d) >= 0), "depth t_rel_s must be monotonic"
+        assert t_d[0] >= color_t, "depth written after the colour frame -> later t_rel_s"
+        assert t_d[-1] <= dres["duration_s"] + 0.01, (t_d[-1], dres["duration_s"])
+        assert np.isnan(f["cam2"]["stamp_s"][0])
+        for i, arr in enumerate(ref_d1):
+            assert np.array_equal(read_depth_frame(f, "cam1", i), arr), i
+    dmeta = depth_meta(depth_path, "cam1")
+    assert dmeta["source_topic"].endswith("compressedDepth") and dmeta["aligned_to_color"] is False
+    assert dmeta["camera_info"]["frame_id"] == "cam1_depth_optical_frame"
+    assert dmeta["extrinsics_depth_to_color"]["translation"][0] == 0.015
+    assert depth_meta(depth_path, "cam2")["aligned_to_color"] is True
+
+    again_d = dsess.close()  # idempotent with depth on, too
+    assert again_d["message_counts"] == dres["message_counts"], again_d
 
     print("SELF-TEST OK")

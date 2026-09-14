@@ -26,7 +26,22 @@ Outputs (in <output_root>/session_<YYYYmmdd_HHMMSS>/ unless session_dir is given
                                                   each recorded video frame to its capture
                                                   timestamp (for syncing MP4 <-> signals).
   * cam1.mp4 / cam2.mp4 -- the two RealSense color video streams, one MP4 each.
+  * depth.h5           -- ONLY with record_depth:=true: both cameras' RealSense
+                         depth streams (raw compressedDepth payloads, one PNG
+                         16UC1 mm frame per row) + depth intrinsics and the
+                         depth->color extrinsics. See depth_writer.py.
   * metadata.json      -- params, start time, and per-topic message counts on exit.
+
+Depth (2026-09-14): ``record_depth`` (bool, default false) switches on
+subscriptions to ``cam1_depth_topic`` / ``cam2_depth_topic`` (CompressedImage,
+``16UC1; compressedDepth``), ``cam*_depth_info_topic`` (CameraInfo) and
+``cam*_extrinsics_topic`` (realsense2_camera_msgs/Extrinsics; the one-shot
+topic is TRANSIENT_LOCAL so it is read with a matching latched QoS).
+``depth_aligned_to_color`` only records WHICH depth stream the topics carry --
+the topic names themselves are what select the aligned stream (see
+``depth_topics_for``). Depth frames are gated by the SAME per-camera color
+warm-up clock as the MP4 frames: a depth frame is dropped exactly while that
+camera's color frames are being dropped (and before its first color frame).
 
 Subscriptions are defensive: a topic that never publishes simply leaves empty
 columns (no error), so this works in sim (fake), arm-only, or full arm+gripper runs.
@@ -49,9 +64,17 @@ from datetime import datetime
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, WrenchStamped
-from sensor_msgs.msg import CompressedImage, JointState
+from sensor_msgs.msg import CameraInfo, CompressedImage, JointState
 from std_msgs.msg import Float32, Float64MultiArray
 
+# Shared with the GUI node: the depth topic layout, the latched-extrinsics QoS
+# and the (guarded, may be None) Extrinsics message type live in ONE place.
+from gello_recorder.gello_gui_node import (
+    EXTRINSICS_QOS,
+    Extrinsics,
+    depth_topics_for,
+    stamp_to_seconds,
+)
 from gello_recorder.recording_session import RecordingSession
 
 # Canonical UR joint order; GELLO and the UR driver both publish these names.
@@ -118,6 +141,30 @@ class GelloUrRecorder(Node):
         self.camera_warmup_s = float(
             self.declare_parameter("camera_warmup_s", 3.0).value
         )
+        # --- Depth (opt-in) ---------------------------------------------
+        # Defaults name the UNALIGNED realsense-ros 4.x topics for cam1/cam2;
+        # run_recorder.sh overrides all of them when ALIGN_DEPTH=1. The
+        # aligned flag is metadata for depth.h5 -- it does not rename topics.
+        self.record_depth = bool(
+            self.declare_parameter("record_depth", False).value
+        )
+        self.depth_aligned_to_color = bool(
+            self.declare_parameter("depth_aligned_to_color", False).value
+        )
+        d1_img, d1_info, d1_ext = depth_topics_for("cam1", False)
+        d2_img, d2_info, d2_ext = depth_topics_for("cam2", False)
+        self.cam1_depth_topic = str(
+            self.declare_parameter("cam1_depth_topic", d1_img).value)
+        self.cam2_depth_topic = str(
+            self.declare_parameter("cam2_depth_topic", d2_img).value)
+        self.cam1_depth_info_topic = str(
+            self.declare_parameter("cam1_depth_info_topic", d1_info).value)
+        self.cam2_depth_info_topic = str(
+            self.declare_parameter("cam2_depth_info_topic", d2_info).value)
+        self.cam1_extrinsics_topic = str(
+            self.declare_parameter("cam1_extrinsics_topic", d1_ext).value)
+        self.cam2_extrinsics_topic = str(
+            self.declare_parameter("cam2_extrinsics_topic", d2_ext).value)
 
         if not session_dir:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -146,7 +193,19 @@ class GelloUrRecorder(Node):
         self._t0 = time.time()
 
         # --- Recording session: owns vectors.h5 + cam1.mp4 + cam2.mp4 -----
-        self._session = RecordingSession(self.session_dir, camera_fps=self.camera_fps)
+        # (+ depth.h5 when record_depth)
+        self._session = RecordingSession(
+            self.session_dir, camera_fps=self.camera_fps,
+            record_depth=self.record_depth)
+        # Depth metadata is pushed at most once per cam per stream (camera_info
+        # is re-published every frame; the session is open for the whole run).
+        self._depth_info_pushed = {1: False, 2: False}
+        self._depth_extrinsics_pushed = {1: False, 2: False}
+        if self.record_depth:
+            self._session.set_depth_source(
+                1, self.cam1_depth_topic, self.depth_aligned_to_color)
+            self._session.set_depth_source(
+                2, self.cam2_depth_topic, self.depth_aligned_to_color)
 
         # --- Subscriptions (READ-ONLY) -----------------------------------
         self.create_subscription(
@@ -172,6 +231,29 @@ class GelloUrRecorder(Node):
             CompressedImage, self.cam1_topic, self._on_cam1, 10)
         self.create_subscription(
             CompressedImage, self.cam2_topic, self._on_cam2, 10)
+        if self.record_depth:
+            # compressedDepth + camera_info take the same plain depth-10 QoS
+            # as the color topic (measured compatible, see gello_gui_node);
+            # the one-shot extrinsics need the latched EXTRINSICS_QOS.
+            self.create_subscription(
+                CompressedImage, self.cam1_depth_topic, self._on_cam1_depth, 10)
+            self.create_subscription(
+                CompressedImage, self.cam2_depth_topic, self._on_cam2_depth, 10)
+            self.create_subscription(
+                CameraInfo, self.cam1_depth_info_topic, self._on_cam1_depth_info, 10)
+            self.create_subscription(
+                CameraInfo, self.cam2_depth_info_topic, self._on_cam2_depth_info, 10)
+            if Extrinsics is None:
+                self.get_logger().warn(
+                    "realsense2_camera_msgs not importable -- depth->color "
+                    "extrinsics will NOT be recorded (depth frames still are)")
+            else:
+                self.create_subscription(
+                    Extrinsics, self.cam1_extrinsics_topic,
+                    self._on_cam1_extrinsics, EXTRINSICS_QOS)
+                self.create_subscription(
+                    Extrinsics, self.cam2_extrinsics_topic,
+                    self._on_cam2_extrinsics, EXTRINSICS_QOS)
 
         # --- Timers ------------------------------------------------------
         self._sample_timer = self.create_timer(
@@ -179,9 +261,16 @@ class GelloUrRecorder(Node):
         self._flush_timer = self.create_timer(self.flush_period_s, self._flush)
 
         self._write_metadata(final=False, counts={})
+        if self.record_depth:
+            depth_desc = (
+                f"depth ON (aligned={str(self.depth_aligned_to_color).lower()}) "
+                f"cam1_depth={self.cam1_depth_topic} cam2_depth={self.cam2_depth_topic}"
+            )
+        else:
+            depth_desc = "depth OFF"
         self.get_logger().info(
             f"gello_ur_recorder logging to {self.session_dir} "
-            f"@ {self.sample_rate_hz:.0f} Hz. Ctrl-C to stop & finalise."
+            f"@ {self.sample_rate_hz:.0f} Hz. {depth_desc}. Ctrl-C to stop & finalise."
         )
 
     # ---- helpers --------------------------------------------------------
@@ -265,6 +354,64 @@ class GelloUrRecorder(Node):
         if idx >= 0:
             self._cam2_frame_idx = idx
 
+    # ---- depth (only subscribed when record_depth) ---------------------
+    def _depth_warmup_over(self, cam_idx: int) -> bool:
+        """The COLOR warm-up gate, re-read for a depth frame.
+
+        Reuses the per-camera first-COLOR-frame time set in _on_cam1/_on_cam2
+        so depth frames are dropped exactly while that camera's color frames
+        are (and before its first color frame arrives) -- one clock, not two.
+        """
+        first = self._cam1_first_frame_t if cam_idx == 1 else self._cam2_first_frame_t
+        if first is None:
+            return False
+        return (self._t() - first) >= self.camera_warmup_s
+
+    def _on_cam1_depth(self, msg: CompressedImage):
+        if self._depth_warmup_over(1):
+            self._session.write_cam1_depth_frame(
+                bytes(msg.data), stamp_s=stamp_to_seconds(msg.header.stamp))
+
+    def _on_cam2_depth(self, msg: CompressedImage):
+        if self._depth_warmup_over(2):
+            self._session.write_cam2_depth_frame(
+                bytes(msg.data), stamp_s=stamp_to_seconds(msg.header.stamp))
+
+    def _on_cam1_depth_info(self, msg: CameraInfo):
+        self._on_depth_info(msg, 1)
+
+    def _on_cam2_depth_info(self, msg: CameraInfo):
+        self._on_depth_info(msg, 2)
+
+    def _on_depth_info(self, msg: CameraInfo, cam_idx: int):
+        if self._depth_info_pushed[cam_idx]:
+            return
+        self._session.set_depth_camera_info(
+            cam_idx,
+            width=int(msg.width), height=int(msg.height),
+            distortion_model=str(msg.distortion_model),
+            D=[float(x) for x in msg.d], K=[float(x) for x in msg.k],
+            R=[float(x) for x in msg.r], P=[float(x) for x in msg.p],
+            frame_id=str(msg.header.frame_id),
+        )
+        self._depth_info_pushed[cam_idx] = True
+
+    def _on_cam1_extrinsics(self, msg):
+        self._on_extrinsics(msg, 1)
+
+    def _on_cam2_extrinsics(self, msg):
+        self._on_extrinsics(msg, 2)
+
+    def _on_extrinsics(self, msg, cam_idx: int):
+        if self._depth_extrinsics_pushed[cam_idx]:
+            return
+        self._session.set_depth_extrinsics(
+            cam_idx,
+            rotation=[float(x) for x in msg.rotation],
+            translation=[float(x) for x in msg.translation],
+        )
+        self._depth_extrinsics_pushed[cam_idx] = True
+
     # ---- fixed-rate synchronized snapshot ------------------------------
     def _on_sample(self):
         self._session.write_sample(
@@ -283,6 +430,8 @@ class GelloUrRecorder(Node):
             "start_wall": datetime.fromtimestamp(self._t0).isoformat(),
             "session_dir": self.session_dir,
             "sample_rate_hz": self.sample_rate_hz,
+            "record_depth": self.record_depth,
+            "depth_aligned_to_color": self.depth_aligned_to_color,
             "duration_s": round(self._t(), 2) if duration_s is None else duration_s,
             "message_counts": counts,
             "note": "empty columns => that topic was not publishing this run",

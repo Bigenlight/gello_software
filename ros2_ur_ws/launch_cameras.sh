@@ -22,11 +22,17 @@
 #     VIEW=false ./launch_cameras.sh      # both cameras, NO viewer window
 #
 # ENV (same names/defaults as run_recorder.sh's camera section):
-#     CAM1_SERIAL    RealSense #1 serial (auto-resolved; default 147122072740, plain D435)
-#     CAM2_SERIAL    RealSense #2 serial (auto-resolved; default 243222072700, D435IF)
+#     CAM1_SERIAL    RealSense #1 serial (auto-resolved; default 143322071682, plain D435, SCENE)
+#     CAM2_SERIAL    RealSense #2 serial (auto-resolved; default 143322072540, plain D435, WRIST)
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
+#     ENABLE_DEPTH   1|true -> also stream depth; default 0 = color only (nothing
+#                    downstream reads depth; it costs USB power/bandwidth)
+#     ALIGN_DEPTH    1|true -> align_depth.enable:=true (only meaningful, and only
+#                    emitted, when depth is on); default 0. Measured 2026-09-14:
+#                    alignment costs ~49 % CPU per camera node and drops BOTH
+#                    color and depth to ~25 Hz, so never make it the default.
 #     VIEW           true|1 (default) -> open the dual-camera viewer;
 #                    false|0          -> skip the viewer, just hold the cameras up
 #
@@ -66,11 +72,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 # -> cam2 (WRIST, gripper-mounted).  Model class is the only evidence tying each
 # unit to its mount, so confirm with one arm jog: cam2 is the WRIST camera, so
 # its background must sweep while the gripper fingers stay fixed in frame.
-CAM1_SERIAL="${CAM1_SERIAL:-147122072740}"
-CAM2_SERIAL="${CAM2_SERIAL:-243222072700}"
+#
+# 2026-09-14 LAB MOVE: the rig now carries TWO PLAIN D435 bodies (the D435IF
+# is gone), so the model-class rule below cannot separate them.  Measured on
+# the Genesys 4-port hub (bus 4), assignment confirmed from live snapshots
+# (cam2's frame shows the gripper fingers; cam1's shows the table front-on):
+#
+#   port    serial_number     asic_serial_number   device   fw
+#   4-4.3   143322071682      143623022572         D435     5.17.3.10  -> cam1 SCENE
+#   4-4.4   143322072540      143523020769         D435     5.17.0.10  -> cam2 WRIST
+#
+# With two plain units resolve_serials() falls back to sorted-serial order,
+# which happens to match this table -- do not rely on that: keep the defaults
+# below equal to the table so the resolver passes them through silently.
+CAM1_SERIAL="${CAM1_SERIAL:-143322071682}"   # ASIC 143623022572
+CAM2_SERIAL="${CAM2_SERIAL:-143322072540}"   # ASIC 143523020769
 CAM1_NAME="${CAM1_NAME:-cam1}"
 CAM2_NAME="${CAM2_NAME:-cam2}"
 COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
+# Depth is OFF by default: nothing in this repo subscribes to a depth topic
+# (color only, everywhere), and rs_launch.py's own default is enable_depth:=true,
+# so leaving it on burns USB bandwidth/power for a stream no one reads. That
+# margin is not theoretical -- two D435s on a bus-powered hub browned out and
+# enumerated alternately (2026-08-11). Opt back in with ENABLE_DEPTH=1.
+ENABLE_DEPTH="${ENABLE_DEPTH:-0}"
+case "${ENABLE_DEPTH,,}" in 1|true|yes|on) DEPTH_ARG="enable_depth:=true" ;; *) DEPTH_ARG="enable_depth:=false" ;; esac
+# ALIGN_DEPTH -> align_depth.enable:=, appended ONLY when depth is on (with
+# depth off the launch line stays byte-identical to before). Default off: see
+# the ENV block above for the measured CPU / frame-rate cost.
+ALIGN_DEPTH="${ALIGN_DEPTH:-0}"
+case "${ALIGN_DEPTH,,}" in 1|true|yes|on) ALIGN_ON=true ;; *) ALIGN_ON=false ;; esac
+DEPTH_LAUNCH_EXTRA=()
+if [ "${DEPTH_ARG}" = "enable_depth:=true" ]; then
+    DEPTH_LAUNCH_EXTRA=("align_depth.enable:=${ALIGN_ON}")
+fi
 # Viewer is ON by default (opt-OUT, unlike run_recorder.sh's opt-IN CAMS): for
 # ACT deploy, eyeballing cam1=scene / cam2=close-up is a safety-relevant check.
 VIEW="${VIEW:-true}"
@@ -197,18 +232,21 @@ trap cleanup EXIT INT TERM
 
 echo "### launch_cameras.sh — RealSense pair for ACT deploy"
 echo "###   cam1 = SCENE (tripod, 3rd person)  D435    serial ${CAM1_SERIAL}"
-echo "###   cam2 = WRIST (gripper-mounted)     D435if  serial ${CAM2_SERIAL}"
-echo "###   profile ${COLOR_PROFILE} | logs -> ${TMPDIR_RUN}/cam1_launch.log, cam2_launch.log"
+echo "###   cam2 = WRIST (gripper-mounted)     D435    serial ${CAM2_SERIAL}"
+echo "###   profile ${COLOR_PROFILE} | depth ${DEPTH_ARG#enable_depth:=} | aligned ${ALIGN_ON} | logs -> ${TMPDIR_RUN}/cam1_launch.log, cam2_launch.log"
 
 # --- Launch both cameras backgrounded ----------------------------------------
 # NOTE: serial_no / color_profile MUST be wrapped in embedded single-quotes
 # ('"'"'...'"'"') -- ros2 launch infers CLI arg types from content, so a bare
 # all-digit serial gets coerced to an integer and the node rejects it (serial_no
 # is declared a STRING param and the node dies instantly otherwise).
+# ${DEPTH_ARG} / align_depth.enable need NO such wrapping -- true/false are not
+# all-digit, so ros2 launch infers the bool the node already expects.
 echo -n "### Starting cam1 ... "
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:="${CAM1_NAME}" camera_namespace:="${CAM1_NAME}" "serial_no:='${CAM1_SERIAL}'" \
     "rgb_camera.color_profile:='${COLOR_PROFILE}'" \
+    "${DEPTH_ARG}" "${DEPTH_LAUNCH_EXTRA[@]}" \
     > "${TMPDIR_RUN}/cam1_launch.log" 2>&1 &
 CAM1_PID=$!
 echo "started (pid ${CAM1_PID})"
@@ -217,6 +255,7 @@ echo -n "### Starting cam2 ... "
 ros2 launch realsense2_camera rs_launch.py \
     camera_name:="${CAM2_NAME}" camera_namespace:="${CAM2_NAME}" "serial_no:='${CAM2_SERIAL}'" \
     "rgb_camera.color_profile:='${COLOR_PROFILE}'" \
+    "${DEPTH_ARG}" "${DEPTH_LAUNCH_EXTRA[@]}" \
     > "${TMPDIR_RUN}/cam2_launch.log" 2>&1 &
 CAM2_PID=$!
 echo "started (pid ${CAM2_PID})"

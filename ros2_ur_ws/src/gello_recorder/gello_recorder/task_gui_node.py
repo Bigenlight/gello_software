@@ -868,9 +868,14 @@ class TaskRecorderGuiNode(GelloRecorderGuiNode):
         output_root: str = "~/gello_recordings",
         node_name: str = "task_recorder_gui_node",
         sample_rate_hz: float = _DEFAULT_SAMPLE_RATE_HZ,
+        **recorder_kwargs,
     ) -> None:
         # The parent wires up every recording subscription, both locks and the
         # take state machine; nothing below touches any of that.
+        # ``**recorder_kwargs`` passes the parent's depth-recording kwargs
+        # (cam*_depth_topic / cam*_depth_info_topic / cam*_extrinsics_topic /
+        # depth_aligned_to_color -- see GelloRecorderGuiNode) straight through,
+        # so task_recorder_gui.main() wires depth exactly like the base GUI.
         super().__init__(
             cam1_topic=cam1_topic,
             cam2_topic=cam2_topic,
@@ -878,6 +883,7 @@ class TaskRecorderGuiNode(GelloRecorderGuiNode):
             camera_warmup_s=camera_warmup_s,
             output_root=output_root,
             node_name=node_name,
+            **recorder_kwargs,
         )
 
         # --- synchronized sampler: rate ----------------------------------- #

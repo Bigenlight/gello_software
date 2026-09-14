@@ -497,11 +497,13 @@ canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
 | 실물 HIL 세션 기동 (운영용 3-CLI, preflight, actor) | [`docs/testing/09_HIL_ACTOR_RUNBOOK.md`](docs/testing/09_HIL_ACTOR_RUNBOOK.md) — 정상 운용은 `run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh` 세 terminal |
 | 서버에서 learner 띄우기 | **`./run_hil_server.sh` 하나가 정상 경로다**(환경변수 0개). 수동 CLI·계약 감사는 🗄️ [`serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md`](serl_ur_infra/HIL_SERL_KANU_RUNBOOK_KO.md) — **kanu 시절 기록이고 실행 절차가 아니다.** 호스트·GPU·경로는 [`DATA_AND_MODELS_JUNHYEONG_AI_KO.md`](serl_ur_infra/DATA_AND_MODELS_JUNHYEONG_AI_KO.md)가 우선 |
 | 녹화 take를 learner용 offline demo로 변환 | [`serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md`](serl_ur_infra/RECORDED_TAKE_DEMO_CONVERSION_KO.md) (`40b99f8`) — **`--outcome success\|truncated`는 사람이 명시한다.** 변환기는 성공을 추측하지 않는다. learner는 offline demo가 0이면 학습을 시작하지 않는다 |
+| 녹화 take를 **Hugging Face 데이터셋으로 공개** (raw + LeRobot, **depth 포함**) | [`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md) 「허깅페이스 업로드」절 — 스크립트는 `scripts/dataset/`(변환·독립 검증·raw 통계). 📌 2026-09-14 `Bigenlight/carrot_in_pot_raw` · `carrot_in_pot_lerobot_v3`(54 에피소드, EEF 모드, depth = lerobot 네이티브 depth video, 선형 12-bit 0~10 m ±1.25 mm, 무효 0 보존). lerobot 기본 log 양자화는 0→10 mm로 바꿔 무효 마스크를 잃으니 쓰지 말 것 |
 | 라이브 reward classifier 뷰어 보기 | [`serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md`](serl_ur_infra/REWARD_CLASSIFIER_LIVE_KO.md) — **2026-07-29 실기 검증 완료.** 터미널 4개 절차·인터프리터 함정·크롭 주의·트러블슈팅 |
 | wandb에서 학습 곡선(critic/actor loss) 보기 | 기본은 **offline**이라 자동으로 안 올라간다. 세션 뒤 서버에서 `~/miniconda3/envs/il/bin/wandb sync <run_root>/wandb/wandb/offline-run-*`. 실시간이 필요하면 **새 lineage 시작 시에만** `HIL_WANDB_MODE=online` — ⚠️ `wandb.log`에 타임아웃이 없어 sink가 느려지면 학습이 조용히 멈출 수 있다(미해결). 📌 `65fbf18` **이전**에 뜬 learner는 중첩 `metrics` dict를 통째로 넘겨서 **loss가 하나도 플롯되지 않는다** — 그 run은 `logs/learner.jsonl`에서 평탄화해 backfill해야 한다 |
 | mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
 | GELLO 개입 손맛·좌표계 **실기** 검증 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §4.5·§9 — `serl_ur_infra/tests/run_real_hil.py`. 기본 `DRY_RUN`이고 `--arm`을 줄 때만 움직인다. **정책이 zero 고정이라 learner도 gRPC 서버도 필요 없다** — 3-CLI 운영 워크플로우와 혼동하지 말 것(실제로 혼동이 있었다). 컨트롤러 요구도 다르다(FPC) → [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.5 |
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
+| 환경(로봇 위치·테이블·작업공간·카메라·물체)이 바뀐 뒤 **시뮬 리허설** / **GELLO 개체 확인** | [`docs/testing/11_SIM_REHEARSAL_KO.md`](docs/testing/11_SIM_REHEARSAL_KO.md) — `ros2_ur_ws/run_ur7e_gello_mock.sh`(실기 런처를 fake 하드웨어 + `127.0.0.1`로, 덮어쓰기 거부) + `scripts/gello_probe.py`(읽기 전용 ping/read, 토크 0, 포트 점유 시 exit 3). 📌 2026-09-14 0~2단계 PASS. 시뮬이 **못** 보는 것(속도 한계·protective stop·그리퍼·테이블 높이·`r_align_rpy`)과 실기 전 측정표는 그 문서 §0·§3 |
 | 처음부터 환경 세팅 / 세션 전 프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
 | 그리퍼만 단독으로 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
 | 카메라가 안 뜰 때 | [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md) · [`docs/testing/06_SENSORS.md`](docs/testing/06_SENSORS.md) |
@@ -608,6 +610,12 @@ ros2_ur_ws/
   src/ur_gello_bringup/.../hil_actor_status.py     abort_episode_enabled(MANUAL/AUTO 공통)
   run_classifier_viewer.sh         라이브 분류기 뷰어 (랩톱 CPU)
   run_remote_classifier_viewer.sh  라이브 분류기 뷰어 (서버 GPU + SSH 터널)
+  run_ur7e_gello_mock.sh           실기 런처(ur7e_gello_real.launch.py)를 fake 하드웨어 + 127.0.0.1로
+                                   리허설 — robot_ip/use_fake_hardware 덮어쓰기 거부, 실물 GELLO 필수
+                                   (source:=fake 없음), control_mode joint|eef|joint_delta → docs/testing/11
+scripts/
+  gello_probe.py                   GELLO 개체 확인 — 읽기 전용(ping/read만, 토크 0), 포트 점유 시 exit 3,
+                                   --reference(기준 자세 대조) / --watch(관절별 방향) → 02 §8 · 11 0단계
 ```
 
 ## 반드시 지킬 것

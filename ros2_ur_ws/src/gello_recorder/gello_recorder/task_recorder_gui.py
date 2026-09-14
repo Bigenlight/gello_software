@@ -88,6 +88,9 @@ from gello_recorder.gello_recorder_gui import (
     DEFAULT_COLOR_PROFILE,
     MainWindow,
     _BIG_BUTTON_STYLE,
+    _align_depth_from_env,
+    _depth_enabled_from_env,
+    _depth_node_kwargs,
     _launch_realsense,
     _resolve_camera_serials,
     _spin_node,
@@ -826,10 +829,17 @@ def main(args=None):
     # The two color topics the realsense nodes publish under their namespace.
     cam1_topic = "/{0}/{0}/color/image_raw/compressed".format(cam1_name)
     cam2_topic = "/{0}/{0}/color/image_raw/compressed".format(cam2_name)
+    # Depth (ENABLE_DEPTH, default on / ALIGN_DEPTH, default off): decided once
+    # here and shared by the camera argv and the node, exactly as the base GUI.
+    enable_depth = _depth_enabled_from_env()
+    align_depth = _align_depth_from_env()
+    depth_kwargs = _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth)
 
     # --- 1. Launch the two RealSense camera nodes as subprocesses --------- #
-    cam1_proc = _launch_realsense(cam1_name, cam1_serial, color_profile)
-    cam2_proc = _launch_realsense(cam2_name, cam2_serial, color_profile)
+    cam1_proc = _launch_realsense(cam1_name, cam1_serial, color_profile,
+                                  enable_depth, align_depth)
+    cam2_proc = _launch_realsense(cam2_name, cam2_serial, color_profile,
+                                  enable_depth, align_depth)
 
     # --- 2. Bring up ROS + the node --------------------------------------- #
     rclpy.init(args=args)
@@ -852,6 +862,7 @@ def main(args=None):
         camera_fps=camera_fps,
         camera_warmup_s=camera_warmup_s,
         output_root=output_root,
+        **depth_kwargs,
     )
 
     # --- 3. Spin the node on a background daemon thread ------------------- #
