@@ -1,0 +1,1200 @@
+{
+  "verdict": "PASS",
+  "interpreter": "/home/laptop3/youngwoong_ws/lr_env/bin/python",
+  "validator": "/home/laptop3/gello_software_humble/scripts/dataset/validate_carrot_eef_conversion.py",
+  "ur_kin": "/home/laptop3/gello_software_humble/ros2_ur_ws/src/ur_gello_bringup/ur_gello_bringup/ur_kin.py",
+  "raw_root": "/home/laptop3/youngwoong_ws/Put_carrot_in_pot",
+  "lerobot_root": "/home/laptop3/youngwoong_ws/carrot_in_pot_eef_lerobot",
+  "repo_id": "Bigenlight/carrot_in_pot_eef_lerobot_v3",
+  "task": "Put carrot in pot",
+  "action_space_id": "eef_delta_v1",
+  "state_dim": 16,
+  "action_dim": 7,
+  "tool_z_m": 0.174,
+  "excluded": [],
+  "test_mode": {
+    "max_frames": 0,
+    "max_takes": 0
+  },
+  "n_takes_found": 54,
+  "n_takes_included": 54,
+  "takes": [
+    "take_01_20260914_164811",
+    "take_02_20260914_164845",
+    "take_03_20260914_164930",
+    "take_04_20260914_165011",
+    "take_05_20260914_165156",
+    "take_06_20260914_165238",
+    "take_07_20260914_165316",
+    "take_08_20260914_165353",
+    "take_09_20260914_165429",
+    "take_10_20260914_165510",
+    "take_11_20260914_165557",
+    "take_13_20260914_165647",
+    "take_14_20260914_165719",
+    "take_15_20260914_165753",
+    "take_16_20260914_165825",
+    "take_17_20260914_165859",
+    "take_18_20260914_165926",
+    "take_19_20260914_170024",
+    "take_20_20260914_170107",
+    "take_21_20260914_170135",
+    "take_22_20260914_170211",
+    "take_23_20260914_170302",
+    "take_24_20260914_170339",
+    "take_25_20260914_170407",
+    "take_26_20260914_170447",
+    "take_27_20260914_170519",
+    "take_28_20260914_170557",
+    "take_29_20260914_170629",
+    "take_30_20260914_170700",
+    "take_31_20260914_170732",
+    "take_32_20260914_170803",
+    "take_33_20260914_170854",
+    "take_34_20260914_170932",
+    "take_35_20260914_171001",
+    "take_36_20260914_171037",
+    "take_37_20260914_171113",
+    "take_38_20260914_171144",
+    "take_39_20260914_171227",
+    "take_40_20260914_171256",
+    "take_41_20260914_171328",
+    "take_42_20260914_171358",
+    "take_43_20260914_171435",
+    "take_44_20260914_171505",
+    "take_45_20260914_171534",
+    "take_46_20260914_171603",
+    "take_47_20260914_171640",
+    "take_48_20260914_171732",
+    "take_49_20260914_171812",
+    "take_50_20260914_171849",
+    "take_51_20260914_171924",
+    "take_52_20260914_171957",
+    "take_53_20260914_172033",
+    "take_54_20260914_172116",
+    "take_55_20260914_172155"
+  ],
+  "take_frame_counts": [
+    253,
+    274,
+    308,
+    258,
+    290,
+    295,
+    250,
+    301,
+    233,
+    270,
+    350,
+    253,
+    343,
+    390,
+    308,
+    273,
+    328,
+    344,
+    291,
+    274,
+    355,
+    295,
+    239,
+    238,
+    274,
+    244,
+    264,
+    312,
+    303,
+    283,
+    266,
+    243,
+    344,
+    372,
+    442,
+    370,
+    295,
+    367,
+    355,
+    301,
+    304,
+    289,
+    280,
+    361,
+    389,
+    360,
+    278,
+    506,
+    426,
+    411,
+    418,
+    285,
+    481,
+    249
+  ],
+  "expected_total_frames": 17085,
+  "info": {
+    "codebase_version": "v3.0",
+    "fps": 30,
+    "total_episodes": 54,
+    "total_frames": 17085,
+    "total_tasks": 1,
+    "robot_type": "ur7e_gello",
+    "splits": {
+      "train": "0:54"
+    }
+  },
+  "features": {
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        7
+      ],
+      "names": [
+        "dx",
+        "dy",
+        "dz",
+        "drx",
+        "dry",
+        "drz",
+        "grip_cmd"
+      ]
+    },
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "ur_q1",
+        "ur_q2",
+        "ur_q3",
+        "ur_q4",
+        "ur_q5",
+        "ur_q6",
+        "tcp_x",
+        "tcp_y",
+        "tcp_z",
+        "tcp_r11",
+        "tcp_r21",
+        "tcp_r31",
+        "tcp_r12",
+        "tcp_r22",
+        "tcp_r32",
+        "grip_pos"
+      ]
+    },
+    "observation.images.cam1": {
+      "dtype": "video",
+      "shape": [
+        720,
+        1280,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ]
+    },
+    "observation.images.cam2": {
+      "dtype": "video",
+      "shape": [
+        720,
+        1280,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ]
+    },
+    "timestamp": {
+      "dtype": "float32",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "frame_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "episode_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "task_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    }
+  },
+  "numeric": {
+    "per_slice_max_abs_dev": {
+      "q": 2.3706996632455457e-07,
+      "tcp_p": 2.9800573342342318e-08,
+      "rot6d": 2.9801766721071488e-08,
+      "grip_pos": 2.7847290029470173e-08,
+      "dp": 3.5701819625644227e-10,
+      "drot": 9.2377475113814e-10,
+      "grip_cmd": 2.95639037695139e-08
+    },
+    "worst_episode": {
+      "q": "ep48 (take_50_20260914_171849)",
+      "tcp_p": "ep11 (take_13_20260914_165647)",
+      "rot6d": "ep3 (take_04_20260914_165011)",
+      "grip_pos": "ep32 (take_34_20260914_170932)",
+      "dp": "ep22 (take_24_20260914_170339)",
+      "drot": "ep2 (take_03_20260914_164930)",
+      "grip_cmd": "ep47 (take_49_20260914_171812)"
+    },
+    "ortho_max_dev": 7.607498783701594e-08,
+    "last_frame_max_motion": 0.0,
+    "n_bad_episodes": 0,
+    "tau_own": [
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.9,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89,
+      0.89
+    ],
+    "tau_own_refined": [
+      0.8942963738399213,
+      0.8936407877238293,
+      0.895,
+      0.8948840166054062,
+      0.8951969830738854,
+      0.8942494467533176,
+      0.8946410734972309,
+      0.8945149337939734,
+      0.8929340044120071,
+      0.8945080201038991,
+      0.8945964990326076,
+      0.8920816214822701,
+      0.8940598590035501,
+      0.895,
+      0.8939653435134733,
+      0.893641110516078,
+      0.8937233943869431,
+      0.8940292281341046,
+      0.8933543135076917,
+      0.893570821699564,
+      0.89360937945828,
+      0.8931298002520742,
+      0.8926697080306384,
+      0.8934346896862075,
+      0.8935651134721173,
+      0.8931918244050807,
+      0.8919644335555401,
+      0.8939887911574265,
+      0.8947447412605783,
+      0.8927590467424229,
+      0.8940340469677874,
+      0.8937616922648899,
+      0.8932663983122914,
+      0.8933442281149158,
+      0.8937528109810332,
+      0.8933923739259789,
+      0.8943966330366898,
+      0.8939889699470562,
+      0.8935967672918744,
+      0.8936102217488419,
+      0.8939829345198391,
+      0.8938652707984183,
+      0.8932100245730007,
+      0.8946444104080079,
+      0.894621190860219,
+      0.893902345919341,
+      0.8937710579798891,
+      0.8946101454651105,
+      0.8936893168211868,
+      0.8937494506359134,
+      0.8943231195605514,
+      0.8942767855351391,
+      0.8935968329476518,
+      0.8938215765988305
+    ],
+    "tau_residual_m": [
+      0.0006861597992509334,
+      0.000670201576259606,
+      0.0006534633749763762,
+      0.0006793126347306828,
+      0.0006579670413186866,
+      0.0008423741976054197,
+      0.000830556048175182,
+      0.0006999383532640771,
+      0.0008342440310599549,
+      0.0008116284407349629,
+      0.0005610154557740088,
+      0.0008772218891761909,
+      0.0007762717260659853,
+      0.0005065525407415603,
+      0.0005575037223033594,
+      0.0006784048745697322,
+      0.0006596151045637102,
+      0.0007056524185872044,
+      0.0005071777225749868,
+      0.0005498001774566854,
+      0.0007111447208405672,
+      0.0008690619473841073,
+      0.0006574419404473876,
+      0.000737796711549785,
+      0.0005566205422253268,
+      0.0008233348044946065,
+      0.0005332271040071634,
+      0.0006430267872209014,
+      0.0005880852367418408,
+      0.0007923180574066766,
+      0.0005624017132923463,
+      0.0007532886754499828,
+      0.0007279369675282546,
+      0.0004626411227829215,
+      0.00043101230124987947,
+      0.0006690048524359734,
+      0.0007269357739107254,
+      0.0004726699316143021,
+      0.0004261582150808216,
+      0.0007022138632807738,
+      0.0004918951456191912,
+      0.0005185806318417305,
+      0.0007056073930388672,
+      0.0005071389822797429,
+      0.00040195497579425865,
+      0.000540635090877591,
+      0.00062832262638363,
+      0.00044598273917094,
+      0.000481900970972602,
+      0.0005966799286719099,
+      0.0004022823013458346,
+      0.0007010482184241374,
+      0.0005934106236239266,
+      0.0006080283488239422
+    ],
+    "tau_abs_diff_vs_meta": [
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.0,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009,
+      0.010000000000000009
+    ],
+    "tau_stats": {
+      "min": 0.89,
+      "median": 0.89,
+      "max": 0.9,
+      "residual_min_m": 0.00040195497579425865,
+      "residual_median_m": 0.0006554526577118819,
+      "residual_max_m": 0.0008772218891761909
+    },
+    "tau_disagreements": [],
+    "joint_step_max_rad": 0.020468000000000153,
+    "n_frames_clamped_past_joint_stream": 0
+  },
+  "rgb_video_corr": {
+    "n": 24,
+    "min": 0.9984056629089103,
+    "mean": 0.9990729669904056
+  },
+  "eef_space_json": {
+    "action_space_id": "eef_delta_v1",
+    "tool_z_m": 0.174,
+    "state_names": [
+      "ur_q1",
+      "ur_q2",
+      "ur_q3",
+      "ur_q4",
+      "ur_q5",
+      "ur_q6",
+      "tcp_x",
+      "tcp_y",
+      "tcp_z",
+      "tcp_r11",
+      "tcp_r21",
+      "tcp_r31",
+      "tcp_r12",
+      "tcp_r22",
+      "tcp_r32",
+      "grip_pos"
+    ],
+    "action_names": [
+      "dx",
+      "dy",
+      "dz",
+      "drx",
+      "dry",
+      "drz",
+      "grip_cmd"
+    ],
+    "definition": "observation.state (16) = [q1..q6 (rad, UR order, as observed -- see the joint_state_alignment note: the recorder's joint cache is stale by a per-take tau_q of ~0.9 s, so the joints are read at master_time + tau_q, by LINEAR INTERPOLATION of the joint record because that record ticks at a jittery ~63-67 Hz and nearest-neighbour would inject fake zero and fake double steps into the finite-difference action), tcp_x, tcp_y, tcp_z (m, base_link frame), r11, r21, r31, r12, r22, r32 (the first two COLUMNS of the TCP rotation matrix -- the continuous 6-D rotation representation, used because the carrot TCP sits ~175 deg from identity where a rotation vector would wrap), grip_pos (0=open..1=closed)]. TCP = ur_kin.fk(q) (base_link -> tool0 flange) translated by +0.174 m along the flange +Z. action (7) = [dx, dy, dz, drx, dry, drz, grip_cmd]: for dataset frame t on the 30 fps master clock, dp = p_tcp(q_{t+1}) - p_tcp(q_t) and drot = so3_log(R_tcp(q_{t+1}) @ R_tcp(q_t)^T), both expressed in the base frame with the rotation LEFT-multiplied; the last frame of every episode has dp = drot = 0. grip_cmd is the ABSOLUTE recorded gripper command (0=open..1=closed), ffill/bfill'd then resampled onto the master clock. The action is the ACHIEVED motion between consecutive frames, never the recorded `command` stream (which leads the measured joints by ~0.9 s in this session). Deploy inverts it exactly: p_target = p_live + dp, R_target = so3_exp(drot) @ R_live, then analytic IK with branch locking (eef_space.apply_delta / ik_tcp_nearest). Nothing here is scaled, clipped or filtered -- clamps belong to the deploy node only.",
+    "joint_state_alignment": "ur_joint_states shifted by per-take tau_q (see source_takes.json); recorder cache was stale ~0.9 s",
+    "joint_state_resampling": "linear_interp",
+    "eef_space_sha256": "6d2aba42b9bc3882a96a167302098735d2bad2cd71da37f2c779839d17e7a58a",
+    "eef_space_path": "/home/laptop3/gello_software_humble/ros2_ur_ws/src/gello_policy/gello_policy/eef_space.py",
+    "fps": 30,
+    "task": "Put carrot in pot"
+  },
+  "source_takes_json": {
+    "names": [
+      "take_01_20260914_164811",
+      "take_02_20260914_164845",
+      "take_03_20260914_164930",
+      "take_04_20260914_165011",
+      "take_05_20260914_165156",
+      "take_06_20260914_165238",
+      "take_07_20260914_165316",
+      "take_08_20260914_165353",
+      "take_09_20260914_165429",
+      "take_10_20260914_165510",
+      "take_11_20260914_165557",
+      "take_13_20260914_165647",
+      "take_14_20260914_165719",
+      "take_15_20260914_165753",
+      "take_16_20260914_165825",
+      "take_17_20260914_165859",
+      "take_18_20260914_165926",
+      "take_19_20260914_170024",
+      "take_20_20260914_170107",
+      "take_21_20260914_170135",
+      "take_22_20260914_170211",
+      "take_23_20260914_170302",
+      "take_24_20260914_170339",
+      "take_25_20260914_170407",
+      "take_26_20260914_170447",
+      "take_27_20260914_170519",
+      "take_28_20260914_170557",
+      "take_29_20260914_170629",
+      "take_30_20260914_170700",
+      "take_31_20260914_170732",
+      "take_32_20260914_170803",
+      "take_33_20260914_170854",
+      "take_34_20260914_170932",
+      "take_35_20260914_171001",
+      "take_36_20260914_171037",
+      "take_37_20260914_171113",
+      "take_38_20260914_171144",
+      "take_39_20260914_171227",
+      "take_40_20260914_171256",
+      "take_41_20260914_171328",
+      "take_42_20260914_171358",
+      "take_43_20260914_171435",
+      "take_44_20260914_171505",
+      "take_45_20260914_171534",
+      "take_46_20260914_171603",
+      "take_47_20260914_171640",
+      "take_48_20260914_171732",
+      "take_49_20260914_171812",
+      "take_50_20260914_171849",
+      "take_51_20260914_171924",
+      "take_52_20260914_171957",
+      "take_53_20260914_172033",
+      "take_54_20260914_172116",
+      "take_55_20260914_172155"
+    ],
+    "n_frames": [
+      253,
+      274,
+      308,
+      258,
+      290,
+      295,
+      250,
+      301,
+      233,
+      270,
+      350,
+      253,
+      343,
+      390,
+      308,
+      273,
+      328,
+      344,
+      291,
+      274,
+      355,
+      295,
+      239,
+      238,
+      274,
+      244,
+      264,
+      312,
+      303,
+      283,
+      266,
+      243,
+      344,
+      372,
+      442,
+      370,
+      295,
+      367,
+      355,
+      301,
+      304,
+      289,
+      280,
+      361,
+      389,
+      360,
+      278,
+      506,
+      426,
+      411,
+      418,
+      285,
+      481,
+      249
+    ],
+    "joint_state_shift_s": {
+      "0": 0.9,
+      "1": 0.9,
+      "2": 0.9,
+      "3": 0.9,
+      "4": 0.9,
+      "5": 0.9,
+      "6": 0.9,
+      "7": 0.9,
+      "8": 0.9,
+      "9": 0.9,
+      "10": 0.9,
+      "11": 0.9,
+      "12": 0.9,
+      "13": 0.9,
+      "14": 0.9,
+      "15": 0.9,
+      "16": 0.9,
+      "17": 0.9,
+      "18": 0.9,
+      "19": 0.9,
+      "20": 0.9,
+      "21": 0.9,
+      "22": 0.9,
+      "23": 0.9,
+      "24": 0.9,
+      "25": 0.9,
+      "26": 0.9,
+      "27": 0.9,
+      "28": 0.9,
+      "29": 0.9,
+      "30": 0.9,
+      "31": 0.9,
+      "32": 0.9,
+      "33": 0.9,
+      "34": 0.9,
+      "35": 0.9,
+      "36": 0.9,
+      "37": 0.9,
+      "38": 0.9,
+      "39": 0.9,
+      "40": 0.9,
+      "41": 0.9,
+      "42": 0.9,
+      "43": 0.9,
+      "44": 0.9,
+      "45": 0.9,
+      "46": 0.9,
+      "47": 0.9,
+      "48": 0.9,
+      "49": 0.9,
+      "50": 0.9,
+      "51": 0.9,
+      "52": 0.9,
+      "53": 0.9
+    },
+    "joint_state_shift_residual_m": {
+      "0": 0.0006220887171976138,
+      "1": 0.0007265234574136323,
+      "2": 0.0006035526592714933,
+      "3": 0.0006324549456259665,
+      "4": 0.0006535810818790096,
+      "5": 0.0008187081044869583,
+      "6": 0.0007510851608063154,
+      "7": 0.00072245391587536,
+      "8": 0.0007709218755812205,
+      "9": 0.0008116284407349629,
+      "10": 0.0005682978908607926,
+      "11": 0.0008259615534566517,
+      "12": 0.000694271004830511,
+      "13": 0.0004867911262104334,
+      "14": 0.0005695868920697665,
+      "15": 0.0006755252358461049,
+      "16": 0.0006439372857706321,
+      "17": 0.0006829526044362852,
+      "18": 0.0005732922561739121,
+      "19": 0.0005618780638165376,
+      "20": 0.0007280804981569756,
+      "21": 0.0008620418415183857,
+      "22": 0.0007502892294666632,
+      "23": 0.0006776593146073686,
+      "24": 0.0005604637484670133,
+      "25": 0.0007978254366940021,
+      "26": 0.0005642268947237666,
+      "27": 0.000580098153616782,
+      "28": 0.0005320652103182118,
+      "29": 0.0006765471637393794,
+      "30": 0.0005462850864732312,
+      "31": 0.0006595608962524803,
+      "32": 0.0007350042103234723,
+      "33": 0.0005528752422037686,
+      "34": 0.00044971843359970794,
+      "35": 0.0006395558811903701,
+      "36": 0.0007015643756107347,
+      "37": 0.0004900988270605199,
+      "38": 0.0004757026526762472,
+      "39": 0.0007782667081218405,
+      "40": 0.000476161860689679,
+      "41": 0.000541010270697226,
+      "42": 0.0006774455694694841,
+      "43": 0.0004726112232438038,
+      "44": 0.00042186982941912714,
+      "45": 0.0005346904698785948,
+      "46": 0.0006144153080515558,
+      "47": 0.0004097301257076299,
+      "48": 0.0004804486853814086,
+      "49": 0.0005884286158976099,
+      "50": 0.0004045259162347617,
+      "51": 0.00073316531444149,
+      "52": 0.0006544751618785834,
+      "53": 0.000627229458006735
+    },
+    "n_frames_dropped_stale_tail": [
+      27,
+      27,
+      27,
+      28,
+      27,
+      28,
+      27,
+      28,
+      28,
+      28,
+      28,
+      27,
+      27,
+      27,
+      27,
+      27,
+      27,
+      27,
+      27,
+      28,
+      28,
+      28,
+      27,
+      27,
+      28,
+      27,
+      27,
+      27,
+      27,
+      27,
+      28,
+      27,
+      27,
+      28,
+      27,
+      27,
+      27,
+      27,
+      28,
+      27,
+      27,
+      27,
+      27,
+      27,
+      27,
+      26,
+      27,
+      27,
+      27,
+      27,
+      28,
+      27,
+      28,
+      27
+    ]
+  },
+  "thresholds": {
+    "tol": 1e-06,
+    "ortho_tol": 1e-05,
+    "video_fail_corr": 0.98,
+    "video_warn_corr": 0.99
+  },
+  "counts": {
+    "pass": 71,
+    "fail": 0,
+    "warn": 0,
+    "skip": 0,
+    "total": 71
+  },
+  "rows": [
+    {
+      "status": "PASS",
+      "check": "vectorised nearest_idx == brute-force argmin reference",
+      "detail": "70 queries against ur/cam2/gripper timelines"
+    },
+    {
+      "status": "PASS",
+      "check": "ffill_bfill reference case",
+      "detail": "[1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "so3_log_own(so3_exp_own(w)) == w for |w| <= 2 rad",
+      "detail": "max|d|=4.441e-16 (tol 1e-09) over |w| in [0.0, 1e-09, 0.0001, 0.03, 0.5, 2.0], worst w=[1.040115, 0.085398, -1.706126]"
+    },
+    {
+      "status": "PASS",
+      "check": "so3_log_own(so3_exp_own(w)) == w for |w| -> pi (ill-conditioned corner)",
+      "detail": "max|d|=1.527e-07 (tol 1e-06) over |w| in [3.1415925535897933, 3.141492653589793], worst w=[2.162911, -0.492139, -2.224684]"
+    },
+    {
+      "status": "PASS",
+      "check": "interp_joints_own is exact on a ramp, on knots, and clamps at both ends",
+      "detail": "max|d|=0.000e+00"
+    },
+    {
+      "status": "PASS",
+      "check": "interp_joints_own agrees with an independent reference interpolation",
+      "detail": "max|d|=4.441e-16"
+    },
+    {
+      "status": "PASS",
+      "check": "so3_log_own of a +90 deg z-rotation == [0,0,pi/2]",
+      "detail": "got [0.0, 0.0, 1.570796327]"
+    },
+    {
+      "status": "PASS",
+      "check": "tcp_pose == fk(q) @ translate(0,0,0.174)",
+      "detail": "max|d|=0.000e+00"
+    },
+    {
+      "status": "PASS",
+      "check": "codebase_version == 'v3.0'",
+      "detail": "got 'v3.0'"
+    },
+    {
+      "status": "PASS",
+      "check": "fps == 30",
+      "detail": "got 30"
+    },
+    {
+      "status": "PASS",
+      "check": "all expected features present",
+      "detail": "9 features"
+    },
+    {
+      "status": "PASS",
+      "check": "no unexpected extra features",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "dataset carries NO depth feature",
+      "detail": "0 depth keys"
+    },
+    {
+      "status": "PASS",
+      "check": "feature action",
+      "detail": "dtype=float32 shape=[7] names=['dx', 'dy', 'dz', 'drx', 'dry', 'drz', 'grip_cmd']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.state",
+      "detail": "dtype=float32 shape=[16] names=['ur_q1', 'ur_q2', 'ur_q3', 'ur_q4', 'ur_q5', 'ur_q6', 'tcp_x', 'tcp_y', 'tcp_z', 'tcp_r11', 'tcp_r21', 'tcp_r31', 'tcp_r12', 'tcp_r22', 'tcp_r32', 'grip_pos']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam1",
+      "detail": "dtype=video shape=[720, 1280, 3] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam2",
+      "detail": "dtype=video shape=[720, 1280, 3] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature timestamp",
+      "detail": "dtype=float32 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature frame_index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature episode_index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature task_index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "total_episodes == 54 (included takes)",
+      "detail": "got 54"
+    },
+    {
+      "status": "PASS",
+      "check": "total_frames == 17085 (sum of cam1_frames rows)",
+      "detail": "got 17085"
+    },
+    {
+      "status": "PASS",
+      "check": "total_tasks == 1",
+      "detail": "got 1"
+    },
+    {
+      "status": "PASS",
+      "check": "splits.train covers all episodes",
+      "detail": "got {'train': '0:54'}"
+    },
+    {
+      "status": "PASS",
+      "check": "episode count == included take count",
+      "detail": "54"
+    },
+    {
+      "status": "PASS",
+      "check": "all 54 episode lengths match their source take",
+      "detail": "total 17085 frames"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 3b |tau_validator - tau_meta| <= 0.02 s for every episode",
+      "detail": "max|d tau|=0.0100 s over 54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "joint series continuous enough to interpolate (max step < 0.2 rad)",
+      "detail": "worst consecutive |dq| over all episodes = 0.0205 rad"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 3c independent tau_q estimate",
+      "detail": "grid min/med/max = 0.89/0.89/0.90 s; parabola-refined med 0.8938 s; residual min/med/max = 0.40/0.66/0.88 mm"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 3  state[:6] == interpolated q at master + tau_q (tol=1e-06)",
+      "detail": "max|d|=2.371e-07  worst ep48 (take_50_20260914_171849)"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 4  state[6:9] == fk(q) + 0.174 m tool offset (tol=1e-06)",
+      "detail": "max|d|=2.980e-08  worst ep11 (take_13_20260914_165647)"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 5a state[9:15] == first two columns of R_tcp (tol=1e-06)",
+      "detail": "max|d|=2.980e-08  worst ep3 (take_04_20260914_165011)"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 5b state[9:15] columns orthonormal (tol=1e-05)",
+      "detail": "max|d|=7.607e-08"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 6  state[15] == resampled grip_pos (tol=1e-06)",
+      "detail": "max|d|=2.785e-08  worst ep32 (take_34_20260914_170932)"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 7a action[:3] == p(q_t+1) - p(q_t) (tol=1e-06)",
+      "detail": "max|d|=3.570e-10  worst ep22 (take_24_20260914_170339)"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 7b action[3:6] == so3_log(R_t+1 R_t^T), own log map (tol=1e-06)",
+      "detail": "max|d|=9.238e-10  worst ep2 (take_03_20260914_164930)"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 7c last frame of every episode has exactly zero motion",
+      "detail": "max|action[-1,:6]|=0.000e+00"
+    },
+    {
+      "status": "PASS",
+      "check": "CHECK 8  action[6] == resampled ffill/bfill grip_cmd (tol=1e-06)",
+      "detail": "max|d|=2.956e-08  worst ep47 (take_49_20260914_171812)"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.state finite",
+      "detail": "NaN=0 Inf=0  range=[-4.4087, 2.0708]"
+    },
+    {
+      "status": "PASS",
+      "check": "action finite",
+      "detail": "NaN=0 Inf=0  range=[-0.0224, 0.9998]"
+    },
+    {
+      "status": "PASS",
+      "check": "exactly one task in meta/tasks.parquet",
+      "detail": "got {0: 'Put carrot in pot'}"
+    },
+    {
+      "status": "PASS",
+      "check": "task string == 'Put carrot in pot'",
+      "detail": "got ['Put carrot in pot']"
+    },
+    {
+      "status": "PASS",
+      "check": "single task_index across all frames",
+      "detail": "unique=[0]"
+    },
+    {
+      "status": "PASS",
+      "check": "every frame's task_index resolves to the task string",
+      "detail": "unique=[0] -> ['Put carrot in pot']"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode's meta 'tasks' == [task]",
+      "detail": "54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "sampled RGB video frames match raw source",
+      "detail": "n=24 min=0.99841 mean=0.99907 worst=ep26 observation.images.cam1 frame 175 (threshold 0.98)"
+    },
+    {
+      "status": "PASS",
+      "check": "episode boundaries monotonic & contiguous",
+      "detail": "0 .. 17085"
+    },
+    {
+      "status": "PASS",
+      "check": "episode spans cover all data rows",
+      "detail": "last dataset_to_index=17085 nrows=17085"
+    },
+    {
+      "status": "PASS",
+      "check": "global 'index' == 0..N-1",
+      "detail": "N=17085"
+    },
+    {
+      "status": "PASS",
+      "check": "episode_index non-decreasing across data",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "per-episode frame_index restarts at 0 and increments by 1",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp == frame_index / 30",
+      "detail": "max dev 8.901e-07"
+    },
+    {
+      "status": "PASS",
+      "check": "action_space_id == 'eef_delta_v1'",
+      "detail": "got 'eef_delta_v1'"
+    },
+    {
+      "status": "PASS",
+      "check": "tool_z_m == 0.174",
+      "detail": "got 0.174"
+    },
+    {
+      "status": "PASS",
+      "check": "state_names == the 16 DESIGN names",
+      "detail": "got ['ur_q1', 'ur_q2', 'ur_q3', 'ur_q4', 'ur_q5', 'ur_q6', 'tcp_x', 'tcp_y', 'tcp_z', 'tcp_r11', 'tcp_r21', 'tcp_r31', 'tcp_r12', 'tcp_r22', 'tcp_r32', 'grip_pos']"
+    },
+    {
+      "status": "PASS",
+      "check": "action_names == the 7 DESIGN names",
+      "detail": "got ['dx', 'dy', 'dz', 'drx', 'dry', 'drz', 'grip_cmd']"
+    },
+    {
+      "status": "PASS",
+      "check": "definition is a prose paragraph",
+      "detail": "1626 chars"
+    },
+    {
+      "status": "PASS",
+      "check": "joint_state_alignment documents the stale joint cache",
+      "detail": "'ur_joint_states shifted by per-take tau_q (see source_takes.json); recorder cache was stale ~0.9 s'"
+    },
+    {
+      "status": "PASS",
+      "check": "joint_state_resampling == 'linear_interp'",
+      "detail": "got 'linear_interp'"
+    },
+    {
+      "status": "PASS",
+      "check": "eef_space_sha256 is a sha256 hex digest",
+      "detail": "got '6d2aba42b9bc3882a96a167302098735d2bad2cd71da37f2c779839d17e7a58a'"
+    },
+    {
+      "status": "PASS",
+      "check": "eef_space.json state_names == info.json observation.state names",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "eef_space.json action_names == info.json action names",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "take list == sorted raw dir minus --exclude (54 takes)",
+      "detail": "54 entries, order matches"
+    },
+    {
+      "status": "PASS",
+      "check": "per-take n_frames == episode length",
+      "detail": "sum=17085 over 54 takes"
+    },
+    {
+      "status": "PASS",
+      "check": "n_frames + n_frames_dropped_stale_tail == raw cam1 frame count",
+      "detail": "1472 frame(s) dropped over 54 takes (raw total 18557 -> stored 17085)"
+    },
+    {
+      "status": "PASS",
+      "check": "--drop-stale-tail: every episode actually dropped frames",
+      "detail": "min 26 / max 28 per episode"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode carries joint_state_shift_s",
+      "detail": "54/54; min/med/max = 0.90/0.90/0.90 s"
+    },
+    {
+      "status": "PASS",
+      "check": "declared joint_state_shift_s within the accepted [0.6, 1.2] s band",
+      "detail": "min 0.90 max 0.90"
+    },
+    {
+      "status": "PASS",
+      "check": "declared joint_state_shift_residual_m < 3 mm for every episode",
+      "detail": "max 0.86 mm"
+    }
+  ]
+}
