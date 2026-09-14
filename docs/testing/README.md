@@ -187,6 +187,9 @@ export WT=/home/laptop3/gello_software
 | 21b | jax 핀 유지 (sm_86 → **sm_120 Blackwell**) | **PASS (2026-07-31 실측)** | 이전의 최대 위험이었다. jax **0.5.3이 네이티브로 돈다** — XLA가 `.target sm_120a`를 생성하고 구형 아치 PTX 폴백이 **아니다**. **핀 상향 불필요.** warm-up 28.4 / 16.0 / 0.101 s 🗄️ vs kanu 46.83 / 37.22 / 0.466 s(총 1.9배 빠름; **kanu learner도 A4000을 1장만 썼다** — 8장이 아니다) |
 | 21c | 3-CLI 조작자 절차 불변 | **PASS (코드 확인 2026-07-31)** | `run_hil_hardware.sh`에 서버 참조 **0건**. `run_hil_session.sh` / `run_hil_actor.sh`는 `127.0.0.1:50153`(터널 로컬 입구)만 참조하며 반대편 호스트를 모른다. **Terminal 1의 스크립트만 호스트가 바뀌었다** → `09` 상단 박스 |
 | 21d | 터널 소유권 실패 모드 | **문서화됨 — 실기에서 발생 (2026-07-31)** | Terminal 1을 Ctrl-C 하거나 닫으면 **learner는 서버에서 살아남고 터널만 죽는다** → Terminal 3 preflight `[6]` `TCP 127.0.0.1:50153 연결 실패 — ConnectionRefusedError`. 조치는 `./run_hil_server.sh` 재실행 하나(살아 있는 learner 재사용 + 새 터널). 🛑 learner를 재기동하면 그 프로세스 RAM에만 있던 online replay가 사라진다 → `09` **§5.4** |
+| 22 | 🆕 **GELLO 개체 확인** (`scripts/gello_probe.py`, 읽기 전용) | **PASS (2026-09-14)** | 7 모터 — ID 1~6 model 1200(XL330-M288), ID 7 model 1190(XL330-M077), FTDI `FTBEO6QK`, torque 전부 0. 4행(2026-07-27)과 일치. 🪤 `gello_publisher`가 떠 있으면 exit 3(포트 점유 — 같이 쓰면 "ID 5, 7만 응답" 같은 거짓 결과). ros/mujoco config의 J1 offset π 차이는 **알려진 상태, ROS yaml이 정본** → [`11_SIM_REHEARSAL_KO.md`](11_SIM_REHEARSAL_KO.md) 0단계, `02` §8 |
+| 22b | 🆕 **joint mock 핸드셰이크 스모크** (`run_ur7e_gello_mock.sh`, 실물 GELLO + fake 하드웨어, 헤드리스) | **PASS (2026-09-14)** | 실기 런처 `ur7e_gello_real.launch.py`를 `use_fake_hardware:=true robot_ip:=127.0.0.1`(박아 넣음)로: `Converged` → `Controller switch OK` → `Bridge resumed`, gello 30 Hz / joint_states 100 Hz / commands 250 Hz. RViz 형상 **사용자 육안 일치**("같은 팔이다"). ⚠️ mock은 속도 한계·protective stop·그리퍼·JTC 도달 오차를 검증하지 않는다 → `11` §0 |
+| 22c | 🆕 **eef mock 무이동 기동** (`control_mode:=eef` → `switch_only`) | **PASS (2026-09-14, 기동 무이동 + `eef_resume` 서비스 존재까지)** | ENGAGE 뒤 방향 일치·DISENGAGE·재ENGAGE 클러치는 ⚠️ **미검증** → `11` 2단계 표 c~e |
 
 ---
 
@@ -230,6 +233,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
 | [`08_OPEN_GAPS.md`](08_OPEN_GAPS.md) | 안전·데이터·운영 갭 **G1~G31**과 완화책. G22/G23은 operator 상태기계로 닫혔고 G30은 현재 preposition 기본값, G31은 global max-step 종료 edge를 기록 |
 | [`09_HIL_ACTOR_RUNBOOK.md`](09_HIL_ACTOR_RUNBOOK.md) | **HIL actor 기동 런북** — 정상 운용용 3-CLI(`run_hil_server.sh` / `run_hil_hardware.sh` / `run_hil_session.sh`), `run_hil_actor.sh` preflight, actor·sidecar 옵션, Stage A fake-env / Stage B 실센서, 학습 서버(`junhyeong_ai`) 기동. **§5.4 = Terminal 1 터널 소유권 실패 모드** |
 | [`10_LATENCY_PROFILING.md`](10_LATENCY_PROFILING.md) | **opt-in per-step 레이턴시 계측**(`HIL_LATENCY_PROFILE=1`) — §8 P1이 요구하는 phase 귀속. 양쪽 호스트가 각자 JSONL을 쓰고 `transition_id`로 오프라인 join, 분석기 `scripts/analyze_hil_latency.py`가 p50/p90/p99/max·loop budget·learner 경합·포화 비율을 낸다. 🪤 **재사용된 learner(`HIL_SERVER_RESULT=reused`)는 서버 쪽을 안 남긴다.** 🛑 **시계 규칙: 호스트 간 타임스탬프는 절대 빼지 않는다** — network+queue는 `step_rpc − server total`로 **유도**한다. 🛑 실기 미검증(**재는 방법**이지 측정 결과가 아니다) |
+| [`11_SIM_REHEARSAL_KO.md`](11_SIM_REHEARSAL_KO.md) | **환경(로봇 위치·테이블·작업공간·카메라·물체)이 바뀐 뒤 실기 전 시뮬 리허설** — 0단계 GELLO 개체 확인(`scripts/gello_probe.py`, 읽기 전용) → 1단계 joint mock 핸드셰이크·형상 비교(`run_ur7e_gello_mock.sh`, 실기 런처 + fake 하드웨어) → 2단계 eef mock 무이동·ENGAGE·클러치 → (선택) fake_gello 패턴. **§3 실기 전 측정표**(`r_align_rpy` · `keepout_json` · 시작 자세 · `tool_*_xyz_rpy` · 재빌드) + §4 Method A/B(Remote 모드). 시뮬이 **못** 보는 것(속도 한계·protective stop·그리퍼·테이블 높이·베이스 정렬각)을 §0에 명시. 📌 2026-09-14 0~2단계 PASS(표 22~22c) |
 
 관련 기존 문서(이 디렉터리 밖, 읽기 전용 참조):
 
@@ -260,6 +264,7 @@ git -C /home/laptop3/gello_software log --oneline -3   # 3f199d4 머지가 보�
  B4  RealSense 2대                      -> 06 §1   [actor 실기 PASS]
         ↓
 [C] mock 하드웨어 + RViz (실기 위험 0)
+ C0  환경 변경 뒤 시뮬 리허설(probe → joint mock → eef mock) -> 11  [PASS 2026-09-14, eef ENGAGE/클러치는 미검증]
  C1  mock RViz HIL 개입 루프            -> 04 §3   [미검증]
  C2  좌표계 3x3 검증                    -> 04 §5   [오프라인 실측으로 대체 통과]
         ↓

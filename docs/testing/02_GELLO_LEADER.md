@@ -256,3 +256,57 @@ env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
 - [x] `/gello/joint_states` 30.004 Hz, std 0.15 ms
 - [x] 30초 901샘플, 드롭 0, `comm failed` 0회
 - [x] 트리거 0.000~1.000 전 스팬
+
+---
+
+## 8. 개체 확인 (probe) — "꽂혀 있는 GELLO가 캘리브레이션한 그 개체인가"
+
+**언제 쓰나:** 리더팔을 옮겨 꽂았거나, 다른 GELLO(Franka용 등)와 섞였을 수 있거나,
+텔레옵이 엉뚱한 방향으로 움직일 때. §3.2의 `/tmp` 스캔을 대체하는 커밋된 도구다.
+**읽기 전용** — 버스에 ping/read만 보내고 토크는 절대 켜지 않으며, `driver.py`의
+`DynamixelDriver`도 쓰지 않는다(그 드라이버는 포트 점유 프로세스를 `fuser -k`로 죽인다).
+
+```bash
+cd /home/laptop3/gello_software
+python3 scripts/gello_probe.py                 # 포트 · 모터 인벤토리 · 현재 자세 · config 비교
+python3 scripts/gello_probe.py --reference     # + 기준 자세 대조 (아래)
+python3 scripts/gello_probe.py --watch         # 2 Hz 스트리밍, 관절을 하나씩 움직여 J번호/방향 확인. Ctrl-C
+python3 scripts/gello_probe.py --config mujoco # configs/rwh_ur.yaml 값으로 (기본은 ur7e_gello.yaml)
+```
+
+시스템 `python3`다(dynamixel_sdk·PyYAML이 `~/.local`에 있다). **`gello_publisher`가 떠 있으면
+포트 점유를 출력하고 종료한다(exit 3)** — 같은 FTDI를 두 마스터가 쓰면 ping이 서로 깨져
+"ID 5, 7만 응답" 같은 거짓 결과가 나온다(2026-09-14 실측). 먼저 내리고 다시 돈다.
+
+**출력 읽는 법:**
+
+| 절 | 보는 것 | 정상 |
+|---|---|---|
+| `[6] config 중복 비교` | `ur7e_gello.yaml` vs `configs/rwh_ur.yaml` 캘리브레이션 값 | 현재 **J1 offset이 0.000 vs 3.142로 다르다** — 알려진 상태. 세 번째 사본(`gello_publisher_node.py` 파라미터 기본값)은 yaml이 덮어쓴다 |
+| `[1] 시리얼 포트` | `/dev/serial/by-id` 목록과 config 포트의 ✅/❌ | `FTBEO6QK -> /dev/ttyUSB0` ✅ 둘 다. ⚠️ FTDI 시리얼은 **USB 어댑터**의 신원이지 팔의 신원이 아니다 |
+| `[2] 모터 인벤토리` | ID 1..12 ping → model / fw / torque_enable, 개수로 형상 판정 | **7개, 1200×6 + 1190×1, torque 전부 0** → "UR용 GELLO 형상" + "모델 지문 일치". 8개면 Franka용 |
+| `[3] 현재 자세` | tick → raw rad → `(raw-offset)*sign` → calib. 그리퍼 0..1 | `2πwrap` 열은 `gello_publisher` 부팅 시 `start_joints` 기준 ±2π 정규화(`dynamixel.py` init)와 동일. **π/2 오차는 이걸로 안 사라진다** |
+| `[4] 기준 자세 대조` | `--reference`: calib − 기준, `--tol`(기본 0.15 rad) | PASS면 그 개체·그 캘리브레이션이다 |
+
+**`--reference`는 사람이 GELLO를 기준 자세로 들고 있을 때만 의미가 있다.** 기준은 config의
+`start_joints` = UR `[0, -1.571, 1.571, -1.571, -1.571, 0]`(값을 직접 줄 수도 있다:
+`--reference 0 -1.571 1.571 -1.571 -1.571 0`). 책상에 놓인 채로 돌리면 당연히 FAIL이고 그건
+개체에 대한 증거가 아니다. FAIL 시 관절별 힌트:
+
+- **π/2 배수만큼 어긋남 → `joint_offsets[i]`** (제안값을 같이 찍는다. 정본 도구는
+  `scripts/gello_get_offset.py` — 기준 자세로 들고 `--start-joints`를 주면 π/2 격자에서 offset을 다시 찾는다)
+- **부호 반대 → `joint_signs[i]`**
+- **그 외 → 다른 개체이거나 재조립/기어 슬립.** 기준 자세를 정확히 맞췄는지부터 다시 본다.
+  ±π/2 관절의 순수 부호 반전은 오차가 정확히 π라 offset(×2)로도 읽히는데, 둘 중 어느 쪽을 고쳐도 같다.
+
+PASS 뒤: 아무것도 바꾸지 않는다. offset을 고쳤으면 **세 곳**(§8 첫 행)에 같이 반영하고
+`colcon build`로 `install/`에 복사해야 노드가 본다(§4.1).
+
+순수 로직(`gello/dynamixel/probe.py`) 테스트 — 하드웨어 불필요:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q -p no:cacheprovider gello/dynamixel/tests
+```
+
+(`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`이 없으면 시스템 pytest 6.2.5가 `~/.local`의 anyio 플러그인에
+걸려 collection에서 죽는다 — `CLAUDE.md`의 `ur_gello_bringup` 함정과 같은 것.)
