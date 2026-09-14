@@ -576,6 +576,13 @@ class CaptureService:
                 return {"ok": False, "msg": "scene/render workers not ready"}
             if not self.sim_alive():
                 return {"ok": False, "msg": "no state from the sim in the last second"}
+            # Refresh layout/seed for THIS take: reset_scene changes the layout without
+            # changing the MJCF (same sha), so the meta cached at startup would record the
+            # first layout's seed for every take (found on the first 22 real takes).
+            try:
+                self.fetch_scene_meta()
+            except Exception as e:  # noqa: BLE001 - stale meta is better than no take
+                print(f"[capture] get_scene_meta before start_take failed: {type(e).__name__}: {e}")
             note = str(req.get("note", ""))
             take_dir = self.recorder.start(self.root, note, self._sim_meta_for_take(note), scene=self._scene)
             return {"ok": True, "take_dir": take_dir, "take_index": self.recorder.take_index,
