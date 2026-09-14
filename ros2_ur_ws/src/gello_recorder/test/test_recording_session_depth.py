@@ -161,7 +161,12 @@ def test_depth_does_not_touch_vectors_h5(depth_session):
     with h5py.File(os.path.join(session_dir, "vectors.h5"), "r") as f:
         cols = json.loads(f["synchronized"].attrs["columns"])
         assert not any("depth" in c for c in cols)
-        assert json.loads(f["cam1_frames"].attrs["columns"]) == ["t_rel_s", "frame_idx"]
+        # cam1_frames gained a trailing `stamp_s` (the COLOUR CompressedImage's
+        # own header stamp, 2026-09-14) -- that column has nothing to do with
+        # depth, and this test's point is that depth adds nothing to vectors.h5.
+        assert json.loads(f["cam1_frames"].attrs["columns"]) == [
+            "t_rel_s", "frame_idx", "stamp_s"
+        ]
 
 
 def test_depth_t_rel_s_shares_session_clock(depth_session):

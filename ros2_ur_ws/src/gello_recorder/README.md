@@ -254,13 +254,48 @@ session_<YYYYmmdd_HHMMSS>/       (GUI는 take_<NN>_<YYYYmmdd_HHMMSS>/)
 | `cam1_frames` | cam1 프레임별 인덱스↔캡처 타임스탬프 매핑 |
 | `cam2_frames` | cam2 프레임별 인덱스↔캡처 타임스탬프 매핑 |
 
+#### `stamp_s` 컬럼 (2026-09-14 추가)
+
+**헤더가 있는 메시지에서 온 테이블에는 마지막 컬럼으로 `stamp_s` 가 붙습니다** — `msg.header.stamp` 을 float64 초로 담고, 스탬프가 없으면 `NaN` 입니다. 기존 컬럼은 **이름도 순서도 그대로**이고 `stamp_s` 는 **뒤에 덧붙기만** 하므로 예전에 쓴 리더는 그대로 동작합니다.
+
+| 테이블 | `stamp_s` | 왜 |
+|---|---|---|
+| `gello_joint_states` · `ur_joint_states` | ✅ | `sensor_msgs/JointState` |
+| `tcp_pose` | ✅ | `geometry_msgs/PoseStamped` |
+| `wrench` | ✅ | `geometry_msgs/WrenchStamped` |
+| `cam1_frames` · `cam2_frames` | ✅ | 컬러 `sensor_msgs/CompressedImage` |
+| `command` | ❌ | `std_msgs/Float64MultiArray` — **헤더가 없다** |
+| `gripper` | ❌ | `std_msgs/Float32` ×3 — **헤더가 없다** |
+| `synchronized` | ❌ | 메시지가 아니라 로컬에서 샘플링한 와이드 행 |
+
+`t_rel_s` 는 **콜백이 실행된(=도착한) 시각**이고 `stamp_s` 는 **드라이버가 그 값을 캡처한 시각**입니다. 둘의 차이 `(t0 + t_rel_s) - stamp_s` 가 그 행이 기록될 때 얼마나 낡아 있었는지이고(`t0` 는 `metadata.json` 의 `start_wall`), 이 한 컬럼이 없어서 2026-09-14 carrot_in_pot 54개 take 는 `ur_joint_states` 가 **0.900 초 낡은 채** 기록된 것을 파일만 봐서는 알 수 없었습니다 — 아래 5-2 절.
+
+헤더가 없는 세 테이블은 `t_rel_s` 만이 유일한 시각이고 그래서 고칠 방법도 없습니다. 그것이 고속 토픽의 구독 큐 깊이를 5로 줄인 이유입니다(`gello_recorder/spin_health.py`).
+
 **영상 프레임 ↔ 신호 행 교차 참조:** `synchronized` 테이블의 `cam1_frame_idx` / `cam2_frame_idx` 컬럼이 그 시점에 해당하는 MP4 프레임 번호입니다. HDF5 는 `pandas.read_hdf("vectors.h5", key="synchronized")` 로 열거나, 순수 `h5py` 로 직접 읽으면 됩니다.
 
 > 신호를 발행하지 않은 토픽(예: 특정 브로드캐스터 미로드)은 에러 없이 **빈 컬럼(NaN)**으로 남습니다. 어떤 토픽이 실제로 들어왔는지는 `metadata.json` 의 `message_counts` 로 확인하세요. (`gripper`/`synchronized` 는 그 자체로는 카운트되지 않고, `gripper` 테이블에 쓰는 세 토픽 각각이 `gello_grip`/`grip_cmd`/`grip_pos` 키로 개별 카운트됩니다 — 아래 아키텍처 섹션 참고.)
 
-### 5-1. `depth.h5` — RealSense depth (기본 켜짐, `ENABLE_DEPTH=0` 으로 끔)
+### 5-1. `depth.h5` — RealSense depth (**기본 꺼짐(RGB만), `ENABLE_DEPTH=1` 로 켬**)
 
-depth 기록은 레코더 경로(`gello_recorder_gui` / `task_recorder_gui` / `run_recorder.sh`)에서 **2026-09-14 부터 기본 켜짐**입니다(새 셀프파워 허브에서 2대 color+depth 동시 스트리밍 실측 안정). 끄려면 환경변수 `ENABLE_DEPTH=0` 하나뿐이고 GUI 토글은 없습니다. `ALIGN_DEPTH=1` 은 color 픽셀 정렬 depth 를 대신 기록하지만 노드당 CPU 49 %·25 Hz 로 떨어지는 것이 실측이라 기본 꺼짐입니다. 켜고 끄는 것과 무관하게 위 `vectors.h5` 9개 테이블·`cam1.mp4`/`cam2.mp4` 는 **동일**합니다 — depth 는 별도 파일 `depth.h5` 에만 들어가고 `vectors.h5` 에는 테이블도 컬럼도 추가되지 않습니다(`metadata.json` 에는 `record_depth`/`depth_aligned_to_color` 키가 항상 적힙니다). 꺼져 있으면 `depth.h5` 자체가 생기지 않습니다. 실측 용량은 848x480 두 대 기준 약 **6 MB/s (분당 ~370 MB)** 입니다.
+```bash
+ENABLE_DEPTH=1 ros2 run gello_recorder gello_recorder_gui     # GUI
+CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh                     # 헤드리스
+```
+
+depth 기록은 **opt-in 이고 기본은 꺼짐**입니다. 기본 캡처는 RGB 만입니다. 끄고 켜는 스위치는 환경변수 `ENABLE_DEPTH` 하나뿐이고 GUI 토글은 없습니다(값에 오타가 나면 **꺼짐**으로 떨어집니다 — opt-in 의 안전한 방향).
+
+🪤 **기본 켜짐이었던 적이 딱 하루 있고(2026-09-14), 그날 54개 take 가 타임스탬프를 잃었습니다.** depth 는 카메라당 30 Hz 구독 2개와 약 6 MB/s HDF5 쓰기를 **로봇 토픽을 처리하는 바로 그 rclpy spin 스레드**에 얹었고, executor 의 라운드 주파수가 ~100 Hz → 60–69 Hz 로 내려가면서 그보다 빨리 발행되는 토픽은 전부 **가득 찬 큐에서 가장 오래된 샘플**을 읽게 됐습니다 → `ur_joint_states` **0.900 초**, `tcp_pose`/`wrench` 약 **0.45 초** 지연. 원인과 수정은 아래 5-2 절. **결함은 고쳤지만 비용은 그대로**이므로 depth 는 이제 세션마다 명시적으로 요청하는 것이 됐습니다.
+
+depth 를 켜면 기동 시 한 줄이 찍힙니다:
+
+```
+depth ON: ~6 MB/s disk, +2 subscriptions/cam, recorder CPU +~35 %; watch ros_lag_s
+```
+
+카메라 자체는 문제가 아니었습니다 — 셀프파워 Genesys 허브에서 2대 color+depth 동시 스트리밍은 실측 안정(color 30 Hz, compressedDepth ~29 Hz, 노드당 CPU ~9 %)입니다. `ALIGN_DEPTH=1` 은 color 픽셀 정렬 depth 를 대신 기록하지만 노드당 CPU 49 %·25 Hz 로 떨어지는 것이 실측이라 별도로 기본 꺼짐입니다.
+
+켜고 끄는 것과 무관하게 위 `vectors.h5` 9개 테이블·`cam1.mp4`/`cam2.mp4` 는 **동일**합니다 — depth 는 별도 파일 `depth.h5` 에만 들어가고 `vectors.h5` 에는 테이블도 컬럼도 추가되지 않습니다(`metadata.json` 에는 `record_depth`/`depth_aligned_to_color` 키가 **항상** 적히므로, RGB-only take 도 "depth 가 꺼져 있었다"를 스스로 증언합니다). 꺼져 있으면 `depth.h5` 자체가 생기지 않습니다. 실측 용량은 848x480 **한 대** 기준 3.08 MB/s(2026-09-14 실측, 28.4 s / 87.4 MB) → 두 대 약 **6 MB/s (분당 ~370 MB)** 입니다.
 
 **왜 MP4 가 아니라 HDF5 인가:** depth 는 `uint16` 밀리미터(`depth_scale` 0.001 m) 단일 채널이라 MP4 로는 무손실 저장이 안 되고, 기록 중 재인코딩은 컬러 두 스트림이 이미 다투는 CPU 를 또 씁니다. 그래서 카메라 드라이버가 이미 만들어 보낸 PNG 를 **그대로**(재인코딩 없이) 저장합니다. 소스 토픽은 `/<cam>/<cam>/depth/image_rect_raw/compressedDepth` (`sensor_msgs/CompressedImage`, `format == '16UC1; compressedDepth'`, 실측 ~29 Hz, 848x480 에서 메시지당 80–130 KB; `align_depth.enable:=true` 면 `/<cam>/<cam>/aligned_depth_to_color/image_raw/compressedDepth`, 1280x720 ~200 KB). 페이로드의 앞 12바이트는 `compressed_depth_image_transport` 의 ConfigHeader(`int32` 포맷 enum + `float32` 2개, 16UC1 에서는 무의미)이고 그 뒤가 완전한 PNG 파일입니다 — 저장 시 이 12바이트만 떼어냅니다(`header_bytes_stripped=12`).
 
@@ -298,6 +333,60 @@ depth_meta("take_01_.../depth.h5", "cam1")   # attrs + camera_info + extrinsics 
 
 ---
 
+### 5-2. spin 스레드 굶음 감시 — `ros_lag_s` / `spin_starvation_suspected` (2026-09-14)
+
+**무엇이 깨졌었나.** 이 레코더의 모든 구독 콜백은 **하나의 rclpy spin 스레드**에서 돌고, 각 행의 `t_rel_s` 는 **그 콜백이 실행된 시각**입니다. `SingleThreadedExecutor` 는 한 라운드에 구독당 메시지 하나를 처리하므로 구독의 서비스 주파수 = 라운드 주파수이고, 그보다 빨리 발행되는 토픽은 KEEP_LAST 히스토리가 항상 가득 차서 **가장 오래된 샘플**을 받게 됩니다. 그 나이는 정확히
+
+```
+낡음 = QoS depth / 발행 주파수
+```
+
+이고, 2026-09-14 carrot_in_pot 세션에서는 `/joint_states`(depth **100** @ ~100 Hz) = **0.900 초**, `tcp_pose`/`wrench`(depth **50** @ ~100 Hz) = 약 **0.45 초**였습니다. 파형은 멀쩡하고 파일도 정상이며 **데이터에는 아무 표시도 없었습니다** — 유일한 지문은 서로 다른 발행 주파수를 가진 네 테이블의 기록 주파수가 소수점 다섯 자리까지 같아진 것이었습니다(take_01: 59.79218 / 59.79089 / 59.79282 / 59.79153 Hz).
+
+**무엇을 고쳤나** (전부 `gello_recorder/spin_health.py`):
+
+| | 이전 | 이후 |
+|---|---|---|
+| `/joint_states`·`tcp_pose`·`wrench`·`commands` QoS depth | 100 / 50 | **5** (`QOS_DEPTH_ROBOT_STATE`) — 최악 나이 100 Hz 에서 50 ms, 500 Hz 에서 10 ms |
+| 컬러 JPEG 디코드 + MP4 인코드 (실측 9.3 + 6.9 ms/프레임) | spin 스레드 | **백그라운드 writer 스레드** (`RecordingSession.submit_cam_frame`) |
+| depth PNG HDF5 append | spin 스레드 | 같은 writer 스레드 (`submit_cam_depth_frame`) |
+| GUI 프리뷰 디코드 (9.3 ms/프레임) | spin 스레드 | **latest-wins 디코더 스레드** (`PreviewDecoder`) |
+| 헤더 스탬프 | 없음 | 모든 stamped 테이블에 `stamp_s` (위 5절) |
+
+큐를 얕게 하면 **행이 빠집니다** — 그리고 그게 맞습니다. 이 레코더는 도착한 것을 그대로 쓰므로 깊은 큐는 "행이 빠짐"을 "행이 낡음"으로 바꿀 뿐이고, **빠지는 편이 낡는 편보다 낫습니다**(빠진 것은 보이고, 낡은 것은 안 보입니다).
+
+**감시 (두 겹, 서로 독립):**
+
+1. **실시간** — 노드 상태에 `ros_lag_s` = (ROS now) − 최신 `/joint_states` 헤더 스탬프. GUI 상태 패널에 `ros lag: 0.009s` 처럼 상시 표시되고, `ROS_LAG_WARN_S`(0.15 s)를 넘으면 빨갛게 바뀌며 노드가 5초에 한 번 WARN 로그를 찍습니다.
+2. **take 종료 시** — `command`/`ur_joint_states`/`tcp_pose`/`wrench` 의 **기록** 주파수를 비교해, 서로 0.5 % 이내로 같아졌는데 그 값이 90 Hz 미만이면(= controller_manager 발행률보다 느린 공통 천장에 넷 다 걸린 것) `spin_starvation_suspected: true` 와 함께 `native tables converged at X Hz — spin thread starved; robot rows may be stale` 를 WARN 으로 찍습니다.
+
+`metadata.json`(헤드리스) / GUI 정지 요약에 기록되는 키:
+
+| 키 | 뜻 |
+|---|---|
+| `record_depth` | 이 take 가 depth 를 기록했는가 (provenance) |
+| `ros_lag_s_max` | take 동안 관측된 최대 `ros_lag_s` (초) |
+| `ros_lag_warn_s` | 그때 쓰인 경고 임계값 |
+| `native_rates_hz` | 네 native 테이블의 기록 주파수 |
+| `spin_starvation_suspected` / `spin_starvation_reason` | 굶음 판정과 그 근거 문장 |
+| `dropped_frames` | writer 큐가 가득 차서 버린 프레임 수 (스트림별 + `total`). **정상값은 0** |
+
+**실측 (2026-09-14, laptop3, 카메라 1대 + 합성 퍼블리셔 `/joint_states` 500 Hz · tcp/wrench/commands 각 100 Hz, 28.5 s):**
+
+| | RGB만 (기본) | `ENABLE_DEPTH=1` |
+|---|---|---|
+| 레코더 프로세스 CPU | **131.6 %** | **135.0 %** (카메라 1대분) |
+| 기록 주파수 `command`/`tcp_pose`/`wrench`/`ur_joint_states` | 94.6 / 94.5 / 94.5 / **184.0** Hz | 86.4 / 86.4 / 86.3 / **138.9** Hz |
+| `stamp_s` 나이 중앙값 ur / tcp / wrench | **9.3 / 8.0 / 7.2 ms** | **25.6 / 12.9 / 12.4 ms** |
+| 같은 값 최대 | 21.4 / 54.0 / 50.7 ms | 615.4 / 54.3 / 59.3 ms |
+| `ros_lag_s_max` | 0.021 s | 0.613 s |
+| `dropped_frames` | **0** | **0** |
+| `spin_starvation_suspected` | false | false |
+
+네 테이블의 주파수가 **더 이상 수렴하지 않는다**는 것이 핵심입니다(굶었다면 넷이 같아집니다). 결함 당시 값과 비교하면 `ur_joint_states` 나이가 **900 ms → 9.3 ms**(RGB) / **25.6 ms**(depth) 입니다.
+
+---
+
 ## 6. 공개 — Hugging Face 업로드 (raw + LeRobot, depth 포함)
 
 take 폴더를 하드링크로 스테이징 → `scripts/dataset/make_carrot_raw_stats.py`(raw 통계) → `convert_carrot_to_lerobot.py`(depth를 lerobot 네이티브 depth video로, 선형 12-bit 0~10 m) → `validate_carrot_conversion.py`(독립 검증) → `hf upload` 2회 → `v3.0` 태그. 절차·함정 전체는 [`docs/ros2/GELLO_UR7E_RECORDING.md`](../../../docs/ros2/GELLO_UR7E_RECORDING.md) 「허깅페이스 업로드」절. 2026-09-14 릴리스: [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) · [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3).
@@ -314,7 +403,9 @@ take 폴더를 하드링크로 스테이징 → `scripts/dataset/make_carrot_raw
 
 - **`depth_writer.py`** — RealSense `compressedDepth`(12바이트 ConfigHeader + PNG) 페이로드를 `depth.h5` 에 쓰는 `DepthH5Writer`. 쓰기 경로는 `h5py` + `numpy` 에만 의존하며 **PNG 를 디코드하지 않는다**(헤더만 떼고 vlen `uint8` 셀에 그대로 append, width/height 는 IHDR 바이트에서 읽음). `cv2` 는 오프라인 리더 헬퍼(`read_depth_frame` / `iter_depth_frames` / `depth_meta`)와 self-test 안에서만 lazy import 한다. 순수 함수 `split_compressed_depth(data)` 가 헤더 분리 + PNG 매직 검사를 담당한다. 손상 페이로드는 `Mp4FrameWriter` 와 같은 규약(`WARNING` 한 줄, `-1` 반환, 인덱스 미증가). `python3 depth_writer.py` self-test 있음. 파일 레이아웃은 위 5-1 절.
 
-- **`recording_session.py`** — 위 순수 모듈들을 조합하는 파일-I/O 코어 `RecordingSession`. "한 번의 녹화(session/take) 분량의 파일 전체"를 소유한다: 9개 테이블이 든 `vectors.h5` + `cam1.mp4` + `cam2.mp4` (+ `record_depth=True` 일 때만 `depth.h5`). **ROS/Qt/thread가 전혀 없다**. `python3 recording_session.py` self-test 있음.
+- **`spin_health.py`** — 단일 rclpy spin 스레드를 굶기지 않기 위한 것 전부. **ROS/Qt import 없음.** 구독 큐 깊이 상수(`QOS_DEPTH_ROBOT_STATE` = 5 등, 근거 주석 포함), 프레임 I/O 를 spin 스레드 밖으로 빼는 `FrameWriteQueue`(데몬 1개, `put_nowait`, 드롭 카운트, `drain`), GUI 프리뷰용 latest-wins `PreviewDecoder`, 그리고 회귀 알람 `detect_spin_starvation` / `native_rate_table` / `stop_health_suffix` + `DEPTH_ON_BANNER`. **모듈 docstring 에 2026-09-14 결함의 전체 진단이 들어 있다.** `python3 spin_health.py` self-test 있음. → 위 5-2 절
+
+- **`recording_session.py`** — 위 순수 모듈들을 조합하는 파일-I/O 코어 `RecordingSession`. "한 번의 녹화(session/take) 분량의 파일 전체"를 소유한다: 9개 테이블이 든 `vectors.h5` + `cam1.mp4` + `cam2.mp4` (+ `record_depth=True` 일 때만 `depth.h5`). **ROS/Qt import 는 여전히 없다.** thread 는 2026-09-14 부터 있다 — 벡터 행은 호출자 스레드에서 동기적으로 쓰고(값싸다), 카메라/depth 프레임은 `submit_cam_frame` / `submit_cam_depth_frame` 으로 **백그라운드 writer 하나**에 넘긴다(`t_rel_s` 는 submit 시점에 찍어서 들려 보낸다). `close()` 는 파일을 마무리하기 **전에** 큐를 비우므로 "제출한 프레임 수 == MP4 프레임 수 == 테이블 행 수" 가 정확히 성립한다. `python3 recording_session.py` self-test 있음.
 
 - **`gello_ur_recorder_node.py`** & **`gello_gui_node.py`** — 두 개의 rclpy `Node` 진입점. 둘 다 `RecordingSession`을 실제 ROS 구독에 배선한다. 전자(`GelloUrRecorder`)는 헤드리스로 launch부터 Ctrl-C까지 무조건 녹화. 후자(`GelloRecorderGuiNode`)는 구독은 항상 켜두되 Start/Stop으로 디스크 쓰기를 게이팅(멀티 take).
 
@@ -426,11 +517,15 @@ gello_recorder_gui = gello_recorder.gello_recorder_gui:main       # GUI
 - `is_recording() -> bool`
 - `take_index() -> int`
 - `start_recording() -> str` — warm-up 안 됐거나 이미 녹화 중이면 `RuntimeError`. take index 증가, `take_<NN>_<stamp>` 디렉터리에 새 `RecordingSession` 생성.
-- `stop_recording() -> dict` — 녹화 중이 아니면 `RuntimeError`. `close()` 통계 + `session_dir` 반환.
+- `stop_recording() -> dict` — 녹화 중이 아니면 `RuntimeError`. `close()` 통계 + `session_dir`, 그리고 take provenance/health 키(`record_depth`, `dropped_frames`, `native_rates_hz`, `spin_starvation_suspected`, `spin_starvation_reason`, `ros_lag_s_max`) 반환. 굶음이 의심되거나 프레임이 버려졌으면 여기서 WARN 을 찍는다. 위 5-2 절.
 - `get_preview_frames()` — `(cam1_frame, cam2_frame)` numpy 배열.
-- `get_state_snapshot() -> dict` — 모든 최신 값 + `cam1_last_frame_age_s`/`cam2_last_frame_age_s`.
+- `get_state_snapshot() -> dict` — 모든 최신 값 + `cam1_last_frame_age_s`/`cam2_last_frame_age_s` + depth liveness + **spin 건강 필드** `ros_lag_s` / `ros_lag_s_max` / `ros_lag_age_s` / `ros_lag_warn_s`.
 
-`destroy_node()`는 `_session_lock` 아래 세션을 빼서 None으로 만든 뒤 진행 중 take를 best-effort로 `close()`한다.
+**프레임 경로는 더 이상 콜백 안에서 끝나지 않는다 (2026-09-14).** `_on_cam` 은 바이트만 복사하고 두 군데로 넘긴다: 프리뷰는 `PreviewDecoder`(latest-wins 디코더 스레드), 녹화는 `RecordingSession.submit_cam_frame`(writer 스레드). 예전에는 이 콜백이 1280x720 JPEG 을 프리뷰용으로 한 번 디코드(실측 9.3 ms)하고 MP4 writer 가 또 디코드+인코드(9.3 + 6.9 ms)했다 — 카메라 2대 30 Hz 면 초당 약 1.5 초어치의 작업이 **모든 로봇 토픽을 처리하는 그 스레드** 위에 있었다는 뜻이다. `_on_cam_depth` 도 같은 이유로 `submit_cam_depth_frame` 으로 바뀌었다. 락 규약은 그대로다(스냅샷은 `_state_lock`, 세션 접근은 `_session_lock`, 중첩 없음).
+
+**`_on_ur` 는 이제 `ros_lag_s` 도 계산한다** — (ROS now) − `/joint_states` 헤더 스탬프. `get_clock()` 과 헤더 스탬프를 **같은 ROS 클럭**에서 읽으므로 sim clock 아래에서도 깨지지 않는다(`time.time()` 을 섞으면 오늘은 맞고 나중에 조용히 틀린다). `ROS_LAG_WARN_S`(0.15 s) 초과 시 5초에 한 번 WARN.
+
+`destroy_node()`는 `_session_lock` 아래 세션을 빼서 None으로 만든 뒤 진행 중 take를 best-effort로 `close()`하고(= writer 큐 drain), 프리뷰 디코더 스레드도 멈춘다.
 
 ### 5. GUI front-end (`gello_recorder_gui.py`)
 

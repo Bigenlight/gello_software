@@ -30,6 +30,10 @@ are comparable):
   * duration_s = max over all groups of that group's last t_rel_s.
   * value ranges are pooled over all takes; mean/std are computed from streamed
     sum / sum-of-squares so no channel is ever fully materialised twice.
+  * the `timestamp_lag` block measures the recorder timestamp artefact: how many
+    seconds late `ur_joint_states` / `tcp_pose` / `wrench` rows are stamped,
+    per take, by joint-space residual and by speed cross-correlation. It adds no
+    other output and changes no other number.
 """
 
 import argparse
@@ -72,6 +76,19 @@ GRIP_CLOSED_LEVEL = 0.7
 # A closure whose measured grip_pos peaks above this is a closure on NOTHING (the
 # fingers met each other, not the carrot). Measured empty-close plateau is 0.898.
 GRIP_EMPTY_LEVEL = 0.80
+
+# ---- recorder timestamp artefact (see the `timestamp_lag` block in the output) ----
+# The GUI recorder stamps every row with the time its callback RAN, not the message
+# header stamp, and it subscribes /joint_states with KEEP_LAST depth 100 and
+# tcp_pose / wrench / commands with depth 50. In this session the single rclpy spin
+# thread was slowed to ~60-69 Hz by the new depth recording, so every publisher
+# faster than that keeps its queue permanently full and each row is stale by
+# depth / publish-rate. The lag is therefore a PURE DELAY: the waveform is intact
+# and a constant shift of `t_rel_s` recovers it. These constants only bound the
+# search; the measured values are written to the output.
+LAG_TAU_MAX_S = 1.5        # widest lag considered
+LAG_TAU_STEP_S = 0.005     # 5 ms search grid
+LAG_MIN_SAMPLES = 50       # skip a candidate lag with less overlap than this
 
 
 # --------------------------------------------------------------------------- utils
@@ -134,6 +151,105 @@ def nearest_idx(src_t, query_t):
     j = np.clip(np.searchsorted(src_t, query_t), 1, len(src_t) - 1)
     left, right = src_t[j - 1], src_t[j]
     return np.where(query_t - left <= right - query_t, j - 1, j)
+
+
+# --------------------------------------------------- recorder timestamp artefact
+def lag_grid():
+    """The 5 ms candidate-lag grid, 0 .. LAG_TAU_MAX_S inclusive."""
+    n = int(round(LAG_TAU_MAX_S / LAG_TAU_STEP_S))
+    return np.arange(n + 1) * LAG_TAU_STEP_S
+
+
+def joint_residual_at(tau, ur_t, ur_q, cmd_t, cmd_q):
+    """|ur_q(t - tau) - cmd(t)| statistics, on the command clock.
+
+    `ur_joint_states` is stamped late, so its clock is shifted EARLIER by `tau`
+    and linearly interpolated onto the `command` timestamps. Returns
+    (median-over-time of the 6-joint mean |err|, mean over everything, n), or
+    None when the shift leaves too little overlap.
+
+    The objective minimised is the MEDIAN over time, not the mean: both agree on
+    0.900 s for most takes, but the mean is dominated by the few high-velocity
+    transients where the real servo following error lives, and that pulls the
+    argmin one grid step (5 ms) low on some takes. The median is the robust
+    estimator of a constant delay.
+    """
+    shifted = ur_t - tau
+    m = (cmd_t >= shifted[0]) & (cmd_t <= shifted[-1])
+    if int(m.sum()) < LAG_MIN_SAMPLES:
+        return None
+    q = cmd_t[m]
+    err = np.abs(
+        np.stack([np.interp(q, shifted, ur_q[:, k]) for k in range(ur_q.shape[1])], axis=1)
+        - cmd_q[m]
+    )
+    per_t = err.mean(axis=1)
+    return float(np.median(per_t)), float(err.mean()), int(m.sum())
+
+
+def joint_lag(ur_t, ur_q, cmd_t, cmd_q):
+    """Best constant lag of `ur_joint_states` behind `command`, in seconds.
+
+    Returns (tau_median_objective, residuals_there, tau_mean_objective). Both
+    objectives are reported because both get published: the median one is stable
+    at one value across the whole session, the mean one wanders by a single 5 ms
+    grid step on some takes. They are the same measurement.
+    """
+    best = None
+    best_mean = None
+    for tau in lag_grid():
+        got = joint_residual_at(tau, ur_t, ur_q, cmd_t, cmd_q)
+        if got is None:
+            continue
+        if best is None or got[0] < best[1][0]:
+            best = (float(tau), got)
+        if best_mean is None or got[1] < best_mean[1]:
+            best_mean = (float(tau), got[1])
+    if best is None:
+        return None
+    return best[0], best[1], (best_mean[0] if best_mean else None)
+
+
+def speed_series(t, x, dt=LAG_TAU_STEP_S):
+    """Scalar speed ‖dx/dt‖ of a multi-channel signal on a uniform `dt` grid."""
+    if t.size < 4 or float(t[-1] - t[0]) <= 4 * dt:
+        return None, None
+    grid = np.arange(float(t[0]), float(t[-1]), dt)
+    y = np.stack([np.interp(grid, t, x[:, k]) for k in range(x.shape[1])], axis=1)
+    return grid, np.linalg.norm(np.gradient(y, dt, axis=0), axis=1)
+
+
+def xcorr_lag(g_lead, v_lead, g_late, v_late):
+    """How many seconds `v_late` trails `v_lead`, by speed-profile correlation.
+
+    Speed (not position) is correlated so that a constant spatial offset — e.g.
+    the 0.174 m tool offset between `fk(q)` and `tcp_pose` — cannot bias the
+    answer. Returns (lag_s, pearson_r) with lag_s > 0 meaning `v_late` is stamped
+    late, or (None, None).
+    """
+    if g_lead is None or g_late is None:
+        return None, None
+    lo, hi = max(g_lead[0], g_late[0]), min(g_lead[-1], g_late[-1])
+    if hi - lo < 1.0:
+        return None, None
+    grid = np.arange(lo, hi, LAG_TAU_STEP_S)
+    a = np.interp(grid, g_lead, v_lead)
+    b = np.interp(grid, g_late, v_late)
+    a = (a - a.mean()) / (a.std() + 1e-12)
+    b = (b - b.mean()) / (b.std() + 1e-12)
+    n = int(round(LAG_TAU_MAX_S / LAG_TAU_STEP_S))
+    best = (None, -np.inf)
+    for k in range(n + 1):
+        aa = a[: a.size - k] if k else a
+        bb = b[k:] if k else b
+        if aa.size < LAG_MIN_SAMPLES:
+            continue
+        r = float(np.dot(aa, bb) / aa.size)
+        if r > best[1]:
+            best = (k * LAG_TAU_STEP_S, r)
+    if best[0] is None:
+        return None, None
+    return float(best[0]), float(best[1])
 
 
 # ------------------------------------------------------------------ video probing
@@ -242,6 +358,7 @@ def main():
     corr_dgello_dcmd = {f"q{i}": [] for i in range(1, 7)}
     cmd_track_err = {f"q{i}": Accum() for i in range(1, 7)}
     cmd_track_err_take_median = {f"q{i}": [] for i in range(1, 7)}
+    lag_rows = []
     nan_or_inf_hits = []
     abs_path_hits = []
     stray_files = []
@@ -326,6 +443,41 @@ def main():
                     err = np.abs(c - u[juc])
                     cmd_track_err[f"q{i}"].add(err)
                     cmd_track_err_take_median[f"q{i}"].append(float(np.median(err)))
+
+            # recorder timestamp artefact -------------------------------------
+            # How late each starved robot table is stamped, measured two ways.
+            lag_rec = {"take": take}
+            urq = np.stack([f["ur_joint_states"][f"q{i}"][:] for i in range(1, 7)], axis=1)
+            cmq = np.stack([f["command"][f"cmd{i}"][:] for i in range(1, 7)], axis=1)
+            if ut.size > 2 and ct.size > 2:
+                found = joint_lag(ut, urq, ct, cmq)
+                zero = joint_residual_at(0.0, ut, urq, ct, cmq)
+                if found is not None:
+                    tau, (med_res, mean_res, n_res), tau_mean = found
+                    lag_rec["ur_joint_states_lag_s"] = _r(tau, 3)
+                    lag_rec["ur_joint_states_lag_s_mean_objective"] = _r(tau_mean, 3)
+                    lag_rec["residual_rad_at_lag"] = _r(med_res, 4)
+                    lag_rec["residual_rad_at_lag_mean"] = _r(mean_res, 4)
+                    lag_rec["n_compared"] = n_res
+                if zero is not None:
+                    lag_rec["residual_rad_at_zero"] = _r(zero[0], 4)
+                    lag_rec["residual_rad_at_zero_mean"] = _r(zero[1], 4)
+            # tcp_pose has its own (smaller) lag: same starvation, half the queue
+            # depth. Measured by speed cross-correlation against `command`, which
+            # is the freshest robot table.
+            tcp_xyz = np.stack([f["tcp_pose"][k][:] for k in ("x", "y", "z")], axis=1)
+            gc_, vc_ = speed_series(ct, cmq)
+            gu_, vu_ = speed_series(ut, urq)
+            gp_, vp_ = speed_series(f["tcp_pose"]["t_rel_s"][:], tcp_xyz)
+            for key, (ga, va, gb, vb) in {
+                "xcorr_command_to_ur_joint_states": (gc_, vc_, gu_, vu_),
+                "xcorr_command_to_tcp_pose": (gc_, vc_, gp_, vp_),
+                "xcorr_tcp_pose_to_ur_joint_states": (gp_, vp_, gu_, vu_),
+            }.items():
+                lag_s, r = xcorr_lag(ga, va, gb, vb)
+                lag_rec[key + "_s"] = _r(lag_s, 3)
+                lag_rec[key + "_r"] = _r(r, 3)
+            lag_rows.append(lag_rec)
 
             # gripper closures -------------------------------------------------
             gr = f["gripper"]
@@ -519,6 +671,96 @@ def main():
         },
     }
 
+    # ------------------------------------------- recorder timestamp artefact
+    def lag_col(key):
+        return np.array([r[key] for r in lag_rows if r.get(key) is not None],
+                        dtype=np.float64)
+
+    def lag_stats(key, nd=3):
+        v = lag_col(key)
+        if not v.size:
+            return None
+        return {"min": _r(v.min(), nd), "median": _r(np.median(v), nd),
+                "max": _r(v.max(), nd), "n_takes": int(v.size)}
+
+    tau_col = lag_col("ur_joint_states_lag_s")
+    timestamp_lag = {
+        "note": (
+            "RECORDER ARTEFACT, not robot behaviour: `ur_joint_states`, `tcp_pose` and "
+            "`wrench` rows are stamped LATE in this release. The GUI recorder writes "
+            "every row inside its subscription callback and sets t_rel_s to the time "
+            "that callback RAN; ROS header stamps are not stored. All callbacks share "
+            "one rclpy spin thread, which a SingleThreadedExecutor services one message "
+            "per subscription per round. Adding depth recording to this session dropped "
+            "the round rate to ~60-69 Hz, so every publisher faster than that keeps its "
+            "KEEP_LAST queue permanently full and each row leaves the queue already "
+            "`queue_depth / publish_rate` seconds old: /joint_states depth 100 at ~100 Hz "
+            "-> ~1.0 s, tcp_pose and wrench depth 50 at ~100 Hz -> ~0.5 s. The starvation "
+            "signature is visible in `rates`: command / ur_joint_states / tcp_pose / "
+            "wrench, four topics with three different publish rates, all converge on the "
+            "same recorded rate. Streams at or below the round rate never queue and are "
+            "fresh: cameras (depth header-stamp age measured at 0.022 s), depth, "
+            "gello_joint_states, gripper, and `command`. The lag is a PURE DELAY - the "
+            "waveform is intact - so subtracting the constant below from t_rel_s restores "
+            "the timebase. NOTHING IS REWRITTEN HERE: the raw files are as recorded. "
+            "FIX RULE for consumers: subtract ur_joint_states_lag_s from "
+            "ur_joint_states/t_rel_s and ~0.45 s from tcp_pose/t_rel_s and "
+            "wrench/t_rel_s; do NOT shift anything else - the gripper and camera tables "
+            "are already on the camera timebase and shifting them would create a "
+            "misalignment that is not there. The recorder has since been fixed (header "
+            "stamps stored, queue depths shrunk, camera/depth writes moved off the spin "
+            "thread, starvation warning) - this release predates that fix."
+        ),
+        "method": (
+            "ur_joint_states_lag_s: joint-space residual. For each candidate lag on a "
+            f"{int(LAG_TAU_STEP_S * 1000)} ms grid over 0..{LAG_TAU_MAX_S} s the "
+            "ur_joint_states clock is shifted EARLIER by that lag, the six joints are "
+            "linearly interpolated onto the `command` timestamps, and the lag minimising "
+            "the median over time of the 6-joint mean |ur_q - cmd| is reported. "
+            "residual_rad_at_lag / residual_rad_at_zero give that residual with and "
+            "without the correction; the *_mean variants are the plain mean over all "
+            "samples and joints, which is larger because it is dominated by the "
+            "high-velocity transients where the genuine servo following error lives. "
+            "ur_joint_states_lag_s_mean_objective is the argmin of that plain mean "
+            "instead of the median: it is the SAME measurement and agrees to within one "
+            "5 ms grid step, and it is reported because independent re-measurements of "
+            "this dataset use it and land on 0.895 s for a minority of takes. Quote the "
+            "lag as 0.89-0.91 s depending on method and grid; the derived LeRobot "
+            "release applies the single constant 0.900 s. "
+            "xcorr_*: independent check by speed-profile cross-correlation on the same "
+            "grid (speed, not position, so a constant spatial offset such as the 0.174 m "
+            "tool offset cannot bias it); a positive value means the second stream is "
+            "stamped that many seconds later than the first."
+        ),
+        "ur_joint_states_lag_s": lag_stats("ur_joint_states_lag_s"),
+        "ur_joint_states_lag_s_mean_objective": lag_stats(
+            "ur_joint_states_lag_s_mean_objective"),
+        "takes_at_modal_lag": (
+            int((tau_col == np.median(tau_col)).sum()) if tau_col.size else None),
+        "modal_lag_s": _r(np.median(tau_col), 3) if tau_col.size else None,
+        "residual_rad_at_lag": lag_stats("residual_rad_at_lag", 4),
+        "residual_rad_at_lag_mean": lag_stats("residual_rad_at_lag_mean", 4),
+        "residual_rad_at_zero": lag_stats("residual_rad_at_zero", 4),
+        "residual_rad_at_zero_mean": lag_stats("residual_rad_at_zero_mean", 4),
+        "xcorr_command_to_ur_joint_states_s": lag_stats("xcorr_command_to_ur_joint_states_s"),
+        "xcorr_command_to_tcp_pose_s": lag_stats("xcorr_command_to_tcp_pose_s"),
+        "xcorr_tcp_pose_to_ur_joint_states_s": lag_stats("xcorr_tcp_pose_to_ur_joint_states_s"),
+        "fresh_streams": [
+            "cam1_frames", "cam2_frames", "depth.h5 cam1", "depth.h5 cam2",
+            "gello_joint_states", "gripper", "command",
+        ],
+        "late_streams": ["ur_joint_states", "tcp_pose", "wrench"],
+        "wrench_note": (
+            "`wrench` shares tcp_pose's QoS depth (50) and publisher, so it carries the "
+            "same ~0.5 s lag. It is not cross-correlated here because the force signal's "
+            "derivative is too noisy to time reliably; the sibling velocity-correlation "
+            "analysis measured tcp_pose -> wrench at 0.000 s over 7 of 8 takes, which is "
+            "the sharpest confirmation of the queue-depth model (equal depth -> equal "
+            "lag), and tcp_pose -> ur_joint_states at +0.495 s (unequal depth)."
+        ),
+        "per_take": lag_rows,
+    }
+
     durs = np.array([t["duration_s"] for t in per_take], dtype=np.float64)
     total_bytes = sum(
         t["bytes_cam1_mp4"] + t["bytes_cam2_mp4"] + t["bytes_vectors_h5"] + t["bytes_depth_h5"]
@@ -612,6 +854,7 @@ def main():
         "rates": rates,
         "leader_vs_follower": leader_vs_follower,
         "command_tracking": command_tracking,
+        "timestamp_lag": timestamp_lag,
         "depth_cameras": cam_meta,
         "regrasp_takes": regrasp,
         "value_ranges": {k: ranges[k].out() for k in sorted(ranges)},

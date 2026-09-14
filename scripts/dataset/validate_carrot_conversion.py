@@ -33,7 +33,7 @@ forced on before lerobot is imported.
 SPEC (re-implemented here)
 --------------------------
   master clock  = cam1_frames/t_rel_s          (fps = 30)
-  observation.state[7] = ur_joint_states q1..q6 @ nearest ur t_rel_s
+  observation.state[7] = ur_joint_states q1..q6 @ nearest (ur t_rel_s - tau)
                        + gripper/grip_pos      @ nearest gripper t_rel_s
   action[7]            = command cmd1..cmd6    @ nearest command t_rel_s
                        + ffill_bfill(gripper/grip_cmd) @ nearest gripper t_rel_s
@@ -42,6 +42,14 @@ SPEC (re-implemented here)
   cam<N>_depth frame k = PNG nearest_idx(depth.h5/cam<N>/t_rel_s, cam1_t)[k],
                          uint16 mm, 848x480, unaligned, 0 = no return
   gello_* streams      = dropped
+
+  tau = the recorder timestamp correction (--ur-lag-s, default 0.9 s; per-take
+  --lag-json wins). The GUI recorder stamped `ur_joint_states` rows tau seconds
+  LATE (spin-thread starvation: queue age = QoS depth / publish rate), so the
+  converter shifts THAT TABLE ONLY to t_rel_s - tau before the nearest-timestamp
+  lookup. grip_pos, action (command + grip_cmd), cam2 and both depth streams are
+  untouched; this validator re-derives with the same rule from the same CLI value
+  (never from the converter) so check 3 must still see max|delta| = 0.
 
 Checks (each prints PASS / FAIL / WARN / SKIP):
   0  self-test of this file's nearest-timestamp + ffill implementations
@@ -63,6 +71,12 @@ Checks (each prints PASS / FAIL / WARN / SKIP):
      the agreed number is not reachable on this recording (cam1's depth topic runs a
      median 8.6 ms ahead of its colour topic), and this check reads raw clocks only,
      so it reports a recording property and can never catch a converter error.
+ 14  meta/source_takes.json carries ur_joint_states_lag_s == the CLI/JSON tau for
+     every episode, and a top-level timestamp_correction block
+ 15  physics sanity: mean |observation.state[0:6] - action[0:6]| per episode
+     (first 1.6 s excluded) is < 0.02 rad WITH the correction, and larger when
+     re-derived at tau = 0 -- the follower tracks its own command, so a correct
+     time base is the only way this gets small
 
 Usage
 -----
@@ -182,6 +196,13 @@ DEPTH_ERR_P99_MM = 1.25
 DEPTH_ERR_MAX_MM = 1.25
 
 
+# CHECK 15 gates: with a correct time base the UR follows its own command to well
+# under 0.02 rad per joint; at tau = 0 the 0.9 s stamp error alone puts ~0.05 rad
+# of pure delay between them (measured median 0.063 rad over the 54 takes).
+STATE_ACTION_MAX_RAD = 0.02
+STATE_ACTION_SKIP_HEAD_S = 1.6
+
+
 # --------------------------------------------------------------------------
 # report plumbing
 # --------------------------------------------------------------------------
@@ -290,8 +311,42 @@ def ffill_bfill(v: np.ndarray) -> np.ndarray:
     return v[src]
 
 
-def derive_take(h5_path: str, max_frames: int = 0):
-    """Return (cam1_t, cam2_t, state[N,7] float32, action[N,7] float32)."""
+def load_lag_json(path: str) -> dict:
+    """take dir name -> tau seconds. Written from the spec, not from the converter.
+
+    Accepts {"takes": {name: {"tau_q_s": x}}}, {name: {"tau_q_s": x}} or
+    {name: x}; metadata keys whose value is neither are ignored.
+    """
+    with open(path) as fh:
+        obj = json.load(fh)
+    if isinstance(obj, dict) and isinstance(obj.get("takes"), dict):
+        obj = obj["takes"]
+    if not isinstance(obj, dict):
+        raise ValueError(f"{path}: expected a JSON object of take -> tau")
+    out = {}
+    for k, v in obj.items():
+        if isinstance(v, dict) and "tau_q_s" in v:
+            out[str(k)] = float(v["tau_q_s"])
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[str(k)] = float(v)
+    if not out:
+        raise ValueError(f"{path}: no take entries with a tau_q_s field")
+    return out
+
+
+def resolve_taus(takes, ur_lag_s: float, lag_json: str | None):
+    """take basename -> tau actually expected, CLI default overridden by the JSON."""
+    lag_map = load_lag_json(lag_json) if lag_json else {}
+    return {os.path.basename(t): float(lag_map.get(os.path.basename(t), ur_lag_s))
+            for t in takes}
+
+
+def derive_take(h5_path: str, max_frames: int = 0, ur_lag_s: float = 0.0):
+    """Return (cam1_t, cam2_t, state[N,7] float32, action[N,7] float32).
+
+    `ur_lag_s` is subtracted from the ur_joint_states row clock before the
+    nearest-timestamp lookup (and from nothing else).
+    """
     import h5py
 
     with h5py.File(h5_path, "r") as f:
@@ -301,7 +356,7 @@ def derive_take(h5_path: str, max_frames: int = 0):
             cam1_t = cam1_t[:max_frames]
         n = len(cam1_t)
 
-        ur_t = f["ur_joint_states"]["t_rel_s"][:]
+        ur_t = np.asarray(f["ur_joint_states"]["t_rel_s"][:], dtype=np.float64) - float(ur_lag_s)
         ur_j = nearest_idx(ur_t, cam1_t)
         state = np.zeros((n, 7), dtype=np.float32)
         for k in range(6):
@@ -767,7 +822,8 @@ def check_frame_counts(rep: Report, eps, takes, take_lens):
     return ok_all
 
 
-def check_numeric(rep: Report, eps, takes, data, tol: float, verbose: bool, max_frames: int):
+def check_numeric(rep: Report, eps, takes, data, tol: float, verbose: bool, max_frames: int,
+                  taus: dict):
     section("CHECK 3  --  numeric fidelity of observation.state / action (independent re-derivation)")
 
     stored_state = data["observation.state"]
@@ -780,7 +836,7 @@ def check_numeric(rep: Report, eps, takes, data, tol: float, verbose: bool, max_
 
     for i, (ep, tk) in enumerate(zip(eps, takes)):
         h5 = os.path.join(tk, "vectors.h5")
-        _, _, state, action = derive_take(h5, max_frames)
+        _, _, state, action = derive_take(h5, max_frames, taus[os.path.basename(tk)])
         a = int(ep["dataset_from_index"])
         b = int(ep["dataset_to_index"])
         got_s = stored_state[a:b]
@@ -1578,6 +1634,131 @@ def check_depth_timestamps(rep: Report, takes, max_frames,
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# CHECK 14 -- the timestamp correction is declared in meta/source_takes.json
+# --------------------------------------------------------------------------
+def check_lag_metadata(rep: Report, lr_root, takes, taus):
+    section("CHECK 14  --  meta/source_takes.json declares the ur_joint_states timestamp correction")
+    path = os.path.join(lr_root, "meta", "source_takes.json")
+    if not os.path.exists(path):
+        rep.fail("meta/source_takes.json exists (check 14)", path)
+        return None
+    with open(path) as fh:
+        obj = json.load(fh)
+    if not isinstance(obj, dict):
+        rep.fail("source_takes.json is an object with a timestamp_correction block",
+                 f"top-level type {type(obj).__name__}")
+        return None
+
+    # 14a -- per-episode tau
+    eps_list = obj.get("episodes")
+    got = {}
+    if isinstance(eps_list, list):
+        for e in eps_list:
+            if isinstance(e, dict) and "ur_joint_states_lag_s" in e:
+                nm = e.get("take_dir_name") or e.get("take") or e.get("name")
+                if nm is not None:
+                    got[os.path.basename(str(nm))] = float(e["ur_joint_states_lag_s"])
+    want = {os.path.basename(t): taus[os.path.basename(t)] for t in takes}
+    missing = sorted(set(want) - set(got))
+    bad = sorted(k for k in want if k in got and abs(got[k] - want[k]) > 1e-9)
+    rep.check(
+        not missing and not bad and len(got) == len(want),
+        f"every episode carries ur_joint_states_lag_s == the expected tau ({len(want)} takes)",
+        (f"missing={missing[:5]} mismatched="
+         + "; ".join(f"{k}: {got[k]} != {want[k]}" for k in bad[:5])) if (missing or bad)
+        else f"distinct tau values: {sorted(set(want.values()))}",
+    )
+
+    # 14b -- the top-level block
+    tc = obj.get("timestamp_correction")
+    if not isinstance(tc, dict):
+        rep.fail("top-level timestamp_correction block present",
+                 f"got {type(tc).__name__}")
+        return {"per_episode_lag_s": got, "timestamp_correction": None}
+    rep.pass_("top-level timestamp_correction block present", f"keys={sorted(tc)}")
+
+    val = tc.get("ur_joint_states_lag_s")
+    vals = [float(x) for x in (val if isinstance(val, (list, tuple)) else [val])] \
+        if val is not None else []
+    want_vals = sorted(set(want.values()))
+    rep.check(
+        bool(vals) and sorted(set(vals)) == want_vals,
+        "timestamp_correction.ur_joint_states_lag_s == the applied tau value(s)",
+        f"declared {val!r}, applied {want_vals}",
+    )
+    why = str(tc.get("why") or "")
+    rep.check(bool(why.strip()), "timestamp_correction.why is non-empty", why[:120])
+    rep.check("tcp_pose/wrench" in tc,
+              "timestamp_correction mentions tcp_pose/wrench",
+              f"{tc.get('tcp_pose/wrench')!r}")
+    return {"per_episode_lag_s": got, "timestamp_correction": tc}
+
+
+# --------------------------------------------------------------------------
+# CHECK 15 -- physics sanity: does the follower actually sit on its command?
+# --------------------------------------------------------------------------
+def check_state_action_physics(rep: Report, eps, takes, data, taus, max_frames, fps):
+    section("CHECK 15  --  physics sanity: mean |state[0:6] - action[0:6]| with vs without "
+            "the correction")
+    skip_n = int(round(STATE_ACTION_SKIP_HEAD_S * float(fps)))
+    stored_state = data["observation.state"]
+    stored_action = data["action"]
+    corr_means, zero_means, rows = [], [], []
+    n_short = 0
+    for i, (ep, tk) in enumerate(zip(eps, takes)):
+        a, b = int(ep["dataset_from_index"]), int(ep["dataset_to_index"])
+        if b - a <= skip_n + 5:
+            n_short += 1
+            continue
+        st = stored_state[a:b, :6].astype(np.float64)
+        ac = stored_action[a:b, :6].astype(np.float64)
+        m_corr = float(np.mean(np.abs(st[skip_n:] - ac[skip_n:])))
+        # independent re-derivation at tau = 0 (the uncorrected v1 behaviour)
+        _, _, s0, a0 = derive_take(os.path.join(tk, "vectors.h5"), max_frames, 0.0)
+        m_zero = float(np.mean(np.abs(s0[skip_n:, :6].astype(np.float64)
+                                      - a0[skip_n:, :6].astype(np.float64))))
+        corr_means.append(m_corr)
+        zero_means.append(m_zero)
+        rows.append({"episode_index": i, "take": os.path.basename(tk),
+                     "mean_abs_rad_corrected": m_corr, "mean_abs_rad_tau0": m_zero})
+    if not rows:
+        rep.skip("state/action agreement", f"no episode longer than {skip_n} frames")
+        return None
+
+    c = np.array(corr_means)
+    z = np.array(zero_means)
+    worst = rows[int(np.argmax(c))]
+    rep.check(
+        float(c.max()) < STATE_ACTION_MAX_RAD,
+        f"corrected mean |state-action| < {STATE_ACTION_MAX_RAD} rad in every episode",
+        f"median {np.median(c):.5f} rad, max {c.max():.5f} rad "
+        f"(worst {worst['take']}), n={len(c)} episodes",
+    )
+    n_worse = int(np.sum(z > c))
+    rep.check(
+        n_worse == len(c),
+        "uncorrected (tau = 0) re-derivation is worse in every episode",
+        f"tau=0 median {np.median(z):.5f} rad, max {z.max():.5f} rad; "
+        f"worse in {n_worse}/{len(c)} episodes; median improvement factor "
+        f"{np.median(z / np.maximum(c, 1e-12)):.1f}x",
+    )
+    print(f"  [info] first {STATE_ACTION_SKIP_HEAD_S} s excluded ({skip_n} frames)"
+          + (f"; {n_short} episode(s) too short and skipped" if n_short else ""))
+    return {
+        "skip_head_s": STATE_ACTION_SKIP_HEAD_S,
+        "skip_frames": skip_n,
+        "gate_rad": STATE_ACTION_MAX_RAD,
+        "n_episodes": len(rows),
+        "corrected": {"median": float(np.median(c)), "mean": float(c.mean()),
+                      "min": float(c.min()), "max": float(c.max())},
+        "tau0": {"median": float(np.median(z)), "mean": float(z.mean()),
+                 "min": float(z.min()), "max": float(z.max())},
+        "n_episodes_improved": n_worse,
+        "per_episode": rows,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Validate the carrot_in_pot LeRobot v3.0 dataset (incl. depth) "
@@ -1595,6 +1776,13 @@ def main():
     ap.add_argument("--task", default="Put carrot in pot", help="expected task string")
     ap.add_argument("--tol", type=float, default=1e-6,
                     help="max allowed abs deviation for state/action")
+    ap.add_argument("--ur-lag-s", type=float, default=0.9,
+                    help="recorder timestamp correction the dataset was built with: the "
+                         "ur_joint_states row clock is t_rel_s - tau (applied to that table "
+                         "only). 0 = validate an uncorrected dataset")
+    ap.add_argument("--lag-json", default=None,
+                    help="per-take override for --ur-lag-s: JSON of take dir name -> "
+                         "{\"tau_q_s\": float} (or a bare float); wins over --ur-lag-s")
     ap.add_argument("--video-episodes", type=int, default=3,
                     help="episodes sampled for the RGB video check (first and last always included)")
     ap.add_argument("--video-frames", type=int, default=4,
@@ -1637,6 +1825,8 @@ def main():
     print(f"  excluded takes : {args.exclude or '(none)'}")
     print(f"  expected task  : {args.task!r}")
     print(f"  numeric tol    : {args.tol:g}")
+    print(f"  ur lag (tau)   : {args.ur_lag_s} s"
+          + (f"  [per-take overrides from {args.lag_json}]" if args.lag_json else ""))
     if args.max_frames or args.max_takes:
         print(f"  !! TEST MODE   : --max-frames={args.max_frames} --max-takes={args.max_takes} "
               f"(checks 2/3/6/9/10/12/13 are evaluated on the truncated prefix only)")
@@ -1658,6 +1848,22 @@ def main():
     if unknown:
         rep.warn("--exclude names not found in raw dir", f"{unknown}")
 
+    try:
+        taus = resolve_taus(takes, args.ur_lag_s, args.lag_json)
+    except Exception as exc:
+        print(f"\nFATAL: --lag-json unreadable: {exc}", file=sys.stderr)
+        return 2
+    tau_values = sorted(set(taus.values()))
+    print(f"  expected tau   : {tau_values} s over {len(taus)} takes")
+    if args.lag_json:
+        lag_missing = [n for n in taus if n not in load_lag_json(args.lag_json)]
+        if lag_missing:
+            rep_pre_warn = lag_missing
+        else:
+            rep_pre_warn = []
+    else:
+        rep_pre_warn = []
+
     missing_files = []
     for t in takes:
         for fn in ("vectors.h5", "cam1.mp4", "cam2.mp4", "depth.h5"):
@@ -1669,6 +1875,11 @@ def main():
     if not os.path.isdir(lr_root):
         print(f"\nFATAL: LeRobot dataset not found at {lr_root}", file=sys.stderr)
         return 2
+
+    if rep_pre_warn:
+        rep.warn("--lag-json covers every included take",
+                 f"{len(rep_pre_warn)} take(s) fall back to --ur-lag-s={args.ur_lag_s}: "
+                 f"{rep_pre_warn[:5]}")
 
     # ---- check 0 -------------------------------------------------------
     self_test_nearest(rep, takes)
@@ -1709,7 +1920,7 @@ def main():
 
     check_frame_counts(rep, eps_c, takes_c, lens_c)
     dev_s, dev_a = check_numeric(rep, eps_c, takes_c, data, args.tol, args.verbose,
-                                 args.max_frames)
+                                 args.max_frames, taus)
     check_nan(rep, data)
     check_task(rep, lr_root, eps, data, args.task)
 
@@ -1774,6 +1985,21 @@ def main():
         rep.fail("depth timestamp check raised an exception",
                  traceback.format_exc().splitlines()[-1])
 
+    try:
+        lag_meta = check_lag_metadata(rep, lr_root, takes_c, taus)
+    except Exception:
+        lag_meta = None
+        rep.fail("timestamp-correction metadata check raised an exception",
+                 traceback.format_exc().splitlines()[-1])
+
+    try:
+        phys = check_state_action_physics(rep, eps_c, takes_c, data, taus,
+                                          args.max_frames, info.get("fps", FPS))
+    except Exception:
+        phys = None
+        rep.fail("state/action physics check raised an exception",
+                 traceback.format_exc().splitlines()[-1])
+
     # ---- summary --------------------------------------------------------
     section("SUMMARY")
     print(f"  raw takes                 : {len(all_takes)} found, "
@@ -1802,6 +2028,13 @@ def main():
                   f"{v['median_signed_offset_ms']:+.2f} ms; worst-episode in-tol "
                   f"{v['min_in_tol_frac_soft'] * 100:.2f}% @{v['soft_tol_ms']:.2f} ms / "
                   f"{v['min_in_tol_frac_hard'] * 100:.2f}% @{v['hard_tol_ms']:.2f} ms")
+    if phys:
+        print(f"  |state-action| corrected  : median {phys['corrected']['median']:.5f} rad, "
+              f"max {phys['corrected']['max']:.5f} rad  (gate < {phys['gate_rad']} rad)")
+        print(f"  |state-action| at tau = 0 : median {phys['tau0']['median']:.5f} rad, "
+              f"max {phys['tau0']['max']:.5f} rad  (comparison only)")
+    print(f"  ur_joint_states lag (tau) : {tau_values} s "
+          f"(source: {args.lag_json or '--ur-lag-s'})")
     print(f"  task                      : {args.task!r}")
     print()
     print("  RESULT TABLE")
@@ -1848,6 +2081,11 @@ def main():
             "depth_timestamps": depth_ts,
             "depth_cameras_json": cams_json,
             "source_takes_json": src_json,
+            "ur_lag_s": args.ur_lag_s,
+            "lag_json": (os.path.abspath(args.lag_json) if args.lag_json else None),
+            "tau_per_take": taus,
+            "lag_metadata": lag_meta,
+            "state_action_physics": phys,
             "thresholds": {
                 "tol": args.tol,
                 "depth_err_p99_mm": DEPTH_ERR_P99_MM,

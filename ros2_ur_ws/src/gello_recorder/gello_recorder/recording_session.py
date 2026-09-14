@@ -10,11 +10,50 @@ VERBATIM (same table headers/column order, same per-field float precision, same
 ``_bump`` counter-key strings) so that both the ROS2 node and a future interactive
 GUI can share it without duplicating the logic.
 
-Deliberately ROS-free / Qt-free / thread-free: it imports only ``h5py``, ``time`` and
-the three proven sibling modules (:mod:`gello_recorder.hdf5_writer`,
-:mod:`gello_recorder.video_writer`, :mod:`gello_recorder.depth_writer`), so it is
-fully importable and testable standalone -- run ``python3 recording_session.py`` for
-the built-in self-test.
+Deliberately ROS-free / Qt-free: it imports only ``h5py``, ``time``, ``threading``
+and the four proven sibling modules (:mod:`gello_recorder.hdf5_writer`,
+:mod:`gello_recorder.video_writer`, :mod:`gello_recorder.depth_writer`,
+:mod:`gello_recorder.spin_health`), so it is fully importable and testable
+standalone -- run ``python3 recording_session.py`` for the built-in self-test.
+
+NO LONGER thread-free (2026-09-14). Two threads may now touch one session:
+
+  * the caller's thread (in the recorders: the single rclpy spin thread), which
+    writes every VECTOR row synchronously -- those are a handful of float
+    appends and cost nothing; and
+  * ONE background frame writer (:class:`~gello_recorder.spin_health.FrameWriteQueue`,
+    created lazily by the first :meth:`submit_cam_frame` /
+    :meth:`submit_cam_depth_frame`) which performs the expensive per-frame I/O:
+    JPEG decode + MP4 encode (measured 9.3 + 6.9 ms per 1280x720 frame on
+    laptop3) and the ~740 kB depth-PNG HDF5 append (1.4 ms).
+
+That split is the fix for the timestamp artifact described in
+:mod:`gello_recorder.spin_health`: with both cameras' colour AND depth handled
+inline, the spin thread was doing ~1.6 s of work per wall-clock second, its
+round rate fell to 60-69 Hz, and every topic publishing faster than that was
+read out of a permanently full queue -- silently back-dating the robot rows.
+
+Locking is deliberately narrow: ``_vec_lock`` around ``vectors.h5`` row appends
+(and its flush/close), ``_depth_lock`` around ``depth.h5``, ``_counts_lock``
+around the message counters. The MP4 encode holds no lock at all -- each
+``Mp4FrameWriter`` is touched only by the frame writer thread (and by
+:meth:`close`, after the queue has drained).
+
+HEADER STAMPS (2026-09-14). Every table fed by a STAMPED ROS message carries a
+trailing ``stamp_s`` column: float64 seconds taken from ``msg.header.stamp``,
+NaN when absent. It is APPENDED, so every pre-existing column keeps its name,
+its order and its meaning and old readers are unaffected. The tables that have
+it: ``gello_joint_states``, ``ur_joint_states``, ``tcp_pose``, ``wrench``,
+``cam1_frames``, ``cam2_frames`` (``depth.h5`` already had one). The tables that
+do NOT, because their ROS message type carries no header at all:
+
+  * ``command``   <- ``std_msgs/Float64MultiArray``
+  * ``gripper``   <- three ``std_msgs/Float32`` topics
+  * ``synchronized`` -- a locally sampled wide row, not one message.
+
+For those three, ``t_rel_s`` (arrival time) is the only timestamp that exists,
+which is exactly why the queue depths were shrunk as well: the recorder cannot
+repair an old sample it cannot recognise.
 
 Depth is strictly additive: with ``record_depth=False`` (the default) NOTHING about
 the on-disk output changes -- ``vectors.h5`` keeps exactly its nine tables, no
@@ -30,20 +69,30 @@ Contract notes (why this class does NOT parse ROS messages):
     caller does all of that and hands over plain lists/floats/None.
   * Every method stamps its own row's ``t_rel_s`` via :meth:`t` (this session's OWN
     relative clock), matching the node's per-callback ``f"{self._t():.4f}"`` pattern.
+    The ONE exception is a frame handed to :meth:`submit_cam_frame` /
+    :meth:`submit_cam_depth_frame`: its ``t_rel_s`` is captured at SUBMIT time
+    (i.e. in the ROS callback, on arrival) and carried through the queue, so the
+    writer thread's own clock never reaches the data.
   * ``None`` values are passed straight through to :class:`Hdf5TableWriter`, whose
     ``_coerce`` maps them to NaN -- except where the node already pre-formats a cell
     with an f-string, in which case that exact formatting is preserved here too.
 """
 
+import threading
 import time
 
 import h5py
 
 from gello_recorder.depth_writer import DepthH5Writer
 from gello_recorder.hdf5_writer import open_h5_table
+from gello_recorder.spin_health import FRAME_QUEUE_MAXSIZE, FrameWriteQueue
 from gello_recorder.video_writer import Mp4FrameWriter
 
 _NAN = float("nan")
+
+#: Work-item kinds carried through the frame queue.
+_KIND_COLOR = {1: "cam1", 2: "cam2"}
+_KIND_DEPTH = {1: "cam1_depth", 2: "cam2_depth"}
 
 # cam_idx (1 or 2) -> depth.h5 group name / counter-key prefix.
 _DEPTH_CAM_NAMES = {1: "cam1", 2: "cam2"}
@@ -63,7 +112,8 @@ class RecordingSession:
     """
 
     def __init__(self, session_dir: str, camera_fps: float = 30.0,
-                 record_depth: bool = False):
+                 record_depth: bool = False,
+                 frame_queue_maxsize: int = FRAME_QUEUE_MAXSIZE):
         """Create ``session_dir`` and open every output file for this session.
 
         Opens ``session_dir/vectors.h5`` (mode 'w') with all nine tables via
@@ -86,6 +136,23 @@ class RecordingSession:
         # Depth is opt-in; keep the attribute present either way so close() and the
         # depth no-op methods can test it without hasattr gymnastics.
         self._depth = None
+
+        # --- threading (see the module docstring) ---------------------------
+        # The frame writer is created LAZILY by the first submit_*: a caller
+        # that only ever uses the synchronous write_* methods (the self-test,
+        # the unit tests, any offline user) gets exactly the old single-threaded
+        # behaviour and no thread at all.
+        self._frame_queue_maxsize = int(frame_queue_maxsize)
+        self._frames = None
+        self._closed = False
+        self._frames_lock = threading.Lock()
+        self._vec_lock = threading.Lock()
+        self._depth_lock = threading.Lock()
+        self._counts_lock = threading.Lock()
+        # Frames lost because the writer queue was full (or already closing),
+        # per stream. Reported by dropped_frames(); NOT folded into
+        # message_counts, whose shape is part of the on-disk contract.
+        self._dropped = {"cam1": 0, "cam2": 0, "cam1_depth": 0, "cam2_depth": 0}
 
         # Per-table message counters (keys match the node's _bump() strings verbatim).
         self._counts = {}
@@ -111,10 +178,15 @@ class RecordingSession:
             + ["tcp_x", "tcp_y", "tcp_z", "tcp_qx", "tcp_qy", "tcp_qz", "tcp_qw"]
             + ["cam1_frame_idx", "cam2_frame_idx"],
         )
+        # NOTE on every header below: ``stamp_s`` is APPENDED LAST on purpose.
+        # Existing columns keep their names, their order and their meaning, so a
+        # reader written before 2026-09-14 sees an unchanged table and a reader
+        # written after it gets the publisher's own capture time as well.
         self._gello_w = open_h5_table(
             self._h5,
             "gello_joint_states",
-            ["t_rel_s"] + [f"q{i+1}" for i in range(_N)] + [f"qd{i+1}" for i in range(_N)],
+            ["t_rel_s"] + [f"q{i+1}" for i in range(_N)]
+            + [f"qd{i+1}" for i in range(_N)] + ["stamp_s"],
         )
         self._ur_w = open_h5_table(
             self._h5,
@@ -122,7 +194,8 @@ class RecordingSession:
             ["t_rel_s"]
             + [f"q{i+1}" for i in range(_N)]
             + [f"qd{i+1}" for i in range(_N)]
-            + [f"eff{i+1}" for i in range(_N)],
+            + [f"eff{i+1}" for i in range(_N)]
+            + ["stamp_s"],
         )
         self._cmd_w = open_h5_table(
             self._h5, "command", ["t_rel_s"] + [f"cmd{i+1}" for i in range(_N)]
@@ -131,13 +204,17 @@ class RecordingSession:
             self._h5, "gripper", ["t_rel_s", "gello_grip", "grip_cmd", "grip_pos"]
         )
         self._wrench_w = open_h5_table(
-            self._h5, "wrench", ["t_rel_s", "fx", "fy", "fz", "tx", "ty", "tz"]
+            self._h5, "wrench",
+            ["t_rel_s", "fx", "fy", "fz", "tx", "ty", "tz", "stamp_s"]
         )
         self._tcp_w = open_h5_table(
-            self._h5, "tcp_pose", ["t_rel_s", "x", "y", "z", "qx", "qy", "qz", "qw"]
+            self._h5, "tcp_pose",
+            ["t_rel_s", "x", "y", "z", "qx", "qy", "qz", "qw", "stamp_s"]
         )
-        self._cam1_w = open_h5_table(self._h5, "cam1_frames", ["t_rel_s", "frame_idx"])
-        self._cam2_w = open_h5_table(self._h5, "cam2_frames", ["t_rel_s", "frame_idx"])
+        self._cam1_w = open_h5_table(
+            self._h5, "cam1_frames", ["t_rel_s", "frame_idx", "stamp_s"])
+        self._cam2_w = open_h5_table(
+            self._h5, "cam2_frames", ["t_rel_s", "frame_idx", "stamp_s"])
 
         # --- Video writers (each lazily opens its MP4 on the first frame) --------
         self._cam1_video = Mp4FrameWriter(
@@ -166,7 +243,10 @@ class RecordingSession:
         return time.time() - self.t0
 
     def _bump(self, key):
-        self._counts[key] = self._counts.get(key, 0) + 1
+        # Bumped from the caller's thread (vector tables) AND from the frame
+        # writer thread (cam*_frames / cam*_depth_frames), hence the lock.
+        with self._counts_lock:
+            self._counts[key] = self._counts.get(key, 0) + 1
 
     def bump(self, key: str) -> None:
         """Public counter increment for callers that need topic-specific counts that
@@ -176,17 +256,22 @@ class RecordingSession:
         self._bump(key)
 
     # ---- one write method per table (values already computed by the caller) --
-    def write_gello(self, pos: list, qd: list) -> None:
-        """gello_joint_states row: ``[t()] + pos + qd``.
+    def write_gello(self, pos: list, qd: list, stamp_s: float = _NAN) -> None:
+        """gello_joint_states row: ``[t()] + pos + qd + [stamp_s]``.
 
         ``pos`` values are appended raw (node passes raw floats); ``qd`` values may be
         ``None`` and are pre-formatted with ``f"{v:.5f}"`` exactly as the node does
-        (None passes straight through to become NaN)."""
+        (None passes straight through to become NaN). ``stamp_s`` is the
+        ``sensor_msgs/JointState`` ``header.stamp`` in float64 seconds (NaN when the
+        message carried no stamp) and is written RAW, never through an f-string:
+        an epoch second formatted to 6 dp loses the sub-microsecond digits."""
         self._bump("gello_joint_states")
-        self._gello_w.writerow(
-            [f"{self.t():.4f}"] + list(pos)
-            + [None if v is None else f"{v:.5f}" for v in qd]
-        )
+        with self._vec_lock:
+            self._gello_w.writerow(
+                [f"{self.t():.4f}"] + list(pos)
+                + [None if v is None else f"{v:.5f}" for v in qd]
+                + [stamp_s]
+            )
 
     def write_gello_grip(self, gello_grip, grip_cmd, grip_pos) -> None:
         """gripper row: ``[t(), gello_grip, grip_cmd, grip_pos]`` (each ``.4f`` or None).
@@ -201,64 +286,190 @@ class RecordingSession:
         def f(v):
             return None if v is None else f"{v:.4f}"
 
-        self._grip_w.writerow(
-            [f"{self.t():.4f}", f(gello_grip), f(grip_cmd), f(grip_pos)]
-        )
+        with self._vec_lock:
+            self._grip_w.writerow(
+                [f"{self.t():.4f}", f(gello_grip), f(grip_cmd), f(grip_pos)]
+            )
 
     def write_cmd(self, cmd: list) -> None:
-        """command row: ``[t()] + cmd`` (cmd values appended raw, as the node does)."""
-        self._bump("command")
-        self._cmd_w.writerow([f"{self.t():.4f}"] + list(cmd))
+        """command row: ``[t()] + cmd`` (cmd values appended raw, as the node does).
 
-    def write_ur(self, pos: list, vel: list, eff: list) -> None:
-        """ur_joint_states row: ``[t()] + pos + vel + eff``.
+        NO ``stamp_s`` column: the source topic is ``std_msgs/Float64MultiArray``,
+        which has no header. ``t_rel_s`` (arrival) is the only timestamp that
+        exists for this table -- see the module docstring."""
+        self._bump("command")
+        with self._vec_lock:
+            self._cmd_w.writerow([f"{self.t():.4f}"] + list(cmd))
+
+    def write_ur(self, pos: list, vel: list, eff: list,
+                 stamp_s: float = _NAN) -> None:
+        """ur_joint_states row: ``[t()] + pos + vel + eff + [stamp_s]``.
 
         pos/vel formatted ``.6f``, eff formatted ``.4f``; any ``None`` passes through
-        as NaN -- verbatim to the node's ``_on_ur``."""
+        as NaN -- verbatim to the node's ``_on_ur``. ``stamp_s`` is the driver's own
+        ``header.stamp`` (float64 seconds, NaN if absent): the ONE column that makes
+        a queue-delayed row detectable offline."""
         self._bump("ur_joint_states")
-        self._ur_w.writerow(
-            [f"{self.t():.4f}"]
-            + [None if v is None else f"{v:.6f}" for v in pos]
-            + [None if v is None else f"{v:.6f}" for v in vel]
-            + [None if v is None else f"{v:.4f}" for v in eff]
-        )
+        with self._vec_lock:
+            self._ur_w.writerow(
+                [f"{self.t():.4f}"]
+                + [None if v is None else f"{v:.6f}" for v in pos]
+                + [None if v is None else f"{v:.6f}" for v in vel]
+                + [None if v is None else f"{v:.4f}" for v in eff]
+                + [stamp_s]
+            )
 
-    def write_wrench(self, wrench6: list) -> None:
-        """wrench row: ``[t()] + wrench6`` (6 floats fx,fy,fz,tx,ty,tz, each ``.5f``)."""
+    def write_wrench(self, wrench6: list, stamp_s: float = _NAN) -> None:
+        """wrench row: ``[t()] + wrench6 + [stamp_s]`` (6 floats fx,fy,fz,tx,ty,tz,
+        each ``.5f``; ``stamp_s`` = ``WrenchStamped.header.stamp``, NaN if absent)."""
         self._bump("wrench")
-        self._wrench_w.writerow(
-            [f"{self.t():.4f}"] + [f"{v:.5f}" for v in wrench6]
-        )
+        with self._vec_lock:
+            self._wrench_w.writerow(
+                [f"{self.t():.4f}"] + [f"{v:.5f}" for v in wrench6] + [stamp_s]
+            )
 
-    def write_tcp(self, tcp7: list) -> None:
-        """tcp_pose row: ``[t()] + tcp7`` (7 floats x,y,z,qx,qy,qz,qw, each ``.6f``)."""
+    def write_tcp(self, tcp7: list, stamp_s: float = _NAN) -> None:
+        """tcp_pose row: ``[t()] + tcp7 + [stamp_s]`` (7 floats x,y,z,qx,qy,qz,qw,
+        each ``.6f``; ``stamp_s`` = ``PoseStamped.header.stamp``, NaN if absent)."""
         self._bump("tcp_pose")
-        self._tcp_w.writerow(
-            [f"{self.t():.4f}"] + [f"{v:.6f}" for v in tcp7]
-        )
+        with self._vec_lock:
+            self._tcp_w.writerow(
+                [f"{self.t():.4f}"] + [f"{v:.6f}" for v in tcp7] + [stamp_s]
+            )
 
-    def write_cam1_frame(self, jpeg_bytes: bytes) -> int:
-        """Write one cam1 frame to cam1.mp4 (+ cam1_frames table). No warm-up logic.
+    def write_cam1_frame(self, jpeg_bytes: bytes, stamp_s: float = _NAN) -> int:
+        """Write one cam1 frame to cam1.mp4 (+ cam1_frames table), SYNCHRONOUSLY.
 
-        Any warm-up/skip decision is the caller's; this always attempts the write.
-        Calls the video writer, and only on success (idx >= 0) appends ``[t(), idx]``
-        to cam1_frames and bumps the ``"cam1_frames"`` counter. Returns the frame index
-        (or -1 on decode failure, in which case nothing is logged)."""
-        now = self.t()
-        idx = self._cam1_video.write_compressed(jpeg_bytes)
-        if idx >= 0:
-            self._bump("cam1_frames")
-            self._cam1_w.writerow([f"{now:.4f}", idx])
-        return idx
+        Unchanged contract: any warm-up/skip decision is the caller's, this always
+        attempts the write, and only on success (idx >= 0) appends
+        ``[t(), idx, stamp_s]`` to cam1_frames and bumps the ``"cam1_frames"``
+        counter. Returns the frame index (or -1 on decode failure, in which case
+        nothing is logged).
 
-    def write_cam2_frame(self, jpeg_bytes: bytes) -> int:
+        The ROS recorders do NOT call this -- they call :meth:`submit_cam_frame`,
+        which does the same work on the background writer thread. This stays for
+        offline callers, the self-test and the unit tests, where "decode failed"
+        must be answerable in the return value."""
+        return self._write_cam_frame(1, jpeg_bytes, self.t(), stamp_s)
+
+    def write_cam2_frame(self, jpeg_bytes: bytes, stamp_s: float = _NAN) -> int:
         """Same as :meth:`write_cam1_frame` for camera 2 / cam2.mp4 / cam2_frames."""
-        now = self.t()
-        idx = self._cam2_video.write_compressed(jpeg_bytes)
+        return self._write_cam_frame(2, jpeg_bytes, self.t(), stamp_s)
+
+    def _write_cam_frame(self, cam_idx: int, jpeg_bytes: bytes,
+                         t_rel_s: float, stamp_s: float) -> int:
+        """Shared body: decode+encode into camN.mp4, then log the row.
+
+        ``t_rel_s`` is passed IN, never taken here, because on the async path this
+        runs on the writer thread long after the frame arrived -- see the module
+        docstring. The MP4 encode deliberately holds no lock (one writer thread per
+        file); only the two-column table append takes ``_vec_lock``."""
+        video = self._cam1_video if cam_idx == 1 else self._cam2_video
+        table = self._cam1_w if cam_idx == 1 else self._cam2_w
+        idx = video.write_compressed(jpeg_bytes)
         if idx >= 0:
-            self._bump("cam2_frames")
-            self._cam2_w.writerow([f"{now:.4f}", idx])
+            self._bump(f"cam{cam_idx}_frames")
+            with self._vec_lock:
+                table.writerow([f"{t_rel_s:.4f}", idx, stamp_s])
         return idx
+
+    # ---- background frame writer (the spin thread never does frame I/O) -----
+    def _ensure_frame_writer(self) -> "FrameWriteQueue | None":
+        """Create the single background writer on first use (None once closed)."""
+        with self._frames_lock:
+            if self._closed:
+                return None
+            frames = self._frames
+            if frames is None:
+                frames = FrameWriteQueue(
+                    self._handle_frame_item,
+                    maxsize=self._frame_queue_maxsize,
+                    name="recording-frame-writer",
+                )
+                self._frames = frames
+            return frames
+
+    def _handle_frame_item(self, item) -> None:
+        """Writer-thread entry point for one ``(kind, payload, t_rel_s, stamp_s)``."""
+        kind, payload, t_rel_s, stamp_s = item
+        if kind == "cam1":
+            self._write_cam_frame(1, payload, t_rel_s, stamp_s)
+        elif kind == "cam2":
+            self._write_cam_frame(2, payload, t_rel_s, stamp_s)
+        elif kind == "cam1_depth":
+            self._write_depth_frame_at(1, payload, t_rel_s, stamp_s)
+        elif kind == "cam2_depth":
+            self._write_depth_frame_at(2, payload, t_rel_s, stamp_s)
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"unknown frame kind {kind!r}")
+
+    def _submit(self, kind: str, drop_key: str, payload: bytes,
+                stamp_s: float) -> bool:
+        """Capture ``t_rel_s`` NOW (arrival) and hand the frame to the writer.
+
+        Never blocks and never raises. Returns False when the frame was dropped
+        (queue full, or the session is closing); the drop is counted per stream
+        and surfaced by :meth:`dropped_frames`."""
+        t_rel_s = self.t()
+        frames = self._ensure_frame_writer()
+        if frames is None or not frames.submit((kind, payload, t_rel_s, stamp_s)):
+            with self._counts_lock:
+                self._dropped[drop_key] = self._dropped.get(drop_key, 0) + 1
+            return False
+        return True
+
+    def submit_cam_frame(self, cam_idx: int, jpeg_bytes: bytes,
+                         stamp_s: float = _NAN) -> bool:
+        """Queue one colour frame for the background writer. Non-blocking."""
+        kind = _KIND_COLOR[cam_idx]
+        return self._submit(kind, kind, jpeg_bytes, stamp_s)
+
+    def submit_cam_depth_frame(self, cam_idx: int, data: bytes,
+                               stamp_s: float = _NAN) -> bool:
+        """Queue one ``compressedDepth`` payload for the background writer.
+
+        A no-op returning False when depth is off -- and it does NOT count as a
+        drop, because nothing was ever going to be written."""
+        if self._depth is None:
+            return False
+        kind = _KIND_DEPTH[cam_idx]
+        return self._submit(kind, kind, data, stamp_s)
+
+    def latest_frame_index(self, cam_idx: int):
+        """Index of the most recent frame actually written to camN.mp4, or None
+        before the first one.
+
+        THE authoritative answer on the async path: ``submit_cam_frame`` returns
+        before anything is encoded, so a caller that needs "which MP4 frame is
+        current" (the ``synchronized`` table's cross-reference) must read it back
+        from the writer, which only advances on a successful decode. Reading a
+        plain int from another thread needs no lock."""
+        video = self._cam1_video if cam_idx == 1 else self._cam2_video
+        count = getattr(video, "frame_count", 0)
+        if not isinstance(count, int) or count <= 0:
+            return None
+        return count - 1
+
+    def dropped_frames(self) -> dict:
+        """``{"cam1": n, "cam2": n, "cam1_depth": n, "cam2_depth": n, "total": n}``.
+
+        Frames the writer queue refused because it was full (the machine could
+        not keep up) or because the session was closing. ZERO is the expected
+        value; anything else is a real, counted data loss and belongs in the
+        take's summary."""
+        lock = getattr(self, "_counts_lock", None)
+        if lock is None:
+            return {"cam1": 0, "cam2": 0, "cam1_depth": 0, "cam2_depth": 0,
+                    "total": 0}
+        with lock:
+            out = dict(self._dropped)
+        out["total"] = sum(out.values())
+        return out
+
+    def frame_queue_pending(self) -> int:
+        """Frames submitted but not yet written (0 in steady state)."""
+        frames = getattr(self, "_frames", None)
+        return 0 if frames is None else frames.pending
 
     # ---- depth (all no-ops returning -1 / None when record_depth is False) ---
     def _write_depth_frame(self, cam_idx: int, data: bytes, stamp_s: float) -> int:
@@ -269,9 +480,16 @@ class RecordingSession:
         the file and the counter untouched, exactly like :meth:`write_cam1_frame`."""
         if self._depth is None:
             return -1
+        return self._write_depth_frame_at(cam_idx, data, self.t(), stamp_s)
+
+    def _write_depth_frame_at(self, cam_idx: int, data: bytes,
+                              t_rel_s: float, stamp_s: float) -> int:
+        """Same, with ``t_rel_s`` passed in (the async path captured it on arrival)."""
+        if self._depth is None:
+            return -1
         cam = _DEPTH_CAM_NAMES[cam_idx]
-        now = self.t()
-        idx = self._depth.write_compressed_depth(cam, data, now, stamp_s)
+        with self._depth_lock:
+            idx = self._depth.write_compressed_depth(cam, data, t_rel_s, stamp_s)
         if idx >= 0:
             self._bump(f"{cam}_depth_frames")
         return idx
@@ -292,7 +510,8 @@ class RecordingSession:
         No-op when depth is off."""
         if self._depth is None:
             return None
-        self._depth.set_source(_DEPTH_CAM_NAMES[cam_idx], topic, aligned_to_color)
+        with self._depth_lock:
+            self._depth.set_source(_DEPTH_CAM_NAMES[cam_idx], topic, aligned_to_color)
         return None
 
     def set_depth_camera_info(self, cam_idx: int, **kw) -> None:
@@ -302,7 +521,8 @@ class RecordingSession:
         is off."""
         if self._depth is None:
             return None
-        self._depth.set_camera_info(_DEPTH_CAM_NAMES[cam_idx], **kw)
+        with self._depth_lock:
+            self._depth.set_camera_info(_DEPTH_CAM_NAMES[cam_idx], **kw)
         return None
 
     def set_depth_extrinsics(self, cam_idx: int, rotation, translation) -> None:
@@ -311,9 +531,10 @@ class RecordingSession:
         is off."""
         if self._depth is None:
             return None
-        self._depth.set_extrinsics_depth_to_color(
-            _DEPTH_CAM_NAMES[cam_idx], rotation, translation
-        )
+        with self._depth_lock:
+            self._depth.set_extrinsics_depth_to_color(
+                _DEPTH_CAM_NAMES[cam_idx], rotation, translation
+            )
         return None
 
     def write_sample(self, gello_q, gello_qd, gello_grip, cmd, ur_q, ur_qd, ur_eff,
@@ -340,31 +561,63 @@ class RecordingSession:
         row += [fmt(v, 5) for v in wrench]
         row += [fmt(v) for v in tcp]
         row += [cam1_frame_idx, cam2_frame_idx]
-        self._sync_w.writerow(row)
+        with self._vec_lock:
+            self._sync_w.writerow(row)
 
     # ---- flush + finalise ----------------------------------------------------
-    def flush(self) -> None:
+    def flush(self, drain: bool = False, drain_timeout: float = 1.0) -> None:
         """Flush the shared h5py.File (and ``depth.h5`` when depth is on) to disk.
         Video writers are not flushed here, matching the node's ``_flush`` which only
-        touches the HDF5 file(s)."""
-        self._h5.flush()
+        touches the HDF5 file(s).
+
+        ``drain`` is OFF by default and that is deliberate. The periodic flush timer
+        runs on the rclpy spin thread, and blocking it until a backlog of frames has
+        been encoded would re-create -- on the flush timer -- exactly the starvation
+        this whole change removes. Crash-resilience does not need an empty queue;
+        FINALISATION does, and :meth:`close` always drains. Pass ``drain=True`` from a
+        caller that owns its own thread (or from a test) to get an exact snapshot."""
+        if drain:
+            frames = getattr(self, "_frames", None)
+            if frames is not None:
+                frames.drain(drain_timeout)
+        with self._vec_lock:
+            self._h5.flush()
         if self._depth is not None:
-            self._depth.flush()
+            with self._depth_lock:
+                self._depth.flush()
 
     def close(self) -> dict:
         """Finalise the session and return ``{"duration_s", "message_counts"}``.
 
-        The snapshot is taken BEFORE any file handle is touched so its duration/counts
-        reflect the full session. Then both video writers are closed (idempotent), the
-        depth store (if any) is closed best-effort, and the HDF5 file is flushed +
-        closed. Safe to call even if construction partially failed or nothing was ever
-        written -- always returns a valid dict with ``duration_s >= 0`` and a
-        (possibly empty) counts dict. The dict SHAPE never changes; with depth on the
-        counts merely gain ``"cam1_depth_frames"`` / ``"cam2_depth_frames"``."""
+        ``duration_s`` is read first (it is the recording length, not the
+        finalisation length), then the background frame writer is DRAINED and joined
+        so every accepted frame is on disk, and only then are the counts snapshotted.
+        Both video writers are closed (idempotent), the depth store (if any) is
+        closed best-effort, and the HDF5 file is flushed + closed. Safe to call even
+        if construction partially failed or nothing was ever written -- always returns
+        a valid dict with ``duration_s >= 0`` and a (possibly empty) counts dict. The
+        dict SHAPE never changes; with depth on the counts merely gain
+        ``"cam1_depth_frames"`` / ``"cam2_depth_frames"``. Dropped frames are
+        deliberately NOT in here -- see :meth:`dropped_frames`."""
         try:
             duration_s = round(self.t(), 2)
         except Exception:  # noqa: BLE001 - t0 may be missing on partial construction
             duration_s = 0.0
+
+        # DRAIN FIRST, then snapshot the counts. The queue is emptied before any
+        # file handle is touched, so every frame that was accepted is on disk and
+        # counted: "N submitted == N written" is exact, and the MP4 frame count
+        # still equals the cam*_frames row count.
+        frames = getattr(self, "_frames", None)
+        if frames is not None:
+            try:
+                if not frames.close():
+                    print("[RecordingSession] WARNING: frame writer did not drain "
+                          "within the timeout; {} item(s) may be lost".format(
+                              frames.pending))
+            except Exception:  # noqa: BLE001 - best-effort on shutdown
+                pass
+
         snapshot = {
             "duration_s": duration_s,
             "message_counts": dict(getattr(self, "_counts", {}) or {}),
@@ -384,6 +637,28 @@ class RecordingSession:
                 depth.close()
             except Exception:  # noqa: BLE001 - best-effort on shutdown
                 pass
+
+        with getattr(self, "_frames_lock", threading.Lock()):
+            self._closed = True
+
+        # Make every table rectangular before the file is sealed. A signal can
+        # land inside writerow() -- Ctrl-C on the headless recorder is delivered
+        # to the very thread that is writing -- leaving the last row with values
+        # in some columns and not others. See Hdf5TableWriter.finalize.
+        for writer in (getattr(self, "_sync_w", None), getattr(self, "_gello_w", None),
+                       getattr(self, "_ur_w", None), getattr(self, "_cmd_w", None),
+                       getattr(self, "_grip_w", None), getattr(self, "_wrench_w", None),
+                       getattr(self, "_tcp_w", None), getattr(self, "_cam1_w", None),
+                       getattr(self, "_cam2_w", None)):
+            if writer is None:
+                continue
+            try:
+                dropped = writer.finalize()
+            except Exception:  # noqa: BLE001 - best-effort on shutdown
+                continue
+            if dropped:
+                print("[RecordingSession] NOTE: discarded {} half-written row(s) "
+                      "from a table (interrupted mid-writerow)".format(dropped))
 
         h5 = getattr(self, "_h5", None)
         if h5 is not None:
@@ -684,5 +959,45 @@ if __name__ == "__main__":
 
     again_d = dsess.close()  # idempotent with depth on, too
     assert again_d["message_counts"] == dres["message_counts"], again_d
+
+    # --- Header stamps + background writer (2026-09-14) -----------------------
+    stamp_dir = os.path.join(scratch, "session_selftest_stamps")
+    ssess = RecordingSession(stamp_dir, camera_fps=30.0)
+    # Stamped tables take a real epoch second; omitting it must give NaN.
+    ssess.write_ur([0.0] * _N, [0.0] * _N, [0.0] * _N, stamp_s=1.7e9)
+    ssess.write_ur([0.0] * _N, [0.0] * _N, [0.0] * _N)
+    ssess.write_tcp([0.0] * 7, stamp_s=1.7e9)
+    ssess.write_wrench([0.0] * 6, stamp_s=1.7e9)
+    ssess.write_gello([0.0] * _N, [None] * _N, stamp_s=1.7e9)
+    ssess.write_cmd([0.0] * _N)          # Float64MultiArray: no stamp column
+    # Async path: submitted, not written -- close() must drain it exactly.
+    n_async = 12
+    for i in range(n_async):
+        assert ssess.submit_cam_frame(1, make_jpeg(0, 20 + i * 5),
+                                      stamp_s=1.7e9 + 0.0333 * i) is True
+    assert ssess.dropped_frames()["total"] == 0
+    sres = ssess.close()
+    assert sres["message_counts"]["cam1_frames"] == n_async, sres
+
+    with h5py.File(os.path.join(stamp_dir, "vectors.h5"), "r") as f:
+        for table, tail in (
+            ("ur_joint_states", "eff6"), ("tcp_pose", "qw"),
+            ("wrench", "tz"), ("gello_joint_states", "qd6"),
+            ("cam1_frames", "frame_idx"), ("cam2_frames", "frame_idx"),
+        ):
+            cols = json.loads(f[table].attrs["columns"])
+            assert cols[-2:] == [tail, "stamp_s"], (table, cols)
+        for table in ("command", "gripper", "synchronized"):
+            cols = json.loads(f[table].attrs["columns"])
+            assert "stamp_s" not in cols, (table, cols)
+        assert abs(f["ur_joint_states"]["stamp_s"][0] - 1.7e9) < 1e-6
+        assert np.isnan(f["ur_joint_states"]["stamp_s"][1])
+        assert list(f["cam1_frames"]["frame_idx"][:]) == list(range(n_async))
+    cap = cv2.VideoCapture(os.path.join(stamp_dir, "cam1.mp4"))
+    read = 0
+    while cap.read()[0]:
+        read += 1
+    cap.release()
+    assert read == n_async, f"drain lost frames: {read} != {n_async}"
 
     print("SELF-TEST OK")

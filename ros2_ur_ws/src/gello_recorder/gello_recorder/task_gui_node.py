@@ -155,6 +155,11 @@ from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from gello_recorder.gello_gui_node import GelloRecorderGuiNode
+from gello_recorder.spin_health import (
+    QOS_DEPTH_GRIPPER,
+    QOS_DEPTH_ROBOT_STATE,
+    QOS_DEPTH_STATUS,
+)
 from gello_recorder.home_move import (
     FPC,
     GRIPPER_OPEN_VALUE,
@@ -928,18 +933,26 @@ class TaskRecorderGuiNode(GelloRecorderGuiNode):
         # time; the conversion to a fraction happens in the reader.
         self._speed_scale_pct: Optional[float] = None
         self._speed_scale_t: Optional[float] = None
+        # depth 5, not 20: /joint_states publishes at ~100 Hz, and this node
+        # stamps what it receives with time.monotonic() to decide whether the
+        # pose is FRESH. A deep queue would hand it a 0.2 s-old sample and let
+        # it call that fresh -- the same defect that back-dated the recorded
+        # rows (gello_recorder.spin_health). Latest-wins is what a liveness
+        # check wants.
         self.create_subscription(
-            JointState, JOINT_STATES_TOPIC, self._on_home_joint_states, 20
+            JointState, JOINT_STATES_TOPIC, self._on_home_joint_states,
+            QOS_DEPTH_ROBOT_STATE
         )
         self.create_subscription(
-            Float32, GRIPPER_POSITION_TOPIC, self._on_home_gripper_position, 20
+            Float32, GRIPPER_POSITION_TOPIC, self._on_home_gripper_position,
+            QOS_DEPTH_GRIPPER
         )
         # The broadcaster may simply not be loaded (some robot configs do not
         # spawn it) -- subscribing to a topic nobody publishes is free, and
         # latest_speed_scale() then reports None forever, which is exactly the
         # "unknown" case HomeMoveController already handles.
         self.create_subscription(
-            Float64, SPEED_SCALING_TOPIC, self._on_speed_scaling, 10
+            Float64, SPEED_SCALING_TOPIC, self._on_speed_scaling, QOS_DEPTH_STATUS
         )
 
         # --- GO HOME: control-path clients -------------------------------- #
@@ -1006,7 +1019,8 @@ class TaskRecorderGuiNode(GelloRecorderGuiNode):
         # speed-scaling subscription above), and its absence IS the recorded
         # answer: state_topic_seen=false.
         self.create_subscription(
-            String, GRIPPER_DISCRETE_STATE_TOPIC, self._on_grip_discrete_state, 10
+            String, GRIPPER_DISCRETE_STATE_TOPIC, self._on_grip_discrete_state,
+            QOS_DEPTH_STATUS
         )
         self._grip_param_client = self.create_client(
             GetParameters, GRIPPER_BRIDGE_PARAMETERS_SERVICE
@@ -1424,15 +1438,14 @@ class TaskRecorderGuiNode(GelloRecorderGuiNode):
     def _cam_frame_index(self, session, cam_idx: int) -> Optional[int]:
         """Index of the most recent frame written to this take's camN.mp4.
 
-        HOW, and why it is this way. RecordingSession.write_cam1_frame() returns
-        the index, but the base node's _on_cam discards it -- and _on_cam must
-        stay exactly as it is, because it is the single writer of camera frames
-        and other people depend on the recorder it belongs to. So the index is
-        read back out of the session instead of being intercepted: each
-        Mp4FrameWriter exposes a PUBLIC ``frame_count`` property (the number of
-        frames successfully written so far), so ``frame_count - 1`` is the index
-        of the latest one. Nothing about which frames are written, or when, is
-        touched; this is a pure read.
+        HOW, and why it is this way. The base node's _on_cam does not write the
+        frame at all any more -- since 2026-09-14 it SUBMITS it to
+        RecordingSession's background writer thread, which returns long before
+        the MP4 frame exists, so there is no index to intercept even in
+        principle. The index is therefore read back out of the session through
+        its public ``latest_frame_index(cam_idx)``, which reports what the MP4
+        writer has actually committed. Nothing about which frames are written,
+        or when, is touched; this is a pure read.
 
         Two properties fall out of reading the LIVE session rather than caching
         in the node, and both are wanted:
@@ -1451,24 +1464,21 @@ class TaskRecorderGuiNode(GelloRecorderGuiNode):
         Caller must hold _session_lock (the session must not be swapped or
         closed underneath this read).
         """
-        writer = getattr(
-            session, "_cam1_video" if cam_idx == 1 else "_cam2_video", None
-        )
-        count = getattr(writer, "frame_count", None)
-        if not isinstance(count, int):
+        reader = getattr(session, "latest_frame_index", None)
+        if not callable(reader):
             # RecordingSession changed shape under us. Loud, because silently
             # writing NaN here would cost every future take its video<->signal
             # cross-reference without anyone noticing.
             self.get_logger().error(
                 "cannot read cam{} frame index from RecordingSession "
-                "(frame_count missing); the synchronized table will have no "
-                "video cross-reference for this take".format(cam_idx),
+                "(latest_frame_index missing); the synchronized table will have "
+                "no video cross-reference for this take".format(cam_idx),
                 throttle_duration_sec=10.0,
             )
             return None
-        if count <= 0:
-            return None  # no frame yet this take -> NaN, as the headless node does
-        return count - 1
+        idx = reader(cam_idx)
+        # None before the first frame of the take -> NaN, as the headless node does.
+        return idx if isinstance(idx, int) else None
 
     def _on_sample(self) -> None:
         """Write ONE `synchronized` row -- but only while a take is recording.

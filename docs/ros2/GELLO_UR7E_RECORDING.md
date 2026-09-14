@@ -38,30 +38,135 @@ ros2_ur_ws/gello_logs/session_<YYYYmmdd_HHMMSS>/
 
 > `gello_logs/`는 `.gitignore` 처리되어 있습니다(데이터는 커밋 안 함, 코드만 커밋).
 
-### 깊이(depth) 녹화 — 2026-09-14부터 기본 ON
+### 깊이(depth) 녹화 — **기본 OFF (RGB만), `ENABLE_DEPTH=1` 로 켠다**
 
-카메라를 함께 띄우는 경로(`CAMS=true ./run_recorder.sh`, `gello_recorder_gui`,
-`task_recorder_gui`)는 이제 RealSense **depth 스트림도 기본으로 녹화**한다. 세션
-폴더에 `depth.h5`가 추가되고, 프레임마다 `compressedDepth` 페이로드(PNG, `16UC1`,
+```bash
+CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh                     # 헤드리스
+ENABLE_DEPTH=1 ros2 run gello_recorder gello_recorder_gui      # GUI
+ENABLE_DEPTH=1 ros2 run gello_recorder task_recorder_gui       # 태스크 GUI
+```
+
+기본 캡처는 **RGB만**이다. depth 는 세션마다 명시적으로 요청하는 opt-in 이고, 켜면
+세션 폴더에 `depth.h5` 가 추가되어 프레임마다 `compressedDepth` 페이로드(PNG, `16UC1`,
 단위 **mm**)가 한 행씩 저장된다. `t_rel_s`는 `vectors.h5`와 **같은 시간 원점**을 쓰므로
 관절/색상 프레임과 바로 정렬되고, 각 카메라의 depth 내부 파라미터(`camera_info`)와
 depth→color 외부 파라미터(`extrinsics/depth_to_color`)도 같이 저장된다. 색상 프레임을
 버리는 워밍업 구간에서는 depth 프레임도 **정확히 같은 기준으로** 버린다(별도 시계 없음).
 
-- 끄기: `ENABLE_DEPTH=0` (색상만, 이전과 동일한 카메라 인자).
+🔴 **왜 기본 OFF 인가 — 2026-09-14 하루의 기본 ON 이 54개 take 의 타임스탬프를 망가뜨렸다.**
+depth 녹화는 카메라당 30 Hz 구독 2개와 약 6 MB/s HDF5 쓰기를 **모든 로봇 토픽을 처리하는
+바로 그 단일 rclpy spin 스레드**에 얹는다. 그 결과 executor 라운드 주파수가 ~100 Hz →
+60–69 Hz 로 떨어졌고, 그보다 빨리 발행되는 토픽은 전부 가득 찬 큐에서 가장 오래된 샘플을
+받게 되어 **`ur_joint_states` +0.900 초, `tcp_pose`/`wrench` 약 +0.45 초** 낡은 채로
+기록됐다. 상세와 수정은 아래 「타임스탬프 아티팩트」 절. **결함은 고쳤지만 비용은 그대로**라
+depth 는 opt-in 으로 되돌렸다. 켜면 기동 시 한 줄이 찍힌다:
+
+```
+depth ON: ~6 MB/s disk, +2 subscriptions/cam, recorder CPU +~35 %; watch ros_lag_s
+```
+
 - 정렬(`ALIGN_DEPTH=1`, 기본 **0**): 카메라 노드 안에서 depth를 1280×720 색상 이미지에
   맞춰 재샘플링하고 `aligned_depth_to_color/*` 토픽을 녹화한다. **실측(2026-09-14) 노드
   CPU 9 % → 49 %, 색상·depth 모두 30 → ~25 Hz**라 기본에서 끈다. 저장된 내·외부 파라미터로
   오프라인에서 정렬하는 편이 싸다.
-- 실측 비용(자체 전원 Genesys USB3 허브, 2대 동시): 색상 30 Hz 유지, depth ~29 Hz,
-  프레임당 80–130 KB, 노드 CPU ~9 %, USB 오류 0. 이 값이 기본 ON의 근거다.
-  `launch_cameras.sh`(HIL 경로)는 depth를 읽는 소비자가 없으므로 **기본 0을 유지**한다.
+- 카메라 자체는 문제가 아니었다(자체 전원 Genesys USB3 허브, 2대 동시): 색상 30 Hz 유지,
+  depth ~29 Hz, 프레임당 80–130 KB, 노드 CPU ~9 %, USB 오류 0. 병목은 **레코더 쪽**이었다.
+  `launch_cameras.sh`(HIL 경로)는 원래부터 **기본 0**이다 — depth 를 읽는 소비자가 없다.
+- `metadata.json` / GUI 정지 요약에는 **항상** `record_depth` 가 적힌다. RGB-only take 도
+  "depth 가 꺼져 있었다"를 스스로 증언하므로, depth 파일이 없는 것과 구별된다.
 - 읽기:
 
 ```python
 from gello_recorder.depth_writer import read_depth_frame
 # 자세한 파일 레이아웃은 ros2_ur_ws/src/gello_recorder/README.md의 출력 구성 절 참조
 ```
+
+### 타임스탬프 아티팩트 (2026-09-14) — 로봇 행이 최대 0.9 초 낡게 기록됐다
+
+**증상.** `command` 가 `ur_joint_states` 를 0.9 초 앞서고, 같은 RTDE 패킷에서 나오는
+`tcp_pose` 와 `ur_joint_states` 가 0.495 초 어긋난다(물리적으로 불가능하다 — 둘은 같은
+controller_manager 사이클에 발행된다). 파형은 온전하고 잔차는 0.5 mm 수준의 **순수 지연**,
+NaN 0개, 파일 검증 전부 통과. **데이터 안에는 아무 표시도 없었다.**
+
+**원인.** 레코더의 모든 구독 콜백이 **단일 rclpy spin 스레드**에서 돌고, 각 행의 `t_rel_s`
+는 **콜백이 실행된 시각**이다(`RecordingSession.t()`, 헤더 스탬프는 저장하지 않았다).
+`SingleThreadedExecutor` 는 한 라운드에 구독당 메시지 하나를 처리하므로 구독의 서비스
+주파수 = 라운드 주파수이고, 그보다 빨리 발행되는 토픽은 KEEP_LAST 히스토리가 항상 가득 차
+**가장 오래된 샘플**을 받는다. 그 나이는 정확히 `QoS depth ÷ 발행 주파수` 다:
+
+| 토픽 | 당시 QoS depth | 발행 | 예상 = 실측 나이 |
+|---|---|---|---|
+| `/joint_states` | **100** | ~100 Hz | **0.900 s** |
+| `/tcp_pose_broadcaster/pose` | **50** | ~100 Hz | **~0.45 s** |
+| `/force_torque_sensor_broadcaster/wrench` | **50** | ~100 Hz | **~0.45 s** |
+| `/forward_position_controller/commands` | 50 | 250 Hz | 0.02–0.20 s |
+| 카메라 color/depth, GELLO, 그리퍼 (≤ 39 Hz) | 10 / 50 / 20 | 30–40 Hz | **0.022 s (신선)** |
+
+라운드 주파수를 ~100 Hz 에서 60–69 Hz 로 끌어내린 것이 `c694d2c` 의 **depth 녹화**다
+(카메라당 구독 2개 추가 + 약 5–6 MB/s HDF5 쓰기, 게다가 컬러 프레임은 프리뷰용으로 한 번,
+MP4 writer 가 또 한 번 디코드하고 있었다 — 실측 1280x720 JPEG 디코드 9.3 ms + MPEG-4
+인코드 6.9 ms, 카메라 2대 30 Hz 면 **초당 약 1.5 초어치의 일**). 임계값이 두 세션 사이에서
+정확히 문제의 토픽들을 가로질렀다: 7월 세션(depth 없음)은 아무것도 굶지 않아 세 토픽이
+98.9 Hz 로 기록됐다.
+
+**영향받는 릴리스:**
+
+| 릴리스 | 낡음 |
+|---|---|
+| `carrot_in_pot_raw` (2026-09-14, 54 take, EEF 모드) | `ur_joint_states` **+0.900 s** (54 take 전부 5 ms 그리드 최적 τ 동일), `tcp_pose` / `wrench` **≈ +0.45 s**. `command` · 카메라 · depth · GELLO · 그리퍼는 **신선** |
+| 2026-07-24 GUI take 2개 | 0.83 s / 0.42 s (같은 결함의 약한 형태 — GUI 레코더 설계 문제였고 depth 부하가 그것을 상수로 크게 만들었다) |
+| `cube_in_cup` / `banana_in_pot` (7월, joint 모드, depth 없음) | ≈ 0.05 s — 실질적으로 영향 없음 |
+
+⚠️ **raw take 는 다시 녹화할 필요가 없다.** 형상이 보존된 순수 지연이므로 테이블별 상수
+시프트로 완전히 복구된다. LeRobot 재변환은 `observation.state[0:6]`(ur_q)의 `t_rel_s` 를
+**−0.900 s** 시프트해 다시 만들었고, 그 사실은 `meta/source_takes.json` 의
+`ur_joint_states_lag_s` 에 적혀 있다. 🛑 **`grip_cmd` 같은 굶지 않은 채널에는 이 시프트를
+적용하면 안 된다** — 없던 0.9 초 오정렬을 새로 만든다.
+
+**수정** (전부 `ros2_ur_ws/src/gello_recorder/`, 새 모듈 `gello_recorder/spin_health.py` 에
+진단 전문이 들어 있다):
+
+1. **헤더 스탬프 저장.** stamped 메시지에서 온 모든 테이블에 마지막 컬럼 `stamp_s`
+   (float64 초, 없으면 NaN): `gello_joint_states` · `ur_joint_states` · `tcp_pose` ·
+   `wrench` · `cam1_frames` · `cam2_frames`. **기존 컬럼은 이름·순서 그대로**이고 뒤에
+   덧붙기만 하므로 예전 리더가 그대로 동작한다. `command`(Float64MultiArray)와
+   `gripper`(Float32 ×3)는 **메시지 타입에 헤더가 없어** 스탬프를 가질 수 없다 — 그래서
+   2번이 먼저였다.
+2. **고속 구독 큐 깊이 100/50 → 5.** 최악 나이가 100 Hz 에서 50 ms, 500 Hz 에서 10 ms 로
+   묶인다. 이 레코더는 도착한 것을 그대로 쓰므로 깊은 큐는 아무 이득이 없고 **"행이 빠짐"을
+   "행이 낡음"으로 바꿀 뿐**이다. 빠지는 편이 낫다 — 빠진 것은 보이고, 낡은 것은 안 보인다.
+3. **프레임 I/O 를 spin 스레드 밖으로.** 컬러 디코드+MP4 인코드와 depth PNG HDF5 append 를
+   백그라운드 writer 스레드 하나가 처리하고(`RecordingSession.submit_cam_frame` /
+   `submit_cam_depth_frame`), 콜백은 바이트만 넘긴다. **행의 `t_rel_s` 는 제출(도착) 시점에
+   찍어서 큐로 들려 보낸다** — 일을 옮기되 시각은 옮기지 않는다. `close()` 는 파일을
+   마무리하기 전에 큐를 비우므로 프레임 수가 정확히 맞고, 큐가 가득 차 버린 프레임은
+   `dropped_frames` 로 센다(정상값 0). GUI 프리뷰 디코드도 latest-wins 디코더 스레드로 뺐다.
+4. **굶음 경보 2겹.** 실시간으로 `ros_lag_s`(= ROS now − `/joint_states` 헤더 스탬프)를
+   GUI 상태줄에 상시 표시하고 0.15 s 초과 시 5초에 한 번 WARN. take 종료 시에는 네 native
+   테이블의 **기록** 주파수가 0.5 % 이내로 같아졌는데 90 Hz 미만이면
+   `native tables converged at X Hz — spin thread starved; robot rows may be stale` 를
+   WARN 으로 찍고 `metadata.json` / GUI 정지 요약에 `spin_starvation_suspected` ·
+   `ros_lag_s_max` · `native_rates_hz` · `dropped_frames` · `record_depth` 를 남긴다.
+
+**수정 후 실측** (2026-09-14, laptop3, 카메라 1대 + 합성 퍼블리셔 `/joint_states` 500 Hz ·
+tcp/wrench/commands 각 100 Hz, 28.5 s):
+
+| | RGB만 (기본) | `ENABLE_DEPTH=1` |
+|---|---|---|
+| 레코더 프로세스 CPU | 131.6 % | 135.0 % (카메라 1대분) |
+| 기록 주파수 `command`/`tcp_pose`/`wrench`/`ur_joint_states` | 94.6 / 94.5 / 94.5 / 184.0 Hz | 86.4 / 86.4 / 86.3 / 138.9 Hz |
+| `stamp_s` 나이 중앙값 ur / tcp / wrench | **9.3 / 8.0 / 7.2 ms** | **25.6 / 12.9 / 12.4 ms** |
+| 같은 값 최대 | 21.4 / 54.0 / 50.7 ms | 615.4 / 54.3 / 59.3 ms |
+| `ros_lag_s_max` | 0.021 s | 0.613 s |
+| `dropped_frames` | 0 | 0 |
+| `spin_starvation_suspected` | false | false |
+
+네 테이블의 기록 주파수가 **더 이상 수렴하지 않는다**는 것이 핵심 판정이다(굶었다면 넷이
+소수점까지 같아진다). `ur_joint_states` 나이는 **900 ms → 9.3 ms**(RGB) / 25.6 ms(depth).
+
+자세한 스키마·상태 필드·한계는
+[`ros2_ur_ws/src/gello_recorder/README.md`](../../ros2_ur_ws/src/gello_recorder/README.md)
+§5·5-1·5-2.
 
 ## `synchronized.csv` 열 (분석용 메인 파일)
 

@@ -26,6 +26,21 @@ Recipe
     same `nearest_idx` semantics used for cam2 RGB.
   - gello_* streams are intentionally ignored (not observable at inference).
 
+Timestamp correction (--ur-lag-s / --lag-json)
+----------------------------------------------
+The GUI recorder stamps every row at callback-execution time on a single rclpy
+spin thread that depth recording starved, so tables published faster than the
+service rate sat in their subscription queue and were stamped LATE by
+(QoS depth / publish rate). Measured on all 54 takes: `ur_joint_states` is
+tau = 0.895-0.900 s late; `command`, `gripper`, the cameras and depth are fresh
+(<= 0.022 s). ONLY `ur_joint_states` is corrected here: its row clock becomes
+`t_rel_s - tau` before the nearest-timestamp lookup, i.e. the master frame at
+time t reads the ur row stamped t + tau. grip_pos, action (command + grip_cmd),
+cam2 and both depth streams are UNCHANGED -- shifting them would invent a
+misalignment that is not there. The applied tau is recorded per episode in
+meta/source_takes.json ("ur_joint_states_lag_s") together with a top-level
+"timestamp_correction" block. tau = 0 reproduces the uncorrected v1 dataset.
+
 Side files written after ds.finalize() (so lerobot's own writer cannot clobber
 meta/): meta/depth_cameras.json (intrinsics/extrinsics/quantization) and
 meta/source_takes.json (episode_index -> take dir).
@@ -105,14 +120,46 @@ def ffill_bfill(v: np.ndarray) -> np.ndarray:
     return v
 
 
-def load_take_arrays(h5_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return (cam1_t, cam2_t, state[N,7], action[N,7]) on the cam1 timeline."""
+def load_lag_json(path: str) -> dict[str, float]:
+    """take dir name -> tau seconds, from a per-take lag JSON.
+
+    Accepted shapes: {"takes": {name: {"tau_q_s": ...}}} or a bare
+    {name: {"tau_q_s": ...}} / {name: <float>} map (non-take metadata keys whose
+    value is neither a dict with tau_q_s nor a number are ignored).
+    """
+    with open(path) as fh:
+        obj = json.load(fh)
+    if isinstance(obj, dict) and isinstance(obj.get("takes"), dict):
+        obj = obj["takes"]
+    if not isinstance(obj, dict):
+        raise SystemExit(f"[!] {path}: expected a JSON object of take -> tau")
+    out: dict[str, float] = {}
+    for k, v in obj.items():
+        if isinstance(v, dict) and "tau_q_s" in v:
+            out[str(k)] = float(v["tau_q_s"])
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[str(k)] = float(v)
+    if not out:
+        raise SystemExit(f"[!] {path}: no take entries with a tau_q_s field")
+    return out
+
+
+def load_take_arrays(
+    h5_path: str, ur_lag_s: float = 0.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return (cam1_t, cam2_t, state[N,7], action[N,7]) on the cam1 timeline.
+
+    `ur_lag_s` (tau) shifts ONLY the ur_joint_states row clock to t_rel_s - tau
+    before the nearest-timestamp lookup. With tau > 0 the first master frames can
+    query before the first (corrected) ur row; nearest_idx clamps to index 0, so
+    they take the earliest available row -- no exception, no extrapolation.
+    """
     with h5py.File(h5_path, "r") as f:
         cam1_t = f["cam1_frames"]["t_rel_s"][:]
         cam2_t = f["cam2_frames"]["t_rel_s"][:]
         n = len(cam1_t)
 
-        ur_t = f["ur_joint_states"]["t_rel_s"][:]
+        ur_t = f["ur_joint_states"]["t_rel_s"][:] - float(ur_lag_s)
         ur_j = nearest_idx(ur_t, cam1_t)
         state = np.zeros((n, 7), dtype=np.float32)
         for k in range(6):
@@ -309,6 +356,8 @@ def convert(
     image_writer_processes: int = 4,
     image_writer_threads: int = 2,
     exclude: Sequence[str] = (),
+    ur_lag_s: float = 0.0,
+    lag_json: str | None = None,
 ) -> None:
     from lerobot.configs import DepthEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -334,6 +383,24 @@ def convert(
         print(f"[!] no takes found under {data_root}", file=sys.stderr)
         sys.exit(1)
 
+    lag_map: dict[str, float] = {}
+    if lag_json:
+        lag_map = load_lag_json(lag_json)
+        known = {os.path.basename(t) for t in all_takes}
+        unknown = sorted(set(lag_map) - known)
+        if unknown:
+            print(f"[!] --lag-json has {len(unknown)} take names not in {data_root}: "
+                  f"{unknown[:5]}", file=sys.stderr)
+        missing_lag = [os.path.basename(t) for t in takes if os.path.basename(t) not in lag_map]
+        if missing_lag:
+            print(f"[!] --lag-json is missing {len(missing_lag)} converted takes "
+                  f"(they fall back to --ur-lag-s={ur_lag_s}): {missing_lag[:5]}", file=sys.stderr)
+    taus = {os.path.basename(t): float(lag_map.get(os.path.basename(t), ur_lag_s)) for t in takes}
+    uniq_tau = sorted(set(taus.values()))
+    print(f"[cfg] ur_joint_states lag correction: default {ur_lag_s} s"
+          + (f", per-take from {lag_json} -> {uniq_tau} s" if lag_json else "")
+          + "  (applied to ur_joint_states ONLY)", flush=True)
+
     depth_encoder = DepthEncoderConfig(**DEPTH_ENCODER_KW)
     print(f"[cfg] depth encoder: {depth_encoder}", flush=True)
     ds = LeRobotDataset.create(
@@ -356,7 +423,9 @@ def convert(
     for ti, tk in enumerate(takes):
         t0 = time.time()
         name = os.path.basename(tk)
-        cam1_t, cam2_t, state, action = load_take_arrays(os.path.join(tk, "vectors.h5"))
+        tau = taus[name]
+        cam1_t, cam2_t, state, action = load_take_arrays(
+            os.path.join(tk, "vectors.h5"), ur_lag_s=tau)
         n = len(cam1_t)
         if max_frames:
             n = min(n, max_frames)
@@ -406,7 +475,8 @@ def convert(
         depth.close()
 
         total_frames += n
-        source_takes.append({"episode_index": ti, "take_dir_name": name, "n_frames": n, "excluded": False})
+        source_takes.append({"episode_index": ti, "take_dir_name": name, "n_frames": n,
+                             "excluded": False, "ur_joint_states_lag_s": tau})
         print(
             f"[{ti + 1:2d}/{len(takes)}] {name:32s} frames={n:4d}  cam2_decoded={len(cam2_all):4d}  "
             f"depth_in_h5={n_depth['cam1']}/{n_depth['cam2']}  depth_matched={matched['cam1']}/{matched['cam2']}  "
@@ -434,6 +504,22 @@ def convert(
             {
                 "task": TASK,
                 "data_root": os.path.abspath(data_root),
+                "timestamp_correction": {
+                    "ur_joint_states_lag_s": (uniq_tau[0] if len(uniq_tau) == 1 else uniq_tau),
+                    "why": ("recorder spin-thread starvation; rows stamped at callback time "
+                            "were depth/rate late"),
+                    "tcp_pose/wrench": "not in this dataset",
+                    "applied_to": ["observation.state[0:6] (ur_joint_states q1..q6)"],
+                    "not_applied_to": ["observation.state[6] (grip_pos)", "action (command + grip_cmd)",
+                                       "observation.images.cam1", "observation.images.cam2",
+                                       "observation.images.cam1_depth", "observation.images.cam2_depth"],
+                    "convention": ("ur_joint_states row clock = t_rel_s - tau before the "
+                                   "nearest-timestamp lookup (master frame at t reads the ur row "
+                                   "stamped t + tau)"),
+                    "source": (os.path.abspath(lag_json) if lag_json else "--ur-lag-s"),
+                    "per_episode": {e["take_dir_name"]: e["ur_joint_states_lag_s"]
+                                    for e in source_takes},
+                },
                 "episodes": source_takes,
                 "excluded": [{"take_dir_name": os.path.basename(t), "excluded": True} for t in skipped],
             },
@@ -463,12 +549,19 @@ def main(argv: Iterable[str] | None = None) -> None:
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--exclude", action="append", default=[],
                     help="take folder name to skip (repeatable); errors if not found")
+    ap.add_argument("--ur-lag-s", type=float, default=0.9,
+                    help="seconds by which ur_joint_states rows are stamped late; its row clock "
+                         "becomes t_rel_s - tau. Applied to ur_joint_states ONLY. 0 = no correction")
+    ap.add_argument("--lag-json", default=None,
+                    help="per-take override for --ur-lag-s: JSON of take dir name -> "
+                         "{\"tau_q_s\": float} (or a bare float); wins over --ur-lag-s")
     args = ap.parse_args(list(argv) if argv is not None else None)
     convert(
         args.data, args.out, args.repo_id,
         limit=args.limit, max_frames=args.max_frames,
         image_writer_processes=args.procs, image_writer_threads=args.threads,
         exclude=tuple(args.exclude),
+        ur_lag_s=args.ur_lag_s, lag_json=args.lag_json,
     )
 
 

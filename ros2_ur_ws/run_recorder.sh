@@ -21,7 +21,8 @@
 # Usage:
 #     ./run_recorder.sh                 # signal logging only (vectors.h5)
 #     BAG=true ./run_recorder.sh        # ALSO capture a full `ros2 bag -a`
-#     CAMS=true ./run_recorder.sh       # ALSO launch both RealSense cameras (-> cam1.mp4/cam2.mp4 + depth.h5)
+#     CAMS=true ./run_recorder.sh       # ALSO launch both RealSense cameras (-> cam1.mp4/cam2.mp4)
+#     CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh   # ...and record depth.h5 too (costly, see below)
 #     RATE=200 ./run_recorder.sh        # synchronized-table sample rate (Hz)
 #
 # Camera env vars (only used when CAMS=true or CAMS=1):
@@ -30,12 +31,12 @@
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
-#     ENABLE_DEPTH   default 1 = stream AND record depth (-> depth.h5);
-#                    0|false -> color only. (2026-09-14: default flipped to ON --
-#                    the recorder now consumes depth, and 2x color+depth measured
-#                    stable on the self-powered Genesys hub: 30 Hz color, ~29 Hz
-#                    compressedDepth, ~9 % CPU/node. launch_cameras.sh (HIL) keeps
-#                    its own default of 0.)
+#     ENABLE_DEPTH   default 0 = RGB only. 1|true -> ALSO stream and record
+#                    depth (-> depth.h5), at ~6 MB/s disk, +2 subscriptions per
+#                    camera and ~+35 % recorder CPU. (Default ON for one day,
+#                    2026-09-14, then reverted: that load starved the recorder's
+#                    spin thread and back-dated every robot row by 0.9 s. Fixed,
+#                    but still costly -- so it is opt-in per session.)
 #     ALIGN_DEPTH    1|true -> align_depth.enable:=true (depth resampled onto the
 #                    1280x720 color image; the node then records the
 #                    aligned_depth_to_color topics). default 0: measured at ~49 %
@@ -102,16 +103,22 @@ if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
     # visually (D435 defaults to 640x480, D435IF to 1280x720 -- force both to
     # match). Override with COLOR_PROFILE=WxHxFPS if you ever need something else.
     COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
-    # Depth is ON by default (2026-09-14): the recorder node now subscribes to
-    # the compressedDepth streams and writes depth.h5 next to the MP4s. The
-    # earlier default-OFF was for the dying bus-powered dock (two D435s browned
-    # out and enumerated alternately, 2026-08-11); on the self-powered Genesys
-    # hub 2x color+depth measured stable (30 Hz color / ~29 Hz depth / ~9 % CPU
-    # per node). Opt out with ENABLE_DEPTH=0. ALIGN_DEPTH=1 additionally turns
-    # on in-node depth->color alignment -- opt-in only, it costs ~49 % CPU and
-    # ~25 Hz on both streams (measured); the aligned element is emitted ONLY
-    # when depth is on (same rule as gello_recorder_gui._realsense_argv).
-    ENABLE_DEPTH="${ENABLE_DEPTH:-1}"
+    # Depth is OPT-IN and OFF by default: RGB only unless ENABLE_DEPTH=1.
+    # It was on by default for one day (2026-09-14) and that day cost a 54-take
+    # corpus its timestamps -- two extra 30 Hz subscriptions per camera plus a
+    # ~6 MB/s HDF5 write on the recorder's single rclpy spin thread dropped its
+    # round rate to 60-69 Hz, and every faster topic was then read out of a full
+    # queue (ur_joint_states 0.900 s late, tcp_pose/wrench ~0.45 s). That defect
+    # is fixed (header stamps + depth-5 queues + a background frame writer +
+    # a starvation watchdog, see gello_recorder/spin_health.py) but the COST is
+    # not, so depth is now something a session asks for on purpose.
+    # The cameras were never the problem: on the self-powered Genesys hub
+    # 2x color+depth measured stable (30 Hz color / ~29 Hz depth / ~9 % CPU per
+    # node). ALIGN_DEPTH=1 additionally turns on in-node depth->color alignment
+    # -- opt-in only, it costs ~49 % CPU and ~25 Hz on both streams (measured);
+    # the aligned element is emitted ONLY when depth is on (same rule as
+    # gello_recorder_gui._realsense_argv).
+    ENABLE_DEPTH="${ENABLE_DEPTH:-0}"
     ALIGN_DEPTH="${ALIGN_DEPTH:-0}"
     case "${ENABLE_DEPTH,,}" in 1|true|yes|on) DEPTH_ON=true; DEPTH_ARG="enable_depth:=true" ;; *) DEPTH_ON=false; DEPTH_ARG="enable_depth:=false" ;; esac
     case "${ALIGN_DEPTH,,}" in 1|true|yes|on) ALIGN_ON=true ;; *) ALIGN_ON=false ;; esac
