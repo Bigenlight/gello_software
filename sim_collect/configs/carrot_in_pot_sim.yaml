@@ -186,3 +186,66 @@ gripper:
   close_at: 0.7               # discrete latch: >= close_at -> CLOSED
 
 init_from_leader: true        # startup: read GELLO once and teleport the arm there
+
+eval:
+  # Closed-loop success-rate evaluation (sim_collect/eval/DESIGN.md §2.1). The harness
+  # applies the REAL deploy client's clamps (policy_leader_node._tick_execute, in this
+  # order): (1) per-joint envelope joint_limits_lo/hi, (2) |target - live_q| <= max_dev_rad,
+  # (3) grip clip 0..1 -> ctrl*255; then the unmodified 250 Hz bridge upsampler (`bridge`).
+  #
+  # start_pose / max_dev_rad / the COMMENTED real-data envelope below are copied VERBATIM from
+  #   /home/laptop3/gello_software_humble/ros2_ur_ws/src/gello_policy/config/carrot_eef_limits.json
+  #   (generated 2026-09-14T22:49:56+09:00 by scripts/dataset/make_carrot_eef_limits.py from
+  #   /home/laptop3/youngwoong_ws/Put_carrot_in_pot, 54 takes / 18557 frames, git a525f0f-dirty):
+  #   1.2x-expanded envelope of the OBSERVED real joints on the -pi shoulder_pan branch.
+  #   max_dev_rad 0.5 = the deploy yaml default (act_deploy.yaml policy_leader_node.max_dev_rad).
+  # start_pose is the REAL dataset's de-staled frame-0 pose, kept here for reference / the
+  # obs re-branching only; the SIM episode starts at robot.home_joints (what the sim demos
+  # started from), which lies inside both envelopes.
+  start_pose: [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
+  start_grip_pos: 0.0118
+  max_dev_rad: 0.5
+  # ENVELOPE (clamp 1). DEFAULT = derived from the SIM demos with the real rule (block below).
+  # The real-data envelope is NOT the default because the sim scene's pot sits farther right
+  # than the real TCP workspace: the 22 sim demos leave it on 24 % of their command steps
+  # (J1 down to -4.05 < -3.805, elbow up to 2.61 > 2.144, J5 < -1.93), and replaying them
+  # through the harness with it scored 16/22 vs 19/22 without (2026-09-15). A sim-trained
+  # policy would be clipped near the pot for a harness reason. To evaluate against the REAL
+  # envelope instead, swap in these two lines (verbatim carrot_eef_limits.json values):
+  #   joint_limits_lo: [-3.8049, -1.8055, 1.2649, -2.6913, -1.9309, -4.6440]
+  #   joint_limits_hi: [-2.5787, -0.8823, 2.1442, -1.4379, -1.2014, -1.8222]
+  # Re-derive after recording new takes: .venv/bin/python -m sim_collect.eval.derive_limits ros2_ur_ws/gello_logs/sim
+  # --- joint envelope derived by sim_collect/eval/derive_limits.py (2026-09-15T03:13:12, git 2862b27) ---
+  # source: ros2_ur_ws/gello_logs/sim (22 takes, 44660 ur_joint_states rows); rule = the real
+  # carrot_eef_limits.json rule: 1.2x symmetric about the centre of the OBSERVED joints, quantised outward 0.0001.
+  # joint_raw_min: [-4.0391, -2.0368, 1.4208, -2.8826, -2.0592, -4.0385]
+  # joint_raw_max: [-2.8625, -1.0832, 2.6115, -1.3501, -1.3709, -2.6656]
+  # recorded `command` min/max (excluded from the envelope, as in the real rule; inside it):
+  #   [-4.0538, -2.0504, 1.4157, -2.9262, -2.0771, -4.0435] / [-2.8535, -1.0596, 2.6139, -1.3392, -1.3681, -2.6561]
+  joint_limits_lo: [-4.1568, -2.1322, 1.3017, -3.0359, -2.1281, -4.1758]
+  joint_limits_hi: [-2.7448, -0.9878, 2.7306, -1.1968, -1.3020, -2.5283]
+  # sim start pose (ur_joint_states row 0, mean / std / max_dev over takes) — reference only:
+  #   [-3.2715, -1.5458, 1.6424, -1.5687, -1.6081, -3.1064] / [0.0781, 0.0431, 0.0715, 0.1071, 0.0157, 0.0395] / [0.3341, 0.1397, 0.3033, 0.4632, 0.0475, 0.1437]
+  # 250 Hz bridge stage for POLICY deploys — the gello_ur_bridge values of
+  # ros2_ur_ws/src/gello_policy/config/act_deploy.yaml (diffusion/fm identical): One-Euro
+  # opened up vs teleop (3.0/4.0 instead of 1.0/2.0), safety values unchanged.
+  # deadband_rad only acts on the EMA path (filter_type ema); it is a no-op under one_euro.
+  bridge:
+    filter_type: one_euro
+    one_euro_min_cutoff: 3.0
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    max_step_rad: 0.0025        # 0.625 rad/s sustained @ 250 Hz
+    deadband_rad: 0.004
+    soft_start_s: 0.7           # slew ramps 15 % -> 100 % of max_step_rad after every (re)seed
+    publish_rate_hz: 250.0
+  policy_hz: 30.0               # one ACT per 1/30 s (the leader node's publish_rate_hz)
+  max_steps: 600                # 20 s @ 30 Hz (no episode limit exists upstream; the harness adds one)
+  dwell_s: 1.0                  # success latch: TaskEvaluator must hold continuously this long
+  settle_s: 0.5                 # physics fast-forward after reset (same as layout.settle_s)
+  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  # Failure detection (episode ends immediately, outcome "failure"):
+  object_bounds_xy_m: 1.5       # any object farther than this from the base axis / below
+  object_min_z_m: -0.05         #   this height has left the workspace (fell / was flung)
+  jpeg_quality: 92              # observation JPEGs, like capture.py

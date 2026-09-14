@@ -32,8 +32,10 @@ from sim_collect import ipc
 from sim_collect.controller import TeleopController, load_bridge_params
 from sim_collect.gripper import GripperMapper, grip_pos_from_driver
 from sim_collect.leader import LeaderSample, make_leader, resolve_leader_config
-from sim_collect.scene import REPO_ROOT, SceneConfig, build_scene, sample_layout, yaw_quat_wxyz
-from sim_collect.task import TaskConfig, TaskEvaluator, set_free_body_pose
+from sim_collect.scene import (REPO_ROOT, SceneConfig, build_scene, layout_conflicts, place_objects_safely,
+                               robot_body_ids, robot_contacts, sample_layout, tcp_over_objects)
+from sim_collect.scene import apply_layout as scene_apply_layout
+from sim_collect.task import TaskConfig, TaskEvaluator
 from ur_gello_bringup import ur_kin
 
 SIM_COLLECT_VERSION = 1
@@ -114,8 +116,7 @@ class SimMain:
         self.task_result = (False, "not evaluated")
         self.T_tool_R = self.controller.T_tool_R
         # robot = every body between world and the first object attachment frame
-        first_obj = min(self.obj_frame_ids.values()) if self.obj_frame_ids else m.nbody
-        self.robot_bodies = set(range(1, first_obj))
+        self.robot_bodies = robot_body_ids(m, self.meta)
         self.startup_note = ""
         self.last_reset_note = ""
 
@@ -153,10 +154,7 @@ class SimMain:
         self.controller.reseed()
 
     def _apply_layout(self, layout: Dict[str, Any]) -> None:
-        for name, o in self.meta["objects"].items():
-            lay = layout[name]
-            set_free_body_pose(self.model, self.data, o["frame_body"], lay["pos"], yaw_quat_wxyz(float(lay["yaw"])))
-        mujoco.mj_forward(self.model, self.data)
+        scene_apply_layout(self.model, self.data, self.meta, layout)
 
     def _settle(self, seconds: float) -> None:
         """Fast-forward physics with the current ctrl held (not real time)."""
@@ -172,54 +170,28 @@ class SimMain:
         return np.concatenate([d.sensordata[self.force_adr:self.force_adr + 3],
                                d.sensordata[self.torque_adr:self.torque_adr + 3]]).astype(float)
 
+    # The placement helpers live in scene.py (shared with sim_collect/eval); these
+    # wrappers keep SimMain's private API (tests call `_robot_contacts`).
     def _robot_contacts(self) -> List[str]:
         """Robot<->(floor|object) contacts in the CURRENT kinematic state (call after mj_forward)."""
-        m, d = self.model, self.data
-        out: List[str] = []
-        for i in range(d.ncon):
-            c = d.contact[i]
-            b1, b2 = int(m.geom_bodyid[c.geom1]), int(m.geom_bodyid[c.geom2])
-            r1, r2 = b1 in self.robot_bodies, b2 in self.robot_bodies
-            if r1 != r2:
-                rb, ob = (b1, b2) if r1 else (b2, b1)
-                out.append(f"{mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, rb)}<->"
-                           f"{mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, ob) or 'world/floor'}")
-        return out
+        return robot_contacts(self.model, self.data, self.robot_bodies)
 
     def _tcp_over_objects(self, layout: Dict[str, Any]) -> List[str]:
         """Objects whose footprint (+3 cm) is under a LOW TCP (z < 0.25 m)."""
-        T = ur_kin.fk(np.asarray(self.data.qpos[:6], dtype=float)) @ self.T_tool_R
-        p = T[:3, 3]
-        if p[2] >= 0.25:
-            return []
-        hits = []
-        for name, o in self.meta["objects"].items():
-            xy = np.asarray(layout[name]["pos"][:2], dtype=float)
-            if np.linalg.norm(p[:2] - xy) < float(o.get("radius_m", 0.05)) + 0.03:
-                hits.append(name)
-        return hits
+        return tcp_over_objects(self.data, self.meta, layout, self.T_tool_R)
 
     def _layout_conflicts(self, layout: Dict[str, Any]) -> List[str]:
-        self._apply_layout(layout)  # includes mj_forward -> collision detection
-        return self._robot_contacts() + [f"tcp_over:{n}" for n in self._tcp_over_objects(layout)]
+        return layout_conflicts(self.model, self.data, self.meta, layout, self.robot_bodies, self.T_tool_R)
 
     def _place_objects_safely(self, seed: int) -> Dict[str, Any]:
         """Sample layouts for `seed` until none touches the arm; else send the arm home."""
-        max_tries = int(self.cfg.layout.get("max_tries", 200))
-        layout = None
-        for attempt in range(max_tries):
-            layout = sample_layout(self.cfg, seed, attempt)
-            conflicts = self._layout_conflicts(layout)
-            if not conflicts:
-                self.last_reset_note = f"layout attempt {attempt}" if attempt else ""
-                return layout
-        # every layout collided with the arm where it stands -> move the arm instead
-        self._teleport_arm(self.cfg.home_joints, open_gripper=True)
-        layout = sample_layout(self.cfg, seed, 0)
-        conflicts = self._layout_conflicts(layout)
-        self.last_reset_note = (f"all {max_tries} layouts collided with the arm at the leader pose; "
-                                f"arm teleported to home_joints" + (f" (still: {conflicts})" if conflicts else ""))
-        print("[sim_main] reset_scene: " + self.last_reset_note)
+        layout, note, fell_back = place_objects_safely(
+            self.cfg, self.model, self.data, self.meta, seed, robot_bodies=self.robot_bodies,
+            T_tool_R=self.T_tool_R, teleport_home=lambda: self._teleport_arm(self.cfg.home_joints, open_gripper=True),
+            sampler=sample_layout)  # module attribute, looked up at call time (tests monkeypatch it)
+        self.last_reset_note = note
+        if fell_back:
+            print("[sim_main] reset_scene: " + self.last_reset_note)
         return layout
 
     def _leader_pose_nearest(self, ref: np.ndarray) -> Optional[np.ndarray]:

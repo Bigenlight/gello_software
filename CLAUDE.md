@@ -505,6 +505,7 @@ canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
 | 환경(로봇 위치·테이블·작업공간·카메라·물체)이 바뀐 뒤 **시뮬 리허설** / **GELLO 개체 확인** | [`docs/testing/11_SIM_REHEARSAL_KO.md`](docs/testing/11_SIM_REHEARSAL_KO.md) — `ros2_ur_ws/run_ur7e_gello_mock.sh`(실기 런처를 fake 하드웨어 + `127.0.0.1`로, 덮어쓰기 거부) + `scripts/gello_probe.py`(읽기 전용 ping/read, 토크 0, 포트 점유 시 exit 3). 📌 2026-09-14 0~2단계 PASS. 시뮬이 **못** 보는 것(속도 한계·protective stop·그리퍼·테이블 높이·`r_align_rpy`)과 실기 전 측정표는 그 문서 §0·§3 |
 | **시뮬레이션에서 GELLO로 데이터 수집** (실기 레코더와 같은 형식의 take 녹화) | [`sim_collect/README.md`](sim_collect/README.md) — `./sim_collect/run_sim_collect.sh` 한 줄. MuJoCo UR7e + EEF 델타 제어 + cam1/cam2 + 조작자 GUI. 설계 계약은 [`sim_collect/DESIGN.md`](sim_collect/DESIGN.md). ⚠️ 플레이그라운드(`experiments/launch_yaml.py`)와 **GELLO 포트를 공유하므로 동시 실행 금지**. 🔴 실제 GELLO 텔레옵·파지는 **조작자 미검증** |
+| **시뮬에서 학습된 정책의 성공률(SR) 측정** (체크포인트 A vs B 비교) | [`sim_collect/eval/README.md`](sim_collect/eval/README.md) — 시드 20개 닫힌 루프, 실기와 **같은 ZMQ 프로토콜**로 act/diffusion/fm 서버 호출. `eval/serve_policy.sh`(로컬 CPU 또는 kanu GPU + 터널, PID 파일로만 정지) → `run_eval` → `eval/report.py`(SR·Wilson 95 % CI·McNemar). 설계는 [`sim_collect/eval/DESIGN.md`](sim_collect/eval/DESIGN.md). 🟡 **구현 진행 중이고 숫자는 아직 없다**(README의 `TODO(numbers)`). ⚠️ 20 시드 CI는 폭 ~0.4라 겹치면 "구별 못 했다"가 정답이고, 시뮬-실기 시각 격차 때문에 **절대 SR보다 상대 비교가 정직하다** |
 | 처음부터 환경 세팅 / 세션 전 프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
 | 그리퍼만 단독으로 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
 | 카메라가 안 뜰 때 | [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md) · [`docs/testing/06_SENSORS.md`](docs/testing/06_SENSORS.md) |
@@ -618,6 +619,7 @@ sim_collect/                       **시뮬 데이터 수집(다른 스택 — H
                                    텔레옵해 실기 레코더 형식 take를 녹화. run_sim_collect.sh가
                                    sim_main(물리+리더+제어) / capture(카메라+녹화) / gui 3프로세스를 띄운다
                                    → sim_collect/README.md · DESIGN.md
+sim_collect/eval/                  **시뮬 정책 SR 평가.** run_eval + serve_policy.sh(서버·터널) + report.py → eval/README.md
 scripts/
   gello_probe.py                   GELLO 개체 확인 — 읽기 전용(ping/read만, 토크 0), 포트 점유 시 exit 3,
                                    --reference(기준 자세 대조) / --watch(관절별 방향) → 02 §8 · 11 0단계

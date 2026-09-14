@@ -550,3 +550,94 @@ def build_scene(cfg: SceneConfig, layout: Optional[Dict[str, Dict[str, Any]]] = 
     xml = root.to_xml_string()
     assets = dict(root.get_assets())
     return BuiltScene(xml=xml, assets=assets, meta=meta)
+
+
+# --------------------------------------------------------------------------- #
+# Placing a layout into a LIVE MjData (shared by sim_main.SimMain and eval.world)
+# --------------------------------------------------------------------------- #
+# These were SimMain's private `_apply_layout / _robot_contacts / _tcp_over_objects /
+# _layout_conflicts / _place_objects_safely` (2026-09-15 refactor for sim_collect/eval,
+# behaviour unchanged). They need a compiled model, so `mujoco` / `ur_kin` are imported
+# lazily — importing this module stays as light as before.
+def apply_layout(model, data, meta: Dict[str, Any], layout: Dict[str, Any]) -> None:
+    """Teleport every scene object to `layout[name]` and run mj_forward.
+
+    `layout[name]` is `{"pos": [x, y, z], "yaw": rad}` (sample_layout) or, for a
+    recorded initial state, `{"pos": [...], "quat_wxyz": [w, x, y, z]}`."""
+    import mujoco
+    from sim_collect.task import set_free_body_pose
+    for name, o in meta["objects"].items():
+        lay = layout[name]
+        quat = (np.asarray(lay["quat_wxyz"], dtype=float) if lay.get("quat_wxyz") is not None
+                else yaw_quat_wxyz(float(lay.get("yaw", 0.0))))
+        set_free_body_pose(model, data, o["frame_body"], lay["pos"], quat)
+    mujoco.mj_forward(model, data)
+
+
+def robot_body_ids(model, meta: Dict[str, Any]) -> set:
+    """Every body between world and the first object attachment frame (arm + gripper)."""
+    import mujoco
+    ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, o["frame_body"]) for o in meta["objects"].values()]
+    first_obj = min(ids) if ids else int(model.nbody)
+    return set(range(1, first_obj))
+
+
+def robot_contacts(model, data, robot_bodies: set) -> List[str]:
+    """Robot<->(floor|object) contacts in the CURRENT kinematic state (call after mj_forward)."""
+    import mujoco
+    out: List[str] = []
+    for i in range(data.ncon):
+        c = data.contact[i]
+        b1, b2 = int(model.geom_bodyid[c.geom1]), int(model.geom_bodyid[c.geom2])
+        r1, r2 = b1 in robot_bodies, b2 in robot_bodies
+        if r1 != r2:
+            rb, ob = (b1, b2) if r1 else (b2, b1)
+            out.append(f"{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, rb)}<->"
+                       f"{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, ob) or 'world/floor'}")
+    return out
+
+
+def tcp_over_objects(data, meta: Dict[str, Any], layout: Dict[str, Any], T_tool_R: np.ndarray) -> List[str]:
+    """Objects whose footprint (+3 cm) is under a LOW TCP (z < 0.25 m)."""
+    from ur_gello_bringup import ur_kin
+    T = ur_kin.fk(np.asarray(data.qpos[:6], dtype=float)) @ T_tool_R
+    p = T[:3, 3]
+    if p[2] >= 0.25:
+        return []
+    hits = []
+    for name, o in meta["objects"].items():
+        xy = np.asarray(layout[name]["pos"][:2], dtype=float)
+        if np.linalg.norm(p[:2] - xy) < float(o.get("radius_m", 0.05)) + 0.03:
+            hits.append(name)
+    return hits
+
+
+def layout_conflicts(model, data, meta: Dict[str, Any], layout: Dict[str, Any], robot_bodies: set,
+                     T_tool_R: np.ndarray) -> List[str]:
+    """Apply `layout` (mj_forward -> collision detection) and list arm conflicts."""
+    apply_layout(model, data, meta, layout)
+    return robot_contacts(model, data, robot_bodies) + [f"tcp_over:{n}" for n in tcp_over_objects(data, meta, layout, T_tool_R)]
+
+
+def place_objects_safely(cfg: SceneConfig, model, data, meta: Dict[str, Any], seed: int, *,
+                         robot_bodies: set, T_tool_R: np.ndarray, teleport_home,
+                         sampler=None) -> Tuple[Dict[str, Any], str, bool]:
+    """Sample layouts for `seed` (attempt 0, 1, ...) until none touches the arm where
+    it stands; if all `layout.max_tries` collide, call `teleport_home()` (the caller's
+    arm teleport) and place attempt 0. Returns (layout, note, fell_back_to_home).
+    `sampler` defaults to `sample_layout` (sim_main passes its own module attribute)."""
+    sampler = sample_layout if sampler is None else sampler
+    max_tries = int(cfg.layout.get("max_tries", 200))
+    layout = None
+    for attempt in range(max_tries):
+        layout = sampler(cfg, seed, attempt)
+        conflicts = layout_conflicts(model, data, meta, layout, robot_bodies, T_tool_R)
+        if not conflicts:
+            return layout, (f"layout attempt {attempt}" if attempt else ""), False
+    # every layout collided with the arm where it stands -> move the arm instead
+    teleport_home()
+    layout = sampler(cfg, seed, 0)
+    conflicts = layout_conflicts(model, data, meta, layout, robot_bodies, T_tool_R)
+    note = (f"all {max_tries} layouts collided with the arm at the leader pose; "
+            f"arm teleported to home_joints" + (f" (still: {conflicts})" if conflicts else ""))
+    return layout, note, True

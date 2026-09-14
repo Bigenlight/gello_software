@@ -317,7 +317,7 @@ def test_consumer_convert_carrot_to_lerobot_loader_and_depth(take):
     # The module imports only cv2/h5py/numpy at import time (lerobot is used inside main).
     conv = _load_script("convert_carrot_to_lerobot")
     h5_path = os.path.join(take["dir"], "vectors.h5")
-    cam1_t, cam2_t, state, action = conv.load_take_arrays(h5_path)
+    cam1_t, cam2_t, state, action, *_n_drop = conv.load_take_arrays(h5_path)   # 5th value (n_dropped) added 2026-09-15
     n = take["n_frames"]
     assert len(cam1_t) == len(cam2_t) == n
     assert state.shape == (n, 7) and action.shape == (n, 7)
