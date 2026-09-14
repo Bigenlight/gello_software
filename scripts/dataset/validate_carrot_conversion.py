@@ -105,6 +105,22 @@ truncated test dataset can be validated end to end. NEVER pass either when
 validating the real release: they weaken checks 2, 3, 6, 9, 10, 12 and 13 to the
 truncated prefix, and the printed header/JSON record that they were used.
 
+SIM MODE (`--sim`)
+------------------
+Validates a dataset built by `convert_carrot_to_lerobot_sim.py` from sim_collect takes
+(MuJoCo UR7e, no depth). The joint/RGB checks 0-7, 12, 14, 16 run unchanged; the
+depth checks 8, 9, 10, 11, 13 are SKIPPED (there is no depth.h5 and no depth feature),
+`depth.h5` is not a required raw file, and check 15 uses a sim gate
+(SIM_STATE_ACTION_MAX_RAD: the MuJoCo position actuators trail their command by a
+visible, physical lag that no timestamp shift could remove) and drops its "tau = 0 is
+worse" comparison whenever the dataset was built at tau = 0 (sim rows are
+tick-synchronous, so tau = 0 IS the corrected value and the comparison is vacuous).
+Check 17 is added: the master clock is an exact 1/30 s grid whose mp4 frame count
+equals its row count (the retimed-take contract), `sim_meta.problems` is empty and
+`sim_meta.retimed` present for every take, `observation.sim.object_poses` re-derives
+bit-exactly from `sim_object_poses` by the same nearest-timestamp rule and is finite,
+and `meta/source_takes.json` carries the sim provenance per episode.
+
 Exit code 0 = all hard checks passed, 1 = at least one FAIL, 2 = could not run.
 """
 
@@ -151,6 +167,14 @@ EXPECTED_FEATURES = {
 
 RGB_KEYS = ["observation.images.cam1", "observation.images.cam2"]
 DEPTH_KEYS = ["observation.images.cam1_depth", "observation.images.cam2_depth"]
+
+# --sim: the optional ground-truth feature written by convert_carrot_to_lerobot_sim.py
+# (sim_object_poses columns, nearest-timestamp onto the cam1 master clock).
+SIM_POSE_KEY = "observation.sim.object_poses"
+SIM_POSE_NAMES = [f"{o}_{f}" for o in ("carrot", "pot")
+                  for f in ("x", "y", "z", "qx", "qy", "qz", "qw")]
+SIM_RAW_FILES = ("vectors.h5", "cam1.mp4", "cam2.mp4")
+REAL_RAW_FILES = SIM_RAW_FILES + ("depth.h5",)
 # LeRobot depth feature key  ->  depth.h5 group name
 DEPTH_KEY_TO_CAM = {
     "observation.images.cam1_depth": "cam1",
@@ -214,6 +238,15 @@ STALE_TAIL_MAX_REPEATS = 3
 
 STATE_ACTION_MAX_RAD = 0.02
 STATE_ACTION_SKIP_HEAD_S = 1.6
+# --sim gate for check 15. MuJoCo position actuators (menagerie UR5e gains, gravity
+# compensated) trail a moving command by a real, physical lag: measured over the 22
+# retimed takes of 2026-09-15 the per-episode mean is 0.014-0.026 rad, above the real
+# rig's 0.02 gate in 9 takes. It is not a time-base error (sim rows are
+# tick-synchronous), so the gate only has to catch a gross misalignment.
+SIM_STATE_ACTION_MAX_RAD = 0.05
+# --sim check 17: the retimed master clock is round(t0 + k/30, 4), so consecutive
+# differences are 0.0333 or 0.0334 exactly; anything else means a non-uniform grid.
+SIM_GRID_DT_TOL_S = 1.5e-4
 
 
 # --------------------------------------------------------------------------
@@ -1758,7 +1791,11 @@ def check_lag_metadata(rep: Report, lr_root, takes, taus):
 # --------------------------------------------------------------------------
 # CHECK 15 -- physics sanity: does the follower actually sit on its command?
 # --------------------------------------------------------------------------
-def check_state_action_physics(rep: Report, eps, takes, data, taus, max_frames, fps):
+def check_state_action_physics(rep: Report, eps, takes, data, taus, max_frames, fps,
+                               gate_rad: float = STATE_ACTION_MAX_RAD,
+                               compare_tau0: bool = True):
+    """`gate_rad` is the per-episode ceiling; `compare_tau0=False` skips the "tau = 0 is
+    worse" sub-check (vacuous when the dataset itself was built at tau = 0)."""
     section("CHECK 15  --  physics sanity: mean |state[0:6] - action[0:6]| with vs without "
             "the correction")
     skip_n = int(round(STATE_ACTION_SKIP_HEAD_S * float(fps)))
@@ -1792,25 +1829,30 @@ def check_state_action_physics(rep: Report, eps, takes, data, taus, max_frames, 
     z = np.array(zero_means)
     worst = rows[int(np.argmax(c))]
     rep.check(
-        float(c.max()) < STATE_ACTION_MAX_RAD,
-        f"corrected mean |state-action| < {STATE_ACTION_MAX_RAD} rad in every episode",
+        float(c.max()) < gate_rad,
+        f"corrected mean |state-action| < {gate_rad} rad in every episode",
         f"median {np.median(c):.5f} rad, max {c.max():.5f} rad "
         f"(worst {worst['take']}), n={len(c)} episodes",
     )
     n_worse = int(np.sum(z > c))
-    rep.check(
-        n_worse == len(c),
-        "uncorrected (tau = 0) re-derivation is worse in every episode",
-        f"tau=0 median {np.median(z):.5f} rad, max {z.max():.5f} rad; "
-        f"worse in {n_worse}/{len(c)} episodes; median improvement factor "
-        f"{np.median(z / np.maximum(c, 1e-12)):.1f}x",
-    )
+    if compare_tau0:
+        rep.check(
+            n_worse == len(c),
+            "uncorrected (tau = 0) re-derivation is worse in every episode",
+            f"tau=0 median {np.median(z):.5f} rad, max {z.max():.5f} rad; "
+            f"worse in {n_worse}/{len(c)} episodes; median improvement factor "
+            f"{np.median(z / np.maximum(c, 1e-12)):.1f}x",
+        )
+    else:
+        rep.skip("uncorrected (tau = 0) re-derivation is worse in every episode",
+                 "dataset built at tau = 0: the comparison is the identity")
     print(f"  [info] first {STATE_ACTION_SKIP_HEAD_S} s excluded ({skip_n} frames)"
           + (f"; {n_short} episode(s) too short and skipped" if n_short else ""))
     return {
         "skip_head_s": STATE_ACTION_SKIP_HEAD_S,
         "skip_frames": skip_n,
-        "gate_rad": STATE_ACTION_MAX_RAD,
+        "gate_rad": gate_rad,
+        "tau0_comparison": compare_tau0,
         "n_episodes": len(rows),
         "corrected": {"median": float(np.median(c)), "mean": float(c.mean()),
                       "min": float(c.min()), "max": float(c.max())},
@@ -1875,6 +1917,152 @@ def check_stale_tail(rep: Report, eps, takes, data, taus, drop_stale_tail, max_f
     }
 
 
+# --------------------------------------------------------------------------
+# CHECK 17 (--sim) -- retimed-take contract, sim extras, sim provenance
+# --------------------------------------------------------------------------
+def derive_sim_poses(h5_path: str, cam1_t: np.ndarray):
+    """(N, 14) float32 re-derivation of observation.sim.object_poses -- same rule, own code."""
+    import h5py
+
+    with h5py.File(h5_path, "r") as f:
+        grp = f["sim_object_poses"]
+        cols = json.loads(str(grp.attrs["columns"]))
+        t = np.asarray(grp["t_rel_s"][:], dtype=np.float64)
+        j = nearest_idx_bruteforce(t, np.asarray(cam1_t, dtype=np.float64)) \
+            if len(cam1_t) <= 2000 else nearest_idx(t, np.asarray(cam1_t, dtype=np.float64))
+        out = np.zeros((len(cam1_t), len(SIM_POSE_NAMES)), dtype=np.float32)
+        for k, name in enumerate(SIM_POSE_NAMES):
+            out[:, k] = grp[name][:][j]
+    return cols, out
+
+
+def check_sim(rep: Report, lr_root, info, eps, takes, data, max_frames, taus, drop_stale_tail,
+              tol: float):
+    import h5py
+
+    section("CHECK 17  --  sim: retimed master clock, object-pose feature, sim provenance")
+    fps = int(info.get("fps", FPS))
+    period = 1.0 / fps
+
+    # 17a -- every take: sim_meta present, retimed, no problems; grid exact; mp4 == rows
+    bad_meta, bad_grid, bad_count, retimed_frames = [], [], [], {}
+    for tk in takes:
+        name = os.path.basename(tk)
+        with h5py.File(os.path.join(tk, "vectors.h5"), "r") as f:
+            meta = json.loads(str(f.attrs["sim_meta"])) if "sim_meta" in f.attrs else None
+            t1 = np.asarray(f["cam1_frames"]["t_rel_s"][:], dtype=np.float64)
+            t2 = np.asarray(f["cam2_frames"]["t_rel_s"][:], dtype=np.float64)
+        if meta is None:
+            bad_meta.append(f"{name}: no sim_meta")
+            continue
+        if not meta.get("simulated"):
+            bad_meta.append(f"{name}: simulated != true")
+        if not isinstance(meta.get("retimed"), dict):
+            bad_meta.append(f"{name}: not retimed")
+        else:
+            retimed_frames[name] = int(meta["retimed"].get("frames", -1))
+        if meta.get("problems"):
+            bad_meta.append(f"{name}: problems={meta['problems']}")
+        for cam, t in (("cam1", t1), ("cam2", t2)):
+            if len(t) > 1:
+                d = np.diff(t)
+                if np.max(np.abs(d - period)) > SIM_GRID_DT_TOL_S:
+                    bad_grid.append(f"{name}/{cam}: dt in [{d.min():.4f}, {d.max():.4f}] s")
+            n_mp4 = raw_frame_count(os.path.join(tk, f"{cam}.mp4"))
+            if n_mp4 != len(t):
+                bad_count.append(f"{name}/{cam}: mp4 {n_mp4} frames vs {len(t)} rows")
+        if name in retimed_frames and retimed_frames[name] != len(t1):
+            bad_count.append(f"{name}: sim_meta.retimed.frames {retimed_frames[name]} != "
+                             f"cam1 rows {len(t1)}")
+        if not np.array_equal(t1, t2):
+            bad_grid.append(f"{name}: cam1/cam2 clocks differ")
+    rep.check(not bad_meta, "every take is a retimed sim_collect take with empty sim_meta.problems",
+              "; ".join(bad_meta[:6]) if bad_meta else f"{len(takes)} takes")
+    rep.check(not bad_grid, f"cam1/cam2 master clocks are an exact 1/{fps} s grid "
+              f"(|dt - {period:.4f}| <= {SIM_GRID_DT_TOL_S:g} s) and identical",
+              "; ".join(bad_grid[:6]) if bad_grid else f"{len(takes)} takes")
+    rep.check(not bad_count, "mp4 frame count == cam*_frames rows == sim_meta.retimed.frames",
+              "; ".join(bad_count[:6]) if bad_count else f"{len(takes)} takes")
+
+    # 17b -- the object-pose feature
+    feats = info.get("features", {})
+    have_feat = SIM_POSE_KEY in feats and SIM_POSE_KEY in data
+    pose_dev = None
+    if not have_feat:
+        rep.skip(f"{SIM_POSE_KEY} re-derives exactly", "feature absent (--no-sim-extras build)")
+    else:
+        fd = feats[SIM_POSE_KEY]
+        rep.check(fd.get("dtype") == "float32" and list(fd.get("shape", [])) == [14]
+                  and list(fd.get("names") or []) == SIM_POSE_NAMES,
+                  f"{SIM_POSE_KEY} feature dict (float32, [14], carrot/pot xyz+quat names)",
+                  f"dtype={fd.get('dtype')} shape={list(fd.get('shape', []))} "
+                  f"names={fd.get('names')}")
+        stored = np.asarray(data[SIM_POSE_KEY], dtype=np.float32)
+        n_nan = int(np.isnan(stored).sum()); n_inf = int(np.isinf(stored).sum())
+        rep.check(n_nan == 0 and n_inf == 0, f"{SIM_POSE_KEY} finite",
+                  f"NaN={n_nan} Inf={n_inf} shape={stored.shape}")
+        max_dev = 0.0
+        bad = []
+        for i, (ep, tk) in enumerate(zip(eps, takes)):
+            a, b = int(ep["dataset_from_index"]), int(ep["dataset_to_index"])
+            cam1_t = take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames,
+                                 taus[os.path.basename(tk)], drop_stale_tail)
+            cols, want = derive_sim_poses(os.path.join(tk, "vectors.h5"), cam1_t)
+            if cols != ["t_rel_s"] + SIM_POSE_NAMES:
+                bad.append(f"ep{i}: sim_object_poses columns {cols}")
+                continue
+            got = stored[a:b]
+            if got.shape != want.shape:
+                bad.append(f"ep{i}: stored {got.shape} vs derived {want.shape}")
+                continue
+            d = float(np.max(np.abs(got.astype(np.float64) - want.astype(np.float64)))) if len(got) else 0.0
+            max_dev = max(max_dev, d)
+            if d >= tol:
+                bad.append(f"ep{i} ({os.path.basename(tk)}): max|d|={d:.3e}")
+        pose_dev = max_dev
+        rep.check(not bad, f"{SIM_POSE_KEY} == sim_object_poses at nearest t_rel_s (tol={tol:g})",
+                  "; ".join(bad[:6]) if bad else f"max|d|={max_dev:.3e} over {len(eps)} episodes")
+
+    # 17c -- provenance in meta/source_takes.json
+    path = os.path.join(lr_root, "meta", "source_takes.json")
+    prov_ok, prov_detail = False, "meta/source_takes.json missing"
+    n_success = None
+    if os.path.exists(path):
+        with open(path) as fh:
+            obj = json.load(fh)
+        sim_top = obj.get("simulation") if isinstance(obj, dict) else None
+        eps_list = obj.get("episodes") if isinstance(obj, dict) else None
+        missing = []
+        if not isinstance(sim_top, dict) or not sim_top.get("simulated"):
+            missing.append("top-level simulation.simulated")
+        if isinstance(eps_list, list) and len(eps_list) == len(takes):
+            n_success = 0
+            for e, tk in zip(eps_list, takes):
+                sb = e.get("sim") if isinstance(e, dict) else None
+                name = os.path.basename(tk)
+                if not isinstance(sb, dict):
+                    missing.append(f"{name}: no sim block")
+                    continue
+                for k in ("git_commit", "mujoco_version", "retimed", "task_success_at_stop",
+                          "initial_object_xy_m", "original_achieved_fps"):
+                    if sb.get(k) in (None, "", {}):
+                        missing.append(f"{name}: sim.{k}")
+                if sb.get("take_name") not in (None, name):
+                    missing.append(f"{name}: sim.take_name={sb.get('take_name')!r}")
+                if sb.get("task_success_at_stop") is True:
+                    n_success += 1
+        else:
+            missing.append(f"episodes list length {len(eps_list) if isinstance(eps_list, list) else None} "
+                           f"!= {len(takes)}")
+        prov_ok = not missing
+        prov_detail = "; ".join(missing[:6]) if missing else (
+            f"{len(takes)} episodes carry git_commit/mujoco_version/retimed/task_success_at_stop; "
+            f"task_success_at_stop true in {n_success}/{len(takes)}")
+    rep.check(prov_ok, "meta/source_takes.json carries sim provenance per episode", prov_detail)
+    return {"pose_feature_present": have_feat, "max_abs_dev_sim_poses": pose_dev,
+            "n_task_success_at_stop": n_success, "grid_dt_tol_s": SIM_GRID_DT_TOL_S}
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Validate the carrot_in_pot LeRobot v3.0 dataset (incl. depth) "
@@ -1928,6 +2116,11 @@ def main():
                          "master clock to its first N frames (0 = full take)")
     ap.add_argument("--max-takes", type=int, default=0,
                     help="TEST ONLY: only consider the first N included takes (0 = all)")
+    ap.add_argument("--sim", action="store_true",
+                    help="validate a depth-free sim_collect dataset built by "
+                         "convert_carrot_to_lerobot_sim.py: depth checks 8-11/13 are skipped, "
+                         "depth.h5 is not required, check 15 uses the sim gate and check 17 "
+                         "(retimed clock / observation.sim.object_poses / provenance) is added")
     ap.add_argument("--skip-video", action="store_true", help="skip check 6 (RGB video)")
     ap.add_argument("--skip-depth-decode", action="store_true",
                     help="skip check 10 (the only check that needs lerobot)")
@@ -1939,8 +2132,16 @@ def main():
     raw_root = os.path.abspath(os.path.expanduser(args.raw))
     lr_root = os.path.abspath(os.path.expanduser(args.lerobot))
 
-    print("LeRobot v3.0 conversion validator  --  carrot_in_pot (RGB + depth)")
+    if args.sim:
+        # depth-free schema + the optional ground-truth feature (its absence is a WARN
+        # via the "unexpected/missing" logic below, never a silent pass)
+        for k in DEPTH_KEYS:
+            EXPECTED_FEATURES.pop(k, None)
+        EXPECTED_FEATURES[SIM_POSE_KEY] = ("float32", [14], SIM_POSE_NAMES)
+    print("LeRobot v3.0 conversion validator  --  carrot_in_pot "
+          + ("(SIM: RGB, no depth)" if args.sim else "(RGB + depth)"))
     print(f"  interpreter    : {sys.executable}")
+    print(f"  mode           : {'--sim (depth checks skipped)' if args.sim else 'real (RGB + depth)'}")
     print(f"  raw takes      : {raw_root}")
     print(f"  lerobot dataset: {lr_root}")
     print(f"  repo id        : {args.repo_id}")
@@ -1989,7 +2190,7 @@ def main():
 
     missing_files = []
     for t in takes:
-        for fn in ("vectors.h5", "cam1.mp4", "cam2.mp4", "depth.h5"):
+        for fn in (SIM_RAW_FILES if args.sim else REAL_RAW_FILES):
             if not os.path.exists(os.path.join(t, fn)):
                 missing_files.append(os.path.join(os.path.basename(t), fn))
     if missing_files:
@@ -2065,17 +2266,38 @@ def main():
 
     check_sanity(rep, info, eps, data)
 
-    depth_feat = check_depth_features(rep, info)
-
-    try:
-        depth_counts = check_depth_counts(rep, lr_root, info, eps_c)
-    except Exception:
+    if args.sim:
+        section("CHECK 8  --  info.json depth feature dicts")
+        rep.skip("depth feature dicts", "--sim: no depth feature in a sim_collect dataset")
+        depth_feat = None
+        # the RGB half of check 8 still applies
+        for key in RGB_KEYS:
+            f = info.get("features", {}).get(key)
+            finfo = (f or {}).get("info") or {}
+            ok = (f is not None and f.get("dtype") == "video"
+                  and list(f.get("shape", [])) == [720, 1280, 3]
+                  and list(f.get("names") or []) == HWC
+                  and not bool(finfo.get("is_depth_map", False)))
+            rep.check(ok, f"{key} unchanged RGB feature",
+                      f"shape={list((f or {}).get('shape', []))} codec={finfo.get('video.codec')!r}")
+        section("CHECK 9  --  per-episode depth frame counts")
+        rep.skip("depth frame counts", "--sim: no depth feature")
         depth_counts = None
-        rep.fail("depth frame count check raised an exception",
-                 traceback.format_exc().splitlines()[-1])
+    else:
+        depth_feat = check_depth_features(rep, info)
+
+        try:
+            depth_counts = check_depth_counts(rep, lr_root, info, eps_c)
+        except Exception:
+            depth_counts = None
+            rep.fail("depth frame count check raised an exception",
+                     traceback.format_exc().splitlines()[-1])
 
     depth_num = None
-    if args.skip_depth_decode:
+    if args.sim:
+        section("CHECK 10  --  depth numeric fidelity")
+        rep.skip("depth decode", "--sim: no depth feature")
+    elif args.skip_depth_decode:
         section("CHECK 10  --  depth numeric fidelity")
         rep.skip("depth decode", "--skip-depth-decode")
     else:
@@ -2088,12 +2310,17 @@ def main():
             rep.fail("depth fidelity check raised an exception",
                      traceback.format_exc().splitlines()[-1])
 
-    try:
-        cams_json = check_depth_cameras_json(rep, lr_root, takes)
-    except Exception:
+    if args.sim:
+        section("CHECK 11  --  meta/depth_cameras.json vs depth.h5 of EVERY take")
+        rep.skip("meta/depth_cameras.json", "--sim: no depth sidecar (no depth.h5 in the takes)")
         cams_json = None
-        rep.fail("depth_cameras.json check raised an exception",
-                 traceback.format_exc().splitlines()[-1])
+    else:
+        try:
+            cams_json = check_depth_cameras_json(rep, lr_root, takes)
+        except Exception:
+            cams_json = None
+            rep.fail("depth_cameras.json check raised an exception",
+                     traceback.format_exc().splitlines()[-1])
 
     try:
         src_json = check_source_takes_json(rep, lr_root, takes, eps_c)
@@ -2102,16 +2329,21 @@ def main():
         rep.fail("source_takes.json check raised an exception",
                  traceback.format_exc().splitlines()[-1])
 
-    try:
-        depth_ts = check_depth_timestamps(rep, takes_c, args.max_frames, taus,
-                                          args.drop_stale_tail,
-                                          soft_tol_s=args.depth_dt_tol_ms / 1000.0,
-                                          hard_tol_s=args.depth_dt_hard_tol_ms / 1000.0,
-                                          frac=args.depth_dt_frac)
-    except Exception:
+    if args.sim:
+        section("CHECK 13  --  depth timestamp sanity (|t_depth - t_cam1|, raw clocks only)")
+        rep.skip("depth timestamp sanity", "--sim: no depth stream")
         depth_ts = None
-        rep.fail("depth timestamp check raised an exception",
-                 traceback.format_exc().splitlines()[-1])
+    else:
+        try:
+            depth_ts = check_depth_timestamps(rep, takes_c, args.max_frames, taus,
+                                              args.drop_stale_tail,
+                                              soft_tol_s=args.depth_dt_tol_ms / 1000.0,
+                                              hard_tol_s=args.depth_dt_hard_tol_ms / 1000.0,
+                                              frac=args.depth_dt_frac)
+        except Exception:
+            depth_ts = None
+            rep.fail("depth timestamp check raised an exception",
+                     traceback.format_exc().splitlines()[-1])
 
     try:
         lag_meta = check_lag_metadata(rep, lr_root, takes_c, taus)
@@ -2120,9 +2352,12 @@ def main():
         rep.fail("timestamp-correction metadata check raised an exception",
                  traceback.format_exc().splitlines()[-1])
 
+    all_tau0 = all(abs(v) < 1e-12 for v in taus.values())
     try:
-        phys = check_state_action_physics(rep, eps_c, takes_c, data, taus,
-                                          args.max_frames, info.get("fps", FPS))
+        phys = check_state_action_physics(
+            rep, eps_c, takes_c, data, taus, args.max_frames, info.get("fps", FPS),
+            gate_rad=(SIM_STATE_ACTION_MAX_RAD if args.sim else STATE_ACTION_MAX_RAD),
+            compare_tau0=not all_tau0)
     except Exception:
         phys = None
         rep.fail("state/action physics check raised an exception",
@@ -2135,6 +2370,15 @@ def main():
         stale = None
         rep.fail("stale-tail check raised an exception",
                  traceback.format_exc().splitlines()[-1])
+
+    sim_res = None
+    if args.sim:
+        try:
+            sim_res = check_sim(rep, lr_root, info, eps_c, takes_c, data, args.max_frames, taus,
+                                args.drop_stale_tail, args.tol)
+        except Exception:
+            rep.fail("sim check (17) raised an exception",
+                     traceback.format_exc().splitlines()[-1])
 
     # ---- summary --------------------------------------------------------
     section("SUMMARY")
@@ -2167,8 +2411,14 @@ def main():
     if phys:
         print(f"  |state-action| corrected  : median {phys['corrected']['median']:.5f} rad, "
               f"max {phys['corrected']['max']:.5f} rad  (gate < {phys['gate_rad']} rad)")
-        print(f"  |state-action| at tau = 0 : median {phys['tau0']['median']:.5f} rad, "
-              f"max {phys['tau0']['max']:.5f} rad  (comparison only)")
+        if phys.get("tau0_comparison", True):
+            print(f"  |state-action| at tau = 0 : median {phys['tau0']['median']:.5f} rad, "
+                  f"max {phys['tau0']['max']:.5f} rad  (comparison only)")
+    if sim_res:
+        print(f"  sim object poses          : "
+              + (f"max|d| {sim_res['max_abs_dev_sim_poses']:.3e}" if sim_res['pose_feature_present']
+                 else "feature absent")
+              + f"; task_success_at_stop true in {sim_res['n_task_success_at_stop']} episodes")
     if stale:
         print(f"  stale tail                : {stale['mode']}; dropped min "
               f"{stale['dropped']['min']} / median {stale['dropped']['median']:g} / max "
@@ -2230,6 +2480,8 @@ def main():
             "state_action_physics": phys,
             "drop_stale_tail": args.drop_stale_tail,
             "stale_tail": stale,
+            "sim_mode": bool(args.sim),
+            "sim": sim_res,
             "thresholds": {
                 "tol": args.tol,
                 "depth_err_p99_mm": DEPTH_ERR_P99_MM,

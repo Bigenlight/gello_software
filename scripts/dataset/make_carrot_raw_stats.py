@@ -331,6 +331,11 @@ def main():
                     help="staging directory holding the take_* folders")
     ap.add_argument("--out", default=None, help="output JSON (default <data>/dataset_stats.json)")
     ap.add_argument("--dataset", default="Bigenlight/carrot_in_pot_raw")
+    ap.add_argument("--no-depth", dest="depth", action="store_false", default=None,
+                    help="depth-free takes (3 files: vectors.h5 + cam1.mp4 + cam2.mp4). "
+                         "Skips every depth section; auto-detected when no take has depth.h5")
+    ap.add_argument("--depth", dest="depth", action="store_true",
+                    help="require depth.h5 in every take (the default for the real release)")
     args = ap.parse_args()
 
     data_dir = os.path.abspath(args.data)
@@ -341,6 +346,20 @@ def main():
     if not takes:
         sys.exit(f"no take_* folders under {data_dir}")
 
+    # Depth mode. Explicit flag wins; otherwise auto-detect from the takes on disk so
+    # the real 4-file release keeps behaving exactly as before.
+    if args.depth is None:
+        have_depth = any(os.path.exists(os.path.join(data_dir, t, "depth.h5")) for t in takes)
+    else:
+        have_depth = bool(args.depth)
+    if have_depth:
+        missing = [t for t in takes if not os.path.exists(os.path.join(data_dir, t, "depth.h5"))]
+        if missing:
+            sys.exit(f"depth mode but {len(missing)} take(s) have no depth.h5, e.g. {missing[0]}")
+    else:
+        print("depth-free mode: expecting 3 files per take, skipping all depth sections",
+              file=sys.stderr)
+
     have_ffprobe = shutil.which("ffprobe") is not None
     frame_method = "ffprobe -count_frames" if have_ffprobe else "cv2 CAP_PROP_FRAME_COUNT"
     print(f"{len(takes)} takes in {data_dir}; video frame counts via {frame_method}",
@@ -349,7 +368,8 @@ def main():
     # pooled accumulators ---------------------------------------------------
     ranges = {}            # "group/chan" -> Accum
     dt_pool = {g: [] for g in VECTOR_GROUPS if g != "synchronized"}
-    dt_pool.update({f"depth_{c}": [] for c in DEPTH_CAMS})
+    if have_depth:
+        dt_pool.update({f"depth_{c}": [] for c in DEPTH_CAMS})
     rate_pool = {k: [] for k in dt_pool}
     gello_minus_ur = {f"q{i}": [] for i in range(1, 7)}
     gello_take_median = {f"q{i}": [] for i in range(1, 7)}
@@ -369,6 +389,7 @@ def main():
     cam_meta = {c: None for c in DEPTH_CAMS}      # canonical camera_info/extrinsics
     cam_meta_mismatch = {c: [] for c in DEPTH_CAMS}
     regrasp = []
+    sim_takes = set()
     columns_attr_types = set()
     group_sets = set()
     depth_max_mm = 0
@@ -380,7 +401,9 @@ def main():
         print(f"[{ti:2d}/{len(takes)}] {take}", file=sys.stderr)
 
         # cleanliness -------------------------------------------------------
-        expected = {"vectors.h5", "depth.h5", "cam1.mp4", "cam2.mp4"}
+        expected = {"vectors.h5", "cam1.mp4", "cam2.mp4"}
+        if have_depth:
+            expected.add("depth.h5")
         for root, dirs, files in os.walk(tdir):
             for fn in files:
                 rel = os.path.relpath(os.path.join(root, fn), tdir)
@@ -393,6 +416,13 @@ def main():
         vec_path = os.path.join(tdir, "vectors.h5")
         with h5py.File(vec_path, "r") as f:
             group_sets.add(tuple(sorted(f.keys())))
+            # simulated takes carry a `sim_meta` file attr; the real recorder writes none
+            if "sim_meta" in f.attrs:
+                try:
+                    sim_takes.add(take) if json.loads(
+                        f.attrs["sim_meta"]).get("simulated") else None
+                except Exception:
+                    pass
             last_t = []
             for g in VECTOR_GROUPS:
                 grp = f[g]
@@ -489,89 +519,93 @@ def main():
             for e in rises:
                 after = falls[falls > e]
                 end = int(after[0]) if after.size else len(gtt) - 1
+                seg = gpos[e:end + 1]
                 closures.append({
                     "t_close_s": _r(gtt[e], 2),
                     "t_open_s": _r(gtt[end], 2) if after.size else None,
-                    "grip_pos_peak": _r(gpos[e:end + 1].max(), 4),
+                    # seg can be empty if the rising edge is the last sample
+                    "grip_pos_peak": _r(seg.max(), 4) if seg.size else None,
                 })
             rec["n_grip_closures"] = len(closures)
             rec["grip_closures"] = closures
-            rec["grip_pos_max"] = _r(gpos.max(), 4)
+            rec["grip_pos_max"] = _r(gpos.max(), 4) if gpos.size else None
             if len(closures) > 1:
                 regrasp.append({"take": take, "closures": closures})
 
         # depth -------------------------------------------------------------
-        depth_path = os.path.join(tdir, "depth.h5")
-        with h5py.File(depth_path, "r") as f:
-            for cam in DEPTH_CAMS:
-                grp = f[cam]
-                t = grp["t_rel_s"][:]
-                n = int(grp["png"].shape[0])
-                rec[f"rows_depth_{cam}"] = n
-                r = mean_rate(t)
-                rec[f"rate_depth_{cam}"] = _r(r, 2)
-                if r is not None:
-                    rate_pool[f"depth_{cam}"].append(r)
-                if t.size > 1:
-                    dt_pool[f"depth_{cam}"].append(np.diff(t))
-                rec[f"depth_{cam}_minus_{cam}_frames"] = n - rec[f"rows_{cam}_frames"]
-                if n != rec[f"rows_{cam}_frames"]:
-                    depth_cam_diff[cam][take] = n - rec[f"rows_{cam}_frames"]
+        if have_depth:
+            depth_path = os.path.join(tdir, "depth.h5")
+            with h5py.File(depth_path, "r") as f:
+                for cam in DEPTH_CAMS:
+                    grp = f[cam]
+                    t = grp["t_rel_s"][:]
+                    n = int(grp["png"].shape[0])
+                    rec[f"rows_depth_{cam}"] = n
+                    r = mean_rate(t)
+                    rec[f"rate_depth_{cam}"] = _r(r, 2)
+                    if r is not None:
+                        rate_pool[f"depth_{cam}"].append(r)
+                    if t.size > 1:
+                        dt_pool[f"depth_{cam}"].append(np.diff(t))
+                    rec[f"depth_{cam}_minus_{cam}_frames"] = n - rec[f"rows_{cam}_frames"]
+                    if n != rec[f"rows_{cam}_frames"]:
+                        depth_cam_diff[cam][take] = n - rec[f"rows_{cam}_frames"]
 
-                # quality on one sampled MID frame
-                if n:
-                    mid = n // 2
-                    d = decode_depth_png(grp["png"][mid])
-                    depth_max_mm = max(depth_max_mm, int(d.max()))
-                    depth_over_10m_px += int((d > 10000).sum())
-                    depth_frames_sampled += 1
-                    valid = d > 0
-                    nv = int(valid.sum())
-                    rec[f"depth_sample_idx_{cam}"] = mid
-                    rec[f"depth_shape_{cam}"] = list(d.shape)
-                    rec[f"depth_valid_pct_{cam}"] = _r(100.0 * nv / d.size, 2)
-                    rec[f"depth_median_range_m_{cam}"] = (
-                        _r(float(np.median(d[valid])) / 1000.0, 4) if nv else None
-                    )
-                    rec[f"depth_p05_range_m_{cam}"] = (
-                        _r(float(np.percentile(d[valid], 5)) / 1000.0, 4) if nv else None
-                    )
-                    rec[f"depth_p95_range_m_{cam}"] = (
-                        _r(float(np.percentile(d[valid], 95)) / 1000.0, 4) if nv else None
-                    )
-
-                    # second sample: the frame nearest the FINAL gripper closure, i.e.
-                    # the instant the fingers are on the carrot. For the wrist camera
-                    # that is the worst case for the D435 minimum range.
-                    if rec["grip_closures"]:
-                        t_grasp = rec["grip_closures"][-1]["t_close_s"]
-                        gi = int(nearest_idx(t, np.array([t_grasp]))[0]) if t.size > 1 else 0
-                        dg = decode_depth_png(grp["png"][gi])
-                        depth_max_mm = max(depth_max_mm, int(dg.max()))
-                        depth_over_10m_px += int((dg > 10000).sum())
+                    # quality on one sampled MID frame
+                    if n:
+                        mid = n // 2
+                        d = decode_depth_png(grp["png"][mid])
+                        depth_max_mm = max(depth_max_mm, int(d.max()))
+                        depth_over_10m_px += int((d > 10000).sum())
                         depth_frames_sampled += 1
-                        vg = dg > 0
-                        ng = int(vg.sum())
-                        rec[f"depth_grasp_idx_{cam}"] = gi
-                        rec[f"depth_grasp_t_s_{cam}"] = _r(t[gi], 2)
-                        rec[f"depth_valid_pct_at_grasp_{cam}"] = _r(100.0 * ng / dg.size, 2)
-                        rec[f"depth_median_range_m_at_grasp_{cam}"] = (
-                            _r(float(np.median(dg[vg])) / 1000.0, 4) if ng else None)
+                        valid = d > 0
+                        nv = int(valid.sum())
+                        rec[f"depth_sample_idx_{cam}"] = mid
+                        rec[f"depth_shape_{cam}"] = list(d.shape)
+                        rec[f"depth_valid_pct_{cam}"] = _r(100.0 * nv / d.size, 2)
+                        rec[f"depth_median_range_m_{cam}"] = (
+                            _r(float(np.median(d[valid])) / 1000.0, 4) if nv else None
+                        )
+                        rec[f"depth_p05_range_m_{cam}"] = (
+                            _r(float(np.percentile(d[valid], 5)) / 1000.0, 4) if nv else None
+                        )
+                        rec[f"depth_p95_range_m_{cam}"] = (
+                            _r(float(np.percentile(d[valid], 95)) / 1000.0, 4) if nv else None
+                        )
 
-                # camera_info / extrinsics: must be identical across all takes
-                meta = {
-                    "group_attrs": attrs_plain(grp.attrs),
-                    "camera_info": attrs_plain(grp["camera_info"].attrs),
-                    "extrinsics_depth_to_color": attrs_plain(
-                        grp["extrinsics_depth_to_color"].attrs),
-                }
-                if cam_meta[cam] is None:
-                    cam_meta[cam] = meta
-                elif meta != cam_meta[cam]:
-                    cam_meta_mismatch[cam].append(take)
+                        # second sample: the frame nearest the FINAL gripper closure, i.e.
+                        # the instant the fingers are on the carrot. For the wrist camera
+                        # that is the worst case for the D435 minimum range.
+                        if rec["grip_closures"]:
+                            t_grasp = rec["grip_closures"][-1]["t_close_s"]
+                            gi = int(nearest_idx(t, np.array([t_grasp]))[0]) if t.size > 1 else 0
+                            dg = decode_depth_png(grp["png"][gi])
+                            depth_max_mm = max(depth_max_mm, int(dg.max()))
+                            depth_over_10m_px += int((dg > 10000).sum())
+                            depth_frames_sampled += 1
+                            vg = dg > 0
+                            ng = int(vg.sum())
+                            rec[f"depth_grasp_idx_{cam}"] = gi
+                            rec[f"depth_grasp_t_s_{cam}"] = _r(t[gi], 2)
+                            rec[f"depth_valid_pct_at_grasp_{cam}"] = _r(100.0 * ng / dg.size, 2)
+                            rec[f"depth_median_range_m_at_grasp_{cam}"] = (
+                                _r(float(np.median(dg[vg])) / 1000.0, 4) if ng else None)
+
+                    # camera_info / extrinsics: must be identical across all takes
+                    meta = {
+                        "group_attrs": attrs_plain(grp.attrs),
+                        "camera_info": attrs_plain(grp["camera_info"].attrs),
+                        "extrinsics_depth_to_color": attrs_plain(
+                            grp["extrinsics_depth_to_color"].attrs),
+                    }
+                    if cam_meta[cam] is None:
+                        cam_meta[cam] = meta
+                    elif meta != cam_meta[cam]:
+                        cam_meta_mismatch[cam].append(take)
 
         rec["bytes_vectors_h5"] = os.path.getsize(vec_path)
-        rec["bytes_depth_h5"] = os.path.getsize(depth_path)
+        if have_depth:
+            rec["bytes_depth_h5"] = os.path.getsize(depth_path)
 
         # videos ------------------------------------------------------------
         for cam in ("cam1", "cam2"):
@@ -594,10 +628,11 @@ def main():
         with open(vec_path, "rb") as fh:
             if b"/home/" in fh.read():
                 abs_path_hits.append(f"{take}/vectors.h5")
-        with h5py.File(depth_path, "r") as f:
-            blob = json.dumps({c: attrs_plain(f[c].attrs) for c in DEPTH_CAMS})
-            if "/home/" in blob:
-                abs_path_hits.append(f"{take}/depth.h5")
+        if have_depth:
+            with h5py.File(depth_path, "r") as f:
+                blob = json.dumps({c: attrs_plain(f[c].attrs) for c in DEPTH_CAMS})
+                if "/home/" in blob:
+                    abs_path_hits.append(f"{take}/depth.h5")
 
         per_take.append(rec)
 
@@ -761,27 +796,53 @@ def main():
         "per_take": lag_rows,
     }
 
+    if sim_takes:
+        # The prose above describes the REAL rig's rclpy spin-thread starvation. A
+        # simulated take is stamped by the physics thread and `command` and
+        # `ur_joint_states` come out of the SAME tick, so nothing is stamped late:
+        # whatever lag the estimator finds here is the simulated arm's own tracking
+        # lag behind its commanded target, and must NOT be subtracted.
+        timestamp_lag["simulated_takes"] = sorted(sim_takes)
+        timestamp_lag["applies_to_this_release"] = False
+        timestamp_lag["simulation_note"] = (
+            "SIMULATED take family (vectors.h5 carries sim_meta.simulated = true): the "
+            "`note`/`method` prose above is inherited from the real-robot release and its "
+            "MECHANISM does not apply here. The sim recorder stamps every robot row with "
+            "the physics tick that produced it, and `command` / `ur_joint_states` / "
+            "`tcp_pose` / `wrench` all come from that same tick, so no table is stamped "
+            "late and NOTHING should be shifted. The non-zero ur_joint_states_lag_s "
+            "reported above is the simulated arm's mechanical tracking lag behind its "
+            "commanded joint target - real robot behaviour that is present in the data, "
+            "not a clock error."
+        )
+
     durs = np.array([t["duration_s"] for t in per_take], dtype=np.float64)
     total_bytes = sum(
-        t["bytes_cam1_mp4"] + t["bytes_cam2_mp4"] + t["bytes_vectors_h5"] + t["bytes_depth_h5"]
+        t["bytes_cam1_mp4"] + t["bytes_cam2_mp4"] + t["bytes_vectors_h5"]
+        + t.get("bytes_depth_h5", 0)
         for t in per_take
     )
 
     def col(key):
         return np.array([t[key] for t in per_take if t.get(key) is not None], dtype=np.float64)
 
+    def col_stats(key, nd):
+        """min/median/max of a per-take column; None-valued when nothing was measured
+        (e.g. a take family with no grasp, or a column that this mode never fills)."""
+        a = col(key)
+        if not a.size:
+            return {"min": None, "median": None, "max": None}
+        return {"min": _r(a.min(), nd), "median": _r(np.median(a), nd), "max": _r(a.max(), nd)}
+
     aggregate = {
         "n_takes": len(per_take),
         "total_duration_s": _r(durs.sum(), 2),
         "total_cam1_frames": int(sum(t["rows_cam1_frames"] for t in per_take)),
         "total_cam2_frames": int(sum(t["rows_cam2_frames"] for t in per_take)),
-        "total_depth_cam1_frames": int(sum(t["rows_depth_cam1"] for t in per_take)),
-        "total_depth_cam2_frames": int(sum(t["rows_depth_cam2"] for t in per_take)),
         "total_bytes": int(total_bytes),
         "total_bytes_cam1_mp4": int(sum(t["bytes_cam1_mp4"] for t in per_take)),
         "total_bytes_cam2_mp4": int(sum(t["bytes_cam2_mp4"] for t in per_take)),
         "total_bytes_vectors_h5": int(sum(t["bytes_vectors_h5"] for t in per_take)),
-        "total_bytes_depth_h5": int(sum(t["bytes_depth_h5"] for t in per_take)),
         "duration_median_s": _r(np.median(durs), 3),
         "duration_min_s": _r(durs.min(), 2),
         "duration_max_s": _r(durs.max(), 2),
@@ -795,71 +856,64 @@ def main():
             t["cam1_h5_video_match"] and t["cam2_h5_video_match"] for t in per_take),
         "video_formats": sorted("|".join(v) for v in video_formats),
         "takes_with_cam1_cam2_diff": cam_diff,
-        "takes_with_depth_cam1_colour_diff": depth_cam_diff["cam1"],
-        "takes_with_depth_cam2_colour_diff": depth_cam_diff["cam2"],
         "columns_attr_python_types": sorted(columns_attr_types),
         "identical_group_set_across_takes": len(group_sets) == 1,
         "groups": sorted(group_sets)[0] if len(group_sets) == 1 else None,
         "takes_with_multiple_grip_closures": [r["take"] for r in regrasp],
-        "depth_valid_pct_cam1": {
-            "min": _r(col("depth_valid_pct_cam1").min(), 2),
-            "median": _r(np.median(col("depth_valid_pct_cam1")), 2),
-            "max": _r(col("depth_valid_pct_cam1").max(), 2),
-        },
-        "depth_valid_pct_cam2": {
-            "min": _r(col("depth_valid_pct_cam2").min(), 2),
-            "median": _r(np.median(col("depth_valid_pct_cam2")), 2),
-            "max": _r(col("depth_valid_pct_cam2").max(), 2),
-        },
-        "depth_median_range_m_cam1": {
-            "min": _r(col("depth_median_range_m_cam1").min(), 4),
-            "median": _r(np.median(col("depth_median_range_m_cam1")), 4),
-            "max": _r(col("depth_median_range_m_cam1").max(), 4),
-        },
-        "depth_median_range_m_cam2": {
-            "min": _r(col("depth_median_range_m_cam2").min(), 4),
-            "median": _r(np.median(col("depth_median_range_m_cam2")), 4),
-            "max": _r(col("depth_median_range_m_cam2").max(), 4),
-        },
-        "depth_camera_info_identical_across_takes": {
-            c: not cam_meta_mismatch[c] for c in DEPTH_CAMS},
-        "depth_camera_info_mismatch_takes": cam_meta_mismatch,
-        "depth_frames_sampled": depth_frames_sampled,
-        "depth_max_mm_sampled": depth_max_mm,
-        "depth_pixels_over_10000mm_sampled": depth_over_10m_px,
-        "depth_valid_pct_at_grasp_cam1": {
-            "min": _r(col("depth_valid_pct_at_grasp_cam1").min(), 2),
-            "median": _r(np.median(col("depth_valid_pct_at_grasp_cam1")), 2),
-            "max": _r(col("depth_valid_pct_at_grasp_cam1").max(), 2),
-        },
-        "depth_valid_pct_at_grasp_cam2": {
-            "min": _r(col("depth_valid_pct_at_grasp_cam2").min(), 2),
-            "median": _r(np.median(col("depth_valid_pct_at_grasp_cam2")), 2),
-            "max": _r(col("depth_valid_pct_at_grasp_cam2").max(), 2),
-        },
     }
+
+    if have_depth:
+        aggregate.update({
+            "total_depth_cam1_frames": int(sum(t["rows_depth_cam1"] for t in per_take)),
+            "total_depth_cam2_frames": int(sum(t["rows_depth_cam2"] for t in per_take)),
+            "total_bytes_depth_h5": int(sum(t["bytes_depth_h5"] for t in per_take)),
+            "takes_with_depth_cam1_colour_diff": depth_cam_diff["cam1"],
+            "takes_with_depth_cam2_colour_diff": depth_cam_diff["cam2"],
+            "depth_valid_pct_cam1": col_stats("depth_valid_pct_cam1", 2),
+            "depth_valid_pct_cam2": col_stats("depth_valid_pct_cam2", 2),
+            "depth_median_range_m_cam1": col_stats("depth_median_range_m_cam1", 4),
+            "depth_median_range_m_cam2": col_stats("depth_median_range_m_cam2", 4),
+            "depth_camera_info_identical_across_takes": {
+                c: not cam_meta_mismatch[c] for c in DEPTH_CAMS},
+            "depth_camera_info_mismatch_takes": cam_meta_mismatch,
+            "depth_frames_sampled": depth_frames_sampled,
+            "depth_max_mm_sampled": depth_max_mm,
+            "depth_pixels_over_10000mm_sampled": depth_over_10m_px,
+            "depth_valid_pct_at_grasp_cam1": col_stats("depth_valid_pct_at_grasp_cam1", 2),
+            "depth_valid_pct_at_grasp_cam2": col_stats("depth_valid_pct_at_grasp_cam2", 2),
+        })
+    else:
+        aggregate["has_depth"] = False
+    aggregate["takes_with_no_grip_closure"] = [
+        t["take"] for t in per_take if not t.get("n_grip_closures")]
 
     doc = {
         "dataset": args.dataset,
         "generated_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "generated_by": (
             f"make_carrot_raw_stats.py — h5py + cv2 + ffprobe audit over all {len(per_take)} "
-            "take folders (vectors.h5, depth.h5, cam1.mp4, cam2.mp4). mean rate = "
+            + ("take folders (vectors.h5, depth.h5, cam1.mp4, cam2.mp4). mean rate = "
+               if have_depth else
+               "take folders (vectors.h5, cam1.mp4, cam2.mp4 — depth-free mode, every "
+               "depth section skipped). mean rate = ") +
             "(N-1)/(t_last-t_first) per take, then median across takes; dt percentiles pooled "
             f"over all takes. Video frame counts from `{frame_method}`. Value ranges pooled "
-            "over all takes. Depth quality measured on ONE sampled mid frame per camera per "
-            "take (decoded with cv2.imdecode(..., IMREAD_UNCHANGED))."
+            "over all takes." + (" Depth quality measured on ONE sampled mid frame per "
+            "camera per take (decoded with cv2.imdecode(..., IMREAD_UNCHANGED))."
+            if have_depth else "")
         ),
         "aggregate": aggregate,
         "rates": rates,
         "leader_vs_follower": leader_vs_follower,
         "command_tracking": command_tracking,
         "timestamp_lag": timestamp_lag,
-        "depth_cameras": cam_meta,
         "regrasp_takes": regrasp,
         "value_ranges": {k: ranges[k].out() for k in sorted(ranges)},
         "per_take": per_take,
     }
+
+    if have_depth:
+        doc["depth_cameras"] = cam_meta
 
     with open(out_path, "w") as fh:
         json.dump(doc, fh, indent=1)
