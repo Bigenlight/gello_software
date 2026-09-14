@@ -167,7 +167,7 @@ from the human).
 
 ## 4. Recorded format (must match `gello_recorder` byte-for-byte in structure)
 
-### 4.1 Take dir: `vectors.h5`, `cam1.mp4`, `cam2.mp4`, `depth.h5` — nothing else.
+### 4.1 Take dir: `vectors.h5`, `cam1.mp4`, `cam2.mp4` (+ `depth.h5` only when `cameras.record_depth: true` / `--depth`; **depth is optional and OFF by default** since 2026-09-14) — nothing else.
 ### 4.2 `vectors.h5` — the nine groups written by `RecordingSession`:
 `synchronized` (56 cols, sample at `sample_rate_hz` 100), `gello_joint_states` (`t_rel_s,q1..6,qd1..6` = leader
 raw joints + finite-diff qd, at leader rate 30 Hz), `ur_joint_states` (`t_rel_s,q1..6,qd1..6,eff1..6`),

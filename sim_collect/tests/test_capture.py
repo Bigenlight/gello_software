@@ -132,7 +132,7 @@ def test_resolve_scene_rebuilds_f1_scene_from_get_scene_meta_reply():
 
 
 def test_service_handles_requests_without_workers(tmp_path):
-    svc = capture.CaptureService(str(tmp_path), fps=30.0)
+    svc = capture.CaptureService(str(tmp_path), fps=30.0, record_depth=True)   # parity test: 4-file take
     st = svc.handle({"cmd": "get_status"})
     assert st["ok"] and st["recording"] is False and st["scene_ready"] is False and st["sim_alive"] is False
     assert svc.handle({"cmd": "start_take"})["ok"] is False
@@ -152,7 +152,7 @@ def test_service_handles_requests_without_workers(tmp_path):
 @needs_display
 def test_capture_records_a_take_end_to_end(tmp_path):
     sim = FakeSim()
-    svc = capture.CaptureService(str(tmp_path), fps=30.0, preview_hz=10.0)
+    svc = capture.CaptureService(str(tmp_path), fps=30.0, preview_hz=10.0, record_depth=True)
     stop, th = _run_service(svc)
     cli = ipc.Client("capture_rep", timeout_ms=3000)
     prev = ipc.Subscriber("preview_pub", "preview")
@@ -337,7 +337,7 @@ def test_sigterm_finalises_take_and_leaves_no_orphans(tmp_path):
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sim = FakeSim()
     proc = subprocess.Popen([sys.executable, "-m", "sim_collect.capture", "--root", str(root),
-                             "--scene-xml", str(scene_xml)], cwd=repo, env=env,
+                             "--scene-xml", str(scene_xml), "--depth"], cwd=repo, env=env,   # parity: 4-file take
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     cli = ipc.Client("capture_rep", timeout_ms=3000)
     out = ""
@@ -397,3 +397,23 @@ def test_sigterm_finalises_take_and_leaves_no_orphans(tmp_path):
             os.kill(p, signal.SIGKILL)
         cli.close()
         sim.close()
+
+
+def test_capture_default_no_depth(tmp_path):
+    """Depth is optional and OFF by default (2026-09-14): the service and its recorder
+    default to record_depth=False; yaml cameras.record_depth / CLI --depth flip it."""
+    svc = capture.CaptureService(str(tmp_path), fps=30.0)
+    try:
+        assert svc.record_depth is False and svc.recorder.record_depth is False
+    finally:
+        svc.close()
+    svc = capture.CaptureService(str(tmp_path), {"cameras": {"record_depth": True}}, fps=30.0)
+    try:
+        assert svc.record_depth is True
+    finally:
+        svc.close()
+    svc = capture.CaptureService(str(tmp_path), {"cameras": {"record_depth": True}}, fps=30.0, record_depth=False)
+    try:
+        assert svc.record_depth is False   # CLI override wins
+    finally:
+        svc.close()

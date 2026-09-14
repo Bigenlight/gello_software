@@ -193,7 +193,11 @@ class SimTakeRecorder:
     """One recorder per capture process; one :class:`RecordingSession` per take."""
 
     def __init__(self, *, camera_fps: float = 30.0, sample_rate_hz: float = 100.0,
-                 object_pose_hz: float = 30.0, cams: Sequence[str] = _cams.CAMS):
+                 object_pose_hz: float = 30.0, cams: Sequence[str] = _cams.CAMS,
+                 record_depth: bool = False):
+        # record_depth=False (default): 3-file take (vectors.h5 + cam{1,2}.mp4), no depth.h5,
+        # depth PNGs handed to on_frames are ignored. True: the real recorder's 4-file take.
+        self.record_depth = bool(record_depth)
         self.camera_fps = float(camera_fps)
         self.sample_rate_hz = float(sample_rate_hz)
         self.object_pose_hz = float(object_pose_hz)
@@ -249,12 +253,13 @@ class SimTakeRecorder:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             take_dir = os.path.join(root, f"take_{self._take_counter:02d}_{stamp}")
             self._reset_take_state()
-            sess = RecordingSession(take_dir, camera_fps=self.camera_fps, record_depth=True)
-            for i, cam in enumerate(self.cams, start=1):
-                sess.set_depth_source(i, _cams.depth_source_topic(cam), False)
-                sess.set_depth_camera_info(i, **_cams.camera_info_dict(cam))
-                ext = _cams.extrinsics_dict(cam)
-                sess.set_depth_extrinsics(i, ext["rotation"], ext["translation"])
+            sess = RecordingSession(take_dir, camera_fps=self.camera_fps, record_depth=self.record_depth)
+            if self.record_depth:
+                for i, cam in enumerate(self.cams, start=1):
+                    sess.set_depth_source(i, _cams.depth_source_topic(cam), False)
+                    sess.set_depth_camera_info(i, **_cams.camera_info_dict(cam))
+                    ext = _cams.extrinsics_dict(cam)
+                    sess.set_depth_extrinsics(i, ext["rotation"], ext["translation"])
             # Sim extras that do not depend on the object list can open now.
             self._ctrl_w = open_h5_table(
                 sess._h5, "sim_control",
@@ -285,6 +290,7 @@ class SimTakeRecorder:
                 "camera_fps": self.camera_fps,
                 "sample_rate_hz": self.sample_rate_hz,
                 "eef_state_codes": dict(EEF_STATE_CODES),
+                "record_depth": self.record_depth,
                 "depth_camera_info": {c: _cams.camera_info_dict(c) for c in self.cams},
                 "depth_extrinsics_depth_to_color": {c: _cams.extrinsics_dict(c) for c in self.cams},
                 "depth_source": {c: "mujoco offscreen depth render (uint16 mm PNG); "
@@ -479,16 +485,23 @@ class SimTakeRecorder:
         if "success" in task:
             self._last_task_success = bool(task.get("success"))
 
+        # The real recorder (2026-09-14 timestamp-starvation fix) appends a `stamp_s`
+        # column = the SOURCE message's header stamp (unix s), NaN if absent. The sim's
+        # source stamp is the state message's wall-clock `t` (taken on the physics
+        # thread when the tick was published), and the leader's own `leader_t`.
+        stamp = _finite_scalar(msg.get("t"))
+        stamp = float("nan") if stamp is None else float(stamp)
+
         # -- 125 Hz group: every 2nd message -----------------------------------
         if n % 2 == 0:
             if q is not None and qd is not None and eff is not None:
-                sess.write_ur(q, qd, eff)
+                sess.write_ur(q, qd, eff, stamp_s=stamp)
             if q_cmd is not None:
                 sess.write_cmd(q_cmd)
             if tcp_pos is not None and tcp_quat is not None:
-                sess.write_tcp(tcp_pos + tcp_quat)
+                sess.write_tcp(tcp_pos + tcp_quat, stamp_s=stamp)
             if wrench is not None:
-                sess.write_wrench(wrench)
+                sess.write_wrench(wrench, stamp_s=stamp)
             self._write_control(sess, msg)
             qf = _finite_list(msg.get("q_lead_f"), _N)
             if qf is not None and self._leadf_w is not None:
@@ -514,7 +527,7 @@ class SimTakeRecorder:
                     qd_lead = [(q_lead[i] - self._last_leader_q[i]) / dt for i in range(_N)]
                 else:
                     qd_lead = _finite_list(msg.get("qd_lead"), _N) or [0.0] * _N
-                sess.write_gello(q_lead, qd_lead)
+                sess.write_gello(q_lead, qd_lead, stamp_s=float(leader_t) if leader_t is not None else stamp)
                 self._last_leader_q, self._last_leader_t = q_lead, leader_t
 
         # -- synchronized: 100 Hz grid, only once both cams have a frame ----------
@@ -604,7 +617,9 @@ class SimTakeRecorder:
         try:
             idx = int(self.cams.index(cam)) + 1
             writer = sess.write_cam1_frame if idx == 1 else sess.write_cam2_frame
-            frame_idx = writer(bytes(jpeg_bytes))
+            # stamp_s = capture time (the state the frame was rendered from), like a
+            # camera header stamp; t_rel_s stays the write time (real-recorder convention)
+            frame_idx = writer(bytes(jpeg_bytes), stamp_s=float(t_capture))
             if frame_idx >= 0:
                 self._frame_idx[cam] = frame_idx
                 ct = self._cap_times[cam]
@@ -621,7 +636,7 @@ class SimTakeRecorder:
             else:
                 self._counts["frames_dropped"] += 1
                 self._warn("frame", f"frame rejected ({cam}): undecodable JPEG")
-            if depth_png:
+            if depth_png and self.record_depth:
                 dwriter = sess.write_cam1_depth_frame if idx == 1 else sess.write_cam2_depth_frame
                 if dwriter(compressed_depth_payload(depth_png), stamp_s=float(t_capture)) < 0:
                     self._warn("depth", f"depth frame rejected ({cam}): not a PNG")

@@ -65,6 +65,12 @@ floor:
 cameras:
   # Names are the contract (real data: cam1 = fixed scene cam, cam2 = wrist cam).
   color_fovy_deg: 42.0        # D435 color vertical FOV (1280x720)
+  # Depth recording is OPTIONAL and OFF by default: no depth render, no depth.h5 — the
+  # take has 3 files. Set true (or run the launcher with --depth) for the real
+  # recorder's 4-file take with 848x480 uint16 mm PNGs. Note: the LeRobot converter
+  # with depth features (convert_carrot_to_lerobot.py) needs depth.h5; recorded_demo
+  # (HIL offline demo) does not.
+  record_depth: false
   depth_fovy_deg: 58.7        # matches depth K fx=426.7 @ 848x480
   depth_offset_m: [0.015, 0.0, 0.0]   # depth cam origin, in the color cam frame (+x = image right)
   cam1:

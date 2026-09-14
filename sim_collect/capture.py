@@ -173,7 +173,7 @@ def load_config(path: Optional[str]) -> Dict[str, Any]:
 # ------------------------------------------------------------------- render worker
 def _render_worker(cam: str, scene: Dict[str, Any], fps: float, depth_max_m: float,
                    out_q: "mp.Queue", ctrl: "mp.connection.Connection",
-                   jpeg_quality: int = JPEG_QUALITY) -> None:
+                   jpeg_quality: int = JPEG_QUALITY, record_depth: bool = False) -> None:
     """Body of one render process: own rig, own SUB socket, own ``fps`` pacing.
 
     Lifetime is tied to the parent three ways (R2 found workers outliving capture by
@@ -253,8 +253,11 @@ def _render_worker(cam: str, scene: Dict[str, Any], fps: float, depth_max_m: flo
             rgb = rig.render_color(cam)
             bgr = np.ascontiguousarray(rgb[:, :, ::-1])
             ok1, jpg = cv2.imencode(".jpg", bgr, enc_jpg)
-            mm = rig.render_depth(cam)
-            ok2, png = cv2.imencode(".png", mm, enc_png)
+            if record_depth:   # depth is optional (default off): skip the second render + PNG
+                mm = rig.render_depth(cam)
+                ok2, png = cv2.imencode(".png", mm, enc_png)
+            else:
+                ok2, png = False, None
             small = cv2.resize(bgr, PREVIEW_SIZE, interpolation=cv2.INTER_AREA)
             ok3, pv = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 80])
         except Exception as e:  # noqa: BLE001
@@ -313,7 +316,7 @@ class CaptureService:
     """Owns the workers, the recorder, ``capture_rep`` and ``preview_pub``."""
 
     def __init__(self, root: str = DEFAULT_ROOT, config: Optional[Mapping[str, Any]] = None,
-                 *, fps: float = 30.0, preview_hz: float = 10.0,
+                 *, fps: float = 30.0, preview_hz: float = 10.0, record_depth: Optional[bool] = None,
                  scene_xml_path: Optional[str] = None, sim_timeout_ms: int = 1500,
                  scene: Optional[Dict[str, Any]] = None, config_path: Optional[str] = None):
         self.root = root
@@ -324,8 +327,13 @@ class CaptureService:
         self.scene_xml_path = scene_xml_path
         cams_cfg = self.config.get("cameras") if isinstance(self.config.get("cameras"), Mapping) else {}
         self.depth_max_m = float(cams_cfg.get("depth_max_m", _cams.DEPTH_MAX_M))
+        # Depth recording is OPTIONAL and OFF by default (operator decision 2026-09-14):
+        # yaml `cameras.record_depth`, overridden by CLI --depth/--no-depth. Off = no
+        # depth render, no depth.h5 (3-file take); on = the real recorder's 4-file take.
+        cfg_depth = bool(cams_cfg.get("record_depth", False))
+        self.record_depth = cfg_depth if record_depth is None else bool(record_depth)
         self.cams = tuple(_cams.CAMS)
-        self.recorder = SimTakeRecorder(camera_fps=self.fps)
+        self.recorder = SimTakeRecorder(camera_fps=self.fps, record_depth=self.record_depth)
         self._ctx = mp.get_context("spawn")
         self._frame_q: Optional["mp.Queue"] = None
         self._workers: Dict[str, Dict[str, Any]] = {}
@@ -404,7 +412,8 @@ class CaptureService:
             parent, child = self._ctx.Pipe()
             proc = self._ctx.Process(
                 target=_render_worker, name=f"render-{cam}", daemon=True,
-                args=(cam, self._scene, self.fps, self.depth_max_m, self._frame_q, child))
+                args=(cam, self._scene, self.fps, self.depth_max_m, self._frame_q, child),
+                kwargs={"record_depth": self.record_depth})
             proc.start()
             self._workers[cam] = {"proc": proc, "conn": parent, "ready": None}
         deadline = time.time() + 30.0
@@ -693,12 +702,17 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--root", default=DEFAULT_ROOT, help="take output root (env SIM_COLLECT_OUTPUT_ROOT)")
     ap.add_argument("--config", default=None, help="scene yaml (for the scene.build_scene fallback)")
     ap.add_argument("--fps", type=float, default=30.0)
+    ap.add_argument("--depth", dest="record_depth", action="store_true", default=None,
+                    help="also render+record depth (848x480 uint16 mm PNGs in depth.h5); default off "
+                         "(yaml cameras.record_depth)")
+    ap.add_argument("--no-depth", dest="record_depth", action="store_false")
     ap.add_argument("--preview-hz", type=float, default=10.0)
     ap.add_argument("--scene-xml", default=None, help="fallback MJCF file when the sim cannot be asked")
     args = ap.parse_args(argv)
     svc = CaptureService(args.root, load_config(args.config), fps=args.fps,
-                         preview_hz=args.preview_hz, scene_xml_path=args.scene_xml,
-                         config_path=args.config)
+                         preview_hz=args.preview_hz, record_depth=args.record_depth,
+                         scene_xml_path=args.scene_xml, config_path=args.config)
+    print(f"[capture] depth recording: {'ON' if svc.record_depth else 'OFF (default; --depth to enable)'}", flush=True)
 
     # SIGTERM (launcher teardown) and SIGINT both end the loop cooperatively so an
     # in-flight take is finalised (mp4 moov, h5 close) before the process exits.

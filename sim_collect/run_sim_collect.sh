@@ -6,7 +6,7 @@
 # Ctrl-C tears all three down. Logs go to $LOG_DIR (default sim_collect/logs/<timestamp>/).
 #
 # Usage:  ./sim_collect/run_sim_collect.sh [--config sim_collect/configs/carrot_in_pot_sim.yaml]
-#                                          [--fake-leader] [--control-mode eef|joint] [--root <take root>]
+#                                          [--fake-leader] [--control-mode eef|joint] [--root <take root>] [--depth]
 # Env:    DISPLAY (default :0), SIM_COLLECT_OUTPUT_ROOT (take root), SIM_COLLECT_IPC (ipc|tcp)
 set -euo pipefail
 
@@ -21,6 +21,8 @@ while [[ $# -gt 0 ]]; do
     --fake-leader) SIM_ARGS+=(--fake-leader); shift ;;
     --control-mode) SIM_ARGS+=(--control-mode "$2"); shift 2 ;;
     --root) CAPTURE_ARGS+=(--root "$2"); shift 2 ;;
+    --depth) CAPTURE_ARGS+=(--depth); shift ;;          # depth is off by default
+    --no-depth) CAPTURE_ARGS+=(--no-depth); shift ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac

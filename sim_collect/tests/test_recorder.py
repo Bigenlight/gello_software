@@ -42,12 +42,12 @@ def _real_headers(tmp_path):
     return heads
 
 
-def record_take(root, seconds=TAKE_SECONDS, fps=30.0, state_hz=250.0, note="synthetic"):
+def record_take(root, seconds=TAKE_SECONDS, fps=30.0, state_hz=250.0, note="synthetic", record_depth=True):
     """Drive a recorder in real time the way capture.py does: state at 250 Hz from this
     thread, pre-encoded frame pairs at 30 Hz from a frame thread."""
     import threading
     frames = [(synthetic_jpeg(i), synthetic_depth_png(i)) for i in range(8)]
-    r = SimTakeRecorder(camera_fps=fps)
+    r = SimTakeRecorder(camera_fps=fps, record_depth=record_depth)
     take_dir = r.start(str(root), note, {"robot": "tiny", "scene_config": {"floor": "wood"}})
     stop = threading.Event()
     counter = {"n": 0, "ms": 0.0}
@@ -293,7 +293,12 @@ def test_depth_h5_attr_parity_with_real_reference(take):
     real_v = os.path.join(os.path.dirname(real), "vectors.h5")
     with h5py.File(real_v, "r") as fr, h5py.File(os.path.join(take["dir"], "vectors.h5"), "r") as fs:
         for g in REAL_GROUPS:
-            assert fr[g].attrs["columns"] == fs[g].attrs["columns"], g
+            # The real recorder appended a trailing `stamp_s` column to six tables on
+            # 2026-09-14 (timestamp-starvation fix); take_18 predates that. Parity with the
+            # CURRENT RecordingSession headers is checked elsewhere; here compare the
+            # pre-existing prefix only.
+            _strip = lambda cols: [c for c in json.loads(cols) if c != "stamp_s"]
+            assert _strip(fr[g].attrs["columns"]) == _strip(fs[g].attrs["columns"]), g
             for c in fr[g]:
                 assert fr[g][c].dtype == fs[g][c].dtype and fr[g][c].chunks == fs[g][c].chunks, (g, c)
 
@@ -436,3 +441,17 @@ def test_bad_messages_never_raise(tmp_path):
         assert f["ur_joint_states"]["t_rel_s"].shape[0] == 0
         assert f["cam1_frames"]["t_rel_s"].shape[0] == 0
         assert "sim_object_poses" in f
+
+
+def test_default_is_no_depth(tmp_path):
+    """Operator decision 2026-09-14: depth is optional and OFF by default -> a 3-file take
+    (no depth.h5), depth PNGs handed to on_frames are ignored, sim_meta says so."""
+    import json, h5py
+    r = SimTakeRecorder()
+    assert r.record_depth is False
+    _r, take_dir, _res, _n = record_take(tmp_path, seconds=1.0, record_depth=False)
+    assert sorted(os.listdir(take_dir)) == ["cam1.mp4", "cam2.mp4", "vectors.h5"]
+    with h5py.File(os.path.join(take_dir, "vectors.h5"), "r") as f:
+        meta = json.loads(f.attrs["sim_meta"])
+        assert meta["record_depth"] is False
+        assert f["cam1_frames"]["t_rel_s"].shape[0] > 0

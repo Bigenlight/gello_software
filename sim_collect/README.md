@@ -298,6 +298,29 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovid
 
 ---
 
+## 6.3 `stamp_s` 컬럼
+
+실기 레코더가 2026-09-14 타임스탬프 기아 문제를 고치면서 `gello_joint_states`·`ur_joint_states`·`wrench`·
+`tcp_pose`·`cam1_frames`·`cam2_frames`에 **원본 메시지의 header stamp**인 `stamp_s`(unix 초) 컬럼을 맨 뒤에
+붙였다. 시뮬도 같은 컬럼을 채운다 — 상태 테이블은 물리 스레드가 그 tick을 발행한 벽시계 시각, 리더 테이블은
+GELLO 샘플 시각, 프레임 테이블은 렌더 캡처 시각이다(`t_rel_s`는 실기 규약대로 쓰기 시각). 그 수정 이전에
+녹화된 실기 take(예: take_18)에는 이 컬럼이 없다.
+
+## 6.4 depth — 옵션이고 기본은 끔
+
+2026-09-14 결정: **depth는 기본으로 수집하지 않는다.** 기본 take는 `vectors.h5` + `cam1.mp4` + `cam2.mp4`
+**3개 파일**이고 depth 렌더도 하지 않는다(카메라당 렌더 1회가 줄어 CPU도 아낀다). 켜는 방법 둘:
+
+```bash
+./sim_collect/run_sim_collect.sh --depth          # 이번 세션만
+# 또는 configs/carrot_in_pot_sim.yaml:  cameras.record_depth: true
+```
+
+켜면 실기 레코더와 같은 4개 파일(`depth.h5`, 848×480 uint16 mm PNG + camera_info/extrinsics)이 된다.
+`sim_meta.record_depth`에 어느 쪽이었는지 남는다. 소비자 차이: `recorded_demo.py`(HIL offline demo)는 depth가
+필요 없고, depth feature를 넣는 `convert_carrot_to_lerobot.py`와 `make_carrot_raw_stats.py`(4개 파일 기대)는
+**depth를 켠 take만** 받는다.
+
 ## 6.5 카메라 프레임레이트 — 이 PC의 한계
 
 렌더는 소프트웨어 GL(NVIDIA 드라이버 미로드)이라 **CPU 부하에 그대로 노출된다.** 실측(2026-09-14):
