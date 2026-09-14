@@ -44,7 +44,7 @@ def test_run_eval_main_end_to_end_with_stub(tmp_path):
 
 def test_zero_policy_on_all_default_seeds(world):
     seeds = world.ev["seeds"]
-    assert seeds == list(range(20))
+    assert seeds == list(range(100, 120))   # held-out default (seeds 0-19 == training layouts)
     max_steps = 120                                 # 4 s each: the arm never moves, so the outcome cannot change
     recs = [run_episode(world, ZeroPolicy(), str(sd), sd, max_steps, None, verbose=False) for sd in seeds]
     assert all(r["outcome"] == "timeout" and r["n_steps"] == max_steps for r in recs)
