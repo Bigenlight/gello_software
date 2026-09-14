@@ -53,11 +53,23 @@
 # #    # Pass extra launch args after the script args:                       #
 # #    ACT_CHECKPOINT=/path/... ./run_ur7e_act_real.sh launch_rviz:=false    #
 # #                                                                          #
+# #    # CARROT, EEF-DELTA action space (different params file AND a         #
+# #    # different action space — BOTH must be set, see the note below):     #
+# #    ACT_PARAMS_FILE=src/gello_policy/config/carrot_eef_act.yaml \         #
+# #        ACT_ACTION_SPACE=eef_delta_v1 \                                   #
+# #        ACT_CHECKPOINT=/path/... ./run_ur7e_act_real.sh                   #
+# #                                                                          #
 # #  ENV:                                                                    #
 # #    ROBOT_IP  (default 192.168.10.11)   CALIB (optional kinematics YAML)   #
 # #    HEADLESS  (true|1 -> Method B)      START_MODE (gello | init_align)    #
 # #    ACT_VENV  (default ros2_ur_ws/act_venv)   ACT_CHECKPOINT (REQUIRED)     #
 # #    ACT_PORT  (default 5591)            ACT_DEVICE (default cuda)          #
+# #    ACT_PARAMS_FILE (default installed config/act_deploy.yaml)             #
+# #    ACT_ACTION_SPACE (default 'joint'; 'eef_delta_v1' for the carrot       #
+# #        EEF deploy). This is the SERVER side of the contract; the NODE     #
+# #        side is action_space/expected_action_space in the params file.     #
+# #        They must agree or ~/start_execution refuses to arm (by design —   #
+# #        the RESET handshake compares them).                                #
 # #    GELLO_REPO_ROOT (default <ros2_ur_ws>/..)                             #
 # ############################################################################
 set -e
@@ -79,6 +91,11 @@ ACT_PORT="${ACT_PORT:-5591}"
 ACT_DEVICE="${ACT_DEVICE:-cuda}"
 ACT_HOST="${ACT_HOST:-127.0.0.1}"
 ACT_CHECKPOINT="${ACT_CHECKPOINT:-}"
+# Action space the SERVER is told to serve. Default "joint" keeps the banana deploy
+# byte-identical; the carrot EEF deploy passes "eef_delta_v1". The server refuses to
+# start if this contradicts the checkpoint's state_dim (16 <-> eef_delta_v1, 7 <-> joint),
+# and the leader refuses to ARM if it contradicts the params file's action_space.
+ACT_ACTION_SPACE="${ACT_ACTION_SPACE:-joint}"
 RUN_ACT_SERVER="$SCRIPT_DIR/src/gello_policy/scripts/run_act_server.sh"
 
 if [ -z "${ACT_CHECKPOINT}" ]; then
@@ -101,15 +118,38 @@ case " $* " in *" headless_mode:=true "*|*"headless_mode:=true"*) HEADLESS=true 
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 
+# --- Resolve the ACT params file. Prefer the INSTALLED share copy; fall back to src. ---
+# (Mirrors run_ur7e_fm_real.sh's FM_PARAMS_FILE. The launch has its own default
+# (act_deploy.yaml) but passing the resolved path explicitly means the banner below
+# can never disagree with what the node actually loads — and it is the ONLY way to
+# select carrot_eef_act.yaml without editing the launch file.)
+# NOTE the share copy is preferred: a `colcon build --symlink-install` share copy IS
+# the src file, but a plain `colcon build` one is a snapshot. If you edit the yaml and
+# see no effect, you are running a non-symlink install — rebuild, or point
+# ACT_PARAMS_FILE at the src path directly.
+if [ -z "${ACT_PARAMS_FILE:-}" ]; then
+    PKG_PREFIX="$(ros2 pkg prefix gello_policy 2>/dev/null || true)"
+    if [ -n "${PKG_PREFIX}" ] && [ -f "${PKG_PREFIX}/share/gello_policy/config/act_deploy.yaml" ]; then
+        ACT_PARAMS_FILE="${PKG_PREFIX}/share/gello_policy/config/act_deploy.yaml"
+    else
+        ACT_PARAMS_FILE="${SCRIPT_DIR}/src/gello_policy/config/act_deploy.yaml"
+    fi
+fi
+if [ ! -f "${ACT_PARAMS_FILE}" ]; then
+    echo "ERROR: ACT params file not found at ${ACT_PARAMS_FILE} (did you colcon build gello_policy?)." >&2
+    exit 1
+fi
+
 # --- Start the ACT inference server in the BACKGROUND (before ros2 launch) ---
 # It loads the checkpoint and listens on ACT_HOST:ACT_PORT. The synthetic leader
 # only queries it AFTER ~/start_execution, so it has ample time to warm up. We do
 # NOT exec the launch below, so this script's EXIT trap fires on Ctrl-C and tears
 # the server down together with the launch.
 echo "### Starting ACT server (py3.12): venv=${ACT_VENV} device=${ACT_DEVICE} bind=${ACT_HOST}:${ACT_PORT}"
-echo "### checkpoint=${ACT_CHECKPOINT}"
+echo "### checkpoint=${ACT_CHECKPOINT} | action_space=${ACT_ACTION_SPACE}"
 ACT_VENV="${ACT_VENV}" ACT_HOST="${ACT_HOST}" ACT_PORT="${ACT_PORT}" ACT_DEVICE="${ACT_DEVICE}" \
     ACT_CHECKPOINT="${ACT_CHECKPOINT}" \
+    ACT_ACTION_SPACE="${ACT_ACTION_SPACE}" \
     bash "${RUN_ACT_SERVER}" &
 ACT_SERVER_PID=$!
 # Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).
@@ -142,6 +182,7 @@ done
 ARGS=(
     robot_ip:="${ROBOT_IP}"
     start_mode:="${START_MODE}"
+    params_file:="${ACT_PARAMS_FILE}"
     act_host:="${ACT_HOST}"
     act_port:="${ACT_PORT}"
     checkpoint_path:="${ACT_CHECKPOINT}"
@@ -156,7 +197,8 @@ else
     HEADLESS_STATE="false (Method A — PLAY External Control on the pendant)"
 fi
 
-echo "### REAL UR7e ACT deploy | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>}"
+echo "### REAL UR7e ACT deploy | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>} | params=${ACT_PARAMS_FILE}"
+echo "### action_space=${ACT_ACTION_SPACE} (server side; the params file's action_space must agree)"
 echo "### headless_mode=${HEADLESS_STATE}"
 if [ "${START_MODE}" = "init_align" ]; then
     echo "### start_mode=init_align — arm parks at the init pose; then it chases the held start pose."

@@ -29,6 +29,7 @@
 # #    DIFFUSION_N_ACTION_STEPS  receding horizon k (default: 32)             #
 # #    DIFFUSION_NUM_INFERENCE_STEPS  DDIM steps (default: 10)                #
 # #    DIFFUSION_SCHEDULER  sampler override    (default: DDIM)               #
+# #    DIFFUSION_ACTION_SPACE  joint | eef_delta_v1 (default: joint)          #
 # #    DIFFUSION_ENSEMBLE_K   ensemble size     (default: empty -> flag not   #
 # #        passed, server default 0 = OFF; only 16 is supported)              #
 # #    DIFFUSION_ENSEMBLE_DIR ensemble h5 dir   (default: empty -> server     #
@@ -53,6 +54,10 @@ DIFFUSION_CHECKPOINT="${DIFFUSION_CHECKPOINT:-}"
 DIFFUSION_N_ACTION_STEPS="${DIFFUSION_N_ACTION_STEPS:-32}"
 DIFFUSION_NUM_INFERENCE_STEPS="${DIFFUSION_NUM_INFERENCE_STEPS:-10}"
 DIFFUSION_SCHEDULER="${DIFFUSION_SCHEDULER:-DDIM}"
+# v2 wire protocol (CARROT_EEF_DESIGN §4). "joint" keeps the original contract
+# byte-for-byte; "eef_delta_v1" serves a 16-D-state Cartesian-delta checkpoint.
+# The server cross-checks this against the checkpoint and exits 4 on a mismatch.
+DIFFUSION_ACTION_SPACE="${DIFFUSION_ACTION_SPACE:-joint}"
 # Empty (default) = do not pass the flag at all -> the server's own default (0/auto).
 DIFFUSION_ENSEMBLE_K="${DIFFUSION_ENSEMBLE_K:-}"
 DIFFUSION_ENSEMBLE_DIR="${DIFFUSION_ENSEMBLE_DIR:-}"
@@ -65,6 +70,7 @@ while [ "$#" -gt 0 ]; do
         --port)       DIFFUSION_PORT="$2"; shift 2 ;;
         --device)     DIFFUSION_DEVICE="$2"; shift 2 ;;
         --n-action-steps) DIFFUSION_N_ACTION_STEPS="$2"; shift 2 ;;
+        --action-space) DIFFUSION_ACTION_SPACE="$2"; shift 2 ;;
         --num-inference-steps) DIFFUSION_NUM_INFERENCE_STEPS="$2"; shift 2 ;;
         --scheduler)  DIFFUSION_SCHEDULER="$2"; shift 2 ;;
         --ensemble-k) DIFFUSION_ENSEMBLE_K="$2"; shift 2 ;;
@@ -74,6 +80,7 @@ while [ "$#" -gt 0 ]; do
         --port=*)     DIFFUSION_PORT="${1#*=}"; shift ;;
         --device=*)   DIFFUSION_DEVICE="${1#*=}"; shift ;;
         --n-action-steps=*) DIFFUSION_N_ACTION_STEPS="${1#*=}"; shift ;;
+        --action-space=*) DIFFUSION_ACTION_SPACE="${1#*=}"; shift ;;
         --num-inference-steps=*) DIFFUSION_NUM_INFERENCE_STEPS="${1#*=}"; shift ;;
         --scheduler=*) DIFFUSION_SCHEDULER="${1#*=}"; shift ;;
         --ensemble-k=*) DIFFUSION_ENSEMBLE_K="${1#*=}"; shift ;;
@@ -83,6 +90,14 @@ while [ "$#" -gt 0 ]; do
 done
 
 VENV_PY="$DIFFUSION_VENV/bin/python"
+
+# zmq_protocol.py imports gello_policy.eef_space (which imports the ROS-free
+# ur_gello_bringup.ur_kin) so that "eef_delta_v1"/16 are defined in exactly one
+# place. The server runs as a BARE SCRIPT, so neither package is importable from
+# sys.path[0]; put both source dirs on PYTHONPATH. (zmq_protocol has the same
+# repair as a fallback -- this is the explicit, greppable half.)
+SRC_DIR="$(cd "$PKG_DIR/.." && pwd)"
+export PYTHONPATH="$SRC_DIR/gello_policy:$SRC_DIR/ur_gello_bringup${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ ! -x "$VENV_PY" ]; then
     echo "ERROR: py3.12 venv python not found at '$VENV_PY'." >&2
@@ -100,7 +115,7 @@ if [ -z "$DIFFUSION_CHECKPOINT" ]; then
 fi
 
 echo "### Diffusion server | venv=$DIFFUSION_VENV | device=$DIFFUSION_DEVICE | bind=$DIFFUSION_HOST:$DIFFUSION_PORT"
-echo "### checkpoint=$DIFFUSION_CHECKPOINT | n_action_steps=$DIFFUSION_N_ACTION_STEPS | num_inference_steps=$DIFFUSION_NUM_INFERENCE_STEPS | scheduler=$DIFFUSION_SCHEDULER"
+echo "### checkpoint=$DIFFUSION_CHECKPOINT | n_action_steps=$DIFFUSION_N_ACTION_STEPS | num_inference_steps=$DIFFUSION_NUM_INFERENCE_STEPS | scheduler=$DIFFUSION_SCHEDULER | action_space=$DIFFUSION_ACTION_SPACE"
 
 # Optional ensemble side-channel flags: only passed when set, so the server's own
 # defaults (--ensemble-k 0 = OFF, auto dir) stay in charge otherwise.
@@ -121,4 +136,5 @@ exec "$VENV_PY" "$SERVER_PY" \
     --n-action-steps "$DIFFUSION_N_ACTION_STEPS" \
     --num-inference-steps "$DIFFUSION_NUM_INFERENCE_STEPS" \
     --scheduler "$DIFFUSION_SCHEDULER" \
+    --action-space "$DIFFUSION_ACTION_SPACE" \
     ${ENSEMBLE_ARGS[@]+"${ENSEMBLE_ARGS[@]}"}

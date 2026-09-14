@@ -12,7 +12,7 @@ Definitions
 TCP    : flange (ur_kin.fk, base_link -> tool0) translated by +0.174 m along the
          flange +Z (same ``tool_r`` as ur7e_gello_eef.yaml; matches the recorder's
          ``tcp_pose`` table to ~1 mm, verified on take_01).
-state  : (16,) float32
+state  : (16,) -- float64 here, cast to float32 by the converter
          [q1..q6 (rad, UR order, as observed),
           tcp_x, tcp_y, tcp_z (m, base frame),
           r11, r21, r31, r12, r22, r32  (6-D rotation = first two COLUMNS of R_tcp,
@@ -20,15 +20,18 @@ state  : (16,) float32
                                           -- the carrot TCP sits ~175 deg from
                                           identity so a rotvec would wrap),
           grip_pos (0=open .. 1=closed)]
-action : (7,) float32
+action : (7,)  -- float64 here, cast to float32 by the converter
          [dx, dy, dz (m, base frame), drx, dry, drz (rotation vector, rad, base
           frame), grip_cmd (0=open .. 1=closed, ABSOLUTE)]
-         with, per dataset frame t,
-             dp  = p_tcp(command_t) - p_tcp(q_t)
-             dR  = R_tcp(command_t) @ R_tcp(q_t).T          (left-multiplied, base frame)
+         with, per dataset frame t (30 fps master clock),
+             dp  = p_tcp(q_{t+1}) - p_tcp(q_t)
+             dR  = R_tcp(q_{t+1}) @ R_tcp(q_t).T            (left-multiplied, base frame)
              drot = so3_log(dR)
-         i.e. "where the bridge is telling the arm to go, relative to where the
-         arm is right now". Deploy inverts this exactly:
+         i.e. the motion the arm ACTUALLY ACHIEVED between consecutive dataset
+         frames; the last frame of an episode is zero motion. It is deliberately
+         NOT derived from the recorder's ``command`` table (that table led the
+         joints by a constant 0.9 s recorder artifact -- see
+         docs/ros2/CARROT_EEF_LAG_NOTE_KO.md). Deploy inverts this exactly:
              p_target = p_live + dp ;  R_target = so3_exp(drot) @ R_live
          then analytic IK on the flange pose with branch/limit filtering and
          nearest-to-live selection (:func:`ik_tcp_nearest`).
@@ -109,24 +112,32 @@ def state_vector(q, grip_pos: float) -> np.ndarray:
     ])
 
 
-def delta_action(q, q_cmd, grip_cmd: float) -> np.ndarray:
-    """(7,) float64 action for one dataset frame: TCP(command) relative to TCP(q)."""
+def delta_action(q, q_next, grip_cmd: float) -> np.ndarray:
+    """(7,) float64 action for one dataset frame: TCP(q_next) relative to TCP(q)."""
     T_q = tcp_pose(q)
-    T_c = tcp_pose(q_cmd)
+    T_c = tcp_pose(q_next)
     dp = T_c[:3, 3] - T_q[:3, 3]
     dR = T_c[:3, :3] @ T_q[:3, :3].T
     drot = ur_kin.so3_log(dR)
     return np.concatenate([dp, drot, [float(grip_cmd)]])
 
 
-def apply_delta(q_live, action) -> np.ndarray:
-    """Target TCP pose (4x4) = live TCP(q_live) advanced by action[:6]."""
+def apply_delta_pose(T, action) -> np.ndarray:
+    """TCP pose (4x4) advanced by action[:6]: p + dp, so3_exp(drot) @ R (base frame).
+
+    This is the accumulation step of the deploy executor (DESIGN §3.3): the
+    target pose, not the live joints, is advanced tick by tick within a chunk."""
     a = np.asarray(action, dtype=float).reshape(-1)
-    T = tcp_pose(q_live)
+    T = np.asarray(T, dtype=float)
     out = np.eye(4)
     out[:3, :3] = ur_kin.so3_exp(a[3:6]) @ T[:3, :3]
     out[:3, 3] = T[:3, 3] + a[:3]
     return out
+
+
+def apply_delta(q_live, action) -> np.ndarray:
+    """Target TCP pose (4x4) = live TCP(q_live) advanced by action[:6]."""
+    return apply_delta_pose(tcp_pose(q_live), action)
 
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +157,8 @@ def ik_tcp_nearest(
       points where labels collapse) -> unwrap every candidate to the seed
       (wrapped_nearest) -> drop candidates outside the UR joint limits when any
       remain -> pick argmin of max|q - seed|.
-    info: {"n_solutions", "branch", "on_branch", "max_dev"}.
+    info: {"n_solutions" (branch-filtered count, NOT the reachable set), "branch",
+    "on_branch", "max_dev" (L_inf to seed), "in_limits"}.
     """
     q_seed = np.asarray(q_seed, dtype=float).reshape(6)
     T_flange = np.asarray(T_tcp, dtype=float) @ T_TOOL_INV
@@ -154,7 +166,8 @@ def ik_tcp_nearest(
              or abs(float(np.remainder(q_seed[4] + np.pi, 2 * np.pi) - np.pi)) < 0.05)
     prefer = None if (merge or branch is None or branch < 0) else int(branch)
     tagged = ur_kin._ik_analytic_tagged(T_flange, prefer)
-    info = {"n_solutions": len(tagged), "branch": -1, "on_branch": False, "max_dev": float("nan")}
+    info = {"n_solutions": len(tagged), "branch": -1, "on_branch": False,
+            "max_dev": float("nan"), "in_limits": False}
     if not tagged:
         return None, info
     pool = tagged
@@ -170,6 +183,10 @@ def ik_tcp_nearest(
     bid, best = min(reanch, key=lambda t: float(np.max(np.abs(t[1] - q_seed))))
     info["branch"] = int(bid)
     info["max_dev"] = float(np.max(np.abs(best - q_seed)))
+    # The limit filter above keeps survivors only when there are any; when none
+    # survive the unfiltered pool is used, so the caller must look at this flag
+    # (the node's joint envelope clamp is the hard backstop).
+    info["in_limits"] = bool(ur_kin.within_joint_limits(best, margin=limit_margin))
     return best, info
 
 
@@ -181,6 +198,8 @@ def clamp_delta(action, max_pos_m: float, max_rot_rad: float) -> Tuple[np.ndarra
 
     Norm-proportional (direction preserving), never per-axis -- see CLAUDE.md
     "개입 액션을 축별 np.clip으로 자르지 말 것". Returns (action, pos_clamped, rot_clamped).
+    A cap <= 0 DISABLES that clamp (repo idiom "0 = off"); non-finite inputs pass
+    through unchanged -- callers must reject NaN/Inf actions before clamping.
     """
     a = np.array(action, dtype=float).reshape(-1).copy()
     pc = rc = False

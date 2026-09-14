@@ -17,7 +17,15 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        # *.yaml are the runtime parameter files. The *.json siblings
+        # (joint_safety_limits.json, carrot_eef_limits.json) are PROVENANCE, not
+        # runtime inputs — nothing loads them, their numbers are already baked into
+        # the yaml. They ship so a deployed share/ tree can answer "where did this
+        # clamp come from" (generated_at, git_commit, raw ranges, delta percentiles)
+        # without the source checkout. One entry, not two: duplicate target dirs in
+        # data_files are merged by setuptools but not obviously so to a reader.
+        (os.path.join('share', package_name, 'config'),
+            glob('config/*.yaml') + glob('config/*.json')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

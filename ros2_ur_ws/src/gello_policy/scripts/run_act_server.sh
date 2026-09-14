@@ -24,6 +24,7 @@
 # #    ACT_PORT      bind port             (default: 5591)                    #
 # #    ACT_DEVICE    torch device          (default: cuda)                    #
 # #    ACT_N_ACTION_STEPS  receding horizon k (default: 30)                   #
+# #    ACT_ACTION_SPACE  joint | eef_delta_v1  (default: joint)               #
 # ############################################################################
 set -euo pipefail
 
@@ -42,6 +43,10 @@ ACT_PORT="${ACT_PORT:-5591}"
 ACT_DEVICE="${ACT_DEVICE:-cuda}"
 ACT_CHECKPOINT="${ACT_CHECKPOINT:-}"
 ACT_N_ACTION_STEPS="${ACT_N_ACTION_STEPS:-30}"
+# v2 wire protocol (CARROT_EEF_DESIGN §4). "joint" keeps the original contract
+# byte-for-byte; "eef_delta_v1" serves a 16-D-state Cartesian-delta checkpoint.
+# The server cross-checks this against the checkpoint and exits 4 on a mismatch.
+ACT_ACTION_SPACE="${ACT_ACTION_SPACE:-joint}"
 
 # --- Parse optional flags (override env) -------------------------------------
 while [ "$#" -gt 0 ]; do
@@ -51,16 +56,26 @@ while [ "$#" -gt 0 ]; do
         --port)       ACT_PORT="$2"; shift 2 ;;
         --device)     ACT_DEVICE="$2"; shift 2 ;;
         --n-action-steps) ACT_N_ACTION_STEPS="$2"; shift 2 ;;
+        --action-space) ACT_ACTION_SPACE="$2"; shift 2 ;;
         --checkpoint=*) ACT_CHECKPOINT="${1#*=}"; shift ;;
         --host=*)     ACT_HOST="${1#*=}"; shift ;;
         --port=*)     ACT_PORT="${1#*=}"; shift ;;
         --device=*)   ACT_DEVICE="${1#*=}"; shift ;;
         --n-action-steps=*) ACT_N_ACTION_STEPS="${1#*=}"; shift ;;
+        --action-space=*) ACT_ACTION_SPACE="${1#*=}"; shift ;;
         *) echo "run_act_server.sh: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
 
 VENV_PY="$ACT_VENV/bin/python"
+
+# zmq_protocol.py imports gello_policy.eef_space (which imports the ROS-free
+# ur_gello_bringup.ur_kin) so that "eef_delta_v1"/16 are defined in exactly one
+# place. The server runs as a BARE SCRIPT, so neither package is importable from
+# sys.path[0]; put both source dirs on PYTHONPATH. (zmq_protocol has the same
+# repair as a fallback -- this is the explicit, greppable half.)
+SRC_DIR="$(cd "$PKG_DIR/.." && pwd)"
+export PYTHONPATH="$SRC_DIR/gello_policy:$SRC_DIR/ur_gello_bringup${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ ! -x "$VENV_PY" ]; then
     echo "ERROR: py3.12 venv python not found at '$VENV_PY'." >&2
@@ -78,11 +93,12 @@ if [ -z "$ACT_CHECKPOINT" ]; then
 fi
 
 echo "### ACT server | venv=$ACT_VENV | device=$ACT_DEVICE | bind=$ACT_HOST:$ACT_PORT"
-echo "### checkpoint=$ACT_CHECKPOINT | n_action_steps=$ACT_N_ACTION_STEPS"
+echo "### checkpoint=$ACT_CHECKPOINT | n_action_steps=$ACT_N_ACTION_STEPS | action_space=$ACT_ACTION_SPACE"
 
 exec "$VENV_PY" "$SERVER_PY" \
     --checkpoint "$ACT_CHECKPOINT" \
     --host "$ACT_HOST" \
     --port "$ACT_PORT" \
     --device "$ACT_DEVICE" \
-    --n-action-steps "$ACT_N_ACTION_STEPS"
+    --n-action-steps "$ACT_N_ACTION_STEPS" \
+    --action-space "$ACT_ACTION_SPACE"

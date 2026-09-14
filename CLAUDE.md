@@ -502,6 +502,7 @@ canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
 | mock RViz로 개입 경로 확인 (실기 위험 0) | [`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`](serl_ur_infra/RVIZ_HIL_TEST_CLI.md) |
 | GELLO 개입 손맛·좌표계 **실기** 검증 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §4.5·§9 — `serl_ur_infra/tests/run_real_hil.py`. 기본 `DRY_RUN`이고 `--arm`을 줄 때만 움직인다. **정책이 zero 고정이라 learner도 gRPC 서버도 필요 없다** — 3-CLI 운영 워크플로우와 혼동하지 말 것(실제로 혼동이 있었다). 컨트롤러 요구도 다르다(FPC) → [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.5 |
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
+| `carrot_in_pot` ACT/FM 정책을 **EEF-델타 액션 공간**으로 배포 (데이터셋 → kanu 학습 → 체크포인트 → 실기) | [`docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md`](docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md) — 🔴 **실기 전면 미검증이고 체크포인트도 아직 없다.** joint 모드와의 차이(state 16 / action 7, chunk 누적, 카르테시안 클램프 3단, 핸드셰이크 거부)와 그 순서만 적어 둔 문서다. 설계 계약은 [`gello_policy/CARROT_EEF_DESIGN.md`](ros2_ur_ws/src/gello_policy/CARROT_EEF_DESIGN.md) |
 | 처음부터 환경 세팅 / 세션 전 프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
 | 그리퍼만 단독으로 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
 | 카메라가 안 뜰 때 | [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md) · [`docs/testing/06_SENSORS.md`](docs/testing/06_SENSORS.md) |

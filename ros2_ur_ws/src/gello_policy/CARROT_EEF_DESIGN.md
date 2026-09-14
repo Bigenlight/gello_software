@@ -21,7 +21,7 @@ No depth. The existing joint-space path must keep working unchanged (`action_spa
 | Raw takes | `/home/laptop3/youngwoong_ws/Put_carrot_in_pot/take_*` (54, EEF-teleop mode, 30 fps cams, `vectors.h5` + `cam1.mp4` + `cam2.mp4` + `depth.h5`). Existing joint-space LeRobot conversion: `/home/laptop3/youngwoong_ws/carrot_in_pot_lerobot` (18,557 frames). |
 | Converter env | `/home/laptop3/youngwoong_ws/lr_env/bin/python` (py3.12, lerobot 0.6.1 pin 8a74e0a). Needs `PYTHONPATH=<wt>/ros2_ur_ws/src/ur_gello_bringup:<wt>/ros2_ur_ws/src/gello_policy` (both are ROS-free modules). Verified: `from ur_gello_bringup import ur_kin` works there. |
 | TCP | flange (`ur_kin.fk`) ⊕ 0.174 m along flange +Z. Matches the recorder's `tcp_pose` table to ~1 mm. Defined once in `gello_policy/eef_space.py` (`T_TOOL`). |
-| Recorded lag | In this EEF-mode session `command` LEADS the measured joints by **~0.9 s** (61 mm median at τ=0, 1 mm at τ=+0.9 s, all takes). Joint-mode cube takes show ~0 lag (3–5 mm). So `command` is NOT "next pose"; **the action is defined from the ACHIEVED motion, never from `command`** (§2). Root cause is open (owner A7). |
+| Recorded lag — RESOLVED as a recorder artifact | `ur_joint_states` in `vectors.h5` is a **stale cache**: FK(q(t+0.90 s)) equals TCP(command(t)) to ~1 mm in all 54 takes (constant 0.90); `tcp_pose` is stale by a constant 0.40 s. Fresh streams: `command`, `cam1` (image motion ↔ command speed peaks at τ=0.00), `cam2` (finger motion ↔ grip_cmd lag 0.3 s, same as July joint-mode takes = physical gripper delay), `gello_*`, `grip_cmd`. Not robot lag, not One-Euro, not ROS transport (A7 documents the mechanism). **Converter rule: sample joints by LINEAR INTERPOLATION at `cam1_t + tau_q`, tau_q estimated per take by minimising median |TCP(q(t+τ)) − TCP(cmd(t))| over τ∈[0,1.5] step 0.01 (measured 0.89 in all 54 takes; assert 0.6–1.2 and residual < 3 mm); state, TCP and Δ all use the shifted, interpolated q** (nearest-neighbour on the shifted grid repeats 8.8 % of samples and inflates 1-frame |dp| to 11.5 mm; interpolation gives max 8.9 mm). `command` itself is used only for this alignment. **`start_pose` is the de-staled frame-0 pose** (the arm's real pose when the first image was taken), not the raw frame-0 sample. |
 | Achieved motion per frame (30 fps) | |Δp| p50 2.2 mm, p99 6.6 mm, max 9.6 mm; |Δrot| p99 0.02 rad, max 0.03 rad. Over 30 frames: |Δp| p50 64 mm, p99 159 mm, max 161 mm; |Δrot| max 0.46 rad. |
 | TCP workspace (all frames) | x 0.415–0.709, y −0.214–0.389, z 0.017–0.306 m (base frame). |
 | Start pose (frame 0, 54 takes) | mean `[-3.193, -1.490, 1.693, -1.798, -1.590, -3.269]` rad, std ≤ 0.113, max |dev| 0.28. Start TCP ≈ (0.528, 0.101, 0.235). Gripper open (grip_pos ≈ 0.012). |
@@ -41,7 +41,8 @@ state  (16) = [q1..q6, tcp_x, tcp_y, tcp_z, r11, r21, r31, r12, r22, r32, grip_p
               COLUMNS of R_tcp (continuous; the carrot TCP is ~175° from identity so a
               rotvec would wrap); grip_pos 0=open..1=closed.
 action (7)  = [dx, dy, dz, drx, dry, drz, grip_cmd]
-              dataset frame t (30 fps master clock):  Δ_t = TCP(q_{t+1}) ⊖ TCP(q_t)
+              dataset frame t (30 fps master clock; q sampled at t + tau_q, see §1):
+                                                       Δ_t = TCP(q_{t+1}) ⊖ TCP(q_t)
                  dp = p_{t+1} − p_t ; drot = so3_log(R_{t+1} R_tᵀ)   (base frame, left-mult)
               last frame of an episode: dp = drot = 0.
               grip_cmd = ABSOLUTE recorded gripper command (0=open..1=closed), same

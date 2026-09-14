@@ -42,11 +42,20 @@ gripper handling, queue logic, health checks, logging -- is identical):
   so -- unlike the single-task diffusion server which sent task="" -- we send the
   real task string ("put the right banana in the pot") on every tick.
 
+Action spaces (CARROT_EEF_DESIGN §4). The wire format is v2: the RESET reply is a
+handshake and the ACT reply carries `chunk_start`. `--action-space` (env
+FM_ACTION_SPACE) selects what the 7-D action MEANS -- "joint" (q1..q6 + grip, the
+banana contract above) or "eef_delta_v1" (base-frame Cartesian delta + grip, state
+16). The server does NOT trust that flag: it reads the checkpoint's own
+observation.state / action feature shapes and REFUSES TO START (exit 4) when they
+contradict it. --task also defaults per action space, because the CLIP sentence
+must be the one the dataset was trained with.
+
 Run:
     python -m gello_policy.policy_server.fm_server \
         --checkpoint <ckpt_dir> --host 127.0.0.1 --port 5593 --device cuda \
         --n-action-steps 24 --num-integration-steps 100 \
-        --task "put the right banana in the pot"
+        --action-space joint --task "put the right banana in the pot"
 """
 
 from __future__ import annotations
@@ -80,9 +89,15 @@ from lerobot.policies import make_pre_post_processors
 # (modeling_multi_task_dit.py reset/select_action). Used for refill logging.
 from lerobot.utils.constants import ACTION
 
-# Default task string for CLIP text conditioning. Single-task deploy, but the FM
-# model IS text-conditioned, so this MUST be the trained task phrasing.
+# Default task strings for CLIP text conditioning. Single-task deploy, but the FM
+# model IS text-conditioned, so this MUST be the phrasing the checkpoint was
+# trained with -- which differs per dataset, hence per action space:
+#   joint         -> the banana-in-pot joint checkpoint (unchanged)
+#   eef_delta_v1  -> the carrot dataset's task string (CARROT_EEF_DESIGN §4)
+# A wrong string is NOT an error anywhere in the stack; it just conditions the
+# policy on the wrong sentence, so it has to be right by default.
 DEFAULT_TASK = "put the right banana in the pot"
+DEFAULT_TASK_EEF = "Put carrot in pot"
 
 # Allow running both as a module (`-m gello_policy.policy_server.fm_server`) and as
 # a bare script (scripts/run_fm_server.sh). Prefer the package-relative import.
@@ -95,6 +110,13 @@ except ImportError:  # pragma: no cover - fallback for direct-path execution
     import zmq_protocol as proto  # type: ignore
 
 
+def default_task_for_space(action_space: str) -> str:
+    """Trained task phrasing for an action space (see DEFAULT_TASK above)."""
+    if action_space == proto.ACTION_SPACE_EEF:
+        return DEFAULT_TASK_EEF
+    return DEFAULT_TASK
+
+
 # =============================================================================
 # Policy wrapper
 # =============================================================================
@@ -104,10 +126,15 @@ class FlowMatchingInferenceEngine:
     calls (via policy.reset())."""
 
     def __init__(self, checkpoint: str, device: str, n_action_steps: int,
-                 num_integration_steps: int | None, task: str) -> None:
+                 num_integration_steps: int | None, task: str,
+                 action_space: str = proto.ACTION_SPACE_JOINT) -> None:
         self.device = device
         self.n_action_steps = n_action_steps
         self.task = task
+        self.checkpoint = checkpoint
+        self.action_space = action_space
+        # Set on every act() so _handle can report chunk_start without re-deriving it.
+        self.last_chunk_start = False
 
         print(f"[fm_server] loading checkpoint: {checkpoint} on {device}", flush=True)
         # Load recipe: mutate the config BEFORE from_pretrained so the model is built
@@ -115,6 +142,17 @@ class FlowMatchingInferenceEngine:
         cfg = PreTrainedConfig.from_pretrained(checkpoint)
         cfg.pretrained_path = checkpoint
         cfg.device = device
+
+        # v2 handshake dims come from the CHECKPOINT's own features, never from the
+        # CLI, so this is a real cross-check. Done on the CONFIG, before the model
+        # (DiT + CLIP encoders) is built: a mismatch costs a second, not a GPU load.
+        self.state_dim = int(cfg.input_features[proto.OBS_STATE_KEY].shape[0])
+        self.action_dim = int(cfg.output_features[proto.POLICY_ACTION_FEATURE].shape[0])
+        self.policy_type = str(getattr(cfg, "type", "?"))
+        proto.enforce_action_space(action_space, self.state_dim, self.action_dim,
+                                   checkpoint, "[fm_server]")
+        print(f"[fm_server] action_space={action_space} state_dim={self.state_dim} "
+              f"action_dim={self.action_dim} policy_type={self.policy_type}", flush=True)
         # Euler-ODE step count override (change #2). Flow matching integrates the
         # velocity field over cfg.num_integration_steps Euler steps -- there is NO
         # noise scheduler / DDIM here. Default None = keep the checkpoint's trained
@@ -190,7 +228,9 @@ class FlowMatchingInferenceEngine:
         # decode_jpeg_to_rgb_float_chw returns native-res frames; mirror the declared
         # camera resolution (3, 720, 1280). The policy resizes to 224 internally.
         zero_obs = {
-            proto.OBS_STATE_KEY: torch.zeros(proto.STATE_DIM, dtype=torch.float32),
+            # self.state_dim (NOT proto.STATE_DIM): an eef_delta_v1 checkpoint wants
+            # 16 and the normalizer would throw on a 7-vector.
+            proto.OBS_STATE_KEY: torch.zeros(self.state_dim, dtype=torch.float32),
             proto.OBS_CAM1_KEY: torch.zeros(3, 720, 1280, dtype=torch.float32),
             proto.OBS_CAM2_KEY: torch.zeros(3, 720, 1280, dtype=torch.float32),
             proto.OBS_TASK_KEY: self.task,
@@ -211,23 +251,37 @@ class FlowMatchingInferenceEngine:
         self.preprocessor.reset()
         self.postprocessor.reset()
 
+    def handshake(self) -> dict:
+        """v2 RESET reply body: what this server is serving (zmq_protocol §wire)."""
+        return proto.handshake(self.action_space, self.state_dim, self.action_dim,
+                               self.policy_type, self.checkpoint)
+
     @torch.no_grad()
     def act(self, state: np.ndarray, cam1_jpeg: bytes, cam2_jpeg: bytes) -> np.ndarray:
-        """Run one inference tick. Returns a (7,) float64 numpy action:
-        [q1..q6 radians, grip_cmd 0..1]."""
+        """Run one inference tick. Returns a (ACTION_DIM,) float64 numpy action --
+        [q1..q6 radians, grip_cmd 0..1] in joint space, [dx,dy,dz,drx,dry,drz,grip]
+        in eef_delta_v1. Also sets self.last_chunk_start."""
         # Build obs dict with EXACT dataset feature keys. Images are RGB, CHW, float32
         # [0,1] at NATIVE resolution (BGR->RGB here, resize to 224 done INSIDE the
-        # policy). State is float32 (7,). task = the trained phrasing (CLIP text cond).
+        # policy). State is float32 (state_dim,). task = trained phrasing (CLIP text).
+        if state.shape != (self.state_dim,):
+            raise ValueError(
+                f"state must be length {self.state_dim} for action_space="
+                f"{self.action_space}, got shape {state.shape}")
         obs = {
-            proto.OBS_STATE_KEY: torch.from_numpy(state.astype(np.float32)),  # (7,)
+            proto.OBS_STATE_KEY: torch.from_numpy(state.astype(np.float32)),  # (S,)
             proto.OBS_CAM1_KEY: decode_jpeg_to_rgb_float_chw(cam1_jpeg),      # (3,H,W)
             proto.OBS_CAM2_KEY: decode_jpeg_to_rgb_float_chw(cam2_jpeg),      # (3,H,W)
             proto.OBS_TASK_KEY: self.task,
         }
 
         # Log net-refills: the policy only re-runs the full Euler ODE integration when
-        # its action deque (policy._queues[ACTION]) is empty.
+        # its action deque (policy._queues[ACTION]) is empty. The SAME boolean is
+        # reported to the client as chunk_start (v2): it marks the tick whose
+        # observation the whole next chunk was predicted from, which is where the EEF
+        # executor re-anchors its integration target (DESIGN §3.3).
         refill = len(self.policy._queues[ACTION]) == 0
+        self.last_chunk_start = refill
 
         proc = self.preprocessor(obs)               # rename -> batch -> tokenize -> device -> normalize
         action = self.policy.select_action(proc)    # (1,7) normalized
@@ -263,16 +317,23 @@ def serve(engine: FlowMatchingInferenceEngine, host: str, port: int) -> None:
     try:
         while True:
             frames = sock.recv_multipart()
-            try:
-                payload = _handle(engine, frames)
-            except Exception as exc:  # never die on a bad request; report it
-                payload = {proto.KEY_OK: False, proto.KEY_ERR: f"{type(exc).__name__}: {exc}"}
-                print(f"[fm_server] ERROR handling request: {payload[proto.KEY_ERR]}", flush=True)
-            _reply(sock, payload)
+            _reply(sock, handle_request(engine, frames))
     except KeyboardInterrupt:
         print("\n[fm_server] interrupted; shutting down.", flush=True)
     finally:
         sock.close(linger=0)
+
+
+def handle_request(engine: FlowMatchingInferenceEngine, frames: list) -> dict:
+    """_handle + the never-die error envelope. The REP loop must answer EVERY
+    request (a REQ socket blocks forever otherwise), so a bad frame becomes an
+    {ok:false, err} reply rather than an exception."""
+    try:
+        return _handle(engine, frames)
+    except Exception as exc:  # never die on a bad request; report it
+        payload = {proto.KEY_OK: False, proto.KEY_ERR: f"{type(exc).__name__}: {exc}"}
+        print(f"[fm_server] ERROR handling request: {payload[proto.KEY_ERR]}", flush=True)
+        return payload
 
 
 def _handle(engine: FlowMatchingInferenceEngine, frames: list) -> dict:
@@ -286,7 +347,9 @@ def _handle(engine: FlowMatchingInferenceEngine, frames: list) -> dict:
 
     if cmd == proto.CMD_RESET:
         engine.reset()
-        return {proto.KEY_OK: True}
+        # v2: RESET is the handshake. The client refuses to arm unless these match
+        # what it is configured to pack/unpack (DESIGN §3.7).
+        return engine.handshake()
 
     if cmd == proto.CMD_ACT:
         if len(frames) != proto.ACT_REQUEST_NFRAMES:
@@ -295,15 +358,18 @@ def _handle(engine: FlowMatchingInferenceEngine, frames: list) -> dict:
                 f"[ctrl, cam1, cam2], got {len(frames)}"
             )
         state = np.asarray(ctrl.get(proto.KEY_STATE), dtype=np.float64)
-        if state.shape != (proto.STATE_DIM,):
-            raise ValueError(f"state must be length {proto.STATE_DIM}, got shape {state.shape}")
+        # Validate against the CHECKPOINT's state_dim, not the joint-space literal.
+        if state.shape != (engine.state_dim,):
+            raise ValueError(f"state must be length {engine.state_dim}, got shape {state.shape}")
         cam1_jpeg, cam2_jpeg = frames[1], frames[2]
 
         action = engine.act(state, cam1_jpeg, cam2_jpeg)
         if action.shape != (proto.ACTION_DIM,) or not np.all(np.isfinite(action)):
             raise ValueError(f"policy returned invalid action: shape={action.shape}, "
                              f"finite={np.all(np.isfinite(action))}")
-        return {proto.KEY_OK: True, proto.KEY_ACTION: [float(x) for x in action]}
+        return {proto.KEY_OK: True,
+                proto.KEY_ACTION: [float(x) for x in action],
+                proto.KEY_CHUNK_START: bool(engine.last_chunk_start)}
 
     raise ValueError(f"unknown cmd: {cmd!r}")
 
@@ -329,9 +395,21 @@ def parse_args(argv=None) -> argparse.Namespace:
                             if os.environ.get("FM_NUM_INTEGRATION_STEPS") else None),
                    help="Euler ODE steps per refill. Default (unset) keeps the "
                         "checkpoint's trained value (100); lower (e.g. 10) = faster refill.")
-    p.add_argument("--task", default=os.environ.get("FM_TASK", DEFAULT_TASK),
+    p.add_argument("--action-space",
+                   default=os.environ.get("FM_ACTION_SPACE", proto.ACTION_SPACE_JOINT),
+                   choices=list(proto.ACTION_SPACES),
+                   help="What the 7-D action MEANS. 'joint' (default, the original "
+                        "contract) = absolute q1..q6 + grip; 'eef_delta_v1' = base-frame "
+                        "Cartesian delta + grip with a 16-D state. Cross-checked against "
+                        "the checkpoint's feature shapes; a mismatch exits 4.")
+    # NOTE: default is None, not DEFAULT_TASK -- the task default DEPENDS on
+    # --action-space, which argparse has not resolved yet. main() fills it in via
+    # default_task_for_space(). An explicit flag or $FM_TASK still wins.
+    p.add_argument("--task", default=os.environ.get("FM_TASK") or None,
                    help="Task string for CLIP text conditioning (the FM model is "
-                        "text-conditioned). Default: the trained banana-in-pot phrasing.")
+                        "text-conditioned). Default: the trained phrasing for the "
+                        f"chosen action space ({DEFAULT_TASK!r} for joint, "
+                        f"{DEFAULT_TASK_EEF!r} for eef_delta_v1).")
     return p.parse_args(argv)
 
 
@@ -358,9 +436,16 @@ def main(argv=None) -> int:
         return 2
 
     device = resolve_device(args.device)
+    # Resolve the per-action-space task default here (argparse could not: it depends
+    # on another flag). Print it -- a silently wrong CLIP sentence is invisible
+    # everywhere else in the stack.
+    task = args.task if args.task else default_task_for_space(args.action_space)
+    print(f"[fm_server] action_space={args.action_space} task={task!r}"
+          f"{'' if args.task else ' (default for this action space)'}", flush=True)
     t0 = time.time()
     engine = FlowMatchingInferenceEngine(args.checkpoint, device, args.n_action_steps,
-                                         args.num_integration_steps, args.task)
+                                         args.num_integration_steps, task,
+                                         action_space=args.action_space)
     print(f"[fm_server] ready in {time.time() - t0:.1f}s", flush=True)
     serve(engine, args.host, args.port)
     return 0

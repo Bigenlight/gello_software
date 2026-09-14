@@ -57,14 +57,26 @@
 # #    # Pass extra launch args after the script args:                       #
 # #    FM_CHECKPOINT=/path/... ./run_ur7e_fm_real.sh launch_rviz:=false      #
 # #                                                                          #
+# #    # CARROT, EEF-DELTA action space (params file + action space + the     #
+# #    # CLIP prompt — ALL THREE must match the checkpoint):                  #
+# #    FM_PARAMS_FILE=src/gello_policy/config/carrot_eef_fm.yaml \           #
+# #        FM_ACTION_SPACE=eef_delta_v1 FM_TASK="Put carrot in pot" \        #
+# #        FM_CHECKPOINT=/path/... ./run_ur7e_fm_real.sh                     #
+# #                                                                          #
 # #  ENV:                                                                    #
 # #    ROBOT_IP  (default 192.168.10.11)   CALIB (optional kinematics YAML)   #
 # #    HEADLESS  (true|1 -> Method B)      START_MODE (gello | init_align)    #
 # #    FM_VENV  (default ros2_ur_ws/act_venv)  FM_CHECKPOINT (REQUIRED)       #
 # #    FM_PORT  (default 5593)             FM_DEVICE (default cuda)           #
 # #    FM_NUM_INTEGRATION_STEPS (default unset -> ckpt's 100)                 #
-# #    FM_N_ACTION_STEPS (default 24)      FM_TASK (default banana-in-pot)    #
+# #    FM_N_ACTION_STEPS (default 24)      FM_TASK (default: unset -> the      #
+# #        server's trained phrase for FM_ACTION_SPACE)                        #
 # #    FM_PARAMS_FILE (default installed config/fm_deploy.yaml)               #
+# #    FM_ACTION_SPACE (default 'joint'; 'eef_delta_v1' for the carrot EEF    #
+# #        deploy). This is the SERVER side of the contract; the NODE side is #
+# #        action_space/expected_action_space in the params file. They must   #
+# #        agree or ~/start_execution refuses to arm (by design — the RESET   #
+# #        handshake compares them).                                          #
 # #    GELLO_REPO_ROOT (default <ros2_ur_ws>/..)                             #
 # ############################################################################
 set -e
@@ -88,7 +100,18 @@ FM_HOST="${FM_HOST:-127.0.0.1}"
 FM_CHECKPOINT="${FM_CHECKPOINT:-}"
 FM_N_ACTION_STEPS="${FM_N_ACTION_STEPS:-24}"
 FM_NUM_INTEGRATION_STEPS="${FM_NUM_INTEGRATION_STEPS:-10}"
-FM_TASK="${FM_TASK:-put the right banana in the pot}"
+# CLIP task string. Default is EMPTY ON PURPOSE, not the banana phrase: fm_server.py
+# picks the trained phrasing FROM THE ACTION SPACE ("put the right banana in the pot"
+# for joint, "Put carrot in pot" for eef_delta_v1), and run_fm_server.sh only passes
+# --task when this is non-empty. Hard-coding the banana phrase here would silently
+# feed the carrot policy the wrong CLIP prompt — a text-conditioned model degrades
+# with NO error. Set FM_TASK explicitly only to override that trained default.
+FM_TASK="${FM_TASK:-}"
+# Action space the SERVER is told to serve. Default "joint" keeps the banana deploy
+# byte-identical; the carrot EEF deploy passes "eef_delta_v1". The server refuses to
+# start if this contradicts the checkpoint's state_dim (16 <-> eef_delta_v1, 7 <-> joint),
+# and the leader refuses to ARM if it contradicts the params file's action_space.
+FM_ACTION_SPACE="${FM_ACTION_SPACE:-joint}"
 RUN_FM_SERVER="$SCRIPT_DIR/src/gello_policy/scripts/run_fm_server.sh"
 
 if [ -z "${FM_CHECKPOINT}" ]; then
@@ -136,12 +159,13 @@ fi
 
 # --- Start the FM inference server in the BACKGROUND (before ros2 launch) ------
 echo "### Starting FM server (py3.12): venv=${FM_VENV} device=${FM_DEVICE} bind=${FM_HOST}:${FM_PORT}"
-echo "### checkpoint=${FM_CHECKPOINT} | integration_steps=${FM_NUM_INTEGRATION_STEPS:-<ckpt 100>} | n_action_steps=${FM_N_ACTION_STEPS} | task='${FM_TASK}'"
+echo "### checkpoint=${FM_CHECKPOINT} | integration_steps=${FM_NUM_INTEGRATION_STEPS:-<ckpt 100>} | n_action_steps=${FM_N_ACTION_STEPS} | task='${FM_TASK:-<server default for ${FM_ACTION_SPACE}>}' | action_space=${FM_ACTION_SPACE}"
 FM_VENV="${FM_VENV}" FM_HOST="${FM_HOST}" FM_PORT="${FM_PORT}" FM_DEVICE="${FM_DEVICE}" \
     FM_CHECKPOINT="${FM_CHECKPOINT}" \
     FM_N_ACTION_STEPS="${FM_N_ACTION_STEPS}" \
     FM_NUM_INTEGRATION_STEPS="${FM_NUM_INTEGRATION_STEPS}" \
     FM_TASK="${FM_TASK}" \
+    FM_ACTION_SPACE="${FM_ACTION_SPACE}" \
     bash "${RUN_FM_SERVER}" &
 FM_SERVER_PID=$!
 # Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).
@@ -187,6 +211,7 @@ else
 fi
 
 echo "### REAL UR7e FM deploy | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>} | params=${FM_PARAMS_FILE}"
+echo "### action_space=${FM_ACTION_SPACE} (server side; the params file's action_space must agree) | task='${FM_TASK:-<server default for ${FM_ACTION_SPACE}>}'"
 echo "### headless_mode=${HEADLESS_STATE}"
 if [ "${START_MODE}" = "init_align" ]; then
     echo "### start_mode=init_align — arm parks at the init pose; then it chases the held start pose."

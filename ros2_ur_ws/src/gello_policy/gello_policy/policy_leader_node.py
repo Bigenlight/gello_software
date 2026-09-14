@@ -21,8 +21,22 @@ State machine (BUILD_SPEC §5):
 
 Services (std_srvs/Trigger):
   ~/start_execution : HOLD (or FAULT) -> EXECUTE. Guards that the live arm pose is
-                      within ~0.1 rad of start_pose, then ZMQ-RESETs the server.
+                      within ~0.1 rad of start_pose, then ZMQ-RESETs the server and
+                      checks the v2 handshake (action_space / state_dim / action_dim)
+                      against this node's configuration.
   ~/hold            : -> HOLD, republishing the current live pose held constant.
+
+Action spaces (``action_space`` parameter, CARROT_EEF_DESIGN.md §3):
+  "joint"     (default) -- the reply IS the joint target: q1..q6 + grip. UNCHANGED,
+              byte for byte, from the banana/cube ACT + FM + Diffusion deploys.
+  "eef_delta" -- the observation is the 16-D EEF state and the reply is a Cartesian
+              delta; ``eef_executor.EefDeltaExecutor`` accumulates it on a target
+              TCP pose, clamps it (step / lead / workspace box, all
+              norm-proportional) and inverts it to joints. The resulting joint
+              target then goes through the SAME joint envelope + max-deviation
+              clamps and the SAME publishers -- the Cartesian layer is strictly
+              upstream of the existing position safety, never a replacement for it.
+              ZMQ only: the gRPC remote-diffusion transport carries a joint action.
 
 Distro note: written to be distro-agnostic (std sensor_msgs/std_msgs/std_srvs +
 rclpy). Verified to construct under ROS2 Jazzy on the dev PC; the target robot PC
@@ -43,6 +57,19 @@ import zmq
 from gello_policy import obs_assembler
 from gello_policy.joint_angles import angular_deviations, positions_near_reference
 from gello_policy.obs_assembler import UR_JOINT_ORDER
+
+# EEF mode only. Imported defensively so a missing numpy / ur_gello_bringup can
+# never break the joint path that drives the robot today; eef mode refuses to
+# construct with the captured error instead.
+try:
+    from gello_policy import eef_space
+    from gello_policy.eef_executor import EefDeltaExecutor, EefExecutorConfig
+    _EEF_IMPORT_ERROR = None
+except Exception as _exc:  # noqa: BLE001 - reported at construction, not import
+    eef_space = None
+    EefDeltaExecutor = None
+    EefExecutorConfig = None
+    _EEF_IMPORT_ERROR = _exc
 from gello_policy.remote_diffusion_client import (
     ImageSnapshot,
     ObservationSnapshot,
@@ -61,6 +88,13 @@ ARMING = "ARMING"
 # Live-pose gate for arming: the arm must already be sitting on start_pose (the
 # handshake has converged) before we hand control to the policy.
 START_GATE_RAD = 0.1
+
+# --- Action spaces (parameter values, NOT wire ids) --------------------------
+# The wire id for eef mode is "eef_delta_v1" (obs_assembler.EEF_ACTION_SPACE_ID /
+# eef_space.ACTION_SPACE_ID) and lives in `expected_action_space`, so the policy
+# space can be versioned without renaming the operator-facing mode switch.
+ACTION_SPACE_JOINT = "joint"
+ACTION_SPACE_EEF = "eef_delta"
 
 
 class PolicyLeaderNode(Node):
@@ -98,6 +132,18 @@ class PolicyLeaderNode(Node):
             "joint_limits_hi", [3.67, -0.88, 2.62, -1.01, -1.25, -1.52]
         )
         self.declare_parameter("max_dev_rad", 0.5)
+        # --- EEF-delta mode (CARROT_EEF_DESIGN.md §3; names are a contract with
+        # the config yamls -- do not rename). All are inert when
+        # action_space == "joint".
+        self.declare_parameter("action_space", ACTION_SPACE_JOINT)
+        self.declare_parameter("expected_action_space", obs_assembler.EEF_ACTION_SPACE_ID)
+        self.declare_parameter("eef_max_step_m", 0.02)
+        self.declare_parameter("eef_max_step_rad", 0.10)
+        self.declare_parameter("eef_max_lead_m", 0.06)
+        self.declare_parameter("eef_max_lead_rad", 0.30)
+        self.declare_parameter("workspace_lo", [0.35, -0.30, 0.00])
+        self.declare_parameter("workspace_hi", [0.78, 0.45, 0.40])
+        self.declare_parameter("eef_ik_fail_fault_n", 10)
         # Max age of any observation before EXECUTE FAULTs. Guards against a frozen
         # camera / hung joint-state stream driving the policy on a stale frame
         # (review: obs-freshness watchdog). ~0.5 s = a real stall, not a dropped frame.
@@ -127,8 +173,31 @@ class PolicyLeaderNode(Node):
         self._auto_start = bool(gp("auto_start_on_stream").value)
         cam1_topic = str(gp("cam1_topic").value)
         cam2_topic = str(gp("cam2_topic").value)
+        self._action_space = str(gp("action_space").value).strip().lower()
+        self._expected_action_space = str(gp("expected_action_space").value)
         if self._transport not in ("zmq", "grpc"):
             raise ValueError("inference_transport must be 'zmq' or 'grpc'")
+        if self._action_space not in (ACTION_SPACE_JOINT, ACTION_SPACE_EEF):
+            raise ValueError(
+                f"action_space must be '{ACTION_SPACE_JOINT}' or '{ACTION_SPACE_EEF}', "
+                f"got {self._action_space!r}"
+            )
+        self._eef_mode = self._action_space == ACTION_SPACE_EEF
+        if self._eef_mode and self._transport != "zmq":
+            # The gRPC RemoteDiffusion contract carries a 7-D JOINT action and has
+            # no chunk_start / handshake fields; there is no way to run eef mode
+            # over it. Refuse loudly at construction rather than silently feeding
+            # Cartesian deltas to the joint clamps.
+            raise ValueError(
+                "action_space 'eef_delta' requires inference_transport 'zmq' "
+                "(the gRPC remote-inference path is joint-space only)"
+            )
+        if self._eef_mode and eef_space is None:
+            raise ValueError(
+                f"action_space 'eef_delta' needs gello_policy.eef_space "
+                f"(numpy + ur_gello_bringup.ur_kin), which failed to import: "
+                f"{_EEF_IMPORT_ERROR}"
+            )
 
         # Validate array param lengths early -- a wrong-length limit vector would
         # silently disable a joint's clamp.
@@ -162,6 +231,36 @@ class PolicyLeaderNode(Node):
         # commanded grip so pausing mid-grasp doesn't drop the object).
         self._hold_gripper = self._start_gripper
         self._last_grip_cmd = self._start_gripper
+
+        # Observation/action widths on the wire. Joint mode keeps the historic 7;
+        # eef mode starts at eef_space's 16 and is then re-confirmed (never
+        # silently widened) by the RESET handshake before the first act request.
+        self._state_len = obs_assembler.STATE_LEN
+        self._action_len = obs_assembler.ACTION_LEN
+        self._expected_wire_space = obs_assembler.JOINT_ACTION_SPACE_ID
+        self._eef = None
+        if self._eef_mode:
+            self._state_len = eef_space.STATE_DIM
+            self._action_len = eef_space.ACTION_DIM
+            self._expected_wire_space = self._expected_action_space
+            self._eef = EefDeltaExecutor(EefExecutorConfig(
+                start_pose=tuple(self._start_pose),
+                max_step_m=float(gp("eef_max_step_m").value),
+                max_step_rad=float(gp("eef_max_step_rad").value),
+                max_lead_m=float(gp("eef_max_lead_m").value),
+                max_lead_rad=float(gp("eef_max_lead_rad").value),
+                workspace_lo=tuple(float(x) for x in gp("workspace_lo").value),
+                workspace_hi=tuple(float(x) for x in gp("workspace_hi").value),
+                ik_fail_fault_n=int(gp("eef_ik_fail_fault_n").value),
+            ))
+            if self._eef.start_branch < 0:
+                # branch_id returns -1 when the analytic IK cannot invert the start
+                # pose at all. ik_tcp_nearest then runs UNLOCKED (any branch), so
+                # say so instead of pretending the lock is in place.
+                self.get_logger().warn(
+                    "start_pose has no closed-form IK branch (branch_id=-1): EEF "
+                    "targets will be inverted WITHOUT a branch lock. Check start_pose."
+                )
 
         self._state = HOLD
         self._arming_generation = 0
@@ -242,6 +341,15 @@ class PolicyLeaderNode(Node):
             f"auto_start_on_stream={self._auto_start}. "
             f"Holding start_pose; call ~/start_execution to begin."
         )
+        if self._eef_mode:
+            c = self._eef.cfg
+            self.get_logger().info(
+                f"action_space=eef_delta (expect {self._expected_wire_space}, "
+                f"state {self._state_len}-D): step<={c.max_step_m} m/{c.max_step_rad} rad, "
+                f"lead<={c.max_lead_m} m/{c.max_lead_rad} rad, box {list(c.workspace_lo)}"
+                f"..{list(c.workspace_hi)}, IK branch {self._eef.start_branch}, "
+                f"fault after {c.ik_fail_fault_n} consecutive IK failures."
+            )
 
     # ---- ZMQ socket lifecycle ------------------------------------------
     def _connect_socket(self):
@@ -347,6 +455,11 @@ class PolicyLeaderNode(Node):
         self._arming_generation += 1
         self._arming_result = None
         self._state = HOLD
+        if self._eef is not None:
+            # Drop the accumulated Cartesian target: after a hold the arm is
+            # wherever the operator left it, and a stale target would be executed
+            # as one large jump on the next arm.
+            self._eef.reset()
         if self._grpc_worker is not None:
             self._grpc_worker.disarm()
         self._auto_start_fired = True  # don't auto-rearm after a manual hold
@@ -403,14 +516,75 @@ class PolicyLeaderNode(Node):
         # RESET the legacy ZMQ policy (clears its action queue).
         try:
             reply = self._zmq_roundtrip(obs_assembler.build_reset_request())
-            obj = obs_assembler.parse_reply(reply)
+            handshake = obs_assembler.parse_reset_reply(reply)
         except Exception as exc:  # noqa: BLE001
             return False, f"refused: inference RESET failed ({exc})"
-        if not obj.get(obs_assembler.KEY_OK, False):
-            return False, f"refused: server RESET returned ok:false ({obj})"
+        if not handshake[obs_assembler.KEY_OK]:
+            return False, f"refused: server RESET returned ok:false ({handshake['raw']})"
+        ok, detail = self._check_handshake(handshake)
+        if not ok:
+            return False, f"refused: {detail}"
+        if self._eef is not None:
+            self._eef.reset(positions_near_reference(self._live_q, self._start_pose))
         self._state = EXECUTE
-        self.get_logger().info("~/start_execution: RESET ok -> EXECUTE.")
+        self.get_logger().info(f"~/start_execution: RESET ok -> EXECUTE{detail}.")
         return True, "EXECUTE"
+
+    def _check_handshake(self, handshake):
+        """Verify a v2 RESET reply describes the checkpoint we are configured for.
+
+        Returns (ok, detail); detail is a refusal reason when ok is False and a
+        short log suffix otherwise. Design §3.7: "a joint checkpoint can never
+        drive eef mode or vice versa".
+
+        Missing fields are handled asymmetrically ON PURPOSE:
+          * eef mode REFUSES a reply without ``action_space``/dims -- that is a
+            pre-v2 server, and a 7-D joint checkpoint answering a 16-D request
+            would be a silent shape error at best and a wrong-space motion at
+            worst;
+          * joint mode ignores absent fields (every server that exists today
+            predates the handshake, and this path must stay byte-for-byte as it
+            is) but still refuses a server that explicitly declares a space or a
+            state width that is not joint/7.
+        """
+        space = handshake[obs_assembler.KEY_ACTION_SPACE]
+        state_dim = handshake[obs_assembler.KEY_STATE_DIM]
+        action_dim = handshake[obs_assembler.KEY_ACTION_DIM]
+        if self._eef_mode and (space is None or state_dim is None or action_dim is None):
+            return False, (
+                "server RESET reply has no action_space/state_dim/action_dim -- it "
+                "predates protocol v2, so it cannot be confirmed to serve "
+                f"{self._expected_wire_space!r}. Start the server with "
+                f"--action-space {self._expected_wire_space}."
+            )
+        if space is not None and space != self._expected_wire_space:
+            return False, (
+                f"server action_space {space!r} != expected "
+                f"{self._expected_wire_space!r} (a joint checkpoint can never drive "
+                f"eef mode or vice versa)"
+            )
+        if state_dim is not None and state_dim != self._state_len:
+            return False, (
+                f"server state_dim {state_dim} != expected {self._state_len} for "
+                f"action_space {self._expected_wire_space!r}"
+            )
+        if action_dim is not None and action_dim != self._action_len:
+            return False, (
+                f"server action_dim {action_dim} != expected {self._action_len} for "
+                f"action_space {self._expected_wire_space!r}"
+            )
+        if space is None or state_dim is None or action_dim is None:
+            # Pre-v2 (or partially v2) server: nothing to adopt. Only reachable in
+            # joint mode -- eef mode refused a few lines above.
+            return True, ""
+        # Adopt the handshaken width: from here on every act request is validated
+        # against what the server said, not against a compile-time constant.
+        self._state_len = int(state_dim)
+        self._action_len = int(action_dim)
+        return True, (
+            f" (server: action_space={space}, state_dim={state_dim}, "
+            f"action_dim={action_dim}, policy={handshake[obs_assembler.KEY_POLICY_TYPE]})"
+        )
 
     def _grpc_arm(self, generation):
         try:
@@ -474,7 +648,12 @@ class PolicyLeaderNode(Node):
         # The same representation is used by the max-deviation clamp below, so a
         # wrapped /joint_states sample cannot corrupt either inference or safety.
         live_q = positions_near_reference(self._live_q, self._start_pose)
-        state = live_q + [float(self._grip_pos)]
+        if self._eef_mode:
+            # 16-D: [q1..q6, tcp_xyz, 6-D rotation, grip_pos] (design §2).
+            state = [float(v) for v in eef_space.state_vector(live_q, float(self._grip_pos))]
+        else:
+            state = live_q + [float(self._grip_pos)]
+        chunk_start = False
         if self._transport == "grpc":
             error = self._grpc_worker.error()
             if error is not None:
@@ -505,13 +684,46 @@ class PolicyLeaderNode(Node):
                 return
             action = result.action
         else:
-            req = obs_assembler.build_act_request(state, self._cam1_jpeg, self._cam2_jpeg)
+            req = obs_assembler.build_act_request(
+                state, self._cam1_jpeg, self._cam2_jpeg, state_len=self._state_len
+            )
             try:
                 reply = self._zmq_roundtrip(req)
-                action = obs_assembler.parse_action_reply(reply)
+                action, chunk_start = obs_assembler.parse_action_reply(
+                    reply, action_len=self._action_len
+                )
             except Exception as exc:  # noqa: BLE001 -- any failure => FAULT
                 self._enter_fault(str(exc))
                 return
+
+        # --- EEF delta -> joint target (design §3 items 3-5) -------------
+        # Everything below this block is the ORIGINAL joint path: whatever the
+        # action space, `action[:6]` has become a joint target by now and the
+        # existing envelope / max-deviation clamps are the last word.
+        if self._eef_mode:
+            q_eef, eef_info = self._eef.step(live_q, action, chunk_start)
+            eef_reasons = EefDeltaExecutor.clamp_reasons(eef_info)
+            if eef_reasons:
+                self.get_logger().warn(
+                    f"EEF CLAMP engaged: {', '.join(eef_reasons)}.",
+                    throttle_duration_sec=1.0,
+                )
+            if q_eef is None:
+                if eef_info["ik_fault"]:
+                    self._enter_fault(
+                        f"EEF IK failed on {eef_info['ik_fail_streak']} consecutive "
+                        f"ticks (target {eef_info['target_pos']})"
+                    )
+                    return
+                self.get_logger().warn(
+                    f"EEF IK failed (streak "
+                    f"{eef_info['ik_fail_streak']}/{self._eef.cfg.ik_fail_fault_n}); "
+                    f"holding the live pose this tick.",
+                    throttle_duration_sec=1.0,
+                )
+                action = list(live_q) + list(action[_N:])
+            else:
+                action = [float(v) for v in q_eef] + list(action[_N:])
 
         # --- SAFETY CLAMP (order matters; BUILD_SPEC §5) -----------------
         target = list(action[:_N])

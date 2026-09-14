@@ -30,7 +30,10 @@
 # #    FM_DEVICE    torch device           (default: cuda)                    #
 # #    FM_N_ACTION_STEPS  receding horizon k (default: 24)                    #
 # #    FM_NUM_INTEGRATION_STEPS  Euler steps (default: unset -> ckpt's 100)   #
-# #    FM_TASK      CLIP task string       (default: "put the right banana in the pot")
+# #    FM_TASK      CLIP task string       (default: per action space --       #
+# #                 "put the right banana in the pot" for joint,              #
+# #                 "Put carrot in pot" for eef_delta_v1)                     #
+# #    FM_ACTION_SPACE  joint | eef_delta_v1 (default: joint)                  #
 # ############################################################################
 set -euo pipefail
 
@@ -61,7 +64,15 @@ FM_N_ACTION_STEPS="${FM_N_ACTION_STEPS:-24}"
 # leader's act_timeout_s (0.6s). Raise toward the trained 100 only if you have latency
 # headroom (benchmark first) — more steps ~= marginally smoother, much slower.
 FM_NUM_INTEGRATION_STEPS="${FM_NUM_INTEGRATION_STEPS:-10}"
-FM_TASK="${FM_TASK:-put the right banana in the pot}"
+# Empty by default ON PURPOSE: the server picks the trained phrasing for the
+# chosen action space (banana for joint, "Put carrot in pot" for eef_delta_v1).
+# Hardcoding the banana string here would silently condition a carrot policy on
+# the wrong CLIP sentence -- which nothing downstream can detect.
+FM_TASK="${FM_TASK:-}"
+# v2 wire protocol (CARROT_EEF_DESIGN §4). "joint" keeps the original contract
+# byte-for-byte; "eef_delta_v1" serves a 16-D-state Cartesian-delta checkpoint.
+# The server cross-checks this against the checkpoint and exits 4 on a mismatch.
+FM_ACTION_SPACE="${FM_ACTION_SPACE:-joint}"
 
 # --- Parse optional flags (override env) -------------------------------------
 while [ "$#" -gt 0 ]; do
@@ -73,6 +84,7 @@ while [ "$#" -gt 0 ]; do
         --n-action-steps) FM_N_ACTION_STEPS="$2"; shift 2 ;;
         --num-integration-steps) FM_NUM_INTEGRATION_STEPS="$2"; shift 2 ;;
         --task)       FM_TASK="$2"; shift 2 ;;
+        --action-space) FM_ACTION_SPACE="$2"; shift 2 ;;
         --checkpoint=*) FM_CHECKPOINT="${1#*=}"; shift ;;
         --host=*)     FM_HOST="${1#*=}"; shift ;;
         --port=*)     FM_PORT="${1#*=}"; shift ;;
@@ -80,11 +92,20 @@ while [ "$#" -gt 0 ]; do
         --n-action-steps=*) FM_N_ACTION_STEPS="${1#*=}"; shift ;;
         --num-integration-steps=*) FM_NUM_INTEGRATION_STEPS="${1#*=}"; shift ;;
         --task=*)     FM_TASK="${1#*=}"; shift ;;
+        --action-space=*) FM_ACTION_SPACE="${1#*=}"; shift ;;
         *) echo "run_fm_server.sh: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
 
 VENV_PY="$FM_VENV/bin/python"
+
+# zmq_protocol.py imports gello_policy.eef_space (which imports the ROS-free
+# ur_gello_bringup.ur_kin) so that "eef_delta_v1"/16 are defined in exactly one
+# place. The server runs as a BARE SCRIPT, so neither package is importable from
+# sys.path[0]; put both source dirs on PYTHONPATH. (zmq_protocol has the same
+# repair as a fallback -- this is the explicit, greppable half.)
+SRC_DIR="$(cd "$PKG_DIR/.." && pwd)"
+export PYTHONPATH="$SRC_DIR/gello_policy:$SRC_DIR/ur_gello_bringup${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ ! -x "$VENV_PY" ]; then
     echo "ERROR: py3.12 venv python not found at '$VENV_PY'." >&2
@@ -101,7 +122,7 @@ if [ -z "$FM_CHECKPOINT" ]; then
 fi
 
 echo "### FM server | venv=$FM_VENV | device=$FM_DEVICE | bind=$FM_HOST:$FM_PORT"
-echo "### checkpoint=$FM_CHECKPOINT | n_action_steps=$FM_N_ACTION_STEPS | num_integration_steps=${FM_NUM_INTEGRATION_STEPS:-<ckpt default>} | task='$FM_TASK'"
+echo "### checkpoint=$FM_CHECKPOINT | n_action_steps=$FM_N_ACTION_STEPS | num_integration_steps=${FM_NUM_INTEGRATION_STEPS:-<ckpt default>} | action_space=$FM_ACTION_SPACE | task='${FM_TASK:-<server default for $FM_ACTION_SPACE>}'"
 
 # Assemble args; --num-integration-steps only when explicitly set (else keep ckpt's 100).
 ARGS=(
@@ -110,8 +131,11 @@ ARGS=(
     --port "$FM_PORT"
     --device "$FM_DEVICE"
     --n-action-steps "$FM_N_ACTION_STEPS"
-    --task "$FM_TASK"
+    --action-space "$FM_ACTION_SPACE"
 )
+# --task only when explicitly set: an empty --task would override the server's
+# per-action-space default with the empty string (no CLIP conditioning at all).
+[ -n "$FM_TASK" ] && ARGS+=(--task "$FM_TASK")
 [ -n "$FM_NUM_INTEGRATION_STEPS" ] && ARGS+=(--num-integration-steps "$FM_NUM_INTEGRATION_STEPS")
 
 exec "$VENV_PY" "$SERVER_PY" "${ARGS[@]}"

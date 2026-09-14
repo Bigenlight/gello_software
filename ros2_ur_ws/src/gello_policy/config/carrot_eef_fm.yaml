@@ -1,0 +1,312 @@
+# carrot_eef_fm.yaml — parameter file for the "Put carrot in pot" FLOW-MATCHING
+# deploy in the CARTESIAN (EEF-delta) action space.
+#
+# ############################################################################
+# #  RELATIONSHIP TO fm_deploy.yaml (the banana / JOINT file)                #
+# #                                                                          #
+# #  This file is a COPY of config/fm_deploy.yaml. EVERY safety-relevant     #
+# #  value that is not task-specific is IDENTICAL, byte for byte:            #
+# #    * the three-watchdog ordering act_timeout_s (0.6) < obs_timeout_s     #
+# #      (0.7) < staleness_timeout_s (0.8) — the leader's ZMQ timeout stays  #
+# #      the PRIMARY fault owner, and a legitimate Euler-ODE refill does not #
+# #      trip a fake obs-stale FAULT while the single-threaded node blocks   #
+# #    * gello_ur_bridge     — identical (max_step_rad 0.0025 = 0.625 rad/s  #
+# #                            slew ceiling, soft_start 0.7 s,               #
+# #                            resume_align_tol 0.08, 250 Hz upsample)       #
+# #    * gello_move_to_start — identical (VERBATIM from ur7e_gello.yaml)     #
+# #    * robotiq_gripper     — identical (VERBATIM from ur7e_gello.yaml)     #
+# #    * policy_leader_node  — identical publish_rate_hz 30.0, act_port 5593,#
+# #                            max_dev_rad 0.5, auto_start_on_stream false   #
+# #                                                                          #
+# #  ONLY these differ, and only because the TASK and the ACTION SPACE       #
+# #  differ:                                                                 #
+# #    1. start_pose / start_gripper       -> the carrot dataset's frame-0   #
+# #    2. joint_limits_lo/hi               -> the carrot 1.2x envelope. The  #
+# #       banana envelope (shoulder_pan +2.40..+3.67) would clip carrot's    #
+# #       -3.19 pan to +2.40 — a ~5.6 rad error. NEVER reuse it here.        #
+# #    3. action_space / expected_action_space + the Cartesian clamps below  #
+# #       (eef_max_step_*, eef_max_lead_*, workspace_lo/hi,                  #
+# #        eef_ik_fail_fault_n) — these keys do not exist in the joint yamls #
+# #    4. expected_model_id / task         -> the carrot EEF checkpoint and  #
+# #       the carrot CLIP text prompt                                        #
+# #                                                                          #
+# #  >>> If a measured p99 refill latency exceeds the budget, REDUCE the     #
+# #  server's FM_NUM_INTEGRATION_STEPS (e.g. 5) rather than widening these   #
+# #  timeouts — fewer Euler steps is the correct knob. Widening a watchdog   #
+# #  weakens the arm's only outage guard.                                    #
+# ############################################################################
+#
+# EEF-DELTA SEMANTICS (see gello_policy/CARROT_EEF_DESIGN.md §2-§3, and the
+# operator runbook docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md):
+#   state  (16) = [q1..q6, tcp_xyz, 6-D rotation, grip_pos]
+#   action (7)  = [dx, dy, dz, drx, dry, drz, grip_cmd]  (Cartesian DELTA, base frame)
+# The node accumulates the deltas onto an internal TARGET pose (re-anchored on the
+# server's chunk_start), clamps in Cartesian space, solves IK on the start pose's
+# closed-form branch, and only THEN applies the SAME joint clamps as the joint-space
+# deploys. The joint envelope below is still the last line of defence.
+#
+# WHY ACCUMULATION MATTERS MORE FOR FM THAN FOR ACT: FM refills a whole chunk
+# (n_action_steps=24, ~0.8 s at 30 Hz) from ONE observation and then pops from the
+# queue. Every tick in that chunk adds its delta to the TARGET, not to the live pose,
+# so a stalled arm cannot shrink the commanded motion — which is exactly why the lead
+# clamp (eef_max_lead_m/rad) exists and must not be raised casually.
+
+# ---------------------------------------------------------------------------- #
+# Synthetic leader (this package). Policy-agnostic; see gello_policy README.
+# ---------------------------------------------------------------------------- #
+policy_leader_node:
+  ros__parameters:
+    # Single rclpy timer rate driving BOTH /gello/joint_states and the gripper
+    # command each tick (matches the recorder / dataset control rate).
+    publish_rate_hz: 30.0
+
+    # ======================================================================== #
+    # ACTION SPACE (this is what makes this file different from fm_deploy.yaml)
+    # ======================================================================== #
+    # "eef_delta" = the 7-D Cartesian delta contract above. "joint" = the legacy
+    # absolute-joint contract of act_deploy.yaml / fm_deploy.yaml.
+    action_space: "eef_delta"
+    # Handshake guard: on ~/start_execution the node RESETs the server and REFUSES
+    # to arm unless the RESET reply reports action_space == this string AND
+    # state_dim == 16 / action_dim == 7. A joint checkpoint therefore can NEVER
+    # drive eef mode (and vice versa) — the failure is a refusal, not a wrong move.
+    expected_action_space: "eef_delta_v1"
+    # Provenance: the checkpoint the server is expected to be serving. (Only the
+    # gRPC transport enforces this today; in the ZMQ path it documents intent and
+    # is echoed in the logs. The binding contract check is the handshake above.)
+    # PLACEHOLDER NAME — the carrot EEF checkpoint has not been trained/published yet.
+    expected_model_id: "Bigenlight/flow_matching_carrot_in_pot_eef"
+    # CLIP text conditioning string. multi_task_dit is TEXT-CONDITIONED, so this must
+    # be the dataset's task string verbatim.
+    # >>> The CONSUMER of this string is the SERVER (FM_TASK env / --task flag), not
+    # this node — policy_leader_node neither reads nor forwards it. It is recorded
+    # here so the deploy's prompt lives next to the deploy's clamps; keep it in sync
+    # with FM_TASK in run_ur7e_fm_real.sh and in the runbook command line.
+    task: "Put carrot in pot"
+
+    # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
+    # HOLD the leader publishes THIS pose perfectly still so gello_move_to_start
+    # converges on it and the resume-align gate passes. This is the dataset's start
+    # pose; the live arm must be within ~0.1 rad of it before ~/start_execution is
+    # accepted. It ALSO fixes the IK branch used for the whole episode
+    # (branch_id(start_pose), computed once at arming).
+    # FROM config/carrot_eef_limits.json (generated_at 2026-09-14T22:49:56+09:00,
+    # git_commit a525f0f40030928ccba86e71668a5cba7f6fd2d0-dirty; 54 takes / 18,557
+    # frames): the mean over takes of the arm's REAL pose at the instant the first
+    # camera frame was taken — joints DE-STALED (linearly interpolated at
+    # cam1_t[0] + tau_q, tau_q = 0.89 s), which is exactly what A1's converter does,
+    # each take first brought to the literal value nearest take 1's by
+    # ur_kin.wrapped_nearest so a +/-2pi wrist_3 split cannot corrupt the mean.
+    # std <= 0.1163, max |dev| 0.2855. Start TCP = (0.5287, 0.1193, 0.2250);
+    # IK branch 2, with 0 off-branch frames in 18,557.
+    # ⚠️ This is NOT the naive frame-0 mean. carrot_eef_limits.json keeps that as
+    # start_pose_unshifted = [-3.1931, -1.4897, 1.6932, -1.7983, -1.5902, -3.2691],
+    # which is **21 mm of TCP away** — do not paste it here. The de-staled pose is
+    # the one that matches the observation.state the policy is trained on.
+    # 🔗 This pose and eef_max_step_m are NOT independent knobs: both are derived
+    # from the converter's resampling recipe. If A1 changes it, regenerate
+    # carrot_eef_limits.json and re-sync BOTH.
+    start_pose: [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
+    # Held gripper command while in HOLD (0.0 = OPEN .. 1.0 = CLOSED).
+    # FROM carrot_eef_limits.json: the measured frame-0 gripper position. 0.0118 IS
+    # fully open on this 2F-85 (the observed range is 0.0118 .. 0.8980), not a partial
+    # close — the banana yamls' 0.0 is the same physical state, idealised.
+    start_gripper: 0.0118
+
+    # FM inference server endpoint (ZMQ REQ/REP over localhost). Overridable by the
+    # launch act_host / act_port args and by run_ur7e_fm_real.sh's FM_PORT.
+    # UNCHANGED from fm_deploy.yaml.
+    act_host: "127.0.0.1"
+    act_port: 5593  # FM server port (ACT=5591, diffusion=5592; avoids collision if they coexist)
+    # REQ socket receive timeout (s). On timeout/error the node FAULTS: it STOPS
+    # publishing /gello/joint_states so the bridge's staleness watchdog trips and
+    # halts the arm (never hold-last-target through an outage).
+    # UNCHANGED from fm_deploy.yaml.
+    act_timeout_s: 0.6  # FM refill (Euler ODE) is slower than an ACT forward; the leader tolerates
+                        # it before FAULT and stays the PRIMARY fault owner (faults first, cleanly).
+
+    # ======================================================================== #
+    # CARTESIAN SAFETY CLAMPS (eef_delta only — ignored when action_space=joint)
+    # Applied in THIS order every EXECUTE tick, all norm-proportional (never
+    # per-axis: per-axis clipping bends the commanded direction), each logging a
+    # throttled WARN.
+    # IDENTICAL to carrot_eef_act.yaml — they describe the DATASET, not the policy
+    # architecture, so ACT and FM get the same envelope.
+    # ======================================================================== #
+    # (a) PER-TICK STEP CAP. Bounds one tick's commanded Cartesian motion.
+    # FROM carrot_eef_limits.json = 1.5x the largest SINGLE-FRAME achieved motion,
+    # rounded up (0.001 m / 0.01 rad). So the policy may command ~1.5x the fastest
+    # motion a human ever demonstrated in one 30 fps tick, and no more.
+    #   1-frame |dp|:   p50 2.329 mm, p99 6.572 mm, max 9.016 mm  (n=17,049)
+    #   1-frame |drot|: p50 0.0037 rad, p99 0.0169 rad, max 0.0282 rad
+    # BASIS: the de-staled grid (cam1_t + tau_q) resampled by LINEAR INTERPOLATION,
+    # which is A1's converter recipe — so these are the actions the policy is
+    # actually trained to emit, and the clamp is sized on them. Sizing it on
+    # anything else would clip the policy's own training distribution.
+    # 🪤 Do NOT re-derive this from nearest-timestamp resampling. The joint cache
+    # runs at ~66.7 Hz with jittery dt (median 15.8 ms, p99 25.9 ms), so nearest at
+    # 30 Hz snaps to a 2- or 3-sample gap; at tau_q = 0.89 s that lands on a bad
+    # phase where 8.8% of frames repeat a sample (zero motion) and 24% jump 3. That
+    # inflates the single-frame motion to p99 7.9 / max 11.5 mm — and would push
+    # this clamp to 0.018 — although THE ARM NEVER MOVED THAT FAST. The nearest
+    # series is kept in the json as frame_1_destaled_nearest for audit only.
+    # >>> If A1 changes the resampling again, REGENERATE carrot_eef_limits.json and
+    # >>> re-sync this value AND start_pose. Do not tune either by hand.
+    eef_max_step_m: 0.0140
+    eef_max_step_rad: 0.0500
+
+    # (b) LEAD CAP. The accumulated TARGET may not run away from the arm: if
+    # |p_target - p_live| exceeds this, the lead vector is scaled back to it (same
+    # for rotation vs eef_max_lead_rad). This is what stops a chunk from integrating
+    # into the distance while the arm is stalled/slew-limited — the single most
+    # important clamp in eef mode, because deltas ACCUMULATE.
+    # FROM carrot_eef_limits.json = the MEDIAN 30-frame (1 s) achieved motion,
+    # rounded up to 0.01. One second of median human progress is the most the target
+    # is ever allowed to be ahead of the arm.
+    #   30-frame |dp|:   p50 64.10 mm, p99 158.66 mm, max 162.28 mm  (n=16,937)
+    #   (30-frame stats are invariant to the de-staling shift above.)
+    eef_max_lead_m: 0.0700
+    #   30-frame |drot|: p50 0.0958 rad, p99 0.3788 rad, max 0.4653 rad
+    #   NOTE: 0.10, NOT the 0.30 default in CARROT_EEF_DESIGN.md §3 — the measured
+    #   median rotation over 1 s is only 0.096 rad, so 0.30 would be 3x looser than
+    #   the data justifies.
+    eef_max_lead_rad: 0.1000
+
+    # (c) WORKSPACE BOX (base frame, metres) on the clamped target POSITION.
+    # FROM carrot_eef_limits.json = the observed TCP min/max over all 18,557 frames,
+    #   quantised OUTWARD onto a 0.0001 m grid
+    #   (x 0.4146-0.7091, y -0.2145-0.3893, z 0.0173-0.3062), padded by +/- 0.03 m,
+    #   EXCEPT z_lo = max(z_raw_min - 0.01, 0.0) — below the table is not a
+    #   recoverable excursion, so that side gets a third of the padding.
+    # BASIS: the converter's tau=0 resampling, NOT the de-staled grid used for
+    # start_pose/eef_max_step_m. That is deliberate and conservative: a constant
+    # shift cannot move a min/max, and de-staling drops the last 7.8% of frames off
+    # the end of the joint record, so the unshifted set is the WIDER of the two.
+    workspace_lo: [0.3846, -0.2445, 0.0073]
+    workspace_hi: [0.7391, 0.4193, 0.3362]
+
+    # IK FAULT COUNTER. ik_tcp_nearest returning None (no solution on the pinned
+    # branch) publishes the LIVE pose for that tick (hold) instead of guessing; this
+    # many CONSECUTIVE failures is a real loss of control -> FAULT.
+    eef_ik_fail_fault_n: 10
+
+    # ======================================================================== #
+    # JOINT SAFETY CLAMPS — unchanged mechanism, carrot values
+    # ======================================================================== #
+    # SAFETY CLAMP (a): per-joint hard limits = the 1.2x dataset envelope, symmetric
+    # about the centre of the observed range (same formula as the banana
+    # config/joint_safety_limits.json). Any commanded joint outside this is clipped
+    # (OOD guard). Order = UR joint order (pan, lift, elbow, w1, w2, w3).
+    # In eef mode this clamps the IK SOLUTION, so it is the final joint-space guard.
+    # FROM carrot_eef_limits.json (raw range quantised OUTWARD onto a 0.0001 grid,
+    # so lo/hi below can be re-derived exactly from these two rows):
+    #   raw min [-3.7027, -1.7285, 1.3382, -2.5868, -1.8701, -4.4088]
+    #   raw max [-2.6809, -0.9593, 2.0709, -1.5424, -1.2622, -2.0574]
+    # BASIS: tau=0 resampling, like the workspace box and for the same reason (a
+    # constant shift cannot move a min/max, and the unshifted set is the wider one).
+    # NOTE vs the banana joint_safety_limits.json: this envelope is taken from the
+    # OBSERVED joints only. The recorded `command` stream is EXCLUDED because in this
+    # EEF-mode session it leads the measured joints by ~0.9 s, so it is not a pose the
+    # arm ever actually held (docs/ros2/CARROT_EEF_LAG_NOTE_KO.md).
+    joint_limits_lo: [-3.8049, -1.8055, 1.2649, -2.6913, -1.9309, -4.6440]
+    joint_limits_hi: [-2.5787, -0.8823, 2.1442, -1.4379, -1.2014, -1.8222]
+
+    # SAFETY CLAMP (b): per-joint max deviation (rad) of a commanded target from the
+    # LIVE /joint_states. Bounds any single-step jump from the actual pose.
+    # UNCHANGED from fm_deploy.yaml.
+    max_dev_rad: 0.5
+
+    # OBS FRESHNESS WATCHDOG: in EXECUTE, if any observation (joint_states, grip_pos,
+    # cam1, cam2) is missing or older than this many seconds, the node FAULTs (stops
+    # publishing -> bridge halts the arm). Catches a frozen/hung camera driving the
+    # policy on a stale frame.
+    # Kept ABOVE act_timeout_s: the node is single-threaded, so during a refill tick it
+    # BLOCKS inside the ZMQ round-trip and cannot service camera callbacks -> obs
+    # timestamps freeze for the refill duration. Keeping obs_timeout_s (0.7) above
+    # act_timeout_s (0.6) makes the ZMQ timeout the real primary fault owner while a
+    # genuinely frozen camera is still caught (0.2 s later).
+    # UNCHANGED from fm_deploy.yaml.
+    obs_timeout_s: 0.7
+
+    # If true, auto-enter EXECUTE when /forward_position_controller/commands starts
+    # streaming (i.e. the bridge released), instead of waiting for the operator's
+    # ~/start_execution call. Default false = operator-gated start (safer).
+    # UNCHANGED from fm_deploy.yaml. Do NOT set true in eef mode: the handshake
+    # refusal (expected_action_space) lives on the ~/start_execution path.
+    auto_start_on_stream: false
+
+# ---------------------------------------------------------------------------- #
+# GELLO -> UR bridge. IDENTICAL to fm_deploy.yaml. Nothing here is action-space
+# aware: by the time a target reaches the bridge it is already 6 joint angles.
+# ---------------------------------------------------------------------------- #
+gello_ur_bridge:
+  ros__parameters:
+    filter_type: "one_euro"
+    # OPENED UP for the policy (was 1.0). The policy emits a smooth, already-filtered
+    # target stream at 30 Hz; a low min_cutoff only adds at-rest lag.
+    one_euro_min_cutoff: 3.0
+    # OPENED UP for the policy (was 2.0). Higher beta => cutoff opens faster with speed
+    # => snappier tracking of the policy's intended motion.
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    # UNCHANGED (safety): per-cycle slew ceiling. 0.0025 rad @ 250 Hz => 0.625 rad/s
+    # sustained, worst-case two-coalesce 2.5 rad/s (~20% margin under the 3.14 rad/s
+    # driver limit). Do NOT raise.
+    max_step_rad: 0.0025
+    deadband_rad: 0.004
+    # Kept ABOVE act_timeout_s (0.6) so the bridge does NOT halt during a legitimate
+    # <=0.6s FM refill gap while the leader blocks on ZMQ. The leader (0.6s) faults
+    # FIRST and cleanly on a real outage. Ordering: act_timeout_s (0.6) < staleness (0.8).
+    staleness_timeout_s: 0.8
+    # UNCHANGED (safety): soft-start ease-in on every (re)seed.
+    soft_start_s: 0.7
+    start_paused: false
+    # UNCHANGED (safety): resume alignment gate; MUST stay >= chase_tol (0.06).
+    resume_align_tol: 0.08
+    # UNCHANGED: 250 Hz upsample of the 30 Hz leader stream into the 500 Hz driver.
+    publish_rate_hz: 250.0
+    joint_states_topic: "/joint_states"
+
+# ---------------------------------------------------------------------------- #
+# move-to-start handshake. IDENTICAL to fm_deploy.yaml (copied VERBATIM from
+# ur7e_gello.yaml). The handshake chases the pose the leader HOLDS
+# (= policy_leader_node.start_pose above) and hands over.
+# ---------------------------------------------------------------------------- #
+gello_move_to_start:
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+    chase_tol: 0.06
+    chase_dwell_s: 0.4
+    chase_v_budget: 0.5
+    min_traj_duration: 0.5
+    chase_hard_limit: 4.0
+    chase_still_speed: 0.1
+    chase_still_window_s: 0.3
+    chase_timeout_s: 30.0
+    gello_staleness_s: 0.5
+    start_mode: "gello"
+    init_pose: [1.5708, -1.57, 1.57, -1.57, -1.57, 0.0]
+    alignment_tolerance: 0.2
+    alignment_hard_limit: 0.5
+    alignment_timeout: 0.0
+
+# ---------------------------------------------------------------------------- #
+# Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
+# IDENTICAL to fm_deploy.yaml (copied VERBATIM from ur7e_gello.yaml). serial_port
+# default "" is overridden to /tmp/ttyUR by the launch (arm driver owns the tool bus
+# via use_tool_communication).
+# ---------------------------------------------------------------------------- #
+robotiq_gripper:
+  ros__parameters:
+    serial_port: ""
+    speed: 150
+    force: 50
+    connect_on_start: true
+    activate_on_connect: true
+    status_rate_hz: 5.0
+    command_rate_hz: 20.0
+    command_deadband: 0.01
