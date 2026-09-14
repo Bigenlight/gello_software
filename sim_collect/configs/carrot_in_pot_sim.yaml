@@ -250,7 +250,10 @@ eval:
   max_steps: 600                # 20 s @ 30 Hz (no episode limit exists upstream; the harness adds one)
   dwell_s: 1.0                  # success latch: TaskEvaluator must hold continuously this long
   settle_s: 0.5                 # physics fast-forward after reset (same as layout.settle_s)
-  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  # Held-out layouts. The 22 demos were recorded with reset_scene seeds 0,1,2,... (auto-
+  # increment), so seeds 0-19 reproduce the TRAINING layouts exactly (measured 2026-09-15:
+  # nearest-demo carrot distance 0.0 cm for every seed 0-19). Evaluate on 100-119.
+  seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119]
   # Failure detection (episode ends immediately, outcome "failure"):
   object_bounds_xy_m: 1.5       # any object farther than this from the base axis / below
   object_min_z_m: -0.05         #   this height has left the workspace (fell / was flung)
