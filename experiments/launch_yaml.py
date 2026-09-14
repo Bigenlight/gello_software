@@ -75,6 +75,48 @@ class Args:
     """Enable saving data with keyboard interface."""
 
 
+def initialize_sim_from_agent(robot, env, agent, timeout_s: float = 2.0) -> None:
+    """Teleport the simulated robot to the agent's (e.g. GELLO's) current pose.
+
+    Reads the leader once, hands the pose to the sim's physics thread via
+    ``reset_joint_state`` and waits until the observed joints match. Prints the
+    pose in a form that can be pasted into ``agent.start_joints`` if the user
+    wants to pin it as the episode reset pose later.
+    """
+    import numpy as np
+
+    pose = np.asarray(agent.act(env.get_obs()), dtype=float)
+    if pose.shape[0] != env.get_obs()["joint_positions"].shape[0]:
+        print(
+            f"Warning: agent dim {pose.shape[0]} != robot dim "
+            f"{env.get_obs()['joint_positions'].shape[0]}; skipping sim init."
+        )
+        return
+    print("Initializing sim robot at the leader's current pose (teleport, no motion):")
+    print("  start_joints: [" + ", ".join(f"{v:.4f}" for v in pose) + "]")
+    robot.reset_joint_state(pose)
+
+    # The teleport itself is exact; what remains is gravity sag of the position
+    # actuators (measured 0.011 rad at the UR calibration pose, wrist kp=500),
+    # so accept anything under 0.05 rad. A residual far above that means the
+    # pose collides with the scene (table / cube) or the arm itself.
+    n_arm = pose.shape[0] - 1  # gripper settles physically; only check the arm
+    tol = 0.05
+    deadline = time.time() + timeout_s
+    err = float("inf")
+    while time.time() < deadline:
+        obs = env.get_obs()["joint_positions"]
+        err = float(np.abs(obs[:n_arm] - pose[:n_arm]).max())
+        if err < tol:
+            print(f"  sim robot placed (residual {err:.4f} rad).")
+            return
+        time.sleep(0.02)
+    print(
+        f"Warning: sim robot is {err:.3f} rad from the leader pose after {timeout_s:.0f}s "
+        "(collision with the scene?); continuing."
+    )
+
+
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
     cleanup()
@@ -196,10 +238,19 @@ def main():
 
     env = RobotEnv(robot_client, control_rate_hz=cfg.get("hz", 30))
 
-    # Move robot to start_joints position if specified in config
+    # Initial pose. Two paths:
+    #  - Simulation (robot has reset_joint_state): read the agent ONCE and
+    #    teleport the sim arm to exactly that pose, so the loop starts with zero
+    #    leader/follower error. No motion at all. Set `init_from_agent: false`
+    #    in the yaml to get the legacy start_joints move instead.
+    #  - Hardware (no reset_joint_state): legacy gradual move to start_joints.
+    #    Hardware is never teleported.
     from gello.utils.launch_utils import move_to_start_position
 
-    if bimanual:
+    init_from_agent = bool(cfg.get("init_from_agent", True))
+    if not bimanual and init_from_agent and hasattr(robot, "reset_joint_state"):
+        initialize_sim_from_agent(robot, env, agent)
+    elif bimanual:
         move_to_start_position(env, bimanual, left_cfg, right_cfg)
     else:
         move_to_start_position(env, bimanual, left_cfg)

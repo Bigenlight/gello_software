@@ -97,7 +97,9 @@ DISPLAY=:1 .venv/bin/python experiments/launch_yaml.py \
 
 - **유효한 `DISPLAY` 필수.** `MujocoRobotServer.serve()`가 GLFW `launch_passive` 인터랙티브 뷰어를 무조건 열기 때문. `DISPLAY`가 잘못되면 뷰어가 안 뜨고 아무것도 안 움직이는 함정이 있음 → 하단 트러블슈팅 참고.
 - **`MUJOCO_GL`은 설정하지 말 것**(인터랙티브 뷰어는 GLFW 사용). 헤드리스 offscreen 렌더가 필요할 때만 `MUJOCO_GL=egl`.
-- 내부 동작: `MujocoRobotServer`가 `127.0.0.1:6001` ZMQ 서버로 뜨고, `GelloAgent`가 30Hz로 관절값을 읽어 sim에 흘려보냄. config의 `start_joints`로 먼저 이동 후 control loop 시작.
+- 내부 동작: `MujocoRobotServer`가 `127.0.0.1:6001` ZMQ 서버로 뜨고, `GelloAgent`가 30Hz로 관절값을 읽어 sim에 흘려보냄.
+- **초기 자세 (2026-09-14~)**: 기동 시 GELLO를 한 번 읽어 sim 로봇을 **그 자세에 텔레포트**하고 시작한다(`MujocoRobotServer.reset_joint_state`, yaml `init_from_agent: true`). 콘솔에 `start_joints: [...]`로 그 자세가 찍히니 episode reset 자세로 고정하고 싶으면 그 값을 복사해 쓰면 된다. 이전 동작(`start_joints`로 이동 후 첫 스텝에서 GELLO 자세로 점프)은 `init_from_agent: false`.
+- ⚠️ **Dynamixel 드라이버는 포트를 잡고 있는 프로세스를 죽이고 시작한다.** 이미 sim이 떠 있는 상태에서 하나 더 띄우면 먼저 뜬 쪽이 조용히 죽는다.
 
 ### 5) 정상 동작 확인 (What you should see)
 

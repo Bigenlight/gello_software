@@ -19,3 +19,11 @@ agent:
   start_joints: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0, 0.0]  # 6 arm joints (calib pose) + 1 normalized gripper
 
 hz: 30
+
+# Startup pose (sim only). true (default): read the GELLO once at launch and
+# TELEPORT the sim UR5e to exactly that pose — no start_joints move, no jump on
+# the first control step. false: legacy behaviour (move to agent.start_joints,
+# then snap to the GELLO on the first step). Hardware robots ignore this key.
+# start_joints above is still used by the Dynamixel driver for the ±2π branch
+# normalisation at boot, so keep it at the calibration pose.
+init_from_agent: true

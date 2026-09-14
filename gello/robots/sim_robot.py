@@ -339,6 +339,11 @@ class MujocoRobotServer:
 
         self._joint_state = np.zeros(self._num_joints)
         self._joint_cmd = self._joint_state
+        # Teleport request consumed by serve() on the physics thread (see
+        # reset_joint_state). Guarded by a lock so a launcher thread can hand
+        # over a pose without racing mj_step.
+        self._reset_lock = threading.Lock()
+        self._pending_reset: Optional[np.ndarray] = None
 
         self._zmq_server = ZMQRobotServer(robot=self, host=host, port=port)
         self._zmq_server_thread = ZMQServerThread(self._zmq_server)
@@ -356,21 +361,56 @@ class MujocoRobotServer:
             f"Expected joint state of length {self._num_joints}, "
             f"got {len(joint_state)}."
         )
+        # normalized [0,1] gripper command -> actuator ctrl (see _to_ctrl)
+        self._joint_cmd = self._to_ctrl(joint_state)
+
+    def _to_ctrl(self, joint_state: np.ndarray) -> np.ndarray:
+        """Map an agent-space joint vector (gripper in [0, 1]) to actuator ctrl."""
+        ctrl = np.asarray(joint_state, dtype=float).copy()
         if self._has_gripper:
-            _joint_state = joint_state.copy()
-            _joint_state[-1] = _joint_state[-1] * 255
-            self._joint_cmd = _joint_state
+            ctrl[-1] = ctrl[-1] * 255
         elif self._gripper_builtin:
-            # map normalized [0,1] gripper command to the actuator's ctrlrange
-            _joint_state = joint_state.copy()
-            g = _joint_state[-1]
+            g = ctrl[-1]
             if self._gripper_invert:
                 g = 1.0 - g
             lo, hi = self._gripper_ctrlrange
-            _joint_state[-1] = lo + g * (hi - lo)
-            self._joint_cmd = _joint_state
-        else:
-            self._joint_cmd = joint_state.copy()
+            ctrl[-1] = lo + g * (hi - lo)
+        return ctrl
+
+    def reset_joint_state(self, joint_state: np.ndarray) -> None:
+        """Teleport the simulated arm to ``joint_state`` (no motion, no dynamics).
+
+        Sim-only. The arm joints' qpos are overwritten, velocities zeroed and the
+        actuator targets set to the same pose so the robot HOLDS there instead
+        of swinging from the model's default (all-zero) configuration. The
+        gripper is not teleported (2F-85 has many coupled joints); its actuator
+        target is set and it settles physically within a few steps.
+
+        Applied on the physics thread at the top of the next serve() tick, so
+        it is safe to call from another thread. Returns immediately.
+        """
+        joint_state = np.asarray(joint_state, dtype=float)
+        assert len(joint_state) == self._num_joints, (
+            f"Expected joint state of length {self._num_joints}, "
+            f"got {len(joint_state)}."
+        )
+        with self._reset_lock:
+            self._pending_reset = joint_state.copy()
+
+    def _apply_pending_reset(self) -> None:
+        with self._reset_lock:
+            target = self._pending_reset
+            self._pending_reset = None
+        if target is None:
+            return
+        n_arm = self._num_joints - 1 if self._has_gripper else self._num_joints
+        self._data.qpos[:n_arm] = target[:n_arm]
+        self._data.qvel[:] = 0.0
+        self._data.qacc[:] = 0.0
+        self._joint_cmd = self._to_ctrl(target)
+        self._data.ctrl[:] = self._joint_cmd
+        mujoco.mj_forward(self._model, self._data)
+        self._joint_state = self._data.qpos.copy()[: self._num_joints]
 
     def freedrive_enabled(self) -> bool:
         return True
@@ -409,6 +449,8 @@ class MujocoRobotServer:
         with mujoco.viewer.launch_passive(self._model, self._data) as viewer:
             while viewer.is_running():
                 step_start = time.time()
+
+                self._apply_pending_reset()
 
                 # mj_step can be replaced with code that also evaluates
                 # a policy and applies a control signal before stepping the physics.
