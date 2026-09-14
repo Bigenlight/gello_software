@@ -41,6 +41,20 @@ misalignment that is not there. The applied tau is recorded per episode in
 meta/source_takes.json ("ur_joint_states_lag_s") together with a top-level
 "timestamp_correction" block. tau = 0 reproduces the uncorrected v1 dataset.
 
+Stale tail (--drop-stale-tail, ON by default whenever tau > 0)
+-------------------------------------------------------------
+Shifting the ur clock back by tau leaves the LAST tau seconds of every take
+without any joint sample: the nearest-timestamp lookup then clamps to the final
+ur row and repeats it for the last ~27 master frames while the arm is still
+moving (raw tcp_pose travels a median 54 mm over that window). Those frames are
+DROPPED -- a master frame k survives only if `cam1_t[k] + tau <= ur_t[-1]`, i.e.
+only if a real joint sample exists at or after its corrected lookup time. The
+cut is applied to the whole frame (state, action, cam1, cam2, both depth
+streams) so the episode stays internally consistent, and the count is recorded
+per episode as "n_frames_dropped_stale_tail" with
+timestamp_correction.stale_tail = "dropped". --no-drop-stale-tail keeps them
+(the v2 behaviour) and records "kept".
+
 Side files written after ds.finalize() (so lerobot's own writer cannot clobber
 meta/): meta/depth_cameras.json (intrinsics/extrinsics/quantization) and
 meta/source_takes.json (episode_index -> take dir).
@@ -144,22 +158,46 @@ def load_lag_json(path: str) -> dict[str, float]:
     return out
 
 
+def stale_tail_keep(cam1_t: np.ndarray, ur_t_raw: np.ndarray, ur_lag_s: float) -> int:
+    """How many leading master frames still have a real ur sample after shifting.
+
+    A frame k is kept iff `cam1_t[k] + tau <= ur_t_raw[-1]`; cam1_t is ascending,
+    so the survivors are a prefix and this is just its length. tau <= 0 keeps
+    everything (there is no stale tail to cut).
+    """
+    if ur_lag_s <= 0:
+        return len(cam1_t)
+    return int(np.count_nonzero(np.asarray(cam1_t) + float(ur_lag_s) <= float(ur_t_raw[-1])))
+
+
 def load_take_arrays(
-    h5_path: str, ur_lag_s: float = 0.0
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return (cam1_t, cam2_t, state[N,7], action[N,7]) on the cam1 timeline.
+    h5_path: str, ur_lag_s: float = 0.0, drop_stale_tail: bool = False
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Return (cam1_t, cam2_t, state[N,7], action[N,7], n_dropped_stale_tail).
 
     `ur_lag_s` (tau) shifts ONLY the ur_joint_states row clock to t_rel_s - tau
     before the nearest-timestamp lookup. With tau > 0 the first master frames can
     query before the first (corrected) ur row; nearest_idx clamps to index 0, so
     they take the earliest available row -- no exception, no extrapolation.
+
+    `drop_stale_tail` cuts the trailing master frames that have NO real joint
+    sample at or after their corrected lookup time (see the module docstring);
+    cam1_t, state and action come back already trimmed, so every downstream
+    stream (cam1/cam2/depth) is cut by the same `len(cam1_t)`.
     """
     with h5py.File(h5_path, "r") as f:
         cam1_t = f["cam1_frames"]["t_rel_s"][:]
         cam2_t = f["cam2_frames"]["t_rel_s"][:]
+
+        ur_t_raw = f["ur_joint_states"]["t_rel_s"][:]
+        n_drop = 0
+        if drop_stale_tail and ur_lag_s > 0:
+            keep = stale_tail_keep(cam1_t, ur_t_raw, ur_lag_s)
+            n_drop = len(cam1_t) - keep
+            cam1_t = cam1_t[:keep]
         n = len(cam1_t)
 
-        ur_t = f["ur_joint_states"]["t_rel_s"][:] - float(ur_lag_s)
+        ur_t = ur_t_raw - float(ur_lag_s)
         ur_j = nearest_idx(ur_t, cam1_t)
         state = np.zeros((n, 7), dtype=np.float32)
         for k in range(6):
@@ -175,7 +213,7 @@ def load_take_arrays(
             action[:, k] = f["command"][f"cmd{k + 1}"][:][cmd_j]
         action[:, 6] = ffill_bfill(f["gripper"]["grip_cmd"][:])[grip_j]
 
-    return cam1_t, cam2_t, state, action
+    return cam1_t, cam2_t, state, action, n_drop
 
 
 # --------------------------------------------------------------------------- #
@@ -358,6 +396,7 @@ def convert(
     exclude: Sequence[str] = (),
     ur_lag_s: float = 0.0,
     lag_json: str | None = None,
+    drop_stale_tail: bool = True,
 ) -> None:
     from lerobot.configs import DepthEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -400,6 +439,10 @@ def convert(
     print(f"[cfg] ur_joint_states lag correction: default {ur_lag_s} s"
           + (f", per-take from {lag_json} -> {uniq_tau} s" if lag_json else "")
           + "  (applied to ur_joint_states ONLY)", flush=True)
+    any_lag = any(t > 0 for t in taus.values())
+    stale_tail_mode = "dropped" if (drop_stale_tail and any_lag) else "kept"
+    print(f"[cfg] stale tail (master frames with no ur sample at t+tau): {stale_tail_mode}",
+          flush=True)
 
     depth_encoder = DepthEncoderConfig(**DEPTH_ENCODER_KW)
     print(f"[cfg] depth encoder: {depth_encoder}", flush=True)
@@ -424,8 +467,9 @@ def convert(
         t0 = time.time()
         name = os.path.basename(tk)
         tau = taus[name]
-        cam1_t, cam2_t, state, action = load_take_arrays(
-            os.path.join(tk, "vectors.h5"), ur_lag_s=tau)
+        cam1_t, cam2_t, state, action, n_drop = load_take_arrays(
+            os.path.join(tk, "vectors.h5"), ur_lag_s=tau,
+            drop_stale_tail=drop_stale_tail)
         n = len(cam1_t)
         if max_frames:
             n = min(n, max_frames)
@@ -476,9 +520,11 @@ def convert(
 
         total_frames += n
         source_takes.append({"episode_index": ti, "take_dir_name": name, "n_frames": n,
-                             "excluded": False, "ur_joint_states_lag_s": tau})
+                             "excluded": False, "ur_joint_states_lag_s": tau,
+                             "n_frames_dropped_stale_tail": int(n_drop)})
         print(
-            f"[{ti + 1:2d}/{len(takes)}] {name:32s} frames={n:4d}  cam2_decoded={len(cam2_all):4d}  "
+            f"[{ti + 1:2d}/{len(takes)}] {name:32s} frames={n:4d} (-{n_drop:2d} stale)  "
+            f"cam2_decoded={len(cam2_all):4d}  "
             f"depth_in_h5={n_depth['cam1']}/{n_depth['cam2']}  depth_matched={matched['cam1']}/{matched['cam2']}  "
             f"{time.time() - t0:6.1f}s",
             flush=True,
@@ -516,6 +562,17 @@ def convert(
                     "convention": ("ur_joint_states row clock = t_rel_s - tau before the "
                                    "nearest-timestamp lookup (master frame at t reads the ur row "
                                    "stamped t + tau)"),
+                    "stale_tail": stale_tail_mode,
+                    "stale_tail_rule": (
+                        "a master frame k is kept iff cam1_t[k] + tau <= ur_joint_states "
+                        "t_rel_s[-1]; the trailing frames without a real joint sample at or "
+                        "after their corrected lookup time would otherwise repeat the last ur "
+                        "row while the arm is still moving, so the whole frame (state, action, "
+                        "cam1, cam2, both depth streams) is dropped. Per-episode count: "
+                        "n_frames_dropped_stale_tail."
+                    ),
+                    "n_frames_dropped_stale_tail_total": int(
+                        sum(e["n_frames_dropped_stale_tail"] for e in source_takes)),
                     "source": (os.path.abspath(lag_json) if lag_json else "--ur-lag-s"),
                     "per_episode": {e["take_dir_name"]: e["ur_joint_states_lag_s"]
                                     for e in source_takes},
@@ -530,7 +587,10 @@ def convert(
     wall = time.time() - t_start
     size_gb = dir_size_bytes(out_root) / 1e9
     print(
-        f"\nDONE: {len(takes)} episodes, {total_frames} frames, {wall / 60:.1f} min wall, "
+        f"\nDONE: {len(takes)} episodes, {total_frames} frames "
+        f"(stale tail {stale_tail_mode}: "
+        f"{sum(e['n_frames_dropped_stale_tail'] for e in source_takes)} frames), "
+        f"{wall / 60:.1f} min wall, "
         f"{size_gb:.2f} GB -> {out_root}"
     )
     if max_frames:
@@ -555,6 +615,13 @@ def main(argv: Iterable[str] | None = None) -> None:
     ap.add_argument("--lag-json", default=None,
                     help="per-take override for --ur-lag-s: JSON of take dir name -> "
                          "{\"tau_q_s\": float} (or a bare float); wins over --ur-lag-s")
+    ap.add_argument("--drop-stale-tail", dest="drop_stale_tail", action="store_true", default=True,
+                    help="drop the trailing master frames that have no ur_joint_states sample at "
+                         "or after their corrected lookup time (default ON whenever a lag is "
+                         "applied; a no-op at tau = 0)")
+    ap.add_argument("--no-drop-stale-tail", dest="drop_stale_tail", action="store_false",
+                    help="keep them (v2 behaviour): the last ~tau seconds of each episode then "
+                         "repeat the final joint sample while the arm is still moving")
     args = ap.parse_args(list(argv) if argv is not None else None)
     convert(
         args.data, args.out, args.repo_id,
@@ -562,6 +629,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         image_writer_processes=args.procs, image_writer_threads=args.threads,
         exclude=tuple(args.exclude),
         ur_lag_s=args.ur_lag_s, lag_json=args.lag_json,
+        drop_stale_tail=args.drop_stale_tail,
     )
 
 
