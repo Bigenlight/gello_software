@@ -181,6 +181,11 @@ Joint order = UR order. `qd` = actual `d.qvel[:6]`, `eff` = `d.actuator_force[:6
 - `sim_object_poses`: `t_rel_s, <obj>_x,_y,_z,_qx,_qy,_qz,_qw` for every object, 30 Hz.
 - `sim_control`: `t_rel_s, engaged, eef_state_code, pos_scale, sigma_min, gamma, ls_scale, task_success`.
 - `sim_leader_filtered`: `t_rel_s, qf1..qf6` (One-Euro output) — lets us reproduce the controller offline.
+- `sim_scene` group (2026-09-15): `xml` dataset = the exact MJCF compiled by the sim; attrs `xml_sha256`,
+  `assets_manifest` (JSON {asset: {sha256, bytes}} — bytes are NOT copied, they live in the repo at `git_commit`),
+  `layout`, `config`, `config_path`, `layout_seed`, `mujoco_version`, `timestep`.
+- `sim_mj_state`: `t_rel_s, sim_t, tick, qpos0..qpos{nq-1}, qvel0.., ctrl0..` at 125 Hz (attrs `nq/nv/nu`). With
+  `sim_scene` this reconstructs every recorded instant kinematically — `sim_collect/tools/replay_take.py`.
 - File-level attrs on `vectors.h5`: `sim_meta` = JSON string {`sim_collect_version`, `git_commit`, `robot`,
   `control_mode`, `gripper_mode`, `pos_scale`, `scene_config` (full yaml dump), `layout_seed`, `objects`,
   `chosen_food`, `container`, `task_success_at_stop`, `cameras` (poses, fovy), `mujoco_version`}.

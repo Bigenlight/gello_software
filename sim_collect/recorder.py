@@ -36,8 +36,9 @@ import struct
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import h5py
 import numpy as np
 
 import weakref
@@ -243,7 +244,8 @@ class SimTakeRecorder:
     def take_index(self) -> int:
         return self._take_counter
 
-    def start(self, root: str, note: str = "", sim_meta: Optional[Mapping[str, Any]] = None) -> str:
+    def start(self, root: str, note: str = "", sim_meta: Optional[Mapping[str, Any]] = None,
+              scene: Optional[Mapping[str, Any]] = None) -> str:
         """Open ``<root>/take_{NN:02d}_{YYYYmmdd_HHMMSS}/`` and return its path."""
         with self._lock:
             if self._session is not None:
@@ -268,6 +270,15 @@ class SimTakeRecorder:
             self._leadf_w = open_h5_table(
                 sess._h5, "sim_leader_filtered",
                 ["t_rel_s"] + [f"qf{i + 1}" for i in range(_N)])
+            # Full MuJoCo generalized state (opened lazily on the first message that
+            # carries qpos_full, because nq/nv are only known then) — see _write_mj_state.
+            self._mj_w = None
+            self._mj_dims: Optional[Tuple[int, int, int]] = None
+            # Scene snapshot for reconstruction: the exact MJCF the sim ran, the sha256
+            # of every asset it referenced (bytes live in the repo at `git_commit`; 35 MB
+            # of meshes are NOT copied per take), plus layout/config so
+            # scene.build_scene(config, layout) can rebuild byte-identically.
+            self._write_scene_snapshot(sess, scene, sim_meta)
             # When each frame was RENDERED (camN_frames.t_rel_s is the write time, like
             # the real recorder): cam 1/2, mp4 frame_idx, capture time on the session
             # clock, and the sim_t / tick of the state that was rendered.
@@ -503,6 +514,7 @@ class SimTakeRecorder:
             if wrench is not None:
                 sess.write_wrench(wrench, stamp_s=stamp)
             self._write_control(sess, msg)
+            self._write_mj_state(sess, msg)
             qf = _finite_list(msg.get("q_lead_f"), _N)
             if qf is not None and self._leadf_w is not None:
                 self._leadf_w.writerow([f"{sess.t():.4f}"] + [f"{v:.6f}" for v in qf])
@@ -553,6 +565,68 @@ class SimTakeRecorder:
         if now >= self._next_obj_t:
             self._next_obj_t = _advance_grid(self._next_obj_t, now, 1.0 / self.object_pose_hz)
             self._write_objects(sess, msg)
+
+    def _write_scene_snapshot(self, sess: RecordingSession, scene: Optional[Mapping[str, Any]],
+                              sim_meta: Optional[Mapping[str, Any]]) -> None:
+        """``vectors.h5:/sim_scene`` — everything needed to rebuild the MuJoCo model:
+        ``xml`` (vlen str dataset, the MJCF string the sim compiled), attrs ``xml_sha256``,
+        ``assets_manifest`` (JSON {asset name: {sha256, bytes}}), ``layout`` and
+        ``config`` (JSON, from get_scene_meta), ``mujoco_version``. Replay:
+        ``python -m sim_collect.tools.replay_take <take_dir>``."""
+        import hashlib
+        g = sess._h5.create_group("sim_scene")
+        meta = dict(sim_meta or {})
+        smeta = meta.get("scene_meta") if isinstance(meta.get("scene_meta"), Mapping) else {}
+        xml = str((scene or {}).get("xml") or "")
+        if xml:
+            g.create_dataset("xml", data=xml, dtype=h5py.string_dtype("utf-8"))
+            g.attrs["xml_sha256"] = hashlib.sha256(xml.encode()).hexdigest()
+        assets = (scene or {}).get("assets") or {}
+        manifest = {str(k): {"sha256": hashlib.sha256(bytes(v)).hexdigest(), "bytes": len(v)}
+                    for k, v in assets.items()}
+        g.attrs["assets_manifest"] = json.dumps(manifest, sort_keys=True)
+        g.attrs["layout"] = json.dumps(_scrub_paths(smeta.get("layout") or {}), default=str)
+        g.attrs["config"] = json.dumps(_scrub_paths(smeta.get("config") or meta.get("scene_config") or {}), default=str)
+        g.attrs["config_path"] = str(smeta.get("config_path") or "")
+        g.attrs["layout_seed"] = int(smeta.get("layout_seed", meta.get("layout_seed", -1)) or -1)
+        g.attrs["git_commit"] = str(meta.get("git_commit") or git_commit())
+        try:
+            import mujoco
+            g.attrs["mujoco_version"] = mujoco.__version__
+        except Exception:  # noqa: BLE001
+            pass
+        g.attrs["timestep"] = float(smeta.get("timestep") or 0.0)
+        self._sim_meta["scene_xml_sha256"] = g.attrs.get("xml_sha256", "")
+        self._sim_meta["scene_assets"] = len(manifest)
+
+    def _write_mj_state(self, sess: RecordingSession, msg: Mapping[str, Any]) -> None:
+        """``sim_mj_state`` row: ``t_rel_s, sim_t, tick, qpos[nq], qvel[nv], ctrl[nu]`` at
+        125 Hz. With the model from ``sim_scene`` this reconstructs every frame
+        (``d.qpos[:] = row; d.qvel[:] = ...; mj_forward``) — objects, arm, gripper."""
+        qpos = msg.get("qpos_full"); qvel = msg.get("qvel_full")
+        if qpos is None or qvel is None:
+            return
+        qpos = [float(v) for v in qpos]; qvel = [float(v) for v in qvel]
+        q_cmd = _finite_list(msg.get("q_cmd"), _N) or [float("nan")] * _N
+        grip_ctrl = _finite_scalar(msg.get("grip_ctrl"))
+        if grip_ctrl is None:   # older/synthetic streams: the 2F-85 actuator ctrl is grip_cmd * 255
+            gc = _finite_scalar(msg.get("grip_cmd"))
+            grip_ctrl = None if gc is None else 255.0 * float(gc)
+        ctrl = list(q_cmd) + [float("nan") if grip_ctrl is None else float(grip_ctrl)]
+        dims = (len(qpos), len(qvel), len(ctrl))
+        if self._mj_w is None:
+            cols = (["t_rel_s", "sim_t", "tick"] + [f"qpos{i}" for i in range(dims[0])]
+                    + [f"qvel{i}" for i in range(dims[1])] + [f"ctrl{i}" for i in range(dims[2])])
+            self._mj_w = open_h5_table(sess._h5, "sim_mj_state", cols)
+            self._mj_dims = dims
+            grp = sess._h5["sim_mj_state"]
+            grp.attrs["nq"], grp.attrs["nv"], grp.attrs["nu"] = dims
+            grp.attrs["ctrl_note"] = "ctrl = q_cmd[6] + grip_ctrl (2F-85 actuator, 0..255)"
+        elif dims != self._mj_dims:
+            self._warn("mj_state", f"qpos/qvel size changed {self._mj_dims} -> {dims}; row skipped")
+            return
+        self._mj_w.writerow([f"{sess.t():.4f}", _finite_scalar(msg.get("sim_t")), _finite_scalar(msg.get("tick"))]
+                            + qpos + qvel + ctrl)
 
     def _write_control(self, sess: RecordingSession, msg: Mapping[str, Any]) -> None:
         if self._ctrl_w is None:

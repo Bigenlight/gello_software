@@ -24,7 +24,8 @@ from gello_recorder.recording_session import RecordingSession
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 REAL_GROUPS = ["synchronized", "gello_joint_states", "ur_joint_states", "command",
                "gripper", "wrench", "tcp_pose", "cam1_frames", "cam2_frames"]
-SIM_GROUPS = ["sim_object_poses", "sim_control", "sim_leader_filtered", "sim_frame_capture"]
+SIM_GROUPS = ["sim_object_poses", "sim_control", "sim_leader_filtered", "sim_frame_capture", "sim_mj_state"]
+SIM_NON_TABLE_GROUPS = ["sim_scene"]   # MJCF snapshot: xml dataset + attrs, no columns/t_rel_s
 REAL_TAKE = os.path.join(_ROOT, "ros2_ur_ws", "gello_logs", "take_18_20260914_165926")
 TAKE_SECONDS = 3.0
 
@@ -112,7 +113,7 @@ def test_take_dir_name_and_exactly_four_files(take):
 def test_vectors_h5_groups_columns_dtypes(take, tmp_path):
     heads = _real_headers(tmp_path)
     with h5py.File(os.path.join(take["dir"], "vectors.h5"), "r") as f:
-        assert sorted(f.keys()) == sorted(REAL_GROUPS + SIM_GROUPS)
+        assert sorted(f.keys()) == sorted(REAL_GROUPS + SIM_GROUPS + SIM_NON_TABLE_GROUPS)
         for g in REAL_GROUPS:
             cols = json.loads(f[g].attrs["columns"])
             assert cols == heads[g], g
@@ -455,3 +456,39 @@ def test_default_is_no_depth(tmp_path):
         meta = json.loads(f.attrs["sim_meta"])
         assert meta["record_depth"] is False
         assert f["cam1_frames"]["t_rel_s"].shape[0] > 0
+
+
+def test_scene_snapshot_and_mj_state_reconstruct(tmp_path):
+    """Each take stores the exact MJCF (+asset manifest, layout, config) and the full
+    generalized state per tick, so the MuJoCo scene can be rebuilt and replayed."""
+    import hashlib, json, h5py, mujoco
+    from sim_collect.tests.f2_testlib import TINY_SCENE_XML, make_state
+    from sim_collect.tools import replay_take
+    m0 = mujoco.MjModel.from_xml_string(TINY_SCENE_XML)
+    r = SimTakeRecorder()
+    scene = {"xml": TINY_SCENE_XML, "assets": {"fake.png": b"\x89PNG"}, "sha": "x"}
+    take_dir = r.start(str(tmp_path), "snapshot", {"scene_meta": {"layout": {"_seed": 3}, "config": {"name": "tiny"}}},
+                       scene=scene)
+    t0 = time.time()
+    for k in range(40):
+        msg = make_state(k, t0 + k * 0.004, k * 0.004)
+        msg["qpos_full"] = list(np.zeros(m0.nq) + 0.01 * k)
+        msg["qvel_full"] = list(np.zeros(m0.nv))
+        r.on_state(msg)
+    r.stop()
+    with h5py.File(os.path.join(take_dir, "vectors.h5"), "r") as f:
+        g = f["sim_scene"]
+        assert g["xml"][()].decode() == TINY_SCENE_XML
+        assert g.attrs["xml_sha256"] == hashlib.sha256(TINY_SCENE_XML.encode()).hexdigest()
+        assert json.loads(g.attrs["assets_manifest"])["fake.png"]["bytes"] == 4
+        assert json.loads(g.attrs["layout"]) == {"_seed": 3}
+        s = f["sim_mj_state"]
+        assert (int(s.attrs["nq"]), int(s.attrs["nv"]), int(s.attrs["nu"])) == (m0.nq, m0.nv, 7)
+        assert s["t_rel_s"].shape[0] == 20          # every 2nd of 40 messages (125 Hz)
+    st = replay_take.load_state(take_dir)
+    assert st.qpos.shape == (20, m0.nq)
+    sc = replay_take.load_scene(take_dir)           # config {"name": "tiny"} cannot rebuild -> note, xml still compiles
+    model = replay_take.load_model(sc)
+    data = mujoco.MjData(model)
+    replay_take.set_row(model, data, st, 19)
+    assert np.allclose(data.qpos, st.qpos[19])

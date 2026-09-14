@@ -201,9 +201,15 @@ GUI에 `Take: N`, `● RECORDING`, 경과 시간, `frames cam1/cam2 · rows`, ta
 베이스에서 +x를 바라볼 때:   왼쪽(+y) = 음식        오른쪽(−y) = 용기
 ```
 
-| 왼쪽(+y), 음식 8종 | 오른쪽(−y), 용기 3종 |
+| 왼쪽(+y) | 오른쪽(−y) |
 | --- | --- |
-| carrot(태스크 기본, 절차적) · strawberry · plum · lemon · peach · pear · banana · bread | pot(절차적, 안지름 18 cm) · bowl · basket |
+| **carrot**(절차적, 18.5 cm) | **pot**(절차적, 안지름 18 cm × 11 cm) |
+
+**기본 씬에는 이 둘만 놓인다**(2026-09-14 결정). 매 RESET SCENE마다 seed로 둘의 위치(당근 반경 6 cm,
+냄비 5 cm)와 방향(당근 ±35°, 냄비 임의)이 조금씩 달라지고, 같은 seed면 같은 배치다 — GUI의 seed 칸 또는
+`sim_main --seed`. 나머지 후보(딸기·자두·레몬·복숭아·배·바나나·빵, 그릇·바구니)는 `assets/objects/`에
+그대로 있고(`assets/objects/README.md`, `assets/preview.jpg`), yaml의 `objects:`와 `layout.items`에
+한 줄씩 추가하면 놓인다(주석에 반지름이 적혀 있다).
 
 전부 2F-85로 집을 수 있게 최소 치수 ≤ 7 cm다. 치수·질량·출처는
 [`assets/objects/README.md`](assets/objects/README.md), 라이선스는 [`assets/ATTRIBUTION.md`](assets/ATTRIBUTION.md),
@@ -297,6 +303,27 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovid
 - 렌더가 필요한 테스트는 `DISPLAY`가 없으면 skip된다.
 
 ---
+
+## 6.2 MuJoCo 씬 재구성 — 무엇이 저장되고 어떻게 되살리나
+
+take마다 `vectors.h5` 안에 두 가지가 더 들어간다.
+
+| 위치 | 내용 |
+| --- | --- |
+| `/sim_scene` | sim이 컴파일한 **MJCF 원문**(`xml`), 그 sha256, 참조한 **에셋별 sha256·크기**(`assets_manifest`), `layout`(seed 포함), `config`, `git_commit`, mujoco 버전 |
+| `/sim_mj_state` | 매 tick(125 Hz)의 **전체 일반화 상태** `qpos[nq]·qvel[nv]·ctrl[nu]` + `sim_t`·`tick` (nq/nv/nu는 attrs) |
+
+메시·텍스처 바이트(35 MB)는 take에 복사하지 않는다. 재생 도구가 `config`+`layout`으로 씬을 다시 빌드해
+에셋을 얻고 sha로 변하지 않았는지 확인한 뒤, **저장된 xml**을 그 에셋으로 컴파일한다. 그다음 행마다
+`qpos/qvel`을 덮어쓰고 `mj_forward`만 하므로(물리 재시뮬 아님) 녹화 당시 상태가 그대로 재현되고, 어떤 카메라로도
+다시 렌더할 수 있다.
+
+```bash
+cd ~/gello_software
+.venv/bin/python -m sim_collect.tools.replay_take <take_dir> --check            # 재구성 검증(물체 자세 오차 mm)
+MUJOCO_GL=glfw DISPLAY=:0 .venv/bin/python -m sim_collect.tools.replay_take <take_dir> --viewer   # 실시간 재생
+MUJOCO_GL=glfw DISPLAY=:0 .venv/bin/python -m sim_collect.tools.replay_take <take_dir> --render cam1 cam2 --out /tmp/frames --every 15
+```
 
 ## 6.3 `stamp_s` 컬럼
 

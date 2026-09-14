@@ -577,7 +577,7 @@ class CaptureService:
             if not self.sim_alive():
                 return {"ok": False, "msg": "no state from the sim in the last second"}
             note = str(req.get("note", ""))
-            take_dir = self.recorder.start(self.root, note, self._sim_meta_for_take(note))
+            take_dir = self.recorder.start(self.root, note, self._sim_meta_for_take(note), scene=self._scene)
             return {"ok": True, "take_dir": take_dir, "take_index": self.recorder.take_index,
                     "msg": f"recording {os.path.basename(take_dir)}"}
         if cmd == "stop_take":

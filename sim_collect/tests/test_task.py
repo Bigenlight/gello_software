@@ -67,7 +67,7 @@ def test_from_scene_validates_names(world):
     with pytest.raises(KeyError):
         task.TaskConfig.from_scene({"food": "durian", "container": "pot"}, built.meta)
     with pytest.raises(ValueError):
-        task.TaskConfig.from_scene({"food": "carrot", "container": "lemon"}, built.meta)
+        task.TaskConfig.from_scene({"food": "carrot", "container": "carrot"}, built.meta)
 
 
 def test_physically_dropped_food_counts(world):

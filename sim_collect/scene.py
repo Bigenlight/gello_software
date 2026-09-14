@@ -212,7 +212,15 @@ def sample_layout(cfg: SceneConfig, seed: Optional[int] = None, attempt: int = 0
         nominal = np.asarray(it.get("nominal_pos", [-0.5, 0.0, 0.0]), dtype=float)[:2]
         rad = float(it.get("random_xy_radius", 0.0))
         r_obj = float(spec.get("radius_m", 0.05))
-        yaw = float(rng.uniform(-math.pi, math.pi)) if it.get("random_yaw", False) else 0.0
+        # yaw: `random_yaw_deg: D` -> uniform in [-D, +D] degrees around the asset's own
+        # heading; `random_yaw: true` -> any heading; neither -> 0.
+        if it.get("random_yaw_deg") is not None:
+            half = math.radians(float(it["random_yaw_deg"]))
+            yaw = float(rng.uniform(-half, half))
+        elif it.get("random_yaw", False):
+            yaw = float(rng.uniform(-math.pi, math.pi))
+        else:
+            yaw = 0.0
         chosen = None
         for _ in range(max_tries):
             if rad > 0:

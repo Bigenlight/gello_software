@@ -111,49 +111,38 @@ render:
   floor_tint: [0.80, 0.80, 0.80, 1.0]   # multiplies the wood texture
 
 objects:
-  # Each entry: assets/objects/<name>/<name>.xml is used when present (O1's
-  # interface, DESIGN §5.2); otherwise the `placeholder` primitive is built.
-  # `radius_m` = footprint radius for the no-overlap layout sampler.
-  # All food candidates are placed so the operator can try grasping each one
-  # with the GELLO and pick the task object afterwards (assets/objects/README.md
-  # has bbox/mass per object; assets/preview.jpg shows them).
-  - {name: carrot,     kind: food, radius_m: 0.10,   # procedural, 18.5 cm long, lies along +x
+  # Each entry: assets/objects/<name>/<name>.xml is used when present (DESIGN §5.2);
+  # otherwise the `placeholder` primitive is built. `radius_m` = footprint radius for
+  # the no-overlap layout sampler.
+  #
+  # 2026-09-14 decision: the task is CARROT -> POT, so only those two are placed.
+  # The other vendored candidates stay available under assets/objects/ (bbox/mass in
+  # assets/objects/README.md, pictures in assets/preview.jpg) — to place one, add it
+  # here AND under layout.items:
+  #   foods:      strawberry(r 0.035) plum(0.035) lemon(0.04) peach(0.04) pear(0.06)
+  #               banana(0.10) bread(0.03)
+  #   containers: bowl(r 0.07, LIBERO akita_black_bowl) basket(r 0.10, LIBERO)
+  - {name: carrot, kind: food, radius_m: 0.10,   # procedural, 18.5 cm long, lies along +x
      placeholder: {shape: capsule, radius: 0.018, half_length: 0.07, mass: 0.08, rgba: [0.93, 0.45, 0.10, 1.0]}}
-  - {name: strawberry, kind: food, radius_m: 0.035}  # YCB 012, 4.5 cm
-  - {name: plum,       kind: food, radius_m: 0.035}  # YCB 018, 5.5 cm
-  - {name: lemon,      kind: food, radius_m: 0.04}   # YCB 014, 6 cm
-  - {name: peach,      kind: food, radius_m: 0.04}   # YCB 015, 6.2 cm
-  - {name: pear,       kind: food, radius_m: 0.06}   # YCB 016, 10 cm long
-  - {name: banana,     kind: food, radius_m: 0.10}   # YCB 011, 17.8 cm long
-  - {name: bread,      kind: food, radius_m: 0.03}   # robosuite, 4.8 cm
-  - {name: pot,        kind: container, radius_m: 0.13,   # procedural, inner Ø18 cm × 11 cm
+  - {name: pot,    kind: container, radius_m: 0.13,   # procedural, inner Ø18 cm × 11 cm
      placeholder: {shape: open_cylinder, inner_radius: 0.09, height: 0.11, wall: 0.006, bottom: 0.006, n_wall: 24, mass: 0.55, rgba: [0.35, 0.35, 0.38, 1.0]}}
-  - {name: bowl,       kind: container, radius_m: 0.07}   # LIBERO akita_black_bowl, Ø11 cm
-  - {name: basket,     kind: container, radius_m: 0.10}   # LIBERO basket, 17 cm
 
 layout:
-  seed: 0                     # default seed for reset_scene when none is given
+  seed: 0                     # default seed for reset_scene when none is given (GUI seed box / --seed)
   drop_height_m: 0.02         # objects spawn this far above the floor
   settle_s: 0.5               # fast-forward physics after a reset
   min_gap_m: 0.02             # extra clearance between footprints
   base_keepout_radius_m: 0.22 # nothing spawns closer than this to the base axis
   max_tries: 200
-  # LEFT (+y) = food, the task object (carrot) at the prime spot right under the
-  # home TCP (+0.48, +0.05); the other candidates fan out around it. RIGHT (-y) =
-  # containers, pot nearest. Radial reach at floor level is comfortable to ~0.65 m.
-  # (Positions are the pre-flip layout rotated 180 deg about z.)
+  # Looking from the base along +x (the arm's forward): LEFT = +y, RIGHT = -y.
+  # carrot LEFT, pot RIGHT. Every reset re-samples both from the seed: position
+  # uniformly inside `random_xy_radius` of `nominal_pos`, heading inside
+  # ±`random_yaw_deg` of the asset's default (carrot: along +x, i.e. pointing away
+  # from the robot). Same seed -> same layout. Reach at floor level is comfortable
+  # to ~0.65 m radial.
   items:
-    carrot:     {nominal_pos: [0.45, 0.18, 0.0], random_xy_radius: 0.03, random_yaw: true}
-    strawberry: {nominal_pos: [0.30, 0.30, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    plum:       {nominal_pos: [0.40, 0.36, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    lemon:      {nominal_pos: [0.50, 0.40, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    peach:      {nominal_pos: [0.60, 0.30, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    pear:       {nominal_pos: [0.66, 0.16, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    banana:     {nominal_pos: [0.30, 0.52, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    bread:      {nominal_pos: [0.72, 0.40, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    pot:        {nominal_pos: [0.45, -0.22, 0.0], random_xy_radius: 0.03, random_yaw: true}
-    bowl:       {nominal_pos: [0.28, -0.42, 0.0], random_xy_radius: 0.02, random_yaw: true}
-    basket:     {nominal_pos: [0.66, -0.44, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    carrot: {nominal_pos: [0.45,  0.18, 0.0], random_xy_radius: 0.06, random_yaw_deg: 35}
+    pot:    {nominal_pos: [0.45, -0.22, 0.0], random_xy_radius: 0.05, random_yaw_deg: 180}
 
 task:
   name: carrot_in_pot
