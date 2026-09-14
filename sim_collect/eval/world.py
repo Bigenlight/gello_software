@@ -63,15 +63,19 @@ N_JOINTS = 6
 STATE_LOG_HZ = 125.0
 COLOR_SIZE = (1280, 720)
 
+# Defaults = the SIM-derived envelope (derive_limits.py on the 22 sim demos, 2026-09-15), the
+# same values as the yaml, so a yaml without limits cannot silently flip to the real-data
+# envelope (carrot_eef_limits.json), which the sim demos leave on 24 % of their steps.
 EVAL_DEFAULTS: Dict[str, Any] = {
-    "joint_limits_lo": [-3.8049, -1.8055, 1.2649, -2.6913, -1.9309, -4.6440],
-    "joint_limits_hi": [-2.5787, -0.8823, 2.1442, -1.4379, -1.2014, -1.8222],
+    "joint_limits_lo": [-4.1568, -2.1322, 1.3017, -3.0359, -2.1281, -4.1758],
+    "joint_limits_hi": [-2.7448, -0.9878, 2.7306, -1.1968, -1.3020, -2.5283],
+    "envelope_source": "sim-derived defaults (EVAL_DEFAULTS in world.py, NOT carrot_eef_limits.json)",
     "max_dev_rad": 0.5,
     "start_pose": [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692],
     "bridge": {
         "filter_type": "one_euro", "one_euro_min_cutoff": 3.0, "one_euro_beta": 4.0, "one_euro_d_cutoff": 1.0,
         "ema_alpha": 0.4, "max_step_rad": 0.0025, "deadband_rad": 0.004, "soft_start_s": 0.7,
-        "publish_rate_hz": 250.0,
+        "soft_start_at_episode_start": False, "publish_rate_hz": 250.0,
     },
     "policy_hz": 30.0, "max_steps": 600, "dwell_s": 1.0, "settle_s": 0.5,
     "seeds": list(range(20)), "object_bounds_xy_m": 1.5, "object_min_z_m": -0.05, "jpeg_quality": 92,
@@ -159,6 +163,7 @@ class EvalWorld:
         self.use_euro = str(b.get("filter_type", "one_euro")) == "one_euro"
         self.max_step_rad = float(b["max_step_rad"])
         self.soft_start_s = float(b["soft_start_s"])
+        self.soft_start_at_episode_start = bool(b.get("soft_start_at_episode_start", False))
         self.deadband_rad = float(b["deadband_rad"])
         self.ema_alpha = float(b["ema_alpha"])
         self.dwell_s = float(self.ev["dwell_s"])
@@ -231,6 +236,18 @@ class EvalWorld:
             self.joint_limits_hi = np.asarray(hi, dtype=float).reshape(N_JOINTS)
         self.ev["joint_limits_lo"] = self.joint_limits_lo.tolist()
         self.ev["joint_limits_hi"] = self.joint_limits_hi.tolist()
+        self.ev["envelope_source"] = ("model joint range only (--no-envelope)" if lo is None or hi is None
+                                      else "set_envelope() override")
+
+    @property
+    def envelope_source(self) -> str:
+        return str(self.ev.get("envelope_source", "unknown"))
+
+    def _branched_q(self) -> List[float]:
+        """Live arm joints re-branched next to `start_pose` — the ONE representation the real
+        client uses for both the policy observation and the max-deviation clamp
+        (policy_leader_node: positions_near_reference)."""
+        return wrapped_nearest([float(v) for v in self.data.qpos[:N_JOINTS]], self.start_pose.tolist())
 
     def q(self) -> np.ndarray:
         """Current arm joints (rad, UR order, as simulated — on the -pi branch)."""
@@ -321,12 +338,17 @@ class EvalWorld:
         self._last_published = list(q)
         self._raw_target = None
         self._last_input_t = None
-        self._seed_time = float(self.data.time)
-        self.step_eff = self.max_step_rad * (0.15 if self.soft_start_s > 0 else 1.0)
+        if self.soft_start_at_episode_start and self.soft_start_s > 0:
+            self._seed_time = float(self.data.time)                    # ramp 15 % -> 100 % from t=0
+            self.step_eff = self.max_step_rad * 0.15
+        else:
+            # real deploy: the (re)seed happened at move_to_start/resume, the ramp is over
+            self._seed_time = float(self.data.time) - self.soft_start_s
+            self.step_eff = self.max_step_rad
 
     def reset(self, seed: Optional[int] = None, layout_override: Optional[Dict[str, Any]] = None,
               q0: Optional[Sequence[float]] = None, video_dir: Optional[str] = None,
-              video_tag: str = "") -> Dict[str, Any]:
+              video_tag: str = "", images: bool = True) -> Dict[str, Any]:
         """Start an episode. `seed` -> seeded layout (sim_main's rejection sampling);
         `layout_override` {name: {"pos", "quat_wxyz"|"yaw"}} places the objects exactly
         there instead (ReplayPolicy); `q0` overrides the arm start pose (default home_joints).
@@ -365,7 +387,7 @@ class EvalWorld:
         self._log_row()
         if self.video:
             self._open_video(video_dir, video_tag)
-        return self.observe()
+        return self.observe(images=images or self.video)
 
     # ------------------------------------------------------------------ #
     # Observe                                                              #
@@ -385,7 +407,7 @@ class EvalWorld:
     def observe(self, images: bool = True) -> Dict[str, Any]:
         """{"cam1_jpeg", "cam2_jpeg", "state": [q1..q6, grip_pos], "t"} (+ "rgb" with video).
         `images=False` skips rendering (for policies that do not look)."""
-        state = [float(v) for v in self.data.qpos[:N_JOINTS]] + [self.grip_pos()]
+        state = self._branched_q() + [self.grip_pos()]
         obs: Dict[str, Any] = {"state": state, "t": self.t, "frame": self.frame, "cam1_jpeg": None, "cam2_jpeg": None}
         if images and self._render_enabled:
             import cv2
@@ -418,7 +440,7 @@ class EvalWorld:
         a = [float(v) for v in action7]
         if len(a) != N_JOINTS + 1 or not all(math.isfinite(v) for v in a):
             raise ValueError(f"action must be 7 finite floats, got {action7!r}")
-        live_q = wrapped_nearest([float(v) for v in self.data.qpos[:N_JOINTS]], self.start_pose.tolist())
+        live_q = self._branched_q()
         target = list(a[:N_JOINTS])
         clamped_limit = False
         clamped_dev = False

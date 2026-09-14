@@ -215,6 +215,7 @@ eval:
   #   joint_limits_lo: [-3.8049, -1.8055, 1.2649, -2.6913, -1.9309, -4.6440]
   #   joint_limits_hi: [-2.5787, -0.8823, 2.1442, -1.4379, -1.2014, -1.8222]
   # Re-derive after recording new takes: .venv/bin/python -m sim_collect.eval.derive_limits ros2_ur_ws/gello_logs/sim
+  envelope_source: "sim-derived from 22 demos (derive_limits.py, NOT carrot_eef_limits.json)"
   # --- joint envelope derived by sim_collect/eval/derive_limits.py (2026-09-15T03:13:12, git 2862b27) ---
   # source: ros2_ur_ws/gello_logs/sim (22 takes, 44660 ur_joint_states rows); rule = the real
   # carrot_eef_limits.json rule: 1.2x symmetric about the centre of the OBSERVED joints, quantised outward 0.0001.
@@ -239,6 +240,11 @@ eval:
     max_step_rad: 0.0025        # 0.625 rad/s sustained @ 250 Hz
     deadband_rad: 0.004
     soft_start_s: 0.7           # slew ramps 15 % -> 100 % of max_step_rad after every (re)seed
+    # On the real robot the bridge is (re)seeded by move_to_start/resume and the 0.7 s ramp
+    # has ELAPSED before the operator calls start_execution, so by default the episode
+    # starts with the ramp already over (step = max_step_rad from the first tick).
+    # true = start the ramp at t=0 of the episode instead.
+    soft_start_at_episode_start: false
     publish_rate_hz: 250.0
   policy_hz: 30.0               # one ACT per 1/30 s (the leader node's publish_rate_hz)
   max_steps: 600                # 20 s @ 30 Hz (no episode limit exists upstream; the harness adds one)

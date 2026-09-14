@@ -30,7 +30,7 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from sim_collect.eval.policies import ReplayPolicy, make_policy  # noqa: E402
+from sim_collect.eval.policies import PolicyRefused, ReplayPolicy, make_policy  # noqa: E402
 from sim_collect.eval.world import EvalWorld, Outcome  # noqa: E402
 
 OUTCOMES = (Outcome.SUCCESS, Outcome.TIMEOUT, Outcome.FAULT, Outcome.FAILURE)
@@ -103,23 +103,30 @@ def run_episode(world: EvalWorld, policy, ep_id: str, seed: Optional[int], max_s
     info: Dict[str, Any] = {}
     try:
         info = policy.reset(world.info()) or {}
-    except Exception as exc:  # noqa: BLE001  (a RESET refusal / timeout is a fault)
+    except PolicyRefused:
+        raise                                   # a checkpoint this harness cannot drive: abort the run
+    except Exception as exc:  # noqa: BLE001  (a RESET timeout / ok:false is a fault)
         rec.update(outcome=Outcome.FAULT, fault=f"reset: {type(exc).__name__}: {exc}", wall_s=time.time() - t_wall)
         if verbose:
             print(f"[run_eval] {ep_id}: FAULT at reset: {rec['fault']}", flush=True)
         return rec
+    need_images = bool(getattr(policy, "needs_images", True)) or video
     obs = world.reset(seed=seed, layout_override=info.get("layout_override"), q0=info.get("q0"),
-                      video_dir=out_dir, video_tag=f"ep_{ep_id}")
+                      video_dir=out_dir, video_tag=f"ep_{ep_id}", images=need_images)
     rec["layout"] = world.layout
     rec["reset_note"] = world.reset_note
     steps = int(max_steps)
     if info.get("max_steps_hint") is not None:
         steps = min(steps, int(info["max_steps_hint"]))
-    need_images = bool(getattr(policy, "needs_images", True)) or video
     outcome = Outcome.TIMEOUT
     n = 0
     while n < steps:
-        action = policy.act(obs)
+        try:
+            action = policy.act(obs)
+        except Exception as exc:  # noqa: BLE001  (a raising policy is a fault; the run continues)
+            outcome = Outcome.FAULT
+            rec["fault"] = f"act: {type(exc).__name__}: {exc}"
+            break
         if action is None:
             outcome = Outcome.FAULT
             rec["fault"] = str(getattr(policy, "last_error", None) or "policy returned None")
@@ -216,6 +223,7 @@ def summary_markdown(s: Dict[str, Any], episodes: List[Dict[str, Any]]) -> str:
               f"{s['clamp_hits']['max_dev']} / grip {s['clamp_hits']['grip']} of {s['clamp_hits']['steps']} steps; "
               f"envelope per joint {s['clamp_hits']['envelope_per_joint']}; episodes with envelope hits "
               f"{s['clamp_hits']['episodes_with_envelope_hits']}/{s['n_episodes']}"),
+             f"- envelope: {s['eval_config'].get('envelope_source', 'unknown') if s.get('eval_config') else 'unknown'}",
              f"- envelope lo {s['eval_config']['joint_limits_lo'] if s.get('eval_config') else '?'} hi "
              f"{s['eval_config']['joint_limits_hi'] if s.get('eval_config') else '?'} (max_dev_rad "
              f"{s['eval_config']['max_dev_rad'] if s.get('eval_config') else '?'})",
@@ -256,7 +264,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--video", action="store_true", help="write ep_<id>_cam1.mp4 / _cam2.mp4 (mp4v, 30 fps)")
     ap.add_argument("--config", default="sim_collect/configs/carrot_in_pot_sim.yaml")
     ap.add_argument("--task", default="Put carrot in pot", help="task string (recorded; FM servers read it server-side)")
-    ap.add_argument("--timeout-s", type=float, default=0.6, help="ZMQ REQ timeout (a timeout is a fault)")
+    ap.add_argument("--timeout-s", type=float, default=None,
+                    help="ZMQ REQ timeout (a timeout is a fault). Default = the real client's per-type value "
+                         "(act 0.5 s, diffusion/fm 0.6 s) inferred from --policy-type or the port 5591/5592/5593")
+    ap.add_argument("--policy-type", choices=["act", "diffusion", "fm"], default=None,
+                    help="server type behind zmq:// (sets the default timeout; recorded in policy_meta)")
     ap.add_argument("--no-state", action="store_true", help="skip the per-episode h5 state logs")
     ap.add_argument("--no-envelope", action="store_true",
                     help="disable clamp (1) (yaml eval.joint_limits = the REAL dataset's envelope, which the sim "
@@ -286,29 +298,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         seeds = parse_seeds(args.seeds, world.ev.get("seeds", list(range(20))))
         jobs = [(str(s), s, None) for s in seeds]
 
-    policy = None if args.policy == "replay" else make_policy(args.policy, task=args.task, timeout_s=args.timeout_s, world=world)
+    policy = None if args.policy == "replay" else make_policy(args.policy, task=args.task, timeout_s=args.timeout_s,
+                                                              world=world, policy_type=args.policy_type)
     policy_meta = dict(getattr(policy, "meta", {}) or {}) if policy is not None else {"policy": "replay", "takes": args.takes}
     print(f"[run_eval] policy={args.policy} episodes={len(jobs)} max_steps={max_steps} dwell={world.dwell_s}s "
           f"video={args.video} out={os.path.relpath(out_dir, _ROOT)}", flush=True)
     episodes: List[Dict[str, Any]] = []
+    run_args = {**vars(args), "started_at": started, "max_steps": max_steps}
     try:
         for ep_id, seed, take in jobs:
-            pol = ReplayPolicy(take, policy_hz=world.policy_hz) if take is not None else policy
-            rec = run_episode(world, pol, ep_id, seed, max_steps, out_dir, video=args.video,
-                              save_state=not args.no_state, verbose=not args.quiet)
+            try:
+                pol = ReplayPolicy(take, policy_hz=world.policy_hz) if take is not None else policy
+                rec = run_episode(world, pol, ep_id, seed, max_steps, out_dir, video=args.video,
+                                  save_state=not args.no_state, verbose=not args.quiet)
+            except PolicyRefused as exc:
+                # an EEF / wrong-dimension checkpoint: abort the run instead of producing N faults
+                print(f"[run_eval] ABORT: {exc}", file=sys.stderr, flush=True)
+                write_outputs(out_dir, episodes, summarize(episodes, policy_spec=args.policy, world=world,
+                                                           args={**run_args, "aborted": str(exc)},
+                                                           wall_s=time.time() - t_wall, policy_meta=policy_meta))
+                return 2
             if take is not None:
                 rec["take"] = os.path.relpath(take, _ROOT)
             episodes.append(rec)
+            if policy is not None:
+                policy_meta = dict(getattr(policy, "meta", {}) or {})   # RESET adds the server's v2 fields
             # keep the run readable while it is still going
-            write_outputs(out_dir, episodes, summarize(episodes, policy_spec=args.policy, world=world,
-                                                       args={**vars(args), "started_at": started, "max_steps": max_steps},
+            write_outputs(out_dir, episodes, summarize(episodes, policy_spec=args.policy, world=world, args=run_args,
                                                        wall_s=time.time() - t_wall, policy_meta=policy_meta))
     finally:
         world.close()
         if policy is not None and hasattr(policy, "close"):
             policy.close()
-    s = summarize(episodes, policy_spec=args.policy, world=world, args={**vars(args), "started_at": started,
-                                                                         "max_steps": max_steps},
+    s = summarize(episodes, policy_spec=args.policy, world=world, args=run_args,
                   wall_s=time.time() - t_wall, policy_meta=policy_meta)
     write_outputs(out_dir, episodes, s)
     ci = s["wilson_95"]

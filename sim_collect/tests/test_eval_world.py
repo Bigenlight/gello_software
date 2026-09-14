@@ -21,6 +21,9 @@ def world():
 
 def test_eval_block_loaded(world):
     assert world.max_step_rad == 0.0025 and world.soft_start_s == 0.7 and world.max_dev_rad == 0.5
+    assert "NOT carrot_eef_limits.json" in world.envelope_source
+    from sim_collect.eval.world import EVAL_DEFAULTS
+    assert EVAL_DEFAULTS["joint_limits_lo"] == world.ev["joint_limits_lo"]   # yaml == code defaults (sim-derived)
     assert world.dwell_s == 1.0 and world.policy_hz == 30.0 and world.steps_per_tick == 2
     assert np.all(world.home_joints > world.joint_limits_lo) and np.all(world.home_joints < world.joint_limits_hi)
     assert np.all(world.start_pose > world.joint_limits_lo) and np.all(world.start_pose < world.joint_limits_hi)
@@ -106,27 +109,76 @@ def test_deploy_clamps_in_order(world):
         world.apply(list(q) + [float("nan")])
 
 
-def test_slew_is_bounded_per_tick_and_soft_started(world):
+def test_slew_is_bounded_per_tick_and_soft_start_already_elapsed(world):
+    """Real deploy parity: the bridge's 0.7 s soft start ran at move_to_start/resume, BEFORE
+    start_execution, so the first tick of an episode already slews at the full max_step_rad."""
+    assert world.soft_start_at_episode_start is False
     world.reset(seed=0)
+    assert world.step_eff == world.max_step_rad                    # full step from the first tick
     q0 = world.q()
     a = list(q0) + [0.0]
     a[3] -= 1.0
     world.apply(a)
     world.step()
+    assert world.step_eff == world.max_step_rad
     assert 0.0 < world.last_tick_max_delta <= world.max_step_rad + 1e-12
-    assert world.step_eff < world.max_step_rad                     # soft start: 15 % -> 100 % over 0.7 s
     moved = abs(world.data.ctrl[3] - q0[3])
-    assert moved <= 5 * world.max_step_rad + 1e-9                  # <= 5 ticks in 1/30 s
+    assert 7 * world.max_step_rad < moved <= 9 * world.max_step_rad + 1e-9   # 8-9 ticks in 1/30 s, full step
     max_delta = 0.0
     for _ in range(29):
         world.step()
         max_delta = max(max_delta, world.last_tick_max_delta)
     assert max_delta <= world.max_step_rad + 1e-12
-    assert world.step_eff == world.max_step_rad                    # soft start over after 0.7 s
     moved = abs(world.data.ctrl[3] - q0[3])
-    # 1 s of 250 Hz ticks with the 0.7 s soft start: (0.7*0.575 + 0.3) * 250 * 0.0025 ~ 0.44 < 0.5 (dev clamp)
-    assert 0.40 < moved < 0.46
+    # 1 s of 250 Hz ticks at the full step -> 0.625 rad, but the max-dev clamp bounds the target at 0.5
+    assert 0.48 < moved <= 0.5 + 1e-9
     assert world.t == pytest.approx(1.0, abs=1e-6) and world.frame == 30
+
+
+def test_soft_start_at_episode_start_opt_in(world):
+    world.soft_start_at_episode_start = True
+    try:
+        world.reset(seed=0)
+        assert world.step_eff == pytest.approx(0.15 * world.max_step_rad)
+        q0 = world.q()
+        a = list(q0) + [0.0]
+        a[3] -= 1.0
+        world.apply(a)
+        world.step()
+        assert world.step_eff < world.max_step_rad
+        assert abs(world.data.ctrl[3] - q0[3]) < 4 * world.max_step_rad     # 9 ticks at ~15-20 % of the step
+        for _ in range(29):
+            world.step()
+        assert world.step_eff == world.max_step_rad                # ramp over after 0.7 s
+        moved = abs(world.data.ctrl[3] - q0[3])
+        assert 0.40 < moved < 0.46                                 # (0.7*0.575 + 0.3) * 250 * 0.0025 ~ 0.44
+    finally:
+        world.soft_start_at_episode_start = False
+
+
+def test_trajectory_is_deterministic_under_a_wiggling_policy(world):
+    def run():
+        world.reset(seed=3)
+        home = world.q()
+        traj = []
+        for k in range(90):
+            a = list(home) + [0.5 * (1 + np.sin(k / 7.0))]
+            a[0] += 0.05 * np.sin(k / 5.0)
+            a[2] -= 0.04 * np.cos(k / 9.0)
+            world.apply(a)
+            world.step()
+            traj.append(np.concatenate([world.data.qpos, world.data.ctrl]))
+        return np.asarray(traj)
+    t1, t2 = run(), run()
+    assert t1.shape == (90, world.model.nq + world.model.nu)
+    assert float(np.max(np.abs(t1 - t2))) == 0.0
+
+
+def test_state_uses_the_rebranched_joints(world):
+    world.reset(seed=0)
+    st = world.observe(images=False)["state"]
+    assert st[:6] == world._branched_q()
+    assert all(abs(st[i] - world.start_pose[i]) <= np.pi for i in range(6))
 
 
 def test_hold_without_apply(world):

@@ -104,3 +104,20 @@ def test_zero_policy_holds_home():
         make_policy("replay")
     with pytest.raises(ValueError):
         make_policy("bogus")
+
+
+def test_timeout_default_per_policy_type():
+    from sim_collect.eval.policies import TIMEOUT_BY_TYPE, infer_policy_type
+    assert infer_policy_type(5591) == "act" and infer_policy_type(5593) == "fm" and infer_policy_type(6000) is None
+    assert infer_policy_type(5591, "fm") == "fm"
+    with StubPolicyServer(port=0) as s:
+        p = ZmqPolicy(s.endpoint, policy_type="act")
+        assert p.timeout_s == TIMEOUT_BY_TYPE["act"] == 0.5 and p.meta["timeout_source"].startswith("real client")
+        p2 = ZmqPolicy(s.endpoint)                              # random port, no type -> generic 0.6
+        assert p2.timeout_s == 0.6 and p2.meta["policy_type"] is None
+        p2.reset({})
+        assert p2.meta["policy_type"] == "stub"                 # learned from the v2 RESET reply
+        p3 = ZmqPolicy(s.endpoint, timeout_s=0.25, policy_type="fm")
+        assert p3.timeout_s == 0.25 and p3.meta["timeout_source"] == "explicit"
+        for q in (p, p2, p3):
+            q.close()

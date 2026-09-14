@@ -347,13 +347,14 @@ if [ "$MODE" = "check" ]; then
         echo "remote repo   : $REMOTE_REPO"
         echo "remote logs   : $REMOTE_LOGDIR (pid file $REMOTE_PIDFILE)"
         echo
-        [ "$DO_SYNC" = "1" ] && { echo "1) sync the server code:"; echo "   $(rsync_cmdline)"; }
-        echo "2) start on $REMOTE_HOST (detached, bound to 127.0.0.1, server-owned):"
+        step=0
+        [ "$DO_SYNC" = "1" ] && { step=$((step+1)); echo "$step) sync the server code:"; echo "   $(rsync_cmdline)"; }
+        step=$((step+1)); echo "$step) start on $REMOTE_HOST (detached, bound to 127.0.0.1, server-owned):"
         echo "   $(remote_launch_preview)"
-        echo "3) tunnel (owned by this terminal):"
+        step=$((step+1)); echo "$step) tunnel (owned by this terminal):"
         echo "   $(tunnel_cmdline)"
-        echo "4) wait for a RESET round-trip on 127.0.0.1:$LOCAL_PORT (up to ${WAIT_S}s)"
-        echo "5) stop later:"
+        step=$((step+1)); echo "$step) wait for a RESET round-trip on 127.0.0.1:$LOCAL_PORT (up to ${WAIT_S}s)"
+        step=$((step+1)); echo "$step) stop later:"
         echo "   $0 --type $TYPE --remote $REMOTE_HOST --port $PORT --stop"
     else
         echo "local venv    : $ACT_VENV"
@@ -415,7 +416,7 @@ fi
 # enough -- the cmdline must be OUR server on OUR port before anything is signalled.
 cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
 case "$cmdline" in
-    *"${TYPE}_server.py"*"--port $PORT"*) ;;
+    *"${TYPE}_server.py"*"--port $PORT "*|*"${TYPE}_server.py"*"--port=$PORT "*) ;;   # trailing space: 5593 must not match 55930
     *)
         echo "REFUSING: pid $pid is not the ${TYPE} server on port $PORT." >&2
         echo "          cmdline: $cmdline" >&2

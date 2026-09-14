@@ -45,6 +45,18 @@ from policy_server import zmq_protocol  # noqa: E402  (stdlib-only constants)
 N_JOINTS = 6
 ACTION_LEN = 7
 
+# The real client's REQ timeout per server type (act_deploy.yaml act_timeout_s 0.5;
+# diffusion/fm deploy yamls 0.6) and the default ports of run_{act,diffusion,fm}_server.sh.
+TIMEOUT_BY_TYPE = {"act": 0.5, "diffusion": 0.6, "fm": 0.6}
+PORT_TO_TYPE = {5591: "act", 5592: "diffusion", 5593: "fm"}
+DEFAULT_TIMEOUT_S = 0.6
+
+
+def infer_policy_type(port: int, policy_type: Optional[str] = None) -> Optional[str]:
+    if policy_type:
+        return str(policy_type).lower()
+    return PORT_TO_TYPE.get(int(port))
+
 
 @runtime_checkable
 class Policy(Protocol):
@@ -85,8 +97,8 @@ class ZmqPolicy:
 
     needs_images = True
 
-    def __init__(self, endpoint: str, task: str = "Put carrot in pot", timeout_s: float = 0.6,
-                 act_timeout_faults: bool = True) -> None:
+    def __init__(self, endpoint: str, task: str = "Put carrot in pot", timeout_s: Optional[float] = None,
+                 act_timeout_faults: bool = True, policy_type: Optional[str] = None) -> None:
         import zmq
         self._zmq = zmq
         ep = str(endpoint)
@@ -98,7 +110,13 @@ class ZmqPolicy:
             raise ValueError(f"endpoint must be zmq://host:port, got {endpoint!r}")
         self.endpoint = zmq_protocol.default_endpoint(host, int(port))
         self.task = str(task)
-        self.timeout_s = float(timeout_s)
+        self.policy_type = infer_policy_type(int(port), policy_type)
+        if timeout_s is not None:
+            self.timeout_s, timeout_source = float(timeout_s), "explicit"
+        elif self.policy_type in TIMEOUT_BY_TYPE:
+            self.timeout_s, timeout_source = TIMEOUT_BY_TYPE[self.policy_type], f"real client default for {self.policy_type}"
+        else:
+            self.timeout_s, timeout_source = DEFAULT_TIMEOUT_S, "generic default (unknown policy type)"
         self.act_timeout_faults = bool(act_timeout_faults)
         self._ctx = zmq.Context.instance()
         self._sock = None
@@ -109,7 +127,8 @@ class ZmqPolicy:
         self.n_acts = 0
         self.rtt_ms: List[float] = []
         self.meta: Dict[str, Any] = {"policy": "zmq", "endpoint": self.endpoint, "task": self.task,
-                                     "timeout_s": self.timeout_s, "transport": "zmq"}
+                                     "policy_type": self.policy_type, "timeout_s": self.timeout_s,
+                                     "timeout_source": timeout_source, "transport": "zmq"}
 
     # -- socket lifecycle: verbatim semantics of policy_leader_node --------------
     def _connect_socket(self) -> None:
@@ -150,6 +169,9 @@ class ZmqPolicy:
                 raise PolicyRefused(f"server reports {k}={v2[k]}; this harness drives joint-space 7/7 only "
                                     f"(an EEF checkpoint is out of scope in v1)")
         self.meta.update({"server": v2, "reset_reply": {k: v for k, v in reply.items() if k != obs_assembler.KEY_OK}})
+        if v2.get("policy_type") and self.policy_type is None:
+            self.policy_type = str(v2["policy_type"]).lower()
+            self.meta["policy_type"] = self.policy_type
         self.last_action = None
         return None
 
@@ -278,12 +300,12 @@ class ZeroPolicy:
         return list(self._hold) if self._hold is not None else [float(v) for v in obs["state"][:N_JOINTS]] + [0.0]
 
 
-def make_policy(spec: str, *, task: str = "Put carrot in pot", timeout_s: float = 0.6, world=None,
-                take_dir: Optional[str] = None):
+def make_policy(spec: str, *, task: str = "Put carrot in pot", timeout_s: Optional[float] = None, world=None,
+                take_dir: Optional[str] = None, policy_type: Optional[str] = None):
     """`zmq://host:port` | `replay` (needs take_dir) | `scripted` (F2) | `zero`."""
     s = str(spec)
     if s.startswith("zmq://") or s.startswith("tcp://"):
-        return ZmqPolicy(s, task=task, timeout_s=timeout_s)
+        return ZmqPolicy(s, task=task, timeout_s=timeout_s, policy_type=policy_type)
     if s == "zero":
         return ZeroPolicy()
     if s == "replay":
