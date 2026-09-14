@@ -49,7 +49,12 @@ fi
 # detach anything.
 GPU_ID="$GPU_ID" "$ROOT_DIR/preflight.sh" "$JOB"
 
+# Every _common.sh default the caller may override per launch (R1 D-3: STEPS=30000
+# ./launch_detached.sh fm used to run 100k silently because the detached script
+# re-sources _common.sh). Forward ALL of them, not just the paths.
 setsid nohup env \
+  STEPS="${STEPS:-}" BATCH_SIZE="$BATCH_SIZE" SAVE_FREQ="$SAVE_FREQ" \
+  EVAL_STEPS="$EVAL_STEPS" NUM_WORKERS="$NUM_WORKERS" SEED="$SEED" \
   CARROT_ROOT="$CARROT_ROOT" \
   DATASET_ROOT="$DATASET_ROOT" \
   REPO_ID="$REPO_ID" \

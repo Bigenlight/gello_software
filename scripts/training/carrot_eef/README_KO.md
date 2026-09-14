@@ -19,7 +19,7 @@
 | `_common.sh` | 경로·기본값·NVIDIA lib 트릭·held-out episode 계산 (나머지가 source 한다) |
 | `train_act_carrot_eef.sh` | ACT 50,000 step, batch 8, 360×640 resize, seed 1000 |
 | `train_fm_carrot_eef.sh` | FM(`multi_task_dit`/`flow_matching`) 100,000 step, batch 8, 내부 224 |
-| `preflight.sh` | 5개 게이트(아래 §2). **통과 못 하면 절대 띄우지 않는다** |
+| `preflight.sh` | 6개 거부 조건(아래 §2). **통과 못 하면 절대 띄우지 않는다** |
 | `launch_detached.sh JOB` | `setsid nohup` 분리 실행 + `runtime/<job>/train.{pid,log}` |
 | `sync_to_kanu.sh` | 번들 + 데이터셋 → `kanu:~/workspace/youngwoong/carrot_eef/` |
 | `eval_offline_eef.py` | held-out episode open-loop 평가 (ACT/FM 공통) |
@@ -73,7 +73,8 @@ GPU_ID=<a> ./preflight.sh act
 GPU_ID=<b> ./preflight.sh fm
 ```
 
-거부 조건 5개:
+거부 조건 6개 (번호는 아래 목록의 것이고, **스크립트가 찍는 `PASS [n]` 라벨과는 다르다** —
+매핑은 목록 끝의 📌):
 
 1. **선택한 GPU에 CUDA compute 프로세스가 하나라도 있으면** 거부.
    메모리 임계값이 아니라 **프로세스**로 본다(banana `TROUBLESHOOTING.md` §6).
@@ -97,6 +98,16 @@ GPU_ID=<b> ./preflight.sh fm
    **버림 자체를 명시적으로 단언한다.** 탈출구 `ALLOW_STALE_TAIL=1`.
    (`source_takes.json`이 없거나 `n_tail_dropped` 필드가 없으면 실패시키지 않고 그 사실을
    한 줄로 알린다.)
+
+> 📌 **스크립트 라벨 ↔ 위 번호.** `PASS [1]` = 1, `PASS [2]` = 2, `PASS [3]` = 3,
+> **`PASS [4]` = 5**(`lerobot-train --help`), **`PASS [5]` = 4 + 6**(데이터셋 스키마 게이트
+> 하나가 feature 집합·이름·`total_episodes`·`fps`·`codebase_version`·tail-drop·
+> `meta/eef_space.json`을 전부 본다). 실패 메시지도 `FAIL [5]`로 나온다.
+
+> 🪤 **`GPU_ID` 없이 `./preflight.sh`를 돌리면 1번 게이트가 SKIP된다**
+> (`SKIP [1] GPU_ID unset -- schema/venv checks only, no GPU reservation`), 그런데도 마지막
+> 줄은 `PREFLIGHT: PASS`다. **GPU 예약을 확인했다는 뜻이 아니다.** 잡 인자를 빼면 `both`로
+> 두 정책 클래스를 다 확인한다(무해).
 
 > 📌 **preflight는 프레임 수를 하드코딩하지 않는다.** `total_episodes == 54`(`TOTAL_EPISODES`로
 > 덮어쓰기 가능)만 단언하고 `total_frames`는 `meta/info.json`에서 읽어 **보고만** 한다.
@@ -212,7 +223,9 @@ DEVICE=cpu ./eval_checkpoints.sh fm        # GPU가 없을 때
   `get_policy_class`) — `fm_server.py`와 같은 방식이라 ACT/FM 둘 다 같은 스크립트로 된다.
 - 이미지 경로는 **학습과 같아야 한다**: `--image-resize auto`(기본)가 ACT면 360×640
   resize를, `multi_task_dit`이면 무변환(정책이 내부에서 224로)을 고른다.
-- `--num-integration-steps` 기본 **10** — 배포(`fm_server.py`)와 같은 값. ACT에서는 무시된다.
+- `--num-integration-steps` 기본 **10** — 배포 셸 런처(`run_fm_server.sh`의
+  `FM_NUM_INTEGRATION_STEPS` 기본값)와 같은 값이다. ⚠️ `fm_server.py`를 **직접** 부르면
+  기본이 unset이라 체크포인트의 학습값 100이 쓰인다. ACT에서는 무시된다.
 - `--n-action-steps`로 receding-horizon 길이를 바꿀 수 있다(기본 = 학습값).
 - 출력: `evaluations/<job>/<step>/{metrics.json,episodes.csv}` + `evaluations/<job>/summary.csv`.
 
@@ -244,10 +257,12 @@ DEVICE=cpu ./eval_checkpoints.sh fm        # GPU가 없을 때
 
 ```bash
 # laptop3에서
-CKPT=~/workspace/youngwoong/carrot_eef/outputs/fm_carrot_eef/checkpoints/100000/pretrained_model
+# ⚠️ CKPT를 `~/...`로 쓰면 **로컬 홈**(/home/laptop3/...)으로 풀려서 rsync가 실패한다.
+#    kanu의 홈은 /home/junhyeong 이다. 원격 `~`는 "kanu:" 뒤에 붙였을 때만 원격에서 풀린다.
+CKPT=workspace/youngwoong/carrot_eef/outputs/fm_carrot_eef/checkpoints/100000/pretrained_model
 DEST=/home/laptop3/gello_software_humble/ros2_ur_ws/src/gello_policy/checkpoints/carrot_eef_fm_100k
 mkdir -p "$DEST"
-rsync -av --partial "kanu:$CKPT/" "$DEST/"
+rsync -av --partial "kanu:$CKPT/" "$DEST/"     # 원격 상대경로 = 원격 홈 기준
 ls -la "$DEST"      # config.json model.safetensors policy_preprocessor.json policy_postprocessor.json
 ```
 

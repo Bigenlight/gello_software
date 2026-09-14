@@ -29,6 +29,10 @@ EPISODES="${EPISODES:-$(carrot_heldout_episodes)}"
 # 10 Euler steps == the deploy default in fm_server.py. No-op for ACT.
 INTEGRATION_STEPS="${INTEGRATION_STEPS:-10}"
 EVAL_SEED="${EVAL_SEED:-$SEED}"
+# Deploy value (act_server.py default 30; fm_server.py 24). Empty = the
+# checkpoint's trained value (ACT chunk_size 100 -> pessimistic, NOT the deploy
+# configuration). Use a separate EVAL_ROOT per value: existing metrics.json are skipped.
+N_ACTION_STEPS="${N_ACTION_STEPS:-}"
 PYTHON="$LEROBOT_VENV/bin/python"
 
 [[ "$DEVICE" == "cuda" || "$DEVICE" == "cpu" ]] || carrot_fail "DEVICE must be cuda or cpu"
@@ -62,7 +66,7 @@ if (( ${#checkpoints[@]} == 0 )); then
   exit 0
 fi
 
-echo "job=$JOB_NAME device=$DEVICE episodes=$EPISODES integration_steps=$INTEGRATION_STEPS"
+echo "job=$JOB_NAME device=$DEVICE episodes=$EPISODES integration_steps=$INTEGRATION_STEPS n_action_steps=${N_ACTION_STEPS:-trained}"
 for checkpoint in "${checkpoints[@]}"; do
   step_name="$(basename "$(dirname "$checkpoint")")"
   # 'last' is a symlink to the newest numbered checkpoint: evaluating it would
@@ -85,6 +89,8 @@ for checkpoint in "${checkpoints[@]}"; do
     continue
   fi
   echo "EVALUATE $step_name"
+  extra=()
+  [[ -n "$N_ACTION_STEPS" ]] && extra+=(--n-action-steps "$N_ACTION_STEPS")
   "$PYTHON" "$ROOT_DIR/eval_offline_eef.py" \
     --checkpoint "$checkpoint" \
     --dataset-root "$DATASET_ROOT" \
@@ -94,6 +100,7 @@ for checkpoint in "${checkpoints[@]}"; do
     --device "$DEVICE" \
     --num-integration-steps "$INTEGRATION_STEPS" \
     --seed "$EVAL_SEED" \
+    "${extra[@]}" \
     --out "$out"
 done
 
@@ -104,13 +111,18 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 metrics = ("position_mae_m", "position_err_norm_m", "rotation_mae_rad",
-           "rotation_axis_mae_rad", "gripper_mae", "gripper_accuracy", "overall_l1")
+           "rotation_axis_mae_rad", "gripper_mae", "gripper_accuracy", "overall_l1",
+           "chunk10_pos_err_m", "chunk30_pos_err_m", "chunk30_gt_norm_m")
 rows = []
 for path in sorted(root.glob("*/metrics.json"),
                    key=lambda p: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", p.parent.name)]):
     data = json.loads(path.read_text())
     rows.append({"step": path.parent.name, "frames": data["aggregate"]["frames"],
-                 **{m: data["aggregate"][m] for m in metrics}})
+                 **{m: data["aggregate"].get(m, float("nan")) for m in metrics}})
+    base = data.get("baseline_zero")
+    if base is not None and not any(r["step"] == "zero_baseline" for r in rows):
+        rows.insert(0, {"step": "zero_baseline", "frames": base["frames"],
+                        **{m: base.get(m, float("nan")) for m in metrics}})
 if not rows:
     print("no metrics.json found; nothing to summarize")
     raise SystemExit(0)
@@ -121,6 +133,7 @@ with out.open("w", newline="") as handle:
     writer.writerows(rows)
 print(f"wrote {out} ({len(rows)} checkpoints)")
 for row in rows:
-    print(f"  {row['step']:>8}  posMAE={row['position_mae_m']:.6f} m  "
-          f"rotMAE={row['rotation_mae_rad']:.6f} rad  gripAcc={row['gripper_accuracy']:.3f}")
+    print(f"  {row['step']:>13}  posMAE={row['position_mae_m']:.6f} m  "
+          f"rotMAE={row['rotation_mae_rad']:.6f} rad  gripAcc={row['gripper_accuracy']:.3f}  "
+          f"chunk30={row['chunk30_pos_err_m']*1e3:.1f}/{row['chunk30_gt_norm_m']*1e3:.1f} mm")
 PY

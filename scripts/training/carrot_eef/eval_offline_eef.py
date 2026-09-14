@@ -189,6 +189,26 @@ def load_policy(checkpoint: Path, device: str, dataset_stats: dict,
     return policy, preprocessor, postprocessor, cfg
 
 
+# Deploy chunk horizons: 30 == act_server's default n_action_steps, 10 == a short lead.
+CHUNK_HORIZONS = (10, 30)
+
+
+def _chunk_cum(pred: np.ndarray, targ: np.ndarray, k: int) -> tuple[float, float]:
+    """(mean error, mean ground-truth norm) of the ACCUMULATED translation over k frames.
+
+    Deploy anchors once per chunk and applies k deltas to the TARGET pose
+    (DESIGN §3.3), so the integrated k-frame displacement -- not the per-frame
+    delta -- is what the arm actually sees. Read the two numbers as a ratio.
+    """
+    if len(pred) <= k:
+        return float("nan"), float("nan")
+    cp, ct = np.cumsum(pred[:, POS_SLICE], 0), np.cumsum(targ[:, POS_SLICE], 0)
+    err = (cp[k:] - cp[:-k]) - (ct[k:] - ct[:-k])
+    gt = ct[k:] - ct[:-k]
+    return (float(np.linalg.norm(err, axis=1).mean()),
+            float(np.linalg.norm(gt, axis=1).mean()))
+
+
 def metric_dict(prediction: np.ndarray, target: np.ndarray) -> dict:
     """EEF-delta metrics. Layout is fixed by DESIGN §2: [0:3] m, [3:6] rad, [6] grip."""
     error = prediction - target
@@ -214,6 +234,8 @@ def metric_dict(prediction: np.ndarray, target: np.ndarray) -> dict:
         "overall_l1": float(absolute.mean()),
         "per_dim_mae": per_dim_mae.tolist(),
         "per_dim_rmse": per_dim_rmse.tolist(),
+        **{f"chunk{k}_pos_err_m": _chunk_cum(prediction, target, k)[0] for k in CHUNK_HORIZONS},
+        **{f"chunk{k}_gt_norm_m": _chunk_cum(prediction, target, k)[1] for k in CHUNK_HORIZONS},
     }
 
 
@@ -350,8 +372,16 @@ def main() -> None:
               f"rotMAE={metrics['rotation_mae_rad']:.6f} rad "
               f"gripAcc={metrics['gripper_accuracy']:.3f}")
 
-    aggregate = metric_dict(np.concatenate(all_pred), np.concatenate(all_gt))
+    all_gt_cat = np.concatenate(all_gt)
+    aggregate = metric_dict(np.concatenate(all_pred), all_gt_cat)
+    # "Don't move" baseline on the same frames: any metric the policy does not
+    # beat here has not been learned (R1 review, 2026-09-15).
+    baseline_zero = metric_dict(np.zeros_like(all_gt_cat), all_gt_cat)
     print_table(rows, aggregate, dim_names)
+    for k in CHUNK_HORIZONS:
+        print(f"[chunk{k:>3}] cumulative pos err {aggregate[f'chunk{k}_pos_err_m']*1e3:.1f} mm "
+              f"vs gt {aggregate[f'chunk{k}_gt_norm_m']*1e3:.1f} mm "
+              f"(zero-motion baseline err {baseline_zero[f'chunk{k}_pos_err_m']*1e3:.1f} mm)")
 
     result = {
         "checkpoint": str(args.checkpoint.resolve()),
@@ -371,6 +401,7 @@ def main() -> None:
         "action_space_id": "eef_delta_v1",
         "per_episode": rows,
         "aggregate": aggregate,
+        "baseline_zero": baseline_zero,
     }
     (args.out / "metrics.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     fields = ["episode", "frames", "position_mae_m", "position_err_norm_m", "rotation_mae_rad",

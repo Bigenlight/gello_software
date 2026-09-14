@@ -12,7 +12,17 @@
 #   3. less than 20 GiB free on the filesystem holding ~/workspace/youngwoong/carrot_eef;
 #   4. the dataset's meta/info.json feature set is not EXACTLY the EEF contract
 #      (9 features, state 16 / action 7, cam1 + cam2, and NO depth);
-#   5. `lerobot-train --help` does not run in the venv.
+#   5. `lerobot-train --help` does not run in the venv;
+#   6. meta/source_takes.json says every take dropped ZERO tail frames, i.e. this is
+#      the DISCARDED pre---drop-stale-tail conversion (escape hatch ALLOW_STALE_TAIL=1).
+#
+# WARNING about the labels this script PRINTS: they are not the numbering above.
+# `PASS [4]` is the lerobot-train check (item 5) and `PASS [5]` is the whole dataset
+# gate (items 4 AND 6, plus names / total_episodes / fps / codebase_version /
+# meta/eef_space.json), because the schema assertions all live in one python block.
+#
+# WITHOUT GPU_ID check 1 is SKIPPED and the script still ends in `PREFLIGHT: PASS`.
+# That PASS says nothing about GPU availability -- always pass GPU_ID before launching.
 #
 # Modelled on cube_flow_matching_training/preflight.sh; the GPU test is
 # process-based, never memory-based (banana TROUBLESHOOTING §6).
