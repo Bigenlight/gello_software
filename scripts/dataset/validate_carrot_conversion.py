@@ -37,6 +37,12 @@ SPEC (re-implemented here)
                        + gripper/grip_pos      @ nearest gripper t_rel_s
   action[7]            = command cmd1..cmd6    @ nearest command t_rel_s
                        + ffill_bfill(gripper/grip_cmd) @ nearest gripper t_rel_s
+  stale tail           = master frames with NO ur sample at their corrected lookup
+                         time are dropped: frame k survives iff
+                         cam1_t[k] + tau <= ur_joint_states t_rel_s[-1]. The cut
+                         applies to the whole frame (state/action/cam1/cam2/both
+                         depth streams). --no-drop-stale-tail mirrors a v2-style
+                         dataset that kept them.
   cam1 frame k         = k-th decoded frame of cam1.mp4 (last frame padded if short)
   cam2 frame k         = decoded frame nearest_idx(cam2_t, cam1_t)[k] of cam2.mp4
   cam<N>_depth frame k = PNG nearest_idx(depth.h5/cam<N>/t_rel_s, cam1_t)[k],
@@ -73,6 +79,8 @@ Checks (each prints PASS / FAIL / WARN / SKIP):
      so it reports a recording property and can never catch a converter error.
  14  meta/source_takes.json carries ur_joint_states_lag_s == the CLI/JSON tau for
      every episode, and a top-level timestamp_correction block
+ 16  stale-tail cut: no episode ends with >= 3 identical consecutive ur_q rows,
+     and every episode's length == the expected count after the drop rule
  15  physics sanity: mean |observation.state[0:6] - action[0:6]| per episode
      (first 1.6 s excluded) is < 0.02 rad WITH the correction, and larger when
      re-derived at tau = 0 -- the follower tracks its own command, so a correct
@@ -199,6 +207,11 @@ DEPTH_ERR_MAX_MM = 1.25
 # CHECK 15 gates: with a correct time base the UR follows its own command to well
 # under 0.02 rad per joint; at tau = 0 the 0.9 s stamp error alone puts ~0.05 rad
 # of pure delay between them (measured median 0.063 rad over the 54 takes).
+# CHECK 16: a clamped (stale) tail shows up as the SAME joint row repeated at the
+# end of an episode. Three consecutive identical 6-vectors is already impossible for
+# a moving arm at 30 fps with a 60-70 Hz joint stream, so this is a tight gate.
+STALE_TAIL_MAX_REPEATS = 3
+
 STATE_ACTION_MAX_RAD = 0.02
 STATE_ACTION_SKIP_HEAD_S = 1.6
 
@@ -341,22 +354,39 @@ def resolve_taus(takes, ur_lag_s: float, lag_json: str | None):
             for t in takes}
 
 
-def derive_take(h5_path: str, max_frames: int = 0, ur_lag_s: float = 0.0):
+def stale_tail_keep(cam1_t, ur_t_raw, ur_lag_s: float) -> int:
+    """Number of leading master frames that still have a real ur sample.
+
+    Frame k survives iff cam1_t[k] + tau <= ur_t_raw[-1]. Re-implemented from the
+    spec; cam1_t is ascending so the survivors are a prefix.
+    """
+    if ur_lag_s <= 0:
+        return len(cam1_t)
+    cam1_t = np.asarray(cam1_t, dtype=np.float64)
+    return int(np.count_nonzero(cam1_t + float(ur_lag_s) <= float(ur_t_raw[-1])))
+
+
+def derive_take(h5_path: str, max_frames: int = 0, ur_lag_s: float = 0.0,
+                drop_stale_tail: bool = False):
     """Return (cam1_t, cam2_t, state[N,7] float32, action[N,7] float32).
 
     `ur_lag_s` is subtracted from the ur_joint_states row clock before the
-    nearest-timestamp lookup (and from nothing else).
+    nearest-timestamp lookup (and from nothing else). `drop_stale_tail` trims the
+    master clock to the frames that still have a real joint sample.
     """
     import h5py
 
     with h5py.File(h5_path, "r") as f:
         cam1_t = f["cam1_frames"]["t_rel_s"][:]
         cam2_t = f["cam2_frames"]["t_rel_s"][:]
+        ur_t_raw = np.asarray(f["ur_joint_states"]["t_rel_s"][:], dtype=np.float64)
+        if drop_stale_tail:
+            cam1_t = cam1_t[:stale_tail_keep(cam1_t, ur_t_raw, ur_lag_s)]
         if max_frames and max_frames > 0:
             cam1_t = cam1_t[:max_frames]
         n = len(cam1_t)
 
-        ur_t = np.asarray(f["ur_joint_states"]["t_rel_s"][:], dtype=np.float64) - float(ur_lag_s)
+        ur_t = ur_t_raw - float(ur_lag_s)
         ur_j = nearest_idx(ur_t, cam1_t)
         state = np.zeros((n, 7), dtype=np.float32)
         for k in range(6):
@@ -376,11 +406,16 @@ def derive_take(h5_path: str, max_frames: int = 0, ur_lag_s: float = 0.0):
     return cam1_t, cam2_t, state, action
 
 
-def take_cam1_t(h5_path: str, max_frames: int = 0) -> np.ndarray:
+def take_cam1_t(h5_path: str, max_frames: int = 0, ur_lag_s: float = 0.0,
+                drop_stale_tail: bool = False) -> np.ndarray:
+    """The master clock the converter is required to use, after the stale-tail cut."""
     import h5py
 
     with h5py.File(h5_path, "r") as f:
         t = f["cam1_frames"]["t_rel_s"][:]
+        if drop_stale_tail:
+            ur_t_raw = np.asarray(f["ur_joint_states"]["t_rel_s"][:], dtype=np.float64)
+            t = t[:stale_tail_keep(t, ur_t_raw, ur_lag_s)]
     return t[:max_frames] if (max_frames and max_frames > 0) else t
 
 
@@ -823,7 +858,7 @@ def check_frame_counts(rep: Report, eps, takes, take_lens):
 
 
 def check_numeric(rep: Report, eps, takes, data, tol: float, verbose: bool, max_frames: int,
-                  taus: dict):
+                  taus: dict, drop_stale_tail: bool):
     section("CHECK 3  --  numeric fidelity of observation.state / action (independent re-derivation)")
 
     stored_state = data["observation.state"]
@@ -836,7 +871,8 @@ def check_numeric(rep: Report, eps, takes, data, tol: float, verbose: bool, max_
 
     for i, (ep, tk) in enumerate(zip(eps, takes)):
         h5 = os.path.join(tk, "vectors.h5")
-        _, _, state, action = derive_take(h5, max_frames, taus[os.path.basename(tk)])
+        _, _, state, action = derive_take(h5, max_frames, taus[os.path.basename(tk)],
+                                          drop_stale_tail)
         a = int(ep["dataset_from_index"])
         b = int(ep["dataset_to_index"])
         got_s = stored_state[a:b]
@@ -904,7 +940,7 @@ def check_task(rep: Report, root, eps, data, task: str):
 
 
 def check_videos(rep: Report, root, info, eps, takes, n_sample, warn_corr, fail_corr,
-                 n_frames_per_ep, max_frames):
+                 n_frames_per_ep, max_frames, taus, drop_stale_tail):
     section("CHECK 6  --  RGB video integrity (LeRobot AV1 vs raw MPEG-4)")
     if FFMPEG is None:
         rep.skip("video check", "ffmpeg not found on PATH")
@@ -927,7 +963,8 @@ def check_videos(rep: Report, root, info, eps, takes, n_sample, warn_corr, fail_
         ep = eps[ei]
         tk = takes[ei]
         n = int(ep["length"])
-        cam1_t, cam2_t, _, _ = derive_take(os.path.join(tk, "vectors.h5"), max_frames)
+        cam1_t, cam2_t, _, _ = derive_take(os.path.join(tk, "vectors.h5"), max_frames,
+                                           taus[os.path.basename(tk)], drop_stale_tail)
         cam2_map = nearest_idx(cam2_t, cam1_t)
 
         ks = sample_frame_indices(n, n_frames_per_ep)
@@ -1188,7 +1225,8 @@ def check_depth_counts(rep: Report, root, info, eps):
 # --------------------------------------------------------------------------
 # CHECK 10 -- depth numeric fidelity
 # --------------------------------------------------------------------------
-def check_depth_numeric(rep: Report, lr_root, repo_id, eps, takes, n_eps, n_frames, max_frames):
+def check_depth_numeric(rep: Report, lr_root, repo_id, eps, takes, n_eps, n_frames, max_frames,
+                        taus, drop_stale_tail):
     section("CHECK 10  --  depth numeric fidelity (LeRobot decode vs depth.h5 ground truth)")
     try:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -1216,7 +1254,8 @@ def check_depth_numeric(rep: Report, lr_root, repo_id, eps, takes, n_eps, n_fram
         tk = takes[ei]
         a = int(ep["dataset_from_index"])
         n = int(ep["length"])
-        cam1_t = take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames)
+        cam1_t = take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames,
+                             taus[os.path.basename(tk)], drop_stale_tail)
         ks = sample_frame_indices(min(n, len(cam1_t)), n_frames)
         dpath = os.path.join(tk, "depth.h5")
         if not os.path.exists(dpath):
@@ -1545,7 +1584,7 @@ def check_source_takes_json(rep: Report, lr_root, takes, eps):
 # --------------------------------------------------------------------------
 # CHECK 13 -- depth timestamp sanity (raw only)
 # --------------------------------------------------------------------------
-def check_depth_timestamps(rep: Report, takes, max_frames,
+def check_depth_timestamps(rep: Report, takes, max_frames, taus, drop_stale_tail,
                            soft_tol_s=DEPTH_DT_TOL_S, hard_tol_s=DEPTH_DT_HARD_TOL_S,
                            frac=DEPTH_DT_FRAC):
     """
@@ -1577,7 +1616,8 @@ def check_depth_timestamps(rep: Report, takes, max_frames,
             if not os.path.exists(dpath):
                 missing.append(f"{os.path.basename(tk)}: depth.h5 missing")
                 continue
-            cam1_t = take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames)
+            cam1_t = take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames,
+                                 taus[os.path.basename(tk)], drop_stale_tail)
             dt = depth_timeline(dpath, cam)
             j = nearest_idx(dt, cam1_t)
             signed = np.asarray(dt, dtype=np.float64)[j] - cam1_t.astype(np.float64)
@@ -1687,12 +1727,32 @@ def check_lag_metadata(rep: Report, lr_root, takes, taus):
         "timestamp_correction.ur_joint_states_lag_s == the applied tau value(s)",
         f"declared {val!r}, applied {want_vals}",
     )
+    st = tc.get("stale_tail")
+    rep.check(
+        str(st) in ("dropped", "kept"),
+        "timestamp_correction.stale_tail is declared",
+        f"got {st!r}",
+    )
+    got_drop = {}
+    if isinstance(eps_list, list):
+        for e in eps_list:
+            if isinstance(e, dict) and "n_frames_dropped_stale_tail" in e:
+                nm = e.get("take_dir_name") or e.get("take") or e.get("name")
+                if nm is not None:
+                    got_drop[os.path.basename(str(nm))] = int(e["n_frames_dropped_stale_tail"])
+    rep.check(
+        len(got_drop) == len(want),
+        "every episode carries n_frames_dropped_stale_tail",
+        f"{len(got_drop)}/{len(want)} episodes; total declared {sum(got_drop.values())}",
+    )
+
     why = str(tc.get("why") or "")
     rep.check(bool(why.strip()), "timestamp_correction.why is non-empty", why[:120])
     rep.check("tcp_pose/wrench" in tc,
               "timestamp_correction mentions tcp_pose/wrench",
               f"{tc.get('tcp_pose/wrench')!r}")
-    return {"per_episode_lag_s": got, "timestamp_correction": tc}
+    return {"per_episode_lag_s": got, "per_episode_dropped_stale_tail": got_drop,
+            "stale_tail": st, "timestamp_correction": tc}
 
 
 # --------------------------------------------------------------------------
@@ -1715,7 +1775,9 @@ def check_state_action_physics(rep: Report, eps, takes, data, taus, max_frames, 
         ac = stored_action[a:b, :6].astype(np.float64)
         m_corr = float(np.mean(np.abs(st[skip_n:] - ac[skip_n:])))
         # independent re-derivation at tau = 0 (the uncorrected v1 behaviour)
+        # tau = 0 comparison, clipped to the same frame span so both cover the same window
         _, _, s0, a0 = derive_take(os.path.join(tk, "vectors.h5"), max_frames, 0.0)
+        s0, a0 = s0[:b - a], a0[:b - a]
         m_zero = float(np.mean(np.abs(s0[skip_n:, :6].astype(np.float64)
                                       - a0[skip_n:, :6].astype(np.float64))))
         corr_means.append(m_corr)
@@ -1759,6 +1821,60 @@ def check_state_action_physics(rep: Report, eps, takes, data, taus, max_frames, 
     }
 
 
+def check_stale_tail(rep: Report, eps, takes, data, taus, drop_stale_tail, max_frames):
+    section("CHECK 16  --  stale tail: no clamped (repeated) joint rows at the end of an episode")
+    stored_state = data["observation.state"]
+    runs, rows, bad_len = [], [], []
+    for i, (ep, tk) in enumerate(zip(eps, takes)):
+        a, b = int(ep["dataset_from_index"]), int(ep["dataset_to_index"])
+        q = stored_state[a:b, :6].astype(np.float64)
+        run = 1
+        for k in range(len(q) - 1, 0, -1):
+            if np.array_equal(q[k], q[k - 1]):
+                run += 1
+            else:
+                break
+        runs.append(run)
+
+        name = os.path.basename(tk)
+        raw_n = len(take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames))
+        want_n = len(take_cam1_t(os.path.join(tk, "vectors.h5"), max_frames,
+                                 taus[name], drop_stale_tail))
+        if (b - a) != want_n:
+            bad_len.append(f"ep{i} ({name}): stored {b - a} != expected {want_n}")
+        rows.append({"episode_index": i, "take": name, "stored_frames": b - a,
+                     "expected_frames": want_n, "raw_frames": raw_n,
+                     "dropped_stale_tail": raw_n - want_n, "tail_repeat_run": run})
+
+    r = np.array(runs)
+    worst = rows[int(np.argmax(r))]
+    rep.check(
+        int(r.max()) < STALE_TAIL_MAX_REPEATS,
+        f"no episode ends with >= {STALE_TAIL_MAX_REPEATS} identical consecutive ur_q rows",
+        f"max trailing run {int(r.max())} frames (ep{worst['episode_index']} "
+        f"{worst['take']}), median {int(np.median(r))}, n={len(r)} episodes",
+    )
+    d = np.array([x["dropped_stale_tail"] for x in rows])
+    rep.check(
+        not bad_len,
+        "every episode length == the expected count after the stale-tail rule",
+        "; ".join(bad_len[:5]) if bad_len
+        else (f"dropped per episode: min {int(d.min())}, median {int(np.median(d))}, "
+              f"max {int(d.max())}, total {int(d.sum())} of "
+              f"{int(sum(x['raw_frames'] for x in rows))} raw frames "
+              f"({100.0 * d.sum() / max(1, sum(x['raw_frames'] for x in rows)):.2f}%)"),
+    )
+    return {
+        "mode": "dropped" if drop_stale_tail else "kept",
+        "max_tail_repeat_run": int(r.max()),
+        "median_tail_repeat_run": float(np.median(r)),
+        "dropped": {"min": int(d.min()), "median": float(np.median(d)),
+                    "max": int(d.max()), "total": int(d.sum())},
+        "raw_frames_total": int(sum(x["raw_frames"] for x in rows)),
+        "per_episode": rows,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Validate the carrot_in_pot LeRobot v3.0 dataset (incl. depth) "
@@ -1783,6 +1899,12 @@ def main():
     ap.add_argument("--lag-json", default=None,
                     help="per-take override for --ur-lag-s: JSON of take dir name -> "
                          "{\"tau_q_s\": float} (or a bare float); wins over --ur-lag-s")
+    ap.add_argument("--drop-stale-tail", dest="drop_stale_tail", action="store_true", default=True,
+                    help="the dataset under test dropped the master frames that have no "
+                         "ur_joint_states sample at or after their corrected lookup time "
+                         "(converter default whenever a lag is applied)")
+    ap.add_argument("--no-drop-stale-tail", dest="drop_stale_tail", action="store_false",
+                    help="the dataset kept them (v2 behaviour)")
     ap.add_argument("--video-episodes", type=int, default=3,
                     help="episodes sampled for the RGB video check (first and last always included)")
     ap.add_argument("--video-frames", type=int, default=4,
@@ -1825,6 +1947,7 @@ def main():
     print(f"  excluded takes : {args.exclude or '(none)'}")
     print(f"  expected task  : {args.task!r}")
     print(f"  numeric tol    : {args.tol:g}")
+    print(f"  stale tail     : {'dropped' if args.drop_stale_tail else 'kept'}")
     print(f"  ur lag (tau)   : {args.ur_lag_s} s"
           + (f"  [per-take overrides from {args.lag_json}]" if args.lag_json else ""))
     if args.max_frames or args.max_takes:
@@ -1892,7 +2015,9 @@ def main():
         info = json.load(fh)
 
     print("\nreading source cam1_frames row counts ...", flush=True)
-    take_lens = [len(take_cam1_t(os.path.join(t, "vectors.h5"), args.max_frames)) for t in takes]
+    take_lens = [len(take_cam1_t(os.path.join(t, "vectors.h5"), args.max_frames,
+                                taus[os.path.basename(t)], args.drop_stale_tail))
+                 for t in takes]
     expected_total = int(sum(take_lens))
     print(f"  {len(takes)} takes, {expected_total} frames expected", flush=True)
 
@@ -1920,7 +2045,7 @@ def main():
 
     check_frame_counts(rep, eps_c, takes_c, lens_c)
     dev_s, dev_a = check_numeric(rep, eps_c, takes_c, data, args.tol, args.verbose,
-                                 args.max_frames, taus)
+                                 args.max_frames, taus, args.drop_stale_tail)
     check_nan(rep, data)
     check_task(rep, lr_root, eps, data, args.task)
 
@@ -1932,7 +2057,8 @@ def main():
         try:
             corr = check_videos(rep, lr_root, info, eps_c, takes_c,
                                 args.video_episodes, args.video_warn_corr,
-                                args.video_fail_corr, args.video_frames, args.max_frames)
+                                args.video_fail_corr, args.video_frames, args.max_frames,
+                                taus, args.drop_stale_tail)
         except Exception:
             rep.fail("RGB video check raised an exception",
                      traceback.format_exc().splitlines()[-1])
@@ -1956,7 +2082,8 @@ def main():
         try:
             depth_num = check_depth_numeric(rep, lr_root, args.repo_id, eps_c, takes_c,
                                             args.depth_episodes,
-                                            args.depth_frames_per_episode, args.max_frames)
+                                            args.depth_frames_per_episode, args.max_frames,
+                                            taus, args.drop_stale_tail)
         except Exception:
             rep.fail("depth fidelity check raised an exception",
                      traceback.format_exc().splitlines()[-1])
@@ -1976,7 +2103,8 @@ def main():
                  traceback.format_exc().splitlines()[-1])
 
     try:
-        depth_ts = check_depth_timestamps(rep, takes_c, args.max_frames,
+        depth_ts = check_depth_timestamps(rep, takes_c, args.max_frames, taus,
+                                          args.drop_stale_tail,
                                           soft_tol_s=args.depth_dt_tol_ms / 1000.0,
                                           hard_tol_s=args.depth_dt_hard_tol_ms / 1000.0,
                                           frac=args.depth_dt_frac)
@@ -1998,6 +2126,14 @@ def main():
     except Exception:
         phys = None
         rep.fail("state/action physics check raised an exception",
+                 traceback.format_exc().splitlines()[-1])
+
+    try:
+        stale = check_stale_tail(rep, eps_c, takes_c, data, taus, args.drop_stale_tail,
+                                 args.max_frames)
+    except Exception:
+        stale = None
+        rep.fail("stale-tail check raised an exception",
                  traceback.format_exc().splitlines()[-1])
 
     # ---- summary --------------------------------------------------------
@@ -2033,6 +2169,12 @@ def main():
               f"max {phys['corrected']['max']:.5f} rad  (gate < {phys['gate_rad']} rad)")
         print(f"  |state-action| at tau = 0 : median {phys['tau0']['median']:.5f} rad, "
               f"max {phys['tau0']['max']:.5f} rad  (comparison only)")
+    if stale:
+        print(f"  stale tail                : {stale['mode']}; dropped min "
+              f"{stale['dropped']['min']} / median {stale['dropped']['median']:g} / max "
+              f"{stale['dropped']['max']} per episode, total {stale['dropped']['total']} of "
+              f"{stale['raw_frames_total']} raw frames; max trailing repeat run "
+              f"{stale['max_tail_repeat_run']}")
     print(f"  ur_joint_states lag (tau) : {tau_values} s "
           f"(source: {args.lag_json or '--ur-lag-s'})")
     print(f"  task                      : {args.task!r}")
@@ -2086,6 +2228,8 @@ def main():
             "tau_per_take": taus,
             "lag_metadata": lag_meta,
             "state_action_physics": phys,
+            "drop_stale_tail": args.drop_stale_tail,
+            "stale_tail": stale,
             "thresholds": {
                 "tol": args.tol,
                 "depth_err_p99_mm": DEPTH_ERR_P99_MM,
