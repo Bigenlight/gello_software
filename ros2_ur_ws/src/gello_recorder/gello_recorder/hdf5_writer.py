@@ -103,6 +103,34 @@ class Hdf5TableWriter:
         shared h5py.File separately)."""
         self._group.file.flush()
 
+    def finalize(self) -> int:
+        """Trim every column to the SHORTEST one; return the rows discarded.
+
+        ``writerow`` resizes and assigns one column at a time, so a signal that
+        lands in the middle of it (Ctrl-C on the headless recorder arrives in
+        the very thread that is writing) leaves a RAGGED last row: the first few
+        columns have N+1 values and the rest still have N. Nothing in HDF5
+        prevents that, and a reader that takes its row count from column 0 then
+        indexes past the end of column 40 -- silently, and only on the last row
+        of one table.
+
+        This is called once at close, when no further writes are possible, and
+        it costs nothing when the table is already rectangular (the common
+        case). Observed live on 2026-09-14: one take's ur_joint_states had
+        t_rel_s/q1/q2 at 4474 rows and its other 17 columns at 4473.
+        """
+        lengths = [d.shape[0] for d in self._datasets]
+        if not lengths:
+            return 0
+        keep = min(lengths)
+        dropped = max(lengths) - keep
+        if dropped:
+            for dset in self._datasets:
+                if dset.shape[0] != keep:
+                    dset.resize((keep,))
+            self._nrows = keep
+        return dropped
+
 
 def open_h5_table(h5file: h5py.File, table_name: str, header: list) -> Hdf5TableWriter:
     """Convenience constructor mirroring the old `_open_csv(name, header)` call site,

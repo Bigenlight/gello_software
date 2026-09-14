@@ -27,15 +27,49 @@ depth path never decodes anything and never touches the preview. Depth frames
 are gated by exactly the same rule as color frames (a session is only ever open
 once ``cameras_ready()`` is true, so every frame written is post-warm-up) --
 there is deliberately no second warm-up clock for depth.
+
+SPIN-THREAD BUDGET + HEADER STAMPS (2026-09-14, the timestamp-artifact fix).
+Read :mod:`gello_recorder.spin_health` for the full diagnosis; the three things
+this node does about it are:
+
+1. **Stamps.** Every callback whose message has a ``header`` now passes
+   ``stamp_s`` (float64 seconds, NaN when absent) into ``RecordingSession``,
+   which appends it as a trailing column. ``/joint_states``,
+   ``/gello/joint_states``, ``tcp_pose``, ``wrench`` and both colour
+   ``CompressedImage`` streams are stamped; ``/forward_position_controller/
+   commands`` (``Float64MultiArray``) and the three gripper ``Float32`` topics
+   are NOT -- those message types have no header, so for them ``t_rel_s``
+   (arrival) remains the only timestamp that exists.
+2. **Shallow queues.** The high-rate robot subscriptions dropped from
+   depth 100/50 to ``QOS_DEPTH_ROBOT_STATE`` (5). Worst-case staleness is
+   ``depth / publish rate``, so 5/100 Hz = 50 ms instead of 1.00 s / 0.50 s.
+   This recorder writes whatever arrives, so a deeper queue buys nothing: it
+   converts "a row was skipped" into "a row is old", and a skipped row is
+   strictly better than a silently mis-stamped one.
+3. **No frame I/O on the spin thread.** ``_on_cam`` used to do a 1280x720
+   ``cv2.imdecode`` for the preview (measured 9.3 ms) and then hand the same
+   JPEG to the MP4 writer, which decoded it AGAIN and encoded it (9.3 + 6.9 ms),
+   plus ~1.4 ms per depth frame into HDF5 -- about 1.6 s of work per wall-clock
+   second with both cameras and depth on. Now the callback only copies bytes:
+   recording goes through ``RecordingSession.submit_cam*`` (one background
+   writer thread) and the preview through :class:`PreviewDecoder` (a separate
+   latest-wins thread, so the preview can never build a backlog and never
+   slows the spin thread down).
+
+The node also publishes the alarm: ``ros_lag_s`` in :meth:`get_state_snapshot`
+is ``now - latest /joint_states header stamp``, WARN-logged (throttled to once
+per ``ROS_LAG_WARN_PERIOD_S``) above ``ROS_LAG_WARN_S``, and
+:meth:`stop_recording` runs :func:`detect_spin_starvation` over the take's own
+recorded table rates.
 """
 
+import math
 import os
 import threading
 import time
 from datetime import datetime
 from typing import Optional, Tuple
 
-import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -51,6 +85,18 @@ except ImportError:  # pragma: no cover - depends on the installed overlay
     Extrinsics = None
 
 from gello_recorder.recording_session import RecordingSession
+from gello_recorder.spin_health import (
+    QOS_DEPTH_CAMERA,
+    QOS_DEPTH_GELLO,
+    QOS_DEPTH_GRIPPER,
+    QOS_DEPTH_ROBOT_STATE,
+    QOS_DEPTH_STATUS,
+    ROS_LAG_WARN_PERIOD_S,
+    ROS_LAG_WARN_S,
+    PreviewDecoder,
+    detect_spin_starvation,
+    native_rate_table,
+)
 
 # QoS realsense-ros 4.58.2 publishes the ONE-SHOT extrinsics with (measured
 # 2026-09-14 with `ros2 topic info -v`): RELIABLE + TRANSIENT_LOCAL. It is
@@ -205,37 +251,73 @@ class GelloRecorderGuiNode(Node):
         self._wrench = [None] * 6
         self._tcp = [None] * 7
 
+        # --- spin-thread health (under _state_lock) -----------------------
+        # ros_lag_s = ROS-clock now - latest /joint_states header stamp. This is
+        # the LIVE form of the 0.900 s artifact: had it been on screen on
+        # 2026-09-14, the whole corpus would have been caught while recording.
+        # Computed on the spin thread (where get_clock() is already in use) so
+        # the Qt poller never touches rcl.
+        self._ros_lag_s = None
+        self._ros_lag_s_max = None
+        self._ros_lag_t = None          # time.monotonic() of the last computation
+
+        # --- live preview decoding (OFF the spin thread) -------------------
+        # Latest-wins: a preview frame superseded before it was decoded is
+        # dropped, so this thread can never build a backlog and can never push
+        # back on the ROS callback. Recording does NOT go through here -- the
+        # session's own writer thread owns the MP4 -- so a slow preview cannot
+        # cost a recorded frame, and vice versa.
+        self._preview = PreviewDecoder(
+            self._set_preview_frame, name="recorder-preview-decoder")
+
         # --- Subscriptions (READ-ONLY, always active) ---------------------
-        self.create_subscription(JointState, "/gello/joint_states", self._on_gello, 50)
+        # QUEUE DEPTHS: the rule is  worst-case staleness = depth / publish rate
+        # (gello_recorder.spin_health). The four robot topics publish at 100 Hz
+        # or more and were the ones that went stale; everything else publishes
+        # slower than the executor's round rate and never queues at all.
+        self.create_subscription(
+            JointState, "/gello/joint_states", self._on_gello, QOS_DEPTH_GELLO)
         self.create_subscription(
             Float32, "/gripper/gripper_client/target_gripper_width_percent",
-            self._on_gello_grip, 20)
+            self._on_gello_grip, QOS_DEPTH_GRIPPER)
         self.create_subscription(
-            Float64MultiArray, "/forward_position_controller/commands", self._on_cmd, 50)
-        self.create_subscription(JointState, "/joint_states", self._on_ur, 100)
+            Float64MultiArray, "/forward_position_controller/commands",
+            self._on_cmd, QOS_DEPTH_ROBOT_STATE)
         self.create_subscription(
-            Float32, "/robotiq_gripper/command_percent", self._on_grip_cmd, 20)
+            JointState, "/joint_states", self._on_ur, QOS_DEPTH_ROBOT_STATE)
         self.create_subscription(
-            Float32, "/robotiq_gripper/position_percent", self._on_grip_pos, 20)
+            Float32, "/robotiq_gripper/command_percent", self._on_grip_cmd,
+            QOS_DEPTH_GRIPPER)
         self.create_subscription(
-            WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._on_wrench, 50)
+            Float32, "/robotiq_gripper/position_percent", self._on_grip_pos,
+            QOS_DEPTH_GRIPPER)
         self.create_subscription(
-            PoseStamped, "/tcp_pose_broadcaster/pose", self._on_tcp, 50)
-        self.create_subscription(CompressedImage, self.cam1_topic, self._on_cam1, 10)
-        self.create_subscription(CompressedImage, self.cam2_topic, self._on_cam2, 10)
+            WrenchStamped, "/force_torque_sensor_broadcaster/wrench",
+            self._on_wrench, QOS_DEPTH_ROBOT_STATE)
+        self.create_subscription(
+            PoseStamped, "/tcp_pose_broadcaster/pose", self._on_tcp,
+            QOS_DEPTH_ROBOT_STATE)
+        self.create_subscription(
+            CompressedImage, self.cam1_topic, self._on_cam1, QOS_DEPTH_CAMERA)
+        self.create_subscription(
+            CompressedImage, self.cam2_topic, self._on_cam2, QOS_DEPTH_CAMERA)
 
         # --- Depth subscriptions (only when depth recording is on) -------
         if self.record_depth:
             self.create_subscription(
-                CompressedImage, self.cam1_depth_topic, self._on_cam1_depth, 10)
+                CompressedImage, self.cam1_depth_topic, self._on_cam1_depth,
+                QOS_DEPTH_CAMERA)
             self.create_subscription(
-                CompressedImage, self.cam2_depth_topic, self._on_cam2_depth, 10)
+                CompressedImage, self.cam2_depth_topic, self._on_cam2_depth,
+                QOS_DEPTH_CAMERA)
             if self.cam1_depth_info_topic:
                 self.create_subscription(
-                    CameraInfo, self.cam1_depth_info_topic, self._on_cam1_depth_info, 10)
+                    CameraInfo, self.cam1_depth_info_topic,
+                    self._on_cam1_depth_info, QOS_DEPTH_CAMERA)
             if self.cam2_depth_info_topic:
                 self.create_subscription(
-                    CameraInfo, self.cam2_depth_info_topic, self._on_cam2_depth_info, 10)
+                    CameraInfo, self.cam2_depth_info_topic,
+                    self._on_cam2_depth_info, QOS_DEPTH_CAMERA)
             if Extrinsics is None:
                 if self.cam1_extrinsics_topic or self.cam2_extrinsics_topic:
                     self.get_logger().warn(
@@ -296,9 +378,10 @@ class GelloRecorderGuiNode(Node):
         self._teleop_last_msg = ""
 
         self.create_subscription(
-            String, "/gello_ur_bridge/state", self._on_arm_state, 10)
+            String, "/gello_ur_bridge/state", self._on_arm_state, QOS_DEPTH_STATUS)
         self.create_subscription(
-            String, "/gello_gripper_bridge/state", self._on_grip_state, 10)
+            String, "/gello_gripper_bridge/state", self._on_grip_state,
+            QOS_DEPTH_STATUS)
         # ============ end TELEOP CONTROL PANEL (added block) =============== #
 
         if self.record_depth:
@@ -369,6 +452,10 @@ class GelloRecorderGuiNode(Node):
                         session.set_depth_extrinsics(cam_idx, **ext_cache[cam_idx])
                         self._depth_extrinsics_pushed[cam_idx] = True
             self._session = session
+        # Per-TAKE maximum, so a stale figure from an earlier take cannot be
+        # reported against this one.
+        with self._state_lock:
+            self._ros_lag_s_max = None
         self.get_logger().info(
             f"Recording started -> {take_dir} "
             f"(depth {'ON' if self.record_depth else 'OFF'})")
@@ -382,11 +469,48 @@ class GelloRecorderGuiNode(Node):
             self._session = None
         # close() (file I/O) happens OUTSIDE the lock -- callbacks already see
         # self._session is None by this point and will no-op, so nothing else
-        # touches `session` concurrently from here on.
+        # touches `session` concurrently from here on. close() also DRAINS the
+        # background frame writer before finalising, so the counts below include
+        # every frame that was accepted.
         stats = session.close()
         stats["session_dir"] = session.session_dir
+        stats.update(self._health_summary(session, stats))
         self.get_logger().info(f"Recording stopped -> {stats}")
+        if stats.get("spin_starvation_suspected"):
+            self.get_logger().warn(stats["spin_starvation_message"])
+        dropped = (stats.get("dropped_frames") or {}).get("total", 0)
+        if dropped:
+            self.get_logger().warn(
+                "{} camera/depth frame(s) were DROPPED (writer queue full) -- "
+                "this take is short by that many frames: {}".format(
+                    dropped, stats["dropped_frames"]))
         return stats
+
+    def _health_summary(self, session, stats: dict) -> dict:
+        """Per-take spin-health verdict, merged into the stop summary.
+
+        Three independent numbers, none of which existed before 2026-09-14:
+        what the writer queue had to throw away, how far behind the robot
+        state stamps ran, and whether the native tables collapsed onto one
+        shared rate (the fingerprint of a starved executor)."""
+        rates = native_rate_table(
+            stats.get("message_counts") or {}, stats.get("duration_s") or 0.0)
+        report = detect_spin_starvation(rates)
+        with self._state_lock:
+            lag_max = self._ros_lag_s_max
+        return {
+            # PROVENANCE: a take must say for itself whether depth was on and
+            # whether the spin thread was starved while it was written -- those
+            # two facts together are what the 2026-09-14 corpus could not
+            # answer after the fact.
+            "record_depth": bool(self.record_depth),
+            "dropped_frames": session.dropped_frames(),
+            "native_rates_hz": report["rates_hz"],
+            "spin_starvation_suspected": bool(report["suspected"]),
+            "spin_starvation_reason": report["reason"],
+            "spin_starvation_message": report["message"] or "",
+            "ros_lag_s_max": None if lag_max is None else round(float(lag_max), 4),
+        }
 
     def get_preview_frames(self):
         with self._state_lock:
@@ -420,6 +544,15 @@ class GelloRecorderGuiNode(Node):
                 "depth_enabled": self.record_depth,
                 "cam1_depth_last_frame_age_s": cam1_depth_age,
                 "cam2_depth_last_frame_age_s": cam2_depth_age,
+                # Spin-thread health. ros_lag_s is (ROS now - /joint_states
+                # header stamp) as of the last /joint_states callback;
+                # ros_lag_age_s says how long ago that was, so "no lag shown"
+                # and "no joint states at all" stay distinguishable.
+                "ros_lag_s": self._ros_lag_s,
+                "ros_lag_s_max": self._ros_lag_s_max,
+                "ros_lag_age_s": (None if self._ros_lag_t is None
+                                  else now - self._ros_lag_t),
+                "ros_lag_warn_s": ROS_LAG_WARN_S,
             }
 
     # ================================================================== #
@@ -532,6 +665,7 @@ class GelloRecorderGuiNode(Node):
         if r is None:
             return
         pos, _, _ = r
+        stamp_s = stamp_to_seconds(msg.header.stamp)
         t = time.monotonic()
         with self._state_lock:
             if self._gello_q_prev is not None and self._gello_t_prev is not None:
@@ -545,7 +679,7 @@ class GelloRecorderGuiNode(Node):
             qd_snapshot = list(self._gello_qd)
         with self._session_lock:
             if self._session is not None:
-                self._session.write_gello(pos, qd_snapshot)
+                self._session.write_gello(pos, qd_snapshot, stamp_s=stamp_s)
 
     def _on_gello_grip(self, msg: Float32):
         with self._state_lock:
@@ -572,11 +706,41 @@ class GelloRecorderGuiNode(Node):
         if r is None:
             return
         pos, vel, eff = r
+        stamp_s = stamp_to_seconds(msg.header.stamp)
+        self._note_ros_lag(stamp_s)
         with self._state_lock:
             self._ur_q, self._ur_qd, self._ur_eff = pos, vel, eff
         with self._session_lock:
             if self._session is not None:
-                self._session.write_ur(pos, vel, eff)
+                self._session.write_ur(pos, vel, eff, stamp_s=stamp_s)
+
+    def _note_ros_lag(self, stamp_s: float) -> None:
+        """Update ros_lag_s from one /joint_states header stamp (spin thread).
+
+        Both sides come from the ROS clock: the stamp is the driver's, ``now``
+        is this node's ``get_clock()``. Mixing in ``time.time()`` would work
+        today (use_sim_time is false) and break silently under a sim clock, so
+        it is not done. A message with no stamp (sec=nsec=0 -> NaN) teaches us
+        nothing and is ignored rather than reported as a huge lag."""
+        if stamp_s is None or not math.isfinite(stamp_s):
+            return
+        try:
+            now = self.get_clock().now().nanoseconds * 1e-9
+        except Exception:  # noqa: BLE001 - never let a clock read kill the callback
+            return
+        lag = now - stamp_s
+        with self._state_lock:
+            self._ros_lag_s = lag
+            self._ros_lag_t = time.monotonic()
+            if self._ros_lag_s_max is None or lag > self._ros_lag_s_max:
+                self._ros_lag_s_max = lag
+        if lag > ROS_LAG_WARN_S:
+            self.get_logger().warn(
+                "ros_lag_s={:.3f}s: /joint_states rows are being stamped "
+                "{:.0f} ms after the driver captured them -- the spin thread is "
+                "falling behind and recorded robot rows will be stale".format(
+                    lag, lag * 1e3),
+                throttle_duration_sec=ROS_LAG_WARN_PERIOD_S)
 
     def _on_grip_cmd(self, msg: Float32):
         with self._state_lock:
@@ -599,20 +763,22 @@ class GelloRecorderGuiNode(Node):
     def _on_wrench(self, msg: WrenchStamped):
         w = msg.wrench
         wrench6 = [w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z]
+        stamp_s = stamp_to_seconds(msg.header.stamp)
         with self._state_lock:
             self._wrench = wrench6
         with self._session_lock:
             if self._session is not None:
-                self._session.write_wrench(wrench6)
+                self._session.write_wrench(wrench6, stamp_s=stamp_s)
 
     def _on_tcp(self, msg: PoseStamped):
         p, q = msg.pose.position, msg.pose.orientation
         tcp7 = [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
+        stamp_s = stamp_to_seconds(msg.header.stamp)
         with self._state_lock:
             self._tcp = tcp7
         with self._session_lock:
             if self._session is not None:
-                self._session.write_tcp(tcp7)
+                self._session.write_tcp(tcp7, stamp_s=stamp_s)
 
     def _on_cam1(self, msg: CompressedImage):
         self._on_cam(msg, cam_idx=1)
@@ -620,16 +786,36 @@ class GelloRecorderGuiNode(Node):
     def _on_cam2(self, msg: CompressedImage):
         self._on_cam(msg, cam_idx=2)
 
+    def _set_preview_frame(self, cam_idx: int, frame) -> None:
+        """Sink for :class:`PreviewDecoder` -- runs on the decoder thread.
+
+        The ONLY place ``_cam*_frame`` is written. A payload that failed to
+        decode never reaches here, so the pane keeps showing the last good
+        frame, exactly as it did when the decode was inline."""
+        if frame is None:
+            return
+        with self._state_lock:
+            if cam_idx == 1:
+                self._cam1_frame = frame
+            else:
+                self._cam2_frame = frame
+
     def _on_cam(self, msg: CompressedImage, cam_idx: int):
+        """Colour frame: copy the bytes, note liveness, hand both jobs away.
+
+        NOTHING is decoded here. This callback used to run a 1280x720
+        ``cv2.imdecode`` for the preview (9.3 ms measured) and then pass the
+        same JPEG to the MP4 writer, which decoded it a SECOND time and encoded
+        it (another 16.2 ms) -- 2 cameras x 30 Hz x 25.5 ms = 1.5 s of work per
+        wall-clock second on the one thread that also services every robot
+        topic. That is the whole timestamp artifact. Now the preview goes to a
+        latest-wins decoder thread and the recording to the session's writer
+        thread; the spin thread does a memcpy and a couple of lock acquisitions.
+        """
         raw = bytes(msg.data)
-        frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        stamp_s = stamp_to_seconds(msg.header.stamp)
         now = time.monotonic()
         with self._state_lock:
-            if frame is not None:
-                if cam_idx == 1:
-                    self._cam1_frame = frame
-                else:
-                    self._cam2_frame = frame
             if cam_idx == 1:
                 self._cam1_last_frame_t = now
                 if self._cam1_first_frame_t is None:
@@ -638,15 +824,13 @@ class GelloRecorderGuiNode(Node):
                 self._cam2_last_frame_t = now
                 if self._cam2_first_frame_t is None:
                     self._cam2_first_frame_t = now
+        self._preview.submit(cam_idx, raw)
         # Recording only ever starts once cameras_ready() (warmup already
         # elapsed), so every frame written into an active session is good --
         # no per-frame warmup skip needed here (unlike the headless node).
         with self._session_lock:
             if self._session is not None:
-                if cam_idx == 1:
-                    self._session.write_cam1_frame(raw)
-                else:
-                    self._session.write_cam2_frame(raw)
+                self._session.submit_cam_frame(cam_idx, raw, stamp_s=stamp_s)
 
     # ---- depth callbacks (only subscribed when record_depth) ---------------
     def _on_cam1_depth(self, msg: CompressedImage):
@@ -671,10 +855,10 @@ class GelloRecorderGuiNode(Node):
         # (i.e. never, once recording) -- no separate depth warm-up clock.
         with self._session_lock:
             if self._session is not None:
-                if cam_idx == 1:
-                    self._session.write_cam1_depth_frame(raw, stamp_s=stamp_s)
-                else:
-                    self._session.write_cam2_depth_frame(raw, stamp_s=stamp_s)
+                # Queued, not written: an 848x480 depth PNG is ~740 kB and its
+                # HDF5 append measured 1.4 ms -- 84 ms/s for two cameras, on the
+                # thread that must service 100 Hz robot topics.
+                self._session.submit_cam_depth_frame(cam_idx, raw, stamp_s=stamp_s)
 
     def _on_cam1_depth_info(self, msg: CameraInfo):
         self._on_depth_info(msg, cam_idx=1)
@@ -725,6 +909,12 @@ class GelloRecorderGuiNode(Node):
         if session is not None:
             try:
                 session.close()
+            except Exception:  # noqa: BLE001 - best-effort on shutdown
+                pass
+        preview = getattr(self, "_preview", None)
+        if preview is not None:
+            try:
+                preview.stop()
             except Exception:  # noqa: BLE001 - best-effort on shutdown
                 pass
         super().destroy_node()

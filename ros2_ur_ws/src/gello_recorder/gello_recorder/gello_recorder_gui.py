@@ -47,6 +47,10 @@ from PyQt5.QtWidgets import (
 # re-exported here at module level because run_recorder.sh's headless node and
 # the tests need the SAME single definition without going through main().
 from gello_recorder.gello_gui_node import depth_topics_for  # noqa: F401 (re-export)
+from gello_recorder.spin_health import (  # noqa: F401 (DEPTH_ON_BANNER re-export)
+    DEPTH_ON_BANNER,
+    stop_health_suffix as _stop_health_suffix,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,21 +101,37 @@ DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"
 
-# Depth is ON by default for the RECORDER (2026-09-14). Both recorder GUIs and
-# run_recorder.sh's headless node now subscribe to the compressedDepth streams
-# and write them to depth.h5 next to the MP4s, so the depth stream finally has
-# a consumer. The 2026-08-12 default-OFF rationale was the then-dying
-# bus-powered USB-C dock (two D435s browned out and enumerated alternately);
-# on the self-powered Genesys USB3 hub the rig moved to on 2026-09-14, 2x
-# color 1280x720x30 + 2x depth 848x480x30 measured stable for minutes: color
-# 30 Hz, compressedDepth ~29 Hz, ~9 % CPU per camera node, zero USB errors.
-# ``ENABLE_DEPTH=0`` opts OUT (a typo in the value also turns depth OFF --
-# only the values below turn it on). HIL's launch_cameras.sh keeps its own
-# default (off): nothing in the HIL actor reads depth. An explicit
+# Depth is OPT-IN and OFF by default. RGB-only is the default capture.
+#
+# It was ON by default for exactly one day (2026-09-14) and that day cost a
+# 54-take corpus its timestamps. Depth recording put two more 30 Hz
+# subscriptions per camera plus a ~6 MB/s HDF5 write onto the single rclpy
+# spin thread that also services every robot topic; the executor's round rate
+# fell from ~100 Hz to 60-69 Hz, and every topic publishing faster than that
+# was then read out of a permanently full queue -- ur_joint_states rows landed
+# 0.900 s late, tcp_pose/wrench ~0.45 s late, with nothing in the file saying
+# so (see gello_recorder.spin_health and docs/ros2/GELLO_UR7E_RECORDING.md).
+#
+# That defect is FIXED -- header stamps, depth-5 queues, a background frame
+# writer and a starvation watchdog -- but the COST is not: depth still costs
+# the disk bandwidth, the subscriptions and the CPU. So it is now something a
+# recording asks for on purpose, per session, rather than something it gets by
+# default and discovers later:
+#
+#     ENABLE_DEPTH=1 ros2 run gello_recorder gello_recorder_gui
+#
+# The 2026-09-14 hub measurements still stand for when it IS on (2x color
+# 1280x720x30 + 2x depth 848x480x30 stable for minutes: color 30 Hz,
+# compressedDepth ~29 Hz, ~9 % CPU per camera node, zero USB errors) -- the
+# question was never whether the cameras could do it.
+#
+# A typo in the value also leaves depth OFF (only the values below turn it on),
+# which is the safe direction for an opt-in. HIL's launch_cameras.sh has always
+# defaulted to off: nothing in the HIL actor reads depth. An explicit
 # enable_depth kwarg wins over the env var.
 _DEPTH_ENV_VAR = "ENABLE_DEPTH"
 _DEPTH_ON_VALUES = ("1", "true", "yes", "on")
-_DEPTH_DEFAULT = "1"
+_DEPTH_DEFAULT = "0"
 
 # Depth->color ALIGNMENT stays OFF by default and is opt-in via ALIGN_DEPTH.
 # Measured 2026-09-14 (same hub, same profiles): align_depth.enable:=true makes
@@ -124,7 +144,7 @@ _ALIGN_DEFAULT = "0"
 
 
 def _depth_enabled_from_env():
-    """True unless ENABLE_DEPTH opts OUT of depth streaming (default: on)."""
+    """True iff ENABLE_DEPTH opts IN to depth streaming (default: off)."""
     raw = os.environ.get(_DEPTH_ENV_VAR, _DEPTH_DEFAULT)
     return raw.strip().lower() in _DEPTH_ON_VALUES
 
@@ -277,8 +297,9 @@ def _launch_realsense(camera_name, serial, color_profile, enable_depth=None,
     the ``realsense2_camera_node`` child it spawns, which leaves orphaned camera
     processes fighting over the USB device on the next run.
 
-    Depth is ON by default (opt out with ``ENABLE_DEPTH=0``) and recorded to
-    depth.h5 by the node; depth->color alignment is opt-in via ``ALIGN_DEPTH``.
+    Depth is OFF by default (opt in with ``ENABLE_DEPTH=1``) and then recorded
+    to depth.h5 by the node; depth->color alignment is separately opt-in via
+    ``ALIGN_DEPTH``.
     See :func:`_realsense_argv` for the argv contract.
     """
     argv = _realsense_argv(camera_name, serial, color_profile, enable_depth,
@@ -483,9 +504,14 @@ class MainWindow(QMainWindow):
         self._cam1_status = QLabel("cam1: --")
         self._cam2_status = QLabel("cam2: --")
         self._depth_status = QLabel("depth: --")
+        # ros_lag = now - /joint_states header stamp. It is on screen because
+        # the 2026-09-14 carrot_in_pot corpus was recorded 0.900 s stale with
+        # nothing visible anywhere; this is that number, live.
+        self._ros_lag_status = QLabel("ros lag: --")
         layout.addWidget(self._cam1_status)
         layout.addWidget(self._cam2_status)
         layout.addWidget(self._depth_status)
+        layout.addWidget(self._ros_lag_status)
 
         sep = QLabel("")
         layout.addWidget(sep)
@@ -618,6 +644,54 @@ class MainWindow(QMainWindow):
             self._cam2_status, "cam2", snap.get("cam2_last_frame_age_s")
         )
         self._update_depth_status(snap)
+        self._update_ros_lag_status(snap)
+
+    def _update_ros_lag_status(self, snap):
+        """One line: how far behind the robot state stamps are running.
+
+        GREEN under the node's warn threshold, RED over it. Over threshold the
+        node is already emitting a throttled WARN; this is the operator-facing
+        half of the same alarm, and it is the ONE readout that would have caught
+        the 0.900 s timestamp artifact while it was still recordable."""
+        lag = snap.get("ros_lag_s")
+        warn_s = snap.get("ros_lag_warn_s")
+        try:
+            warn_s = float(warn_s)
+        except (TypeError, ValueError):
+            warn_s = 0.15
+        age = snap.get("ros_lag_age_s")
+        try:
+            lag = None if lag is None else float(lag)
+        except (TypeError, ValueError):
+            lag = None
+        if lag is None:
+            self._ros_lag_status.setText("ros lag: -- (no /joint_states)")
+            self._ros_lag_status.setStyleSheet("color: #888888;")
+            return
+        try:
+            stale = age is not None and float(age) > 2.0
+        except (TypeError, ValueError):
+            stale = False
+        peak = snap.get("ros_lag_s_max")
+        try:
+            peak_txt = "" if peak is None else " (max {:.2f}s)".format(float(peak))
+        except (TypeError, ValueError):
+            peak_txt = ""
+        if stale:
+            self._ros_lag_status.setText(
+                "ros lag: {:.3f}s (no update){}".format(lag, peak_txt))
+            self._ros_lag_status.setStyleSheet("color: #888888;")
+            return
+        if lag > warn_s:
+            self._ros_lag_status.setText(
+                "ros lag: {:.3f}s STALE ROWS{}".format(lag, peak_txt))
+            self._ros_lag_status.setStyleSheet(
+                "color: #cc3333; font-weight: bold;")
+        else:
+            self._ros_lag_status.setText(
+                "ros lag: {:.3f}s{}".format(lag, peak_txt))
+            self._ros_lag_status.setStyleSheet(
+                "color: #22aa22; font-weight: bold;")
 
     def _update_depth_status(self, snap):
         """One line: 'depth: OFF' or 'depth: ON (cam1 x.xxs / cam2 x.xxs)'.
@@ -848,10 +922,16 @@ class MainWindow(QMainWindow):
             session_dir = meta.get("session_dir")
             msg = "Saved take: {} ({:.1f}s)".format(session_dir, float(duration))
             counts = meta.get("message_counts") or {}
-            if "cam1_depth_frames" in counts or "cam2_depth_frames" in counts:
-                msg += " | depth frames cam1 {} / cam2 {}".format(
+            # Provenance first: depth on/off is a property of the TAKE, and a
+            # take recorded without depth must say so rather than merely omit
+            # the depth line (an omission reads as "no depth frames arrived").
+            if meta.get("record_depth"):
+                msg += " | depth ON (cam1 {} / cam2 {} frames)".format(
                     counts.get("cam1_depth_frames", 0),
                     counts.get("cam2_depth_frames", 0))
+            else:
+                msg += " | depth OFF (RGB only)"
+            msg += _stop_health_suffix(meta)
         except (AttributeError, TypeError, ValueError):
             msg = "Take saved."
         self.statusBar().showMessage(msg, 8000)
@@ -966,6 +1046,13 @@ def main(args=None):
     # launch argv and the node's subscriptions, so they cannot disagree.
     enable_depth = _depth_enabled_from_env()
     align_depth = _align_depth_from_env()
+    # Say the bill OUT LOUD, before the take. Depth is opt-in because it is
+    # expensive, and 'expensive' has to be visible at the moment it is chosen.
+    if enable_depth:
+        print("[gello_recorder] {}".format(DEPTH_ON_BANNER), flush=True)
+    else:
+        print("[gello_recorder] depth OFF (RGB only) -- "
+              "ENABLE_DEPTH=1 to record depth.h5", flush=True)
     depth_kwargs = _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth)
 
     # --- 1. Launch the two RealSense camera nodes as subprocesses --------- #

@@ -86,6 +86,7 @@ from gello_recorder.gello_recorder_gui import (
     DEFAULT_CAM2_NAME,
     DEFAULT_CAM2_SERIAL,
     DEFAULT_COLOR_PROFILE,
+    DEPTH_ON_BANNER,
     MainWindow,
     _BIG_BUTTON_STYLE,
     _align_depth_from_env,
@@ -829,10 +830,17 @@ def main(args=None):
     # The two color topics the realsense nodes publish under their namespace.
     cam1_topic = "/{0}/{0}/color/image_raw/compressed".format(cam1_name)
     cam2_topic = "/{0}/{0}/color/image_raw/compressed".format(cam2_name)
-    # Depth (ENABLE_DEPTH, default on / ALIGN_DEPTH, default off): decided once
+    # Depth (ENABLE_DEPTH, default OFF / ALIGN_DEPTH, default off): decided once
     # here and shared by the camera argv and the node, exactly as the base GUI.
     enable_depth = _depth_enabled_from_env()
     align_depth = _align_depth_from_env()
+    # Say the bill OUT LOUD, before the take. Depth is opt-in because it is
+    # expensive, and 'expensive' has to be visible at the moment it is chosen.
+    if enable_depth:
+        print("[gello_recorder] {}".format(DEPTH_ON_BANNER), flush=True)
+    else:
+        print("[gello_recorder] depth OFF (RGB only) -- "
+              "ENABLE_DEPTH=1 to record depth.h5", flush=True)
     depth_kwargs = _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth)
 
     # --- 1. Launch the two RealSense camera nodes as subprocesses --------- #
