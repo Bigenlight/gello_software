@@ -96,6 +96,24 @@ START_GATE_RAD = 0.1
 ACTION_SPACE_JOINT = "joint"
 ACTION_SPACE_EEF = "eef_delta"
 
+# --- chunk_start anomaly watchdog (R2/F8), eef mode only ---------------------
+# `chunk_start` marks the tick whose observation the whole next chunk was predicted
+# from; the EEF executor re-anchors its integration target on it. Both degenerate
+# cases are SILENT today and both are task failures rather than safety hazards, so
+# they WARN and never FAULT:
+#   * never true  -> the executor anchors once at arming and integrates forever.
+#     Bounded by the lead clamp, but invisible.
+#   * always true -> the target is re-anchored on the lagging live pose every tick,
+#     which shrinks every step. R2 measured 169 mm p50 tracking error (vs 15 mm)
+#     replaying the dataset through the real executor: a total task failure.
+# The thresholds are ticks, not seconds, because a chunk is counted in ticks. There
+# is no n_action_steps parameter on this node (the server owns the horizon and does
+# not report it in the handshake), so the "silent" bound is a FIXED 200 ticks ~
+# 6.7 s at 30 Hz -- comfortably above 2x any horizon these servers run (ACT 30, FM
+# 32, diffusion 32 => 2x = 64) so a healthy run can never trip it.
+CHUNK_START_SILENT_WARN_TICKS = 200
+CHUNK_START_ALWAYS_WARN_TICKS = 60
+
 
 class PolicyLeaderNode(Node):
     """ACT-driven synthetic GELLO leader with a HOLD/EXECUTE/FAULT state machine."""
@@ -261,6 +279,10 @@ class PolicyLeaderNode(Node):
                     "start_pose has no closed-form IK branch (branch_id=-1): EEF "
                     "targets will be inverted WITHOUT a branch lock. Check start_pose."
                 )
+        # EEF-only per-episode counters (F1 envelope-clip streak, F8 chunk_start
+        # watchdog). Declared unconditionally so joint mode has the same attribute
+        # set; joint mode never reads or writes them.
+        self._reset_eef_watchdogs()
 
         self._state = HOLD
         self._arming_generation = 0
@@ -441,6 +463,21 @@ class PolicyLeaderNode(Node):
         response.message = msg_text
         return response
 
+    def _reset_eef_watchdogs(self):
+        """Zero the eef-mode per-episode counters (arming, ``~/hold``, construction).
+
+        They are STREAK counters: every one of them means "for how many consecutive
+        ticks of THIS episode has X been true". An episode boundary therefore has to
+        clear them, or a re-arm inherits the previous episode's suspicion.
+        """
+        # F1: consecutive ticks on which the joint envelope had to modify an IK
+        # solution. Reset on every clean tick, on ~/hold and on re-arming.
+        self._eef_env_clip_streak = 0
+        # F8: ticks since the last chunk_start, and the length of the current run of
+        # consecutive chunk_start=True ticks.
+        self._chunk_start_silent_ticks = 0
+        self._chunk_start_run_ticks = 0
+
     def _srv_hold(self, request, response):
         # Republish the current live pose held (fall back to start_pose if unseen).
         if self._live_q is not None:
@@ -460,6 +497,7 @@ class PolicyLeaderNode(Node):
             # wherever the operator left it, and a stale target would be executed
             # as one large jump on the next arm.
             self._eef.reset()
+            self._reset_eef_watchdogs()
         if self._grpc_worker is not None:
             self._grpc_worker.disarm()
         self._auto_start_fired = True  # don't auto-rearm after a manual hold
@@ -526,6 +564,7 @@ class PolicyLeaderNode(Node):
             return False, f"refused: {detail}"
         if self._eef is not None:
             self._eef.reset(positions_near_reference(self._live_q, self._start_pose))
+            self._reset_eef_watchdogs()
         self._state = EXECUTE
         self.get_logger().info(f"~/start_execution: RESET ok -> EXECUTE{detail}.")
         return True, "EXECUTE"
@@ -581,9 +620,15 @@ class PolicyLeaderNode(Node):
         # against what the server said, not against a compile-time constant.
         self._state_len = int(state_dim)
         self._action_len = int(action_dim)
+        # R2/F2: `checkpoint` is parsed by parse_reset_reply and used to be thrown
+        # away here. It is the ONLY field that says WHICH weights answered: the
+        # handshake above proves the action space and the dims, and a stale server
+        # left on the port from the previous checkpoint satisfies all three. Logging
+        # it is what makes "which checkpoint drove the arm" answerable after a run.
         return True, (
             f" (server: action_space={space}, state_dim={state_dim}, "
-            f"action_dim={action_dim}, policy={handshake[obs_assembler.KEY_POLICY_TYPE]})"
+            f"action_dim={action_dim}, policy={handshake[obs_assembler.KEY_POLICY_TYPE]}, "
+            f"checkpoint={handshake[obs_assembler.KEY_CHECKPOINT]})"
         )
 
     def _grpc_arm(self, generation):
@@ -634,6 +679,38 @@ class PolicyLeaderNode(Node):
         # Publish the held pose + held gripper constantly. Never query server.
         self._publish_arm(self._hold_pose)
         self._publish_gripper(self._hold_gripper)
+
+    def _check_chunk_start(self, chunk_start):
+        """R2/F8: WARN (never FAULT) on a degenerate ``chunk_start`` pattern.
+
+        Called once per EXECUTE tick in eef mode only -- joint mode hardcodes
+        ``chunk_start=False`` and never reads it, so running this there would warn
+        forever about a flag that path does not use.
+        """
+        if chunk_start:
+            self._chunk_start_silent_ticks = 0
+            self._chunk_start_run_ticks += 1
+            if self._chunk_start_run_ticks >= CHUNK_START_ALWAYS_WARN_TICKS:
+                self.get_logger().warn(
+                    f"chunk_start has been TRUE on {self._chunk_start_run_ticks} "
+                    f"consecutive ticks: the server re-runs the network every tick, so "
+                    f"the target re-anchors on the LAGGING live pose every tick and "
+                    f"every step shrinks (measured: 169 mm p50 tracking error vs 15 mm). "
+                    f"Check the server's n_action_steps / temporal_ensemble_coeff.",
+                    throttle_duration_sec=5.0,
+                )
+        else:
+            self._chunk_start_run_ticks = 0
+            self._chunk_start_silent_ticks += 1
+            if self._chunk_start_silent_ticks >= CHUNK_START_SILENT_WARN_TICKS:
+                self.get_logger().warn(
+                    f"no chunk_start in {self._chunk_start_silent_ticks} ticks: the "
+                    f"target has been integrating from ONE anchor for "
+                    f"{self._chunk_start_silent_ticks / max(self._publish_rate_hz, 1e-9):.1f} s. "
+                    f"Only the lead clamp bounds it. Is the server pre-v2 (it then never "
+                    f"sends the flag) or is its action queue never emptying?",
+                    throttle_duration_sec=5.0,
+                )
 
     def _tick_execute(self):
         # FAULT if any observation is missing or stale (frozen camera / hung stream):
@@ -701,6 +778,7 @@ class PolicyLeaderNode(Node):
         # action space, `action[:6]` has become a joint target by now and the
         # existing envelope / max-deviation clamps are the last word.
         if self._eef_mode:
+            self._check_chunk_start(chunk_start)
             q_eef, eef_info = self._eef.step(live_q, action, chunk_start)
             eef_reasons = EefDeltaExecutor.clamp_reasons(eef_info)
             if eef_reasons:
@@ -723,6 +801,25 @@ class PolicyLeaderNode(Node):
                 )
                 action = list(live_q) + list(action[_N:])
             else:
+                if not eef_info["ik_on_branch"] or not eef_info["ik_in_limits"]:
+                    # R2/F5. ik_tcp_nearest falls back to the FULL branch enumeration
+                    # when the pinned branch has no verified solution, and returns an
+                    # out-of-UR-limit solution when the limit filter leaves nothing.
+                    # Both facts were computed and thrown away. A silent branch switch
+                    # is a large joint reconfiguration bounded only by max_dev and the
+                    # envelope -- i.e. it lands straight in the envelope-clip failure
+                    # mode handled below. WARN only, no hold (integrator decision):
+                    # empirically unreachable in this workspace (0 off-branch and 0
+                    # out-of-limit over a 729-point grid of the box, and the elbow /
+                    # wrist merge points are never approached), so holding here would
+                    # add a failure mode without closing a live one.
+                    self.get_logger().warn(
+                        f"EEF IK left the pinned branch "
+                        f"{eef_info['start_branch']}->{eef_info['ik_branch']} "
+                        f"(in_limits={eef_info['ik_in_limits']}): a branch switch is a "
+                        f"large joint reconfiguration.",
+                        throttle_duration_sec=1.0,
+                    )
                 action = [float(v) for v in q_eef] + list(action[_N:])
 
         # --- SAFETY CLAMP (order matters; BUILD_SPEC §5) -----------------
@@ -759,6 +856,41 @@ class PolicyLeaderNode(Node):
                 f"SAFETY CLAMP engaged: {', '.join(reasons)}.",
                 throttle_duration_sec=1.0,
             )
+
+        if self._eef_mode and clamped_limit:
+            # R2/F1. `target` came out of IK. Clipping it PER JOINT makes it not an
+            # IK solution any more, so the executed TCP leaves the workspace box the
+            # Cartesian clamps just enforced -- the box only ever constrained the
+            # TARGET pose, never the joint vector the envelope hands to the bridge.
+            # Measured offline (sustained +x OOD drive, R2): the tool slid 168 mm
+            # DOWN toward the table while the commanded target z was CONSTANT, ending
+            # 96 mm away from the target. Nothing faulted and nothing stopped it.
+            # In JOINT mode the same clip is harmless (a clipped joint target is
+            # still a valid joint pose), which is why this is guarded on eef mode --
+            # the joint path below is byte-for-byte what it was.
+            # Hold the live pose instead: a streak is a real loss of control.
+            self._eef_env_clip_streak += 1
+            if self._eef_env_clip_streak >= self._eef.cfg.ik_fail_fault_n:
+                self._enter_fault(
+                    f"EEF target hit the joint envelope on "
+                    f"{self._eef_env_clip_streak} consecutive ticks "
+                    f"(target {eef_info['target_pos']}): the workspace box no longer "
+                    f"bounds the tool"
+                )
+                return
+            self.get_logger().warn(
+                f"EEF joint-envelope clip (streak "
+                f"{self._eef_env_clip_streak}/{self._eef.cfg.ik_fail_fault_n}); "
+                f"holding the live pose this tick.",
+                throttle_duration_sec=1.0,
+            )
+            # live_q is the arm's MEASURED pose, so commanding it is a no-op move and
+            # needs no re-clamping: |target - live| = 0 satisfies max_dev by
+            # construction, and the envelope cannot be violated by a pose the arm is
+            # physically holding.
+            target = list(live_q)
+        elif self._eef_mode:
+            self._eef_env_clip_streak = 0
 
         grip = action[_N]
         grip = 0.0 if grip < 0.0 else (1.0 if grip > 1.0 else grip)

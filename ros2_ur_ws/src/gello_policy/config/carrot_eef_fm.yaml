@@ -27,8 +27,9 @@
 # #    3. action_space / expected_action_space + the Cartesian clamps below  #
 # #       (eef_max_step_*, eef_max_lead_*, workspace_lo/hi,                  #
 # #        eef_ik_fail_fault_n) — these keys do not exist in the joint yamls #
-# #    4. expected_model_id / task         -> the carrot EEF checkpoint and  #
-# #       the carrot CLIP text prompt                                        #
+# #    4. expected_model_id                -> the carrot EEF checkpoint      #
+# #       (the CLIP text prompt is NOT a node parameter -- see the `task`    #
+# #        comment below; the server owns it via FM_TASK)                    #
 # #                                                                          #
 # #  >>> If a measured p99 refill latency exceeds the budget, REDUCE the     #
 # #  server's FM_NUM_INTEGRATION_STEPS (e.g. 5) rather than widening these   #
@@ -74,15 +75,23 @@ policy_leader_node:
     # Provenance: the checkpoint the server is expected to be serving. (Only the
     # gRPC transport enforces this today; in the ZMQ path it documents intent and
     # is echoed in the logs. The binding contract check is the handshake above.)
-    # PLACEHOLDER NAME — the carrot EEF checkpoint has not been trained/published yet.
+    # PLACEHOLDER NAME — as of 2026-09-15 the carrot EEF checkpoints exist only on
+    # kanu (~/workspace/youngwoong/carrot_eef/outputs/...); nothing was pushed to HF,
+    # so this repo id does not resolve. It is documentation, not a gate, on the ZMQ path.
     expected_model_id: "Bigenlight/flow_matching_carrot_in_pot_eef"
-    # CLIP text conditioning string. multi_task_dit is TEXT-CONDITIONED, so this must
-    # be the dataset's task string verbatim.
-    # >>> The CONSUMER of this string is the SERVER (FM_TASK env / --task flag), not
-    # this node — policy_leader_node neither reads nor forwards it. It is recorded
-    # here so the deploy's prompt lives next to the deploy's clamps; keep it in sync
-    # with FM_TASK in run_ur7e_fm_real.sh and in the runbook command line.
-    task: "Put carrot in pot"
+    # CLIP text conditioning string -- NOT A PARAMETER, DELIBERATELY COMMENTED OUT.
+    #     task: "Put carrot in pot"
+    # R2/F7: policy_leader_node never declares `task`, so an override here was stored
+    # by rclpy and read by nobody (`get_parameter('task')` raises
+    # ParameterNotDeclaredException) -- an inert line that LOOKS like the prompt knob.
+    # multi_task_dit is text-conditioned, so a wrong prompt degrades the policy with
+    # no error, and the trap is that someone eventually "fixes the prompt" HERE.
+    # The prompt's only real sources are, in order:
+    #   1. FM_TASK env / --task on the SERVER (run_ur7e_fm_real.sh passes it through),
+    #   2. fm_server.default_task_for_space(), which returns exactly
+    #      "Put carrot in pot" for action_space eef_delta_v1.
+    # Keep the string above in sync with the dataset task string; change the VALUE in
+    # run_ur7e_fm_real.sh / the runbook command line, never here.
 
     # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
     # HOLD the leader publishes THIS pose perfectly still so gello_move_to_start
@@ -127,9 +136,13 @@ policy_leader_node:
 
     # ======================================================================== #
     # CARTESIAN SAFETY CLAMPS (eef_delta only — ignored when action_space=joint)
-    # Applied in THIS order every EXECUTE tick, all norm-proportional (never
-    # per-axis: per-axis clipping bends the commanded direction), each logging a
-    # throttled WARN.
+    # Applied in THIS order every EXECUTE tick, each logging a throttled WARN.
+    # (a) and (b) are NORM-PROPORTIONAL (never per-axis: per-axis clipping bends the
+    # commanded direction). (c), the workspace box, IS an axis-wise min/max clip --
+    # a box constraint cannot be expressed norm-proportionally, so a target that hits
+    # the wall slides along it. That is why the box is sized as a LAST-RESORT OOD
+    # barrier (observed TCP range +/- 0.03 m), not as an everyday limit: if it fires
+    # continuously the policy is leaving its training distribution.
     # IDENTICAL to carrot_eef_act.yaml — they describe the DATASET, not the policy
     # architecture, so ACT and FM get the same envelope.
     # ======================================================================== #

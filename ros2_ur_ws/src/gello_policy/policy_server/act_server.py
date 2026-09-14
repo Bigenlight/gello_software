@@ -73,6 +73,11 @@ except ImportError:  # pragma: no cover - fallback for direct-path execution
 # =============================================================================
 # Policy wrapper
 # =============================================================================
+# lerobot's ACTPolicy names its receding-horizon deque this. The v2 `chunk_start`
+# flag is "was this deque empty before select_action", i.e. "did the net re-run".
+ACTION_QUEUE_ATTR = "_action_queue"
+
+
 class ACTInferenceEngine:
     """Loads the ACT policy + processors and turns (state, cam1, cam2) into a 7-dim
     action. Holds the receding-horizon queue across calls (via policy.reset())."""
@@ -140,6 +145,21 @@ class ACTInferenceEngine:
         )
 
         self.reset()
+        # R2/F8: chunk_start is derived from `len(policy._action_queue) == 0`, and
+        # `getattr(..., [])` would make a policy class WITHOUT that attribute read as
+        # "queue empty" on every single tick -> chunk_start true on every tick -> the
+        # EEF executor re-anchors its target on the LAGGING live pose every tick and
+        # every step shrinks (measured: 169 mm p50 tracking error vs 15 mm). The
+        # temporal_ensemble_coeff assert above protects the ACT class specifically;
+        # this protects against the class not being the one we think it is at all.
+        # reset() has just run, so the deque must exist by now.
+        if not hasattr(self.policy, ACTION_QUEUE_ATTR):
+            raise AttributeError(
+                f"{type(self.policy).__name__} has no {ACTION_QUEUE_ATTR!r} after "
+                f"reset(): this server derives the v2 `chunk_start` flag from that "
+                f"receding-horizon queue and cannot serve a policy class that does "
+                f"not have one (it would report chunk_start=True on every tick)."
+            )
         self._act_calls = 0
         self._refills = 0
         # Review H1: force CUDA kernel compilation / lazy init NOW, so the operator's
@@ -205,7 +225,10 @@ class ACTInferenceEngine:
         # The SAME boolean is reported to the client as chunk_start (v2): it marks the
         # tick whose observation the whole next chunk was predicted from, which is
         # where the EEF executor re-anchors its integration target (DESIGN §3.3).
-        refill = len(getattr(self.policy, "_action_queue", [])) == 0
+        # No getattr default: the attribute's existence is a load-time contract
+        # (checked in __init__), so a silent "[] means empty means chunk_start" here
+        # would be a regression, not a fallback.
+        refill = len(getattr(self.policy, ACTION_QUEUE_ATTR)) == 0
         self.last_chunk_start = refill
 
         proc = self.preprocessor(obs)               # rename -> batch -> device -> normalize

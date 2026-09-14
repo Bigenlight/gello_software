@@ -122,6 +122,64 @@ def test_action_len_is_overridable():
 
 
 # --------------------------------------------------------------------------- #
+# R2/F3: non-finite actions are refused, in BOTH action spaces
+#
+# json.loads accepts the bare `NaN` / `Infinity` / `-Infinity` literals BY DEFAULT,
+# so these are literally what a non-conforming server puts on the wire -- hence the
+# raw byte strings below rather than json.dumps of a float('nan'). Without the check:
+#   * action[6] reaches /robotiq_gripper/command_percent verbatim (the node's
+#     0..1 clip `0.0 if g < 0 else (1.0 if g > 1 else g)` is NaN-transparent);
+#   * in eef mode action[:6] costs eef_ik_fail_fault_n held ticks before the
+#     IK-failure streak faults;
+#   * in joint mode it is a NaN joint target.
+# The caller turns the ValueError into a FAULT.
+# --------------------------------------------------------------------------- #
+NONFINITE_WIRE_REPLIES = [
+    b'{"ok":true,"action":[NaN,0,0,0,0,0,0.0]}',            # NaN in the position delta
+    b'{"ok":true,"action":[0,0,0,NaN,0,0,0.0]}',            # NaN in the rotation delta
+    b'{"ok":true,"action":[0,0,0,0,0,0,NaN]}',              # NaN in the GRIPPER command
+    b'{"ok":true,"action":[Infinity,0,0,0,0,0,0.0]}',
+    b'{"ok":true,"action":[0,0,0,0,0,0,-Infinity]}',
+]
+
+
+@pytest.mark.parametrize("raw", NONFINITE_WIRE_REPLIES)
+def test_non_finite_actions_are_refused(raw):
+    with pytest.raises(ValueError, match="not finite"):
+        oa.parse_action_reply([raw])
+
+
+@pytest.mark.parametrize("raw", NONFINITE_WIRE_REPLIES)
+def test_the_bare_json_literals_really_do_parse(raw):
+    """The premise of the check: stdlib json accepts these, so they ARE reachable."""
+    values = json.loads(raw.decode())["action"]
+    assert len(values) == 7
+    assert not all(v == v and abs(v) != float("inf") for v in values)
+
+
+def test_non_finite_is_refused_in_the_sixteen_wide_eef_space_too():
+    """One check covers both spaces -- the eef action is 7-D like the joint one."""
+    raw = b'{"ok":true,"action":[0,0,0,0,0,0,NaN],"chunk_start":true}'
+    with pytest.raises(ValueError, match="not finite"):
+        oa.parse_action_reply([raw], action_len=oa.ACTION_LEN_BY_ACTION_SPACE[
+            oa.EEF_ACTION_SPACE_ID])
+
+
+def test_finite_actions_are_still_accepted_unchanged():
+    """The guard must not have narrowed the accepted set (regression on v1)."""
+    action, chunk = oa.parse_action_reply(
+        frame({"ok": True, "action": [-1e6, 0.0, 1e6, -3.14, 0.0, 3.14, 1.0]}))
+    assert action == [-1e6, 0.0, 1e6, -3.14, 0.0, 3.14, 1.0]
+    assert chunk is False
+
+
+def test_the_length_check_still_runs_first():
+    """A short reply reports its LENGTH, not its finiteness (clearer diagnosis)."""
+    with pytest.raises(ValueError, match="floats"):
+        oa.parse_action_reply([b'{"ok":true,"action":[NaN,0,0,0,0,0]}'])
+
+
+# --------------------------------------------------------------------------- #
 # reset handshake
 # --------------------------------------------------------------------------- #
 def test_reset_reply_reports_the_full_handshake():

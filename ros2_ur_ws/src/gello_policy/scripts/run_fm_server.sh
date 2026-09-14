@@ -29,7 +29,7 @@
 # #    FM_PORT      bind port              (default: 5593)                    #
 # #    FM_DEVICE    torch device           (default: cuda)                    #
 # #    FM_N_ACTION_STEPS  receding horizon k (default: 24)                    #
-# #    FM_NUM_INTEGRATION_STEPS  Euler steps (default: unset -> ckpt's 100)   #
+# #    FM_NUM_INTEGRATION_STEPS  Euler steps (default: 10, see below)         #
 # #    FM_TASK      CLIP task string       (default: per action space --       #
 # #                 "put the right banana in the pot" for joint,              #
 # #                 "Put carrot in pot" for eef_delta_v1)                     #
@@ -124,7 +124,11 @@ fi
 echo "### FM server | venv=$FM_VENV | device=$FM_DEVICE | bind=$FM_HOST:$FM_PORT"
 echo "### checkpoint=$FM_CHECKPOINT | n_action_steps=$FM_N_ACTION_STEPS | num_integration_steps=${FM_NUM_INTEGRATION_STEPS:-<ckpt default>} | action_space=$FM_ACTION_SPACE | task='${FM_TASK:-<server default for $FM_ACTION_SPACE>}'"
 
-# Assemble args; --num-integration-steps only when explicitly set (else keep ckpt's 100).
+# Assemble args. NOTE the guard below is vestigial for --num-integration-steps:
+# FM_NUM_INTEGRATION_STEPS defaults to 10 above, so the flag is effectively ALWAYS
+# passed. Set FM_NUM_INTEGRATION_STEPS= (empty) to fall back to the checkpoint's
+# trained 100. --task is the one that is genuinely optional (empty -> the server's
+# per-action-space default).
 ARGS=(
     --checkpoint "$FM_CHECKPOINT"
     --host "$FM_HOST"

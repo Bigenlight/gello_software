@@ -18,6 +18,7 @@ the spec literals exactly (``b'{"cmd":"reset"}'`` -- no spaces).
 """
 
 import json
+import math
 from collections import namedtuple
 
 # --- Recorder contract (VERBATIM from gello_ur_recorder_node.py) -------------
@@ -186,6 +187,21 @@ def parse_action_reply(frames, action_len=ACTION_LEN):
         raise ValueError(
             f"ACT reply action must have {int(action_len)} floats, got {len(action)}"
         )
+    if not all(math.isfinite(v) for v in action):
+        # R2/F3. json.loads accepts the bare `NaN` / `Infinity` / `-Infinity`
+        # literals by DEFAULT, so a non-conforming server can put them on the wire
+        # and nothing downstream stops them:
+        #   * action[6] (gripper) is published VERBATIM -- the node's
+        #     `0.0 if g < 0 else (1.0 if g > 1 else g)` clip is NaN-transparent, so
+        #     a NaN reaches /robotiq_gripper/command_percent as Float32(nan);
+        #   * in eef mode action[:6] costs eef_ik_fail_fault_n ticks of held pose
+        #     before the IK-failure streak FAULTs (eef_space.clamp_delta's own
+        #     docstring says callers must reject non-finite values first -- this is
+        #     that caller);
+        #   * in joint mode it would be a NaN joint target.
+        # One check covers BOTH action spaces; the caller turns ValueError into a
+        # FAULT, which stops publishing and lets the bridge watchdog halt the arm.
+        raise ValueError(f"ACT reply action is not finite: {action}")
     return ActionReply(action, bool(obj.get(KEY_CHUNK_START, False)))
 
 
@@ -243,6 +259,14 @@ if __name__ == "__main__":
     act, chunk = parse_action_reply([b'{"ok":true,"action":[0,1,2,3,4,5,0.9],"chunk_start":true}'])
     assert act[-1] == 0.9 and chunk is True
     assert parse_action_reply([b'{"ok":true,"action":[0,1,2,3,4,5,0.9]}']).chunk_start is False
+    for _bad in (b'{"ok":true,"action":[0,1,2,3,4,5,NaN]}',
+                 b'{"ok":true,"action":[Infinity,1,2,3,4,5,0.9]}'):
+        try:
+            parse_action_reply([_bad])
+        except ValueError:
+            pass
+        else:  # pragma: no cover - the assert below is the failure report
+            raise AssertionError(f"non-finite action accepted: {_bad!r}")
     assert parse_reply([b'{"ok":true}'])["ok"] is True
     hs = parse_reset_reply([b'{"ok":true,"action_space":"eef_delta_v1","state_dim":16,"action_dim":7}'])
     assert hs["action_space"] == "eef_delta_v1" and hs["state_dim"] == 16

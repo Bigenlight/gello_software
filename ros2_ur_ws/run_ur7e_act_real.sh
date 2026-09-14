@@ -140,6 +140,19 @@ if [ ! -f "${ACT_PARAMS_FILE}" ]; then
     exit 1
 fi
 
+# --- Refuse to start if the ZMQ port is already occupied ---------------------
+# A leftover server holding ACT_PORT would make the NEW server die on bind, yet the
+# readiness loop below breaks the moment `ss` sees ANYTHING listening -> the leader
+# would silently drive the arm from the STALE server. The v2 handshake cannot catch
+# it either: a stale EEF server answers action_space/state_dim/action_dim perfectly
+# and differs only in WHICH CHECKPOINT is loaded. Fail loudly BEFORE spawning.
+if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${ACT_PORT}([^0-9]|$)"; then
+    echo "ERROR: port ${ACT_PORT} is already in use (a stale ACT/FM/diffusion server?)." >&2
+    echo "       Starting now would leave the arm driven by that stale server. Kill it first:" >&2
+    echo "         pkill -f act_server.py ; ss -ltnp | grep :${ACT_PORT}" >&2
+    exit 1
+fi
+
 # --- Start the ACT inference server in the BACKGROUND (before ros2 launch) ---
 # It loads the checkpoint and listens on ACT_HOST:ACT_PORT. The synthetic leader
 # only queries it AFTER ~/start_execution, so it has ample time to warm up. We do

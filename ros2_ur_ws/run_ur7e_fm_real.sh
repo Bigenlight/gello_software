@@ -68,7 +68,7 @@
 # #    HEADLESS  (true|1 -> Method B)      START_MODE (gello | init_align)    #
 # #    FM_VENV  (default ros2_ur_ws/act_venv)  FM_CHECKPOINT (REQUIRED)       #
 # #    FM_PORT  (default 5593)             FM_DEVICE (default cuda)           #
-# #    FM_NUM_INTEGRATION_STEPS (default unset -> ckpt's 100)                 #
+# #    FM_NUM_INTEGRATION_STEPS (default 10; set empty -> ckpt's 100)         #
 # #    FM_N_ACTION_STEPS (default 24)      FM_TASK (default: unset -> the      #
 # #        server's trained phrase for FM_ACTION_SPACE)                        #
 # #    FM_PARAMS_FILE (default installed config/fm_deploy.yaml)               #

@@ -498,6 +498,83 @@ def test_diffusion_cli_action_space(monkeypatch):
 
 
 # =============================================================================
+# R2/F8: chunk_start must not be able to degrade to "always true"
+# =============================================================================
+class _QueuelessPolicy(_Policy):
+    """A policy class with NO receding-horizon deque.
+
+    This is what a future lerobot class -- or the same class with temporal
+    ensembling on -- looks like from the server's side: `select_action` works, the
+    handshake works, and only `chunk_start` is meaningless. Exactly the case
+    `getattr(self.policy, "_action_queue", [])` used to swallow.
+    """
+
+    def __init__(self, cfg) -> None:
+        super().__init__(cfg)
+        del self._action_queue
+        del self._queues
+
+    def reset(self) -> None:
+        pass
+
+    def select_action(self, _batch) -> torch.Tensor:
+        self.select_calls += 1
+        n = self.config.output_features[proto.POLICY_ACTION_FEATURE].shape[0]
+        return torch.arange(n, dtype=torch.float32).unsqueeze(0)
+
+
+def test_the_queue_attribute_name_is_a_named_constant():
+    assert act_server.ACTION_QUEUE_ATTR == "_action_queue"
+
+
+def test_act_engine_refuses_a_policy_without_the_receding_horizon_queue(monkeypatch):
+    """Fail at LOAD, not silently on the arm.
+
+    With the old `getattr(..., [])` default this policy would have reported
+    chunk_start=True on EVERY tick, so the EEF executor would re-anchor its target
+    onto the LAGGING live pose every tick and every step would shrink -- R2 measured
+    169 mm p50 tracking error against 15 mm for the healthy case. Nothing would have
+    logged an error. The `assert temporal_ensemble_coeff is None` above it protects
+    the ACT class specifically; it says nothing about the class being ACT at all.
+    """
+    policy = _QueuelessPolicy(_Config(7, 7, "act"))
+
+    class _ACTPolicy:
+        @staticmethod
+        def from_pretrained(_ckpt):
+            return policy
+
+    monkeypatch.setattr(act_server, "ACTPolicy", _ACTPolicy)
+    monkeypatch.setattr(act_server, "make_pre_post_processors",
+                        lambda **_kw: (_Processor(), _Processor()))
+    monkeypatch.setattr(act_server, "decode_jpeg_to_rgb_float_chw",
+                        lambda _b: torch.zeros(3, 360, 640))
+
+    with pytest.raises(AttributeError, match="_action_queue"):
+        act_server.ACTInferenceEngine("/ckpt/fake", "cpu", 2)
+
+    # ...and it refuses BEFORE the (expensive, GPU-touching) warm-up runs.
+    assert policy.select_calls == 0
+
+
+def test_act_engine_accepts_a_policy_that_has_the_queue(monkeypatch):
+    """The guard must not have narrowed what the server will serve."""
+    engine = _act_engine(monkeypatch)
+    assert hasattr(engine.policy, act_server.ACTION_QUEUE_ATTR)
+    act_server._handle(engine, _reset_frames())
+    assert act_server._handle(engine, _act_frames(range(7)))["chunk_start"] is True
+
+
+def test_chunk_start_no_longer_reads_through_a_getattr_default():
+    """A regression guard on the source itself: the `[]` default was the bug."""
+    import inspect
+
+    src = inspect.getsource(act_server.ACTInferenceEngine.act)
+    assert 'getattr(self.policy, "_action_queue", [])' not in src
+    assert "ACTION_QUEUE_ATTR" in src
+
+
+# =============================================================================
 # client parity (the py3.10 side keeps its own literals; they must not drift)
 # =============================================================================
 def test_wire_literals_match_the_client_module():

@@ -24,9 +24,9 @@ No depth. The existing joint-space path must keep working unchanged (`action_spa
 | Recorded lag — RESOLVED as a recorder artifact | `ur_joint_states` in `vectors.h5` is a **stale cache**: FK(q(t+0.90 s)) equals TCP(command(t)) to ~1 mm in all 54 takes (constant 0.90); `tcp_pose` is stale by a constant 0.40 s. Fresh streams: `command`, `cam1` (image motion ↔ command speed peaks at τ=0.00), `cam2` (finger motion ↔ grip_cmd lag 0.3 s, same as July joint-mode takes = physical gripper delay), `gello_*`, `grip_cmd`. Not robot lag, not One-Euro, not ROS transport (A7 documents the mechanism). **Converter rule: sample joints by LINEAR INTERPOLATION at `cam1_t + tau_q`, tau_q estimated per take by minimising median |TCP(q(t+τ)) − TCP(cmd(t))| over τ∈[0,1.5] step 0.01 (measured 0.89 in all 54 takes; assert 0.6–1.2 and residual < 3 mm); state, TCP and Δ all use the shifted, interpolated q** (nearest-neighbour on the shifted grid repeats 8.8 % of samples and inflates 1-frame |dp| to 11.5 mm; interpolation gives max 8.9 mm). `command` itself is used only for this alignment. **The shifted tail is dropped** (`--drop-stale-tail`): the last ~0.9 s of every take has no joint samples after the shift, and the arm is still moving there (45 mm median, 128 mm max), so those ~7.9 % of frames are removed rather than frozen. **`start_pose` is the de-staled frame-0 pose** (the arm's real pose when the first image was taken), not the raw frame-0 sample. |
 | Achieved motion per frame (30 fps) | |Δp| p50 2.2 mm, p99 6.6 mm, max 9.6 mm; |Δrot| p99 0.02 rad, max 0.03 rad. Over 30 frames: |Δp| p50 64 mm, p99 159 mm, max 161 mm; |Δrot| max 0.46 rad. |
 | TCP workspace (all frames) | x 0.415–0.709, y −0.214–0.389, z 0.017–0.306 m (base frame). |
-| Start pose (frame 0, 54 takes) | mean `[-3.193, -1.490, 1.693, -1.798, -1.590, -3.269]` rad, std ≤ 0.113, max |dev| 0.28. Start TCP ≈ (0.528, 0.101, 0.235). Gripper open (grip_pos ≈ 0.012). |
+| Start pose (frame 0, 54 takes) | **DE-STALED** (the arm's real pose when the first camera frame was taken — this row used to quote the unshifted sample): mean `start_pose [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]` rad, std ≤ 0.116, max |dev| 0.286. Start TCP **(0.5287, 0.1193, 0.2250)**, branch 2. Gripper open (`start_gripper` 0.0118). Authoritative source: `config/carrot_eef_limits.json` (`start_pose` / `start_tcp` / `start_gripper`); that file also keeps the naive τ=0 values as `start_pose_unshifted [-3.1931, -1.4897, 1.6932, -1.7983, -1.5902, -3.2691]` / `start_tcp_unshifted (0.5307, 0.1008, 0.2357)` **for reference only — never paste those into a yaml** (they differ by up to 0.047 rad / 21 mm of TCP, and frame 0 is the one quantity a constant time shift does not leave alone). |
 | IK branch | every frame of every take is closed-form branch **2** (`ur_kin.branch_id`). Round trip `delta → apply → ik_tcp_nearest` recovers the target to 3e-15 rad, 0 failures on 1,079 sampled frames. |
-| Deploy stack facts | `policy_leader_node` (py3.10 rclpy) publishes `/gello/joint_states` at 30 Hz as a synthetic leader; bridge runs in JOINT mode (slew 0.625 rad/s) → `forward_position_controller`. Servers (py3.12 `ros2_ur_ws/act_venv`, symlinked into the worktree) speak ZMQ REQ/REP: ACT 5591, FM 5593. Config yaml is selected by `params_file` launch arg (`FM_PARAMS_FILE` env in `run_ur7e_fm_real.sh`; ACT script has no such env yet). `checkpoints/` is symlinked into the worktree too. |
+| Deploy stack facts | `policy_leader_node` (py3.10 rclpy) publishes `/gello/joint_states` at 30 Hz as a synthetic leader; bridge runs in JOINT mode (slew 0.625 rad/s) → `forward_position_controller`. Servers (py3.12 `ros2_ur_ws/act_venv`, symlinked into the worktree) speak ZMQ REQ/REP: ACT 5591, FM 5593. Config yaml is selected by `params_file` launch arg (`FM_PARAMS_FILE` env in `run_ur7e_fm_real.sh`; ~~ACT script has no such env yet~~ — **A6 delivered the mirror: `ACT_PARAMS_FILE` exists in `run_ur7e_act_real.sh` since 9e3601c**). `checkpoints/` is symlinked into the worktree too. |
 | Banana values to REPLACE | `start_pose [3.106, …]`, `joint_limits_lo/hi` (shoulder_pan +2.40..+3.67 — would clip carrot's −3.19 to +2.40), task string "put the right banana in the pot". |
 | kanu | ssh alias `kanu`, 8× RTX A4000 16 GB. **Use at most 2 GPUs, pick idle ones with `nvidia-smi` right before launch** (GPU 4 was busy). Disk 98 % full / 51 GB free — do not write outside `~/workspace/youngwoong/carrot_eef/`. lerobot env already there: `~/workspace/youngwoong/cube_flow_matching/training/lr_env` (torch 2.11 cu128, CUDA OK, lerobot 0.6.1); CLIP ViT-B/16 in HF cache. Reuse it via `LEROBOT_VENV`; do not create a new env. |
 | Reference train recipes | ACT: `/home/laptop3/youngwoong_ws/banana-in-pot-experiments/train_act.sh` (+ `train_act_valdiag.sh`, `eval_offline.py`). FM: `/home/laptop3/youngwoong_ws/cube_flow_matching_training/train_flow_matching.sh` (+ preflight/launch_detached/eval_checkpoints). Both are plain `lerobot-train`. |
@@ -72,12 +72,52 @@ Per 30 Hz tick in EXECUTE:
 5. `q_target, info = ik_tcp_nearest(target, live_q, branch=start_branch)` where `start_branch =
    branch_id(start_pose)` computed once at arming. `None` → publish `live_q` (hold) this tick,
    count; `eef_ik_fail_fault_n` consecutive → FAULT.
+   **5b (R2/F5, added 2026-09-15) — WARN, no hold.** The executor now also surfaces
+   `info["ik_in_limits"]` next to `info["ik_on_branch"]`; both used to be computed and
+   thrown away. `ik_tcp_nearest` falls back to the FULL branch enumeration when the pinned
+   branch has no verified solution, and returns an out-of-UR-limit solution when the limit
+   filter leaves nothing. The node logs a throttled WARN (`EEF IK left the pinned branch
+   … (in_limits=…)`) on either. **Warn only** (integrator decision): both are empirically
+   unreachable in this workspace — 0 off-branch and 0 out-of-limit over a 729-point grid of
+   the box, and the elbow/wrist merge points are never approached — so a hold here would add
+   a failure mode without closing a live one.
 6. Existing joint clamps unchanged: envelope `joint_limits_lo/hi`, then `max_dev_rad` vs live.
    Then publish exactly as today (`_publish_arm`, `_publish_gripper` with grip clipped 0..1).
+   **6b (R2/F1, added 2026-09-15) — an envelope clip in eef mode HOLDS, and a streak FAULTs.**
+   In joint mode clipping the target per joint is harmless: a clipped joint target is still a
+   valid joint pose. In eef mode the envelope clips an **IK solution**, and a per-axis-clipped
+   IK solution is **not an IK solution** — the executed TCP leaves the workspace box the
+   Cartesian clamps of step 4 just enforced, because that box only ever constrained the
+   *target pose*, never the joint vector handed to the bridge. Measured offline (R2, sustained
+   +x OOD drive, perfect-tracking arm): the tool slid **168 mm DOWN** toward the table while
+   the commanded target z was **constant**, ending 96 mm from the target, with nothing
+   faulting. So: when `clamped_limit` is true **and** `action_space: eef_delta`, publish
+   `live_q` (hold) for that tick and count a streak; `eef_ik_fail_fault_n` consecutive clipped
+   ticks → FAULT (`EEF target hit the joint envelope on N consecutive ticks`). A clean tick,
+   `~/hold` and re-arming all reset the streak. **Joint mode is untouched** — it still
+   publishes the clipped target, exactly as before.
 7. `~/hold` and FAULT behave as today. Arming (`~/start_execution`) additionally sends RESET
    and **refuses** unless the RESET reply reports `action_space == expected_action_space`
    and `state_dim == 16`, `action_dim == 7` — a joint checkpoint can never drive eef mode
    or vice versa.
+   **7b (R2/F2, added 2026-09-15).** The accepted-handshake log line now also names the
+   server's `checkpoint`. The handshake proves the space and the dims and says **nothing**
+   about *which weights* answered — a stale server left on the port from the previous
+   checkpoint satisfies all three — so this is what makes "which checkpoint drove the arm"
+   answerable after a run. Paired with the stale-port refusal in `run_ur7e_act_real.sh`
+   (mirroring `run_ur7e_fm_real.sh`; the diffusion launcher already had one).
+8. **`chunk_start` anomaly WARN (R2/F8, added 2026-09-15) — WARN, never FAULT.** Both
+   degenerate patterns were silent, and both are task failures rather than hazards:
+   *never true* means the target integrates from a single anchor forever (bounded only by the
+   lead clamp), *always true* means the target re-anchors on the **lagging** live pose every
+   tick so every step shrinks (R2 measured 169 mm p50 tracking error against 15 mm healthy).
+   The node WARNs, throttled, if no `chunk_start` has arrived for
+   `CHUNK_START_SILENT_WARN_TICKS` (200 ticks ≈ 6.7 s — a fixed count, because the node has no
+   `n_action_steps` parameter and the horizon is not in the handshake; 200 clears 2× the
+   largest horizon these servers run, ACT 30 / FM 32 / diffusion 32) or if `chunk_start` was
+   true on `CHUNK_START_ALWAYS_WARN_TICKS` (60) consecutive ticks. The server side is hardened
+   to match: `act_server` now refuses at load if the policy object has no `_action_queue`,
+   instead of `getattr(…, [])` silently meaning "chunk_start on every tick".
 
 New parameters (declare with these exact names; defaults in parentheses):
 `action_space` ("joint"), `expected_action_space` ("eef_delta_v1"), `eef_max_step_m` (0.02),
@@ -110,7 +150,7 @@ New parameters (declare with these exact names; defaults in parentheses):
 | **A3 training** | `scripts/training/carrot_eef/`: `train_act_carrot_eef.sh`, `train_fm_carrot_eef.sh` (mirror the reference recipes; `--dataset.eval_split=0.111` = last 6 of 54; ACT 50k steps / FM 100k, save every 10k, `--wandb.enable=false`; `GPU_ID` required; `DRY_RUN=1` prints the command), `preflight.sh` (GPU idle, dataset features == §2, disk ≥ 20 GB, `lerobot-train --help` works), `launch_detached.sh` (setsid nohup, pid + log under `runtime/`), `sync_to_kanu.sh` (rsync bundle + dataset to `kanu:~/workspace/youngwoong/carrot_eef/`, `--dry-run` first), `eval_offline_eef.py` (open-loop metrics on held-out episodes: position MAE m, rotation MAE rad, gripper acc, per checkpoint; ACT and FM), `README_KO.md`. Run sync + preflight + `DRY_RUN=1` on kanu as soon as A1's dataset exists; **do not start training** — the integrator triggers it. | `scripts/training/carrot_eef/**` |
 | **A4 node** | `policy_leader_node.py` eef_delta mode per §3 with the pure math in a new rclpy-free `gello_policy/eef_executor.py` (class holding anchor/target/counters; `step(live_q, action, chunk_start) -> (q_target or None, info)`); `obs_assembler.py` 16-D packing + v2 reply parsing + RESET handshake check; unit tests for the executor (accumulation, all clamps, IK fail → hold, re-anchor on chunk_start, joint-mode regression) runnable without ROS. | `ros2_ur_ws/src/gello_policy/gello_policy/{policy_leader_node,obs_assembler,eef_executor}.py`, `ros2_ur_ws/src/gello_policy/test/test_eef_executor.py`, `test_obs_assembler_v2.py` |
 | **A5 servers** | §4 in `zmq_protocol.py`, `act_server.py`, `fm_server.py` (+ `diffusion_server.py` only the RESET/act reply additions so it stays protocol-compatible), `scripts/run_act_server.sh` / `run_fm_server.sh` env passthrough (`*_ACTION_SPACE`, `FM_TASK`). Tests with a stub policy object (no checkpoint needed) in act_venv: handshake fields, state-dim validation, chunk_start flag. | `ros2_ur_ws/src/gello_policy/policy_server/*`, `ros2_ur_ws/src/gello_policy/test/test_zmq_protocol_v2.py` |
-| **A6 configs+launch+docs** | `config/carrot_eef_act.yaml`, `config/carrot_eef_fm.yaml` (copy of act/fm_deploy.yaml with `action_space: eef_delta`, `expected_action_space`, §3 params, A2's `start_pose`/limits/workspace, FM `task: "Put carrot in pot"`), `run_ur7e_act_real.sh` gains `ACT_PARAMS_FILE` (mirror `FM_PARAMS_FILE`), launch passes the new node params through, `scripts/run_*_server.sh` accept the action-space env; `docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md` (operator runbook: dataset → kanu training → checkpoint fetch → latency check → deploy, env vars, safety clamps, what is NOT yet verified) + CLAUDE.md pointer (one table row). `colcon build --packages-select gello_policy ur_gello_bringup` in the worktree must pass. | `ros2_ur_ws/src/gello_policy/config/carrot_eef_*.yaml`, `ros2_ur_ws/run_ur7e_act_real.sh`, launch files, `docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md`, `CLAUDE.md` |
+| **A6 configs+launch+docs** | `config/carrot_eef_act.yaml`, `config/carrot_eef_fm.yaml` (copy of act/fm_deploy.yaml with `action_space: eef_delta`, `expected_action_space`, §3 params, A2's `start_pose`/limits/workspace. ⚠️ **`task:` is NOT a node parameter** — `policy_leader_node` never declares it, so an override there is stored by rclpy and read by nobody. The CLIP prompt comes from `FM_TASK` / `--task` on the SERVER, or `fm_server.default_task_for_space()`; the FM yaml keeps it as a COMMENT only), `run_ur7e_act_real.sh` gains `ACT_PARAMS_FILE` (mirror `FM_PARAMS_FILE`), launch passes the new node params through, `scripts/run_*_server.sh` accept the action-space env; `docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md` (operator runbook: dataset → kanu training → checkpoint fetch → latency check → deploy, env vars, safety clamps, what is NOT yet verified) + CLAUDE.md pointer (one table row). `colcon build --packages-select gello_policy ur_gello_bringup` in the worktree must pass. | `ros2_ur_ws/src/gello_policy/config/carrot_eef_*.yaml`, `ros2_ur_ws/run_ur7e_act_real.sh`, launch files, `docs/ros2/GELLO_UR7E_CARROT_EEF_DEPLOY_KO.md`, `CLAUDE.md` |
 | **A7 lag + eef_space review** | (1) Explain the 0.9 s command-vs-joint lag of the EEF-mode session from the bridge/driver code and the raw data (which topic `command` is, whether the arm was slew/velocity limited, whether the same lag will exist when `policy_leader_node` drives the bridge in joint mode). Write `docs/ros2/CARROT_EEF_LAG_NOTE_KO.md`. (2) Adversarial review of `eef_space.py` (6-D convention, so3 conventions, branch handling near merge points, `wrapped_nearest` elbow rule, clamp semantics) with a test file `test/test_eef_space.py` (round trip on ≥ 3 raw takes, rot_from_6d∘rot_to_6d, apply/delta inverse, clamp direction preservation). Report bugs to the integrator; do not edit `eef_space.py` unless the bug is unambiguous (then note it in the report). | `docs/ros2/CARROT_EEF_LAG_NOTE_KO.md`, `ros2_ur_ws/src/gello_policy/test/test_eef_space.py` |
 
 Wave 2 (after wave 1): A8 integration (end-to-end fake ZMQ server ↔ node in eef_delta mode

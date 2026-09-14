@@ -282,6 +282,13 @@ class EefDeltaExecutor:
             "ik_ok": q_target is not None,
             "ik_branch": int(ik_info["branch"]),
             "ik_on_branch": bool(ik_info["on_branch"]),
+            # R2/F5: ik_tcp_nearest keeps the UR-joint-limit filter only while SOME
+            # candidate survives it; when none do it returns an out-of-limit solution
+            # and says so here. That fact used to stop at eef_space's own info dict,
+            # leaving the yaml joint envelope as the only thing that noticed -- and
+            # the envelope's own reaction (a per-joint clip of an IK solution) is the
+            # failure this flag is meant to pre-announce. The node WARNs on it.
+            "ik_in_limits": bool(ik_info["in_limits"]),
             "ik_n_solutions": int(ik_info["n_solutions"]),
             "ik_max_dev": float(ik_info["max_dev"]),
             "ik_fail_streak": self._ik_fail_streak,

@@ -338,8 +338,10 @@ def test_a_successful_tick_clears_the_streak(monkeypatch):
 
     def fake(*args, **kw):
         if fail["on"]:
+            # Same shape as eef_space.ik_tcp_nearest's failure info (in_limits
+            # included -- the executor now surfaces it as info["ik_in_limits"]).
             return None, {"n_solutions": 0, "branch": -1, "on_branch": False,
-                          "max_dev": float("nan")}
+                          "max_dev": float("nan"), "in_limits": False}
         return real(*args, **kw)
 
     monkeypatch.setattr(eef_space, "ik_tcp_nearest", fake)
@@ -357,6 +359,7 @@ def test_info_carries_the_ik_diagnostics():
     assert info["ik_ok"] is True
     assert info["ik_branch"] == info["start_branch"] == 2
     assert info["ik_on_branch"] is True
+    assert info["ik_in_limits"] is True
     assert info["ik_n_solutions"] >= 1
     assert info["ik_max_dev"] == pytest.approx(0.0, abs=1e-9)
     assert info["tick"] == 1 and info["chunk_start"] is True

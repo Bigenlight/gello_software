@@ -6,10 +6,12 @@
 # #                                                                          #
 # #  This file is a COPY of config/act_deploy.yaml. EVERY safety-relevant    #
 # #  value that is not task-specific is IDENTICAL, byte for byte:            #
-# #    * gello_ur_bridge     — identical (max_step_rad 0.0025 = 0.625 rad/s  #
-# #                            slew ceiling, deadband, staleness 0.5 s,      #
-# #                            soft_start 0.7 s, resume_align_tol 0.08,      #
-# #                            250 Hz upsample, one-euro 3.0/4.0/1.0)        #
+# #    * gello_ur_bridge     — identical EXCEPT staleness_timeout_s          #
+# #                            (0.5 -> 0.8, see R2/F6 at that key): same     #
+# #                            max_step_rad 0.0025 = 0.625 rad/s slew        #
+# #                            ceiling, deadband, soft_start 0.7 s,          #
+# #                            resume_align_tol 0.08, 250 Hz upsample,       #
+# #                            one-euro 3.0/4.0/1.0                          #
 # #    * gello_move_to_start — identical (VERBATIM from ur7e_gello.yaml)     #
 # #    * robotiq_gripper     — identical (VERBATIM from ur7e_gello.yaml)     #
 # #    * policy_leader_node  — identical publish_rate_hz 30.0, act_host/port #
@@ -61,7 +63,9 @@ policy_leader_node:
     # Provenance: the checkpoint the server is expected to be serving. (Only the
     # gRPC transport enforces this today; in the ZMQ path it documents intent and
     # is echoed in the logs. The binding contract check is the handshake above.)
-    # PLACEHOLDER NAME — the carrot EEF checkpoint has not been trained/published yet.
+    # PLACEHOLDER NAME — as of 2026-09-15 the carrot EEF checkpoints exist only on
+    # kanu (~/workspace/youngwoong/carrot_eef/outputs/...); nothing was pushed to HF,
+    # so this repo id does not resolve. It is documentation, not a gate, on the ZMQ path.
     expected_model_id: "Bigenlight/act_carrot_in_pot_eef"
 
     # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
@@ -106,9 +110,13 @@ policy_leader_node:
 
     # ======================================================================== #
     # CARTESIAN SAFETY CLAMPS (eef_delta only — ignored when action_space=joint)
-    # Applied in THIS order every EXECUTE tick, all norm-proportional (never
-    # per-axis: per-axis clipping bends the commanded direction), each logging a
-    # throttled WARN.
+    # Applied in THIS order every EXECUTE tick, each logging a throttled WARN.
+    # (a) and (b) are NORM-PROPORTIONAL (never per-axis: per-axis clipping bends the
+    # commanded direction). (c), the workspace box, IS an axis-wise min/max clip --
+    # a box constraint cannot be expressed norm-proportionally, so a target that hits
+    # the wall slides along it. That is why the box is sized as a LAST-RESORT OOD
+    # barrier (observed TCP range +/- 0.03 m), not as an everyday limit: if it fires
+    # continuously the policy is leaving its training distribution.
     # ======================================================================== #
     # (a) PER-TICK STEP CAP. Bounds one tick's commanded Cartesian motion.
     # FROM carrot_eef_limits.json = 1.5x the largest SINGLE-FRAME achieved motion,
@@ -229,9 +237,16 @@ gello_ur_bridge:
     # driver limit). Do NOT raise for ACT.
     max_step_rad: 0.0025
     deadband_rad: 0.004
-    # UNCHANGED (safety): 0.5 s staleness watchdog. This is what the leader FAULT
-    # path relies on to halt the arm when it stops publishing.
-    staleness_timeout_s: 0.5
+    # RAISED to 0.8 (act_deploy.yaml has 0.5) -- R2/F6: the node is single-threaded,
+    # so a ZMQ round trip BLOCKS the 30 Hz publish for its whole duration. With
+    # staleness == act_timeout_s (0.5) there is ZERO margin: a reply at ~0.45 s does
+    # not FAULT the node, but it has already starved the bridge past its watchdog,
+    # forcing a re-seed plus the 0.7 s soft-start ramp -- a visible stutter with
+    # nothing logged on the node side, during which the EEF target keeps integrating.
+    # 0.8 mirrors carrot_eef_fm.yaml's margin and preserves the intended ordering
+    # act_timeout_s (0.5) < staleness_timeout_s (0.8): the LEADER still faults first
+    # on a real outage, and the bridge watchdog is still what halts the arm.
+    staleness_timeout_s: 0.8
     # UNCHANGED (safety): soft-start ease-in on every (re)seed.
     soft_start_s: 0.7
     start_paused: false
