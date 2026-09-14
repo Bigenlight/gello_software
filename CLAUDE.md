@@ -504,6 +504,7 @@ canonical offline demo 2,037개는 영향 없다(진짜 terminal이다).
 | GELLO 개입 손맛·좌표계 **실기** 검증 | [`docs/testing/04_HIL_INTERVENTION.md`](docs/testing/04_HIL_INTERVENTION.md) §4.5·§9 — `serl_ur_infra/tests/run_real_hil.py`. 기본 `DRY_RUN`이고 `--arm`을 줄 때만 움직인다. **정책이 zero 고정이라 learner도 gRPC 서버도 필요 없다** — 3-CLI 운영 워크플로우와 혼동하지 말 것(실제로 혼동이 있었다). 컨트롤러 요구도 다르다(FPC) → [`docs/testing/00_SETUP_AND_SAFETY.md`](docs/testing/00_SETUP_AND_SAFETY.md) §3.5 |
 | GELLO로 실기 팔 텔레옵 (HIL 개입이 이 경로 위에 있다) | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) · 조인트 모드는 [`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
 | 환경(로봇 위치·테이블·작업공간·카메라·물체)이 바뀐 뒤 **시뮬 리허설** / **GELLO 개체 확인** | [`docs/testing/11_SIM_REHEARSAL_KO.md`](docs/testing/11_SIM_REHEARSAL_KO.md) — `ros2_ur_ws/run_ur7e_gello_mock.sh`(실기 런처를 fake 하드웨어 + `127.0.0.1`로, 덮어쓰기 거부) + `scripts/gello_probe.py`(읽기 전용 ping/read, 토크 0, 포트 점유 시 exit 3). 📌 2026-09-14 0~2단계 PASS. 시뮬이 **못** 보는 것(속도 한계·protective stop·그리퍼·테이블 높이·`r_align_rpy`)과 실기 전 측정표는 그 문서 §0·§3 |
+| **시뮬레이션에서 GELLO로 데이터 수집** (실기 레코더와 같은 형식의 take 녹화) | [`sim_collect/README.md`](sim_collect/README.md) — `./sim_collect/run_sim_collect.sh` 한 줄. MuJoCo UR7e + EEF 델타 제어 + cam1/cam2 + 조작자 GUI. 설계 계약은 [`sim_collect/DESIGN.md`](sim_collect/DESIGN.md). ⚠️ 플레이그라운드(`experiments/launch_yaml.py`)와 **GELLO 포트를 공유하므로 동시 실행 금지**. 🔴 실제 GELLO 텔레옵·파지는 **조작자 미검증** |
 | 처음부터 환경 세팅 / 세션 전 프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
 | 그리퍼만 단독으로 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
 | 카메라가 안 뜰 때 | [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md) · [`docs/testing/06_SENSORS.md`](docs/testing/06_SENSORS.md) |
@@ -613,6 +614,10 @@ ros2_ur_ws/
   run_ur7e_gello_mock.sh           실기 런처(ur7e_gello_real.launch.py)를 fake 하드웨어 + 127.0.0.1로
                                    리허설 — robot_ip/use_fake_hardware 덮어쓰기 거부, 실물 GELLO 필수
                                    (source:=fake 없음), control_mode joint|eef|joint_delta → docs/testing/11
+sim_collect/                       **시뮬 데이터 수집(다른 스택 — HIL 아님).** GELLO로 MuJoCo UR7e를
+                                   텔레옵해 실기 레코더 형식 take를 녹화. run_sim_collect.sh가
+                                   sim_main(물리+리더+제어) / capture(카메라+녹화) / gui 3프로세스를 띄운다
+                                   → sim_collect/README.md · DESIGN.md
 scripts/
   gello_probe.py                   GELLO 개체 확인 — 읽기 전용(ping/read만, 토크 0), 포트 점유 시 exit 3,
                                    --reference(기준 자세 대조) / --watch(관절별 방향) → 02 §8 · 11 0단계

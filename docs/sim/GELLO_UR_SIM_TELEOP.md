@@ -1,5 +1,9 @@
 # GELLO → UR5e + Robotiq 2F-85 MuJoCo 텔레오퍼레이션 셋업
 
+> 🧪 **이 문서는 *플레이그라운드*다** — `configs/rwh_ur.yaml` + `experiments/launch_yaml.py`로 GELLO↔MuJoCo 연결을 확인하는 용도이고, 여기서 나오는 데이터는 아무 데도 저장되지 않는다.
+> **데모 데이터 수집은 여기가 아니라 [`sim_collect/README.md`](../../sim_collect/README.md)에 있다** — 실기 레코더와 같은 형식으로 take를 녹화하는 별도 환경(UR7e + EEF 델타 제어 + 카메라 2대 + 조작자 GUI)이다.
+> ⚠️ 둘은 **같은 GELLO 포트를 쓰므로 동시에 띄우면 서로를 죽인다**(Dynamixel 드라이버가 포트 점유 프로세스를 죽인다). 한 번에 하나만.
+
 물리 **GELLO**(6-DOF UR 리더 암)로 **MuJoCo 시뮬레이션 속 UR5e + Robotiq 2F-85 그리퍼**를 텔레오퍼레이션하는 셋업 문서. 실제 UR 하드웨어 없이 시뮬레이션만으로 동작하며, GELLO는 **passive read-only(토크 미인가)** 로만 사용한다. [Franka 판](GELLO_PANDA_SIM_TELEOP.md)의 UR 버전.
 
 > **먼저 읽을 것**: 저장소 전체 개요와 공통 사전 준비(STEP-0 Dynamixel Wizard 모터 점검, `dialout` 시리얼 권한)는 [README](../../README.md)에 있음. 서브모듈·venv·의존성 설치는 [Franka 판](GELLO_PANDA_SIM_TELEOP.md)의 0~2단계와 동일하니 먼저 마쳐 둘 것.

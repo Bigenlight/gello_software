@@ -1,0 +1,67 @@
+<mujoco model="pot">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+  </asset>
+  <worldbody>
+    <body name="pot" pos="0 0 0">
+      <inertial pos="-1.1135e-18 1.68349e-08 0.0428747" quat="0 0.707107 0 0.707107" mass="0.55" diaginertia="0.00418126 0.0029284 0.00269874"/>
+      <site name="pot_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <site name="pot_opening" pos="0 0 0.1100" size="0.0900" rgba="0 0 0 0"/>
+      <site name="pot_floor" pos="0 0 0.0060" size="0.005" rgba="0 0 0 0"/>
+      <geom name="pot_vis0" type="cylinder" size="0.0960 0.0030" pos="0 4.32723e-08 0.003" rgba="0.22 0.23 0.26 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col1" type="cylinder" size="0.0960 0.0030" pos="0 4.32723e-08 0.003" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis2" type="box" size="0.0030 0.0130 0.0520" pos="0.093 4.32723e-08 0.058" euler="0 0 0.0000" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col3" type="box" size="0.0030 0.0130 0.0520" pos="0.093 4.32723e-08 0.058" euler="0 0 0.0000" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis4" type="box" size="0.0030 0.0130 0.0520" pos="0.0898 0.0241 0.058" euler="0 0 0.2618" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col5" type="box" size="0.0030 0.0130 0.0520" pos="0.0898 0.0241 0.058" euler="0 0 0.2618" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis6" type="box" size="0.0030 0.0130 0.0520" pos="0.0805 0.0465 0.058" euler="0 0 0.5236" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col7" type="box" size="0.0030 0.0130 0.0520" pos="0.0805 0.0465 0.058" euler="0 0 0.5236" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis8" type="box" size="0.0030 0.0130 0.0520" pos="0.0658 0.0658 0.058" euler="0 0 0.7854" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col9" type="box" size="0.0030 0.0130 0.0520" pos="0.0658 0.0658 0.058" euler="0 0 0.7854" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis10" type="box" size="0.0030 0.0130 0.0520" pos="0.0465 0.0805 0.058" euler="0 0 1.0472" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col11" type="box" size="0.0030 0.0130 0.0520" pos="0.0465 0.0805 0.058" euler="0 0 1.0472" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis12" type="box" size="0.0030 0.0130 0.0520" pos="0.0241 0.0898 0.058" euler="0 0 1.3090" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col13" type="box" size="0.0030 0.0130 0.0520" pos="0.0241 0.0898 0.058" euler="0 0 1.3090" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis14" type="box" size="0.0030 0.0130 0.0520" pos="0 0.093 0.058" euler="0 0 1.5708" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col15" type="box" size="0.0030 0.0130 0.0520" pos="0 0.093 0.058" euler="0 0 1.5708" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis16" type="box" size="0.0030 0.0130 0.0520" pos="-0.0241 0.0898 0.058" euler="0 0 1.8326" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col17" type="box" size="0.0030 0.0130 0.0520" pos="-0.0241 0.0898 0.058" euler="0 0 1.8326" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis18" type="box" size="0.0030 0.0130 0.0520" pos="-0.0465 0.0805 0.058" euler="0 0 2.0944" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col19" type="box" size="0.0030 0.0130 0.0520" pos="-0.0465 0.0805 0.058" euler="0 0 2.0944" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis20" type="box" size="0.0030 0.0130 0.0520" pos="-0.0658 0.0658 0.058" euler="0 0 2.3562" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col21" type="box" size="0.0030 0.0130 0.0520" pos="-0.0658 0.0658 0.058" euler="0 0 2.3562" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis22" type="box" size="0.0030 0.0130 0.0520" pos="-0.0805 0.0465 0.058" euler="0 0 2.6180" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col23" type="box" size="0.0030 0.0130 0.0520" pos="-0.0805 0.0465 0.058" euler="0 0 2.6180" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis24" type="box" size="0.0030 0.0130 0.0520" pos="-0.0898 0.0241 0.058" euler="0 0 2.8798" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col25" type="box" size="0.0030 0.0130 0.0520" pos="-0.0898 0.0241 0.058" euler="0 0 2.8798" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis26" type="box" size="0.0030 0.0130 0.0520" pos="-0.093 4.32723e-08 0.058" euler="0 0 3.1416" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col27" type="box" size="0.0030 0.0130 0.0520" pos="-0.093 4.32723e-08 0.058" euler="0 0 3.1416" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis28" type="box" size="0.0030 0.0130 0.0520" pos="-0.0898 -0.0241 0.058" euler="0 0 3.4034" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col29" type="box" size="0.0030 0.0130 0.0520" pos="-0.0898 -0.0241 0.058" euler="0 0 3.4034" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis30" type="box" size="0.0030 0.0130 0.0520" pos="-0.0805 -0.0465 0.058" euler="0 0 3.6652" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col31" type="box" size="0.0030 0.0130 0.0520" pos="-0.0805 -0.0465 0.058" euler="0 0 3.6652" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis32" type="box" size="0.0030 0.0130 0.0520" pos="-0.0658 -0.0658 0.058" euler="0 0 3.9270" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col33" type="box" size="0.0030 0.0130 0.0520" pos="-0.0658 -0.0658 0.058" euler="0 0 3.9270" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis34" type="box" size="0.0030 0.0130 0.0520" pos="-0.0465 -0.0805 0.058" euler="0 0 4.1888" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col35" type="box" size="0.0030 0.0130 0.0520" pos="-0.0465 -0.0805 0.058" euler="0 0 4.1888" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis36" type="box" size="0.0030 0.0130 0.0520" pos="-0.0241 -0.0898 0.058" euler="0 0 4.4506" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col37" type="box" size="0.0030 0.0130 0.0520" pos="-0.0241 -0.0898 0.058" euler="0 0 4.4506" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis38" type="box" size="0.0030 0.0130 0.0520" pos="-0 -0.093 0.058" euler="0 0 4.7124" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col39" type="box" size="0.0030 0.0130 0.0520" pos="-0 -0.093 0.058" euler="0 0 4.7124" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis40" type="box" size="0.0030 0.0130 0.0520" pos="0.0241 -0.0898 0.058" euler="0 0 4.9742" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col41" type="box" size="0.0030 0.0130 0.0520" pos="0.0241 -0.0898 0.058" euler="0 0 4.9742" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis42" type="box" size="0.0030 0.0130 0.0520" pos="0.0465 -0.0805 0.058" euler="0 0 5.2360" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col43" type="box" size="0.0030 0.0130 0.0520" pos="0.0465 -0.0805 0.058" euler="0 0 5.2360" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis44" type="box" size="0.0030 0.0130 0.0520" pos="0.0658 -0.0658 0.058" euler="0 0 5.4978" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col45" type="box" size="0.0030 0.0130 0.0520" pos="0.0658 -0.0658 0.058" euler="0 0 5.4978" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis46" type="box" size="0.0030 0.0130 0.0520" pos="0.0805 -0.0465 0.058" euler="0 0 5.7596" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col47" type="box" size="0.0030 0.0130 0.0520" pos="0.0805 -0.0465 0.058" euler="0 0 5.7596" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis48" type="box" size="0.0030 0.0130 0.0520" pos="0.0898 -0.0241 0.058" euler="0 0 6.0214" rgba="0.30 0.31 0.34 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col49" type="box" size="0.0030 0.0130 0.0520" pos="0.0898 -0.0241 0.058" euler="0 0 6.0214" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis50" type="box" size="0.012 0.022 0.005" pos="0.108 4.32723e-08 0.092" rgba="0.22 0.23 0.26 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col51" type="box" size="0.012 0.022 0.005" pos="0.108 4.32723e-08 0.092" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="pot_vis52" type="box" size="0.012 0.022 0.005" pos="-0.108 4.32723e-08 0.092" rgba="0.22 0.23 0.26 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="pot_col53" type="box" size="0.012 0.022 0.005" pos="-0.108 4.32723e-08 0.092" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

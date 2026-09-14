@@ -1,0 +1,16 @@
+<mujoco model="pear">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh name="pear_mesh" file="pear.obj" maxhullvert="64"/>
+    <texture name="pear_tex" type="2d" file="pear.png"/>
+    <material name="pear_mat" texture="pear_tex" specular="0.25" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="pear" pos="0 0 0">
+      <inertial pos="0.00077739 -0.00691714 0.0302189" quat="0.34261 0.206918 -0.538898 0.74121" mass="0.18" diaginertia="0.000122414 0.000119955 7.2298e-05"/>
+      <site name="pear_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="pear_vis0" type="mesh" mesh="pear_mesh" pos="0.03332 -0.0179945 0.000179" material="pear_mat" group="2" contype="0" conaffinity="0"/>
+      <geom name="pear_col1" type="mesh" mesh="pear_mesh" pos="0.03332 -0.0179945 0.000179" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

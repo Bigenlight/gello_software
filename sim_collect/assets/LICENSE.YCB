@@ -1,0 +1,18 @@
+Yale-CMU-Berkeley (YCB) Object and Model Set
+The YCB object/model data is released under the Creative Commons Attribution 4.0
+International licence (CC BY 4.0), https://creativecommons.org/licenses/by/4.0/
+
+Required attribution / citation:
+
+  B. Calli, A. Singh, A. Walsman, S. Srinivasa, P. Abbeel and A. M. Dollar,
+  "Benchmarking in Manipulation Research: Using the Yale-CMU-Berkeley Object and
+  Model Set", IEEE Robotics and Automation Magazine, 22(3):36-52, Sept. 2015.
+
+  B. Calli, A. Walsman, A. Singh, S. Srinivasa, P. Abbeel and A. M. Dollar,
+  "Benchmarking in Manipulation Research: The YCB Object and Model Set and
+  Benchmarking Protocols", IEEE Robotics and Automation Magazine, 2015.
+
+Changes made here: the google_16k textured.obj was copied verbatim (metres),
+mtllib/usemtl lines were stripped, texture_map.png was downscaled to 1024x1024,
+and the mesh was re-positioned so the object's origin is at the bottom centre of
+its bounding box.  No geometry was modified.

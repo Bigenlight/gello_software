@@ -1,0 +1,193 @@
+# sim_collect scene/task config — "carrot in pot" (see sim_collect/DESIGN.md §3).
+#
+# Everything an operator may want to tune lives here. Loaded by
+# sim_collect.scene.SceneConfig.load(); the same file drives [A] sim_main and
+# [B] capture so both build byte-identical models (scene.build_scene is
+# deterministic given this file + a layout dict).
+#
+# WORLD FRAME / LEFT-RIGHT CONVENTION (DESIGN §3.3, re-derived 2026-09-14 for the
+# REAL robot's home): the real UR7e works with J1 ~ -pi and its TCP on base-frame
+# +x (take_18: q0[0] = -3.299, tcp x0 = +0.49). The UR7e base sits at the world
+# origin on the floor (z=0); at `home_joints` the arm reaches along world +x
+# (TCP ~ (+0.48, +0.05, 0.29), measured with ur_kin.fk). Standing at the base and
+# looking along +x with z up:
+#       LEFT  = +y   -> food (carrot, fruit ...)
+#       RIGHT = -y   -> containers (pot, bowl, basket)
+#   cam1 stands 0.70 m in front of the base at x=+0.70 and looks back toward -x,
+#   so in the cam1 image world +y (LEFT) appears on the image RIGHT (the camera
+#   faces the robot). Negate the y of nominal_pos below to mirror the layout.
+#   (Earlier drafts used J1 ~ -0.16 / TCP on -x; the whole scene was rotated by
+#   180 deg about z to follow the real robot — exactly the J1 -pi shift.)
+
+name: carrot_in_pot_sim
+sim_collect_version: 1
+
+robot:
+  name: ur7e
+  xml: sim_collect/assets/robots/ur7e/ur7e.xml            # repo-relative
+  gripper_xml: third_party/mujoco_menagerie/robotiq_2f85/2f85.xml
+  attachment_site: attachment_site
+  # GELLO calibration pose read 2026-09-14 (DESIGN §1 "Start pose") with J1 shifted
+  # by -pi so it sits on the real robot's branch (take_18 q0[0] = -3.299). Also
+  # passed to the Dynamixel driver as start_joints so its +-2pi wrap lands there.
+  home_joints: [-3.302, -1.563, 1.607, -1.523, -1.615, -3.118]
+  # 2F-85 driver joint used for grip_pos (0 open .. 1 closed). The joint range in
+  # 2f85.xml is 0..0.8 but an empty-hand full close settles at 0.7822 rad (sim,
+  # ctrl 255) while the real Robotiq reports ~0.898 at empty-hand close, so
+  # hi = 0.7822 / 0.898 = 0.871 maps sim closed -> 0.90 like the real driver.
+  gripper_driver_joint: robotiq_2f85/right_driver_joint
+  gripper_driver_range: [0.0, 0.871]
+  gripper_actuator: robotiq_2f85/fingers_actuator      # ctrl 0..255
+  ft_site: ft_site                                      # flange force/torque site
+
+physics:
+  timestep: 0.002
+  integrator: implicitfast
+  cone: elliptic
+  impratio: 10
+  noslip_iterations: 0
+  # Gravity compensation on the six arm links (fraction of weight). The menagerie
+  # position actuators are PD-only, so without it the held arm sags ~0.011 rad
+  # per seed (0.022 measured after teleport+seed); with 1.0 the residual is
+  # 0.0025 rad (the uncompensated gripper's weight). 0 = off.
+  arm_gravcomp: 1.0
+
+floor:
+  # Repeating LIBERO table-wood texture (delivered by O1 under assets/textures/).
+  # If the file is missing scene.py falls back to a procedural checker so the sim
+  # still runs; get_scene_meta reports which one was used (floor.texture_used).
+  texture: sim_collect/assets/textures/seamless_wood_planks_floor.png   # alt: martin_novak_wood_table.png
+  size_m: 5.0                 # plane half-extent -> 10 x 10 m
+  texrepeat: [20, 20]         # ~0.5 m grain period at size_m=5 (tune to real scale)
+  rgba: [0.75, 0.62, 0.45, 1.0]   # fallback tint when no texture file
+  friction: [1.0, 0.005, 0.0001]
+
+cameras:
+  # Names are the contract (real data: cam1 = fixed scene cam, cam2 = wrist cam).
+  color_fovy_deg: 42.0        # D435 color vertical FOV (1280x720)
+  depth_fovy_deg: 58.7        # matches depth K fx=426.7 @ 848x480
+  depth_offset_m: [0.015, 0.0, 0.0]   # depth cam origin, in the color cam frame (+x = image right)
+  cam1:
+    # 0.70 m along +x from the base, z = wrist_2 height at the home pose (0.570),
+    # looking back toward -x, pitched down at the workspace centre.
+    pos: [0.70, 0.0, 0.571]
+    lookat: [0.45, 0.0, 0.0]
+    up: [0.0, 0.0, 1.0]
+  cam2:
+    # Wrist camera. Mounted on the flange side FARTHEST from the base at the home
+    # pose: at home, tool(+attachment_site) +Y points along world +x (measured
+    # 2026-09-14 at home_joints: R_tool[:,1] = (0.979, -0.182, -0.091)), so the
+    # mount is along tool +Y. Looks along tool +Z (toward the fingertips, 0.174 m
+    # out) pitched `pitch_deg` toward the tool axis so the fingertips sit at the
+    # bottom of the frame; `axial_m` pushes the camera down the tool so the
+    # gripper body does not fill the lower half of the frame (0.08 -> only the
+    # fingertips intrude). All numbers are in the attachment_site (tool) frame;
+    # scene.py converts them into the wrist_3_link frame the <camera> lives in.
+    parent_body: wrist_3_link
+    mount_frame: attachment_site
+    radial_dir_tool: [0.0, 1.0, 0.0]
+    radial_m: 0.05
+    axial_m: 0.08           # along tool +Z from the flange
+    pitch_deg: 15.0
+
+render:
+  # Interactive viewer + offscreen renderer quality. Software GL: a 4096 shadow
+  # map in the viewer starved the capture workers (140 ms/frame measured).
+  viewer_shadowsize: 2048
+  offsamples: 0
+  # Lighting. cam1's lit floor saturated to white at headlight 0.6 / ambient 0.35 /
+  # sun 0.55 (mean 212); these give a floor mean ~150 with readable grain.
+  headlight_diffuse: 0.20
+  headlight_ambient: 0.12
+  sun_diffuse: 0.22
+  fill_diffuse: 0.12
+  floor_reflectance: 0.0
+  floor_tint: [0.80, 0.80, 0.80, 1.0]   # multiplies the wood texture
+
+objects:
+  # Each entry: assets/objects/<name>/<name>.xml is used when present (O1's
+  # interface, DESIGN §5.2); otherwise the `placeholder` primitive is built.
+  # `radius_m` = footprint radius for the no-overlap layout sampler.
+  # All food candidates are placed so the operator can try grasping each one
+  # with the GELLO and pick the task object afterwards (assets/objects/README.md
+  # has bbox/mass per object; assets/preview.jpg shows them).
+  - {name: carrot,     kind: food, radius_m: 0.10,   # procedural, 18.5 cm long, lies along +x
+     placeholder: {shape: capsule, radius: 0.018, half_length: 0.07, mass: 0.08, rgba: [0.93, 0.45, 0.10, 1.0]}}
+  - {name: strawberry, kind: food, radius_m: 0.035}  # YCB 012, 4.5 cm
+  - {name: plum,       kind: food, radius_m: 0.035}  # YCB 018, 5.5 cm
+  - {name: lemon,      kind: food, radius_m: 0.04}   # YCB 014, 6 cm
+  - {name: peach,      kind: food, radius_m: 0.04}   # YCB 015, 6.2 cm
+  - {name: pear,       kind: food, radius_m: 0.06}   # YCB 016, 10 cm long
+  - {name: banana,     kind: food, radius_m: 0.10}   # YCB 011, 17.8 cm long
+  - {name: bread,      kind: food, radius_m: 0.03}   # robosuite, 4.8 cm
+  - {name: pot,        kind: container, radius_m: 0.13,   # procedural, inner Ø18 cm × 11 cm
+     placeholder: {shape: open_cylinder, inner_radius: 0.09, height: 0.11, wall: 0.006, bottom: 0.006, n_wall: 24, mass: 0.55, rgba: [0.35, 0.35, 0.38, 1.0]}}
+  - {name: bowl,       kind: container, radius_m: 0.07}   # LIBERO akita_black_bowl, Ø11 cm
+  - {name: basket,     kind: container, radius_m: 0.10}   # LIBERO basket, 17 cm
+
+layout:
+  seed: 0                     # default seed for reset_scene when none is given
+  drop_height_m: 0.02         # objects spawn this far above the floor
+  settle_s: 0.5               # fast-forward physics after a reset
+  min_gap_m: 0.02             # extra clearance between footprints
+  base_keepout_radius_m: 0.22 # nothing spawns closer than this to the base axis
+  max_tries: 200
+  # LEFT (+y) = food, the task object (carrot) at the prime spot right under the
+  # home TCP (+0.48, +0.05); the other candidates fan out around it. RIGHT (-y) =
+  # containers, pot nearest. Radial reach at floor level is comfortable to ~0.65 m.
+  # (Positions are the pre-flip layout rotated 180 deg about z.)
+  items:
+    carrot:     {nominal_pos: [0.45, 0.18, 0.0], random_xy_radius: 0.03, random_yaw: true}
+    strawberry: {nominal_pos: [0.30, 0.30, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    plum:       {nominal_pos: [0.40, 0.36, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    lemon:      {nominal_pos: [0.50, 0.40, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    peach:      {nominal_pos: [0.60, 0.30, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    pear:       {nominal_pos: [0.66, 0.16, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    banana:     {nominal_pos: [0.30, 0.52, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    bread:      {nominal_pos: [0.72, 0.40, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    pot:        {nominal_pos: [0.45, -0.22, 0.0], random_xy_radius: 0.03, random_yaw: true}
+    bowl:       {nominal_pos: [0.28, -0.42, 0.0], random_xy_radius: 0.02, random_yaw: true}
+    basket:     {nominal_pos: [0.66, -0.44, 0.0], random_xy_radius: 0.02, random_yaw: true}
+
+task:
+  name: carrot_in_pot
+  food: carrot
+  container: pot
+  max_vz_m_s: 0.05            # food must be (nearly) at rest vertically
+  gripper_open_below: 0.3     # grip_cmd < this counts as "open"
+
+control:
+  control_mode: eef           # eef | joint
+  control_hz: 250
+  leader_hz: 30
+  # ROS bridge parameter files (gello_ur_bridge section). The eef file is an
+  # OVERLAY on the base file, exactly as the launch loads them — both are read.
+  bridge_params:
+    - ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
+    - ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello_eef.yaml
+  bridge_node: gello_ur_bridge
+  # Sim-only additions (no ROS equivalent):
+  joint_engage_max_gap_rad: 1.5   # joint mode: refuse engage if any joint is farther than this from the leader
+
+leader:
+  # SINGLE SOURCE for the GELLO calibration: the ROS gello_publisher parameters
+  # (port, joint_ids, joint_offsets [0.0,1.571,4.712,4.712,4.712,3.142], joint_signs,
+  # gripper_config). With those offsets today's calibration pose reads J1 ~ +2.98;
+  # the driver's start_joints +-2pi wrap (gello/robots/dynamixel.py:84-104) moves it
+  # to -3.30 because start_joints = robot.home_joints (+ gripper 0). Do NOT copy
+  # numbers here — put deliberate deviations in `overrides` (default empty).
+  calibration_source: ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
+  calibration_node: gello_publisher
+  overrides: {}               # e.g. {joint_offsets: [...], port: /dev/ttyUSB1}
+  warmup_reads: 5             # discard this many samples after connect (driver "comm failed" warm-up)
+  connect_timeout_s: 15.0
+
+gripper:
+  mode: continuous            # continuous | discrete
+  deadband: 0.02              # continuous: |trigger - last| < deadband is not applied (ROS gate)
+  resume_ramp_s: 2.0          # after gripper_resume: slew toward the leader value (ROS resume ramp)
+  resume_slew_per_s: 0.6      #   at this rate, bypassing the deadband
+  open_at: 0.3                # discrete latch: <= open_at -> OPEN
+  close_at: 0.7               # discrete latch: >= close_at -> CLOSED
+
+init_from_leader: true        # startup: read GELLO once and teleport the arm there

@@ -1,0 +1,132 @@
+[
+ {
+  "name": "banana",
+  "bbox_cm": [
+   10.89,
+   17.84,
+   3.67
+  ],
+  "mass": 0.12,
+  "visual_below_floor_mm": 0.0,
+  "source": "YCB 011_banana"
+ },
+ {
+  "name": "strawberry",
+  "bbox_cm": [
+   4.52,
+   4.53,
+   4.57
+  ],
+  "mass": 0.025,
+  "visual_below_floor_mm": 0.0,
+  "source": "YCB 012_strawberry"
+ },
+ {
+  "name": "lemon",
+  "bbox_cm": [
+   6.06,
+   5.93,
+   5.3
+  ],
+  "mass": 0.1,
+  "visual_below_floor_mm": -0.0,
+  "source": "YCB 014_lemon"
+ },
+ {
+  "name": "peach",
+  "bbox_cm": [
+   6.21,
+   6.26,
+   5.86
+  ],
+  "mass": 0.13,
+  "visual_below_floor_mm": -0.0,
+  "source": "YCB 015_peach"
+ },
+ {
+  "name": "pear",
+  "bbox_cm": [
+   6.65,
+   10.05,
+   6.57
+  ],
+  "mass": 0.18,
+  "visual_below_floor_mm": 0.0,
+  "source": "YCB 016_pear"
+ },
+ {
+  "name": "plum",
+  "bbox_cm": [
+   5.72,
+   5.49,
+   5.3
+  ],
+  "mass": 0.07,
+  "visual_below_floor_mm": -0.0,
+  "source": "YCB 018_plum"
+ },
+ {
+  "name": "bread",
+  "bbox_cm": [
+   4.8,
+   4.0,
+   4.8
+  ],
+  "mass": 0.08,
+  "visual_below_floor_mm": -0.0,
+  "source": "robosuite bread"
+ },
+ {
+  "name": "carrot",
+  "bbox_cm": [
+   18.46,
+   3.71,
+   3.6
+  ],
+  "mass": 0.08,
+  "visual_below_floor_mm": 0.0,
+  "source": "procedural"
+ },
+ {
+  "name": "pot",
+  "bbox_cm": [
+   24.0,
+   19.21,
+   11.0
+  ],
+  "mass": 0.55,
+  "visual_below_floor_mm": -0.0,
+  "rim_z": 0.11,
+  "inner_floor_z": 0.006,
+  "opening_radius": 0.09,
+  "source": "procedural"
+ },
+ {
+  "name": "bowl",
+  "bbox_cm": [
+   11.18,
+   11.13,
+   5.26
+  ],
+  "mass": 0.15,
+  "visual_below_floor_mm": 1.59,
+  "rim_z": 0.0505,
+  "inner_floor_z": 0.0052,
+  "opening_radius": 0.0501,
+  "source": "LIBERO akita_black_bowl"
+ },
+ {
+  "name": "basket",
+  "bbox_cm": [
+   17.34,
+   16.22,
+   14.76
+  ],
+  "mass": 0.4,
+  "visual_below_floor_mm": 4.23,
+  "rim_z": 0.1415,
+  "inner_floor_z": 0.0174,
+  "opening_radius": 0.0647,
+  "source": "LIBERO basket"
+ }
+]

@@ -39,42 +39,69 @@ def context() -> zmq.Context:
     return _ctx
 
 
+_SEP = b"\x00"
+
+
+def _frame(topic: str, payload: Dict[str, Any]) -> bytes:
+    """Single-part frame `topic\\0pickle` — single-part so ZMQ_CONFLATE works (it
+    rejects multipart) while SUBSCRIBE prefix filtering on the topic still applies."""
+    return topic.encode() + _SEP + pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _unframe(raw: bytes) -> Dict[str, Any]:
+    return pickle.loads(raw[raw.index(_SEP) + 1:])
+
+
 class Publisher:
     """PUB socket. `send(topic, payload_dict)`; payload is pickled."""
 
-    def __init__(self, name: str, hwm: int = 4):
+    def __init__(self, name: str, hwm: int = 4000):
+        # SNDHWM is per subscriber pipe: a full pipe DROPS for that subscriber. The
+        # recorder must see every 250 Hz message, so keep the pipe deep (4000 msgs ≈
+        # 16 s); conflating subscribers do not care.
         self.sock = context().socket(zmq.PUB)
         self.sock.setsockopt(zmq.SNDHWM, hwm)
         self.sock.bind(endpoint(name))
 
     def send(self, topic: str, payload: Dict[str, Any]) -> None:
-        self.sock.send_multipart([topic.encode(), pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)], zmq.NOBLOCK)
+        self.sock.send(_frame(topic, payload), zmq.NOBLOCK)
 
     def close(self) -> None:
         self.sock.close(linger=0)
 
 
 class Subscriber:
-    """SUB socket with CONFLATE-like behaviour done in software: `latest()` drains the
-    queue and returns the newest message (or None). `recv(timeout_ms)` blocks for one."""
+    """SUB socket.
 
-    def __init__(self, name: str, topic: str = "", hwm: int = 4):
+    conflate=True  -> ZMQ_CONFLATE: the socket keeps ONLY the newest message, so
+                      `latest()`/`recv()` are truly the latest state no matter how slowly
+                      the consumer polls (render workers, GUI). Measured before this
+                      option existed: a 30 Hz consumer of the 250 Hz state stream saw
+                      messages 0.5-2.4 s old because kernel socket buffers, not just the
+                      ZMQ pipe (RCVHWM), queue frames.
+    conflate=False -> every message is delivered in order (the recorder needs all of
+                      them); `latest()` drains what is queued and returns the newest.
+    """
+
+    def __init__(self, name: str, topic: str = "", hwm: int = 4, conflate: bool = False):
         self.sock = context().socket(zmq.SUB)
-        self.sock.setsockopt(zmq.RCVHWM, hwm)
+        self.conflate = bool(conflate)
+        if self.conflate:
+            self.sock.setsockopt(zmq.CONFLATE, 1)     # must precede connect()
+        else:
+            self.sock.setsockopt(zmq.RCVHWM, hwm)
         self.sock.setsockopt(zmq.SUBSCRIBE, topic.encode())
         self.sock.connect(endpoint(name))
 
     def recv(self, timeout_ms: int = 1000) -> Optional[Dict[str, Any]]:
         if self.sock.poll(timeout_ms) == 0:
             return None
-        _topic, raw = self.sock.recv_multipart()
-        return pickle.loads(raw)
+        return _unframe(self.sock.recv())
 
     def latest(self) -> Optional[Dict[str, Any]]:
         msg = None
         while self.sock.poll(0):
-            _topic, raw = self.sock.recv_multipart()
-            msg = pickle.loads(raw)
+            msg = _unframe(self.sock.recv())
         return msg
 
     def close(self) -> None:

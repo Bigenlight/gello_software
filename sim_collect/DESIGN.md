@@ -198,6 +198,22 @@ Joint order = UR order. `qd` = actual `d.qvel[:6]`, `eff` = `d.actuator_force[:6
 | O3 ur7e | **DONE by integrator** — `sim_collect/assets/robots/ur7e/ur7e.xml` (menagerie ur5e structure, exact URDF offsets, meshes via `meshdir` to menagerie; FK == `ur_kin.fk` to 0.000 mm). Load with `mujoco.MjModel.from_xml_path` or dm_control `mjcf.from_path`. | — |
 | O4 docs+launcher+tests | `sim_collect/README.md` (Korean, operator runbook), `sim_collect/run_sim_collect.sh`, `sim_collect/tests/test_format_parity.py`, CLAUDE.md pointer | passes on this machine |
 
+### 5.0 Integration changes after the first implementation round (2026-09-14 evening)
+- `ipc.py` frames are single-part (`topic\0pickle`) so `Subscriber(..., conflate=True)` (ZMQ_CONFLATE) can hand
+  consumers the truly newest state: render workers and the GUI preview use it. Before this the 30 Hz render
+  workers saw states 0.5–2.4 s old (kernel socket buffers queue frames regardless of RCVHWM). The recorder
+  subscribes without conflate (needs every message) with a deep pipe (`Publisher` SNDHWM default 4000).
+- `recorder.py` swaps `RecordingSession`'s table writer for `BufferedHdf5TableWriter` (same on-disk layout;
+  rows buffered and written in blocks every 1 s / on flush / before close): 904 → 6.6 µs per row. Without it
+  the 125 Hz tables fell to ~78 Hz under CPU contention.
+- `cameras.py` render quality from the yaml `render:` block (`capture_offsamples` 0, `capture_shadows` true,
+  `capture_reflections` false, `capture_skybox` false). Measured on the real scene at 1280×720: 20.1 ms
+  baseline → 16.3 (no MSAA) → 3.6 ms (also no shadow/reflection/skybox). The viewer's own shadowmap is
+  `render.viewer_shadowsize` (F1).
+- Wrench is tared after every teleport+settle (startup/reset/home) like the real UR's zeroed F/T; raw in `wrench_raw`.
+- Leader calibration: the ROS `ur7e_gello.yaml` (`gello_publisher`) is the single source; home = the real
+  robot's home (J1 ≈ −3.30, TCP on base-frame +x, matching `take_18`); scene/cameras mirrored to +x (F1, R1 #1).
+
 ### 5.1 Provided by the integrator (use, do not rewrite)
 - `sim_collect/ipc.py` — `endpoint(name)`, `Publisher(name).send(topic, dict)`, `Subscriber(name, topic).latest()/recv()`,
   `Server(name).poll(handler, timeout_ms)`, `Client(name, timeout_ms).call(cmd, **kw)`, `wait_for(client)`.

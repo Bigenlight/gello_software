@@ -1,0 +1,16 @@
+<mujoco model="plum">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh name="plum_mesh" file="plum.obj" maxhullvert="64"/>
+    <texture name="plum_tex" type="2d" file="plum.png"/>
+    <material name="plum_mat" texture="plum_tex" specular="0.25" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="plum" pos="0 0 0">
+      <inertial pos="7.53887e-05 6.87316e-05 0.0240173" quat="0.203621 0.612342 0.292053 0.70589" mass="0.07" diaginertia="2.20761e-05 2.12904e-05 2.03599e-05"/>
+      <site name="plum_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="plum_vis0" type="mesh" mesh="plum_mesh" pos="0.007818 -0.0194235 0.000297001" material="plum_mat" group="2" contype="0" conaffinity="0"/>
+      <geom name="plum_col1" type="mesh" mesh="plum_mesh" pos="0.007818 -0.0194235 0.000297001" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>
