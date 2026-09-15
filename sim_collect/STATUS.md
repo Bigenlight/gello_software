@@ -85,7 +85,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovid
 
 ## 남은 결정 / 다음 단계
 
-1. Diffusion·FM 체크포인트 SR 측정(자동, 알림 오는 대로). 20 seed 해상도(±20 %)에서는 체크포인트 간 차이가 대부분 잡음이라, 최종 비교는 seed를 50~100개로 늘려 상위 후보(Diff 30k, ACT 50k, Diff 60k)만 다시 재는 것이 맞다.
+1. FM 나머지 체크포인트 SR 측정(자동, 알림 오는 대로).
+2. **최종 순위(새 seed 120~159 추가, 총 60 seed)**: Diffusion 70k **33/60 (55 %)** · ACT 50k 25/60 (42 %) — 20 seed 잡음을 넘어
+   Diffusion 70k가 앞선다. FM 최고 체크포인트(70k 11/20)도 학습 종료 후 같은 60 seed로 잰다.
 2. 일반화 개선: 더 넓은 배치(`random_xy_radius`·seed 범위 확대)에서 시연 추가 수집 → 재학습. **사용자 결정 필요.**
 3. 실제 GELLO로 ENGAGE 텔레옵·파지는 수집 과정에서 사용자가 이미 수행(22 take). depth 수집은 옵션(`--depth`).
 4. 실기 전이(sim→real)는 범위 밖: 시각 도메인 격차 큼(`eval/README.md` §8).

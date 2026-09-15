@@ -343,6 +343,8 @@ mpv sim_collect/eval/runs/<run>/ep_07_cam1.mp4
 | FM 60k (Euler 10스텝, CPU) | – | 7/20 | – |
 | FM 70k (Euler 10스텝, CPU) | – | **11/20** | – |
 
+**60-seed 최종 비교(seed 100~159)**: Diffusion 70k **33/60 = 55 %** (Wilson 95 % 42~67 %) · ACT 50k 25/60 = 42 % (30~55 %).
+
 학습 데이터: `Bigenlight/carrot_in_pot_sim_lerobot_v3`(22 에피소드). fault·봉투/max_dev 클램프는 전 구간 0.
 20 seed의 Wilson 구간은 ±20 %라 체크포인트 간 차이는 통계적으로 구분되지 않는다. 지배적 실패는
 "당근에 접근을 못 함(r > 0.3 m)"으로, 시연 배치 범위(당근 x 0.40~0.49, y 0.12~0.24) 밖 일반화 한계로 보인다.
