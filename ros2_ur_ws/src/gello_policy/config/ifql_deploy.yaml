@@ -1,0 +1,222 @@
+# ifql_deploy.yaml — single parameter file for the IFQL real-robot deploy pipeline
+# (carrot-in-pot, UR7e + Robotiq 2F-85, ROS2 Humble).
+#
+# IFQL VARIANT of fm_deploy.yaml. Model: IFQL = flow-matching BC actor + IQL critic,
+# served with best-of-N (BoN) rejection sampling at deploy time (K=32; K=1 == plain BC
+# control from the SAME checkpoint). Observation = frozen ResNet18 spatial-softmax
+# features of cam1 + cam2 (1024-D each) + 7-D proprio = 2055-D. The server emits one
+# 56-D chunk = 8 knots x 7 (q1..q6 target rad + grip_cmd 0..1) at 10 Hz stride-3,
+# expands it into a 24-frame 30 Hz action queue, pops one frame per ACT and re-plans
+# (refill) only when the queue is empty -> re-plan every 24 ticks ~= 0.8 s @ 30 Hz.
+# The 7-D per-tick action contract on the wire is IDENTICAL to ACT/diffusion/FM, so the
+# whole ROS2 safety stack (leader node, bridge, clamps, handshake, gripper) is reused
+# UNCHANGED; only the inference server differs.
+#
+# SERVER (outside this repo): ~/carrot_ifql/code/.../vision_carrot/ifql_server.py
+#   (.venv-svf: torch for the ResNet18 encoder + JAX for the agent), ZMQ REP on
+#   127.0.0.1:5595. Launcher: ros2_ur_ws/run_ur7e_ifql_real.sh. Runbook:
+#   vision_carrot/REALROBOT_RUNBOOK_IFQL.md and docs/ros2/GELLO_UR7E_IFQL_DEPLOY.md.
+#
+# TIMEOUTS: an IFQL refill = JPEG decode + 2x ResNet18 forward (torch) + K flow-matching
+# samples + critic scoring (JAX). The runbook only reports pixel-run refills (21 ms on
+# an RTX 3060, 41 ms on an A4000 with torch on CPU); THIS frozen-feature + BoN K=32 path
+# on this laptop is UNMEASURED, the GPU may be unavailable (CPU fallback) and K=32 is
+# the slow case, so the FM deploy's 0.6/0.7/0.8 budget is widened ONCE to 0.8/0.9/1.0
+# (the handoff's requested values). Ordering invariant
+# preserved: act_timeout_s < obs_timeout_s < staleness_timeout_s (0.8 < 0.9 < 1.0) ->
+# the leader's ZMQ timeout stays the clean primary fault owner.
+#
+# >>> If the measured warmup/refill exceeds 300 ms (server prints
+#     "WARNING: warmup refill ... > 300 ms"), REDUCE K (--num-samples 32 -> 16) rather
+#     than widening these timeouts further. Do NOT raise the timeouts again.
+#
+# PROVENANCE OF THE NUMBERS (all rad, UR joint order pan, lift, elbow, w1, w2, w3):
+#   * start_pose / joint_limits come from the REAL carrot_in_pot corpus, 54 takes /
+#     18,557 frames recorded 2026-09-14 (/home/laptop3/youngwoong_ws/Put_carrot_in_pot),
+#     all 54 confirmed successful 2026-09-15. Two derivations of the same corpus exist:
+#       (1) HF handoff: carrot_real_limits.json (Bigenlight, downloaded by another
+#           agent) -> the values PASTED BELOW.
+#       (2) local: /home/laptop3/gello_software_humble/ros2_ur_ws/src/gello_policy/
+#           config/carrot_eef_limits.json (scripts/dataset/make_carrot_eef_limits.py,
+#           2026-09-14T22:49:56+09:00, git a525f0f-dirty).
+#     They differ only in the 4th decimal (max |diff| 0.0027 rad, see per-field notes).
+#     We use (1); re-check against the HF file once it is on disk.
+#   * The banana values that fm_deploy.yaml carries (start_pose j0 = +3.106, envelope
+#     [2.40, 3.67] on pan) are a DIFFERENT robot placement: the carrot corpus has pan
+#     ~ -3.16, i.e. the SIGN is different. Leaving any banana value here would send
+#     move-to-start to a wrong pose. Nothing banana remains in this file.
+#   * config/joint_safety_limits.json is the banana provenance file for ACT/diffusion.
+#     It is NOT read at runtime and is deliberately left untouched.
+
+# ---------------------------------------------------------------------------- #
+# Synthetic leader (this package). Policy-agnostic; see gello_policy README.
+# ---------------------------------------------------------------------------- #
+policy_leader_node:
+  ros__parameters:
+    # Single rclpy timer rate driving BOTH /gello/joint_states and the gripper
+    # command each tick. MUST stay 30.0: the server's 24-frame queue is laid out on
+    # the dataset's 30 Hz clock (8 knots x stride 3); changing this stretches the
+    # chunk time axis.
+    publish_rate_hz: 30.0
+
+    # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
+    # HOLD the leader publishes THIS pose perfectly still so gello_move_to_start
+    # converges on it and the resume-align gate passes. The live arm must be within
+    # START_GATE_RAD (0.1 rad, policy_leader_node.py) of it before ~/start_execution
+    # is accepted.
+    #
+    # SOURCE: carrot_eef_limits.json "start_pose" = mean over 54 takes of the arm's
+    # REAL pose at the instant the first camera frame was taken (joints DE-STALED:
+    # interpolated at cam1_t[0] + tau_q, tau_q = 0.89 s, matching the training
+    # converter). Per-joint std [0.079, 0.087, 0.107, 0.098, 0.039, 0.116], max dev
+    # [0.201, 0.237, 0.279, 0.278, 0.092, 0.286]. Do NOT paste the naive tau=0 value
+    # ("start_pose_unshifted" [-3.1931, -1.4897, 1.6932, -1.7983, -1.5902, -3.2691],
+    # ~21 mm of TCP away) -- the policy was trained from the de-staled frame-0 state.
+    # The server's own warmup home [-3.302, -1.563, 1.607, -1.523, -1.615, -3.118] is a
+    # dummy for CUDA warmup, not a pose the arm should hold.
+    start_pose: [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
+    # Held gripper command while in HOLD (0.0 = OPEN .. 1.0 = CLOSED). Every take
+    # starts fully open (dataset start_gripper reading 0.0118 = the open end stop).
+    start_gripper: 0.0
+
+    # IFQL inference server endpoint (ZMQ REQ/REP over localhost). Overridable by the
+    # launch act_host / act_port args; run_ur7e_ifql_real.sh passes IFQL_PORT.
+    act_host: "127.0.0.1"
+    act_port: 5595  # IFQL server port (ACT=5591, diffusion=5592, FM=5593, SVF=5594)
+    # REQ socket receive timeout (s). On timeout/error the node FAULTS: it STOPS
+    # publishing /gello/joint_states so the bridge's staleness watchdog trips and
+    # halts the arm (never hold-last-target through an outage).
+    act_timeout_s: 0.8  # widened from FM's 0.6 for BoN K=32 / possible CPU fallback; the
+                        # leader still FAULTs first and stays the PRIMARY fault owner.
+
+    # SAFETY CLAMP (a): per-joint hard limits = the 1.2x dataset envelope, expanded
+    # symmetrically about the centre of the OBSERVED joint range of the 54 carrot takes
+    # (command stream excluded -- in EEF-mode teleop it leads the joints by ~0.9 s).
+    # Any commanded joint outside this is clipped (OOD guard). Order = UR joint order.
+    #
+    # SOURCE: HF handoff carrot_real_limits.json (values below). The local
+    # carrot_eef_limits.json derivation gives
+    #   lo [-3.8049, -1.8055, 1.2649, -2.6913, -1.9309, -4.6440]
+    #   hi [-2.5787, -0.8823, 2.1442, -1.4379, -1.2014, -1.8222]
+    # i.e. per-joint |diff| lo [0.0002, 0.0004, 0.0027, 0.0008, 0.0002, 0.0001],
+    #                    hi [0.0004, 0.0001, 0.0003, 0.0014, 0.0024, 0.0001] rad.
+    # Both enclose the server's denormalisation box (norm_stats_r18_ss_real_lead6.json
+    # action lo [-3.7535, -1.7674, 1.2990, -2.6399, -1.9006, -4.5254] /
+    #        hi [-2.6294, -0.9206, 2.1077, -1.4915, -1.2295, -1.9397]), so with the
+    # correct norm_stats this clamp can only fire on a genuinely OOD sample -- a
+    # steady "SAFETY CLAMP engaged: joint_limits (OOD)" WARN therefore means the server
+    # was started with a SIM norm_stats (sim demos reach pan -4.05), not a policy quirk.
+    # NOTE: the lead0 REAL file (norm_stats_r18_ss_real.json) shares this same action
+    # box, so a lead0/lead6 mix-up is NOT caught here -- only by the launcher's
+    # "norm_stats: ... real_lead6" log check (run_ur7e_ifql_real.sh).
+    joint_limits_lo: [-3.8051, -1.8059, 1.2622, -2.6921, -1.9311, -4.6439]
+    joint_limits_hi: [-2.5783, -0.8822, 2.1445, -1.4393, -1.1990, -1.8221]
+
+    # SAFETY CLAMP (b): per-joint max deviation (rad) of a commanded target from the
+    # LIVE /joint_states. Bounds any single-step jump from the actual pose.
+    # Unchanged from ACT/diffusion/FM.
+    max_dev_rad: 0.5
+
+    # OBS FRESHNESS WATCHDOG: in EXECUTE, if any observation (joint_states, grip_pos,
+    # cam1, cam2) is missing or older than this many seconds, the node FAULTs (stops
+    # publishing -> bridge halts the arm). Catches a frozen/hung camera driving the
+    # policy on a stale frame.
+    # Kept ABOVE act_timeout_s: the node is single-threaded, so during a refill tick it
+    # BLOCKS inside the ZMQ round-trip and cannot service camera callbacks -> obs
+    # timestamps freeze for the refill duration. Keeping obs_timeout_s (0.9) above
+    # act_timeout_s (0.8) makes the ZMQ timeout the real primary fault owner while a
+    # genuinely frozen camera is still caught (0.1 s later).
+    obs_timeout_s: 0.9
+
+    # If true, auto-enter EXECUTE when /forward_position_controller/commands starts
+    # streaming (i.e. the bridge released), instead of waiting for the operator's
+    # ~/start_execution call. MUST stay false for the trial protocol: nothing moves
+    # autonomously before the operator presses START.
+    auto_start_on_stream: false
+
+# ---------------------------------------------------------------------------- #
+# GELLO -> UR bridge. REUSED from ur7e_gello.yaml / fm_deploy.yaml. ONLY
+# staleness_timeout_s differs from fm_deploy.yaml (moved with the other two
+# timeouts); every other safety-relevant value is IDENTICAL.
+# ---------------------------------------------------------------------------- #
+gello_ur_bridge:
+  ros__parameters:
+    filter_type: "one_euro"
+    # OPENED UP for the policy (was 1.0). The policy emits a smooth, already-filtered
+    # target stream at 30 Hz; a low min_cutoff only adds at-rest lag.
+    one_euro_min_cutoff: 3.0
+    # OPENED UP for the policy (was 2.0). Higher beta => cutoff opens faster with speed
+    # => snappier tracking of the policy's intended motion.
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    # UNCHANGED (safety): per-cycle slew ceiling. 0.0025 rad @ 250 Hz => 0.625 rad/s
+    # sustained, worst-case two-coalesce 2.5 rad/s (~20% margin under the 3.14 rad/s
+    # driver limit). Do NOT raise.
+    max_step_rad: 0.0025
+    deadband_rad: 0.004
+    # Kept ABOVE act_timeout_s (0.8) so the bridge does NOT halt during a legitimate
+    # <=0.8s IFQL refill gap while the leader blocks on ZMQ. The leader (0.8s) faults
+    # FIRST and cleanly on a real outage. Ordering: act_timeout_s (0.8) <
+    # obs_timeout_s (0.9) < staleness (1.0).
+    staleness_timeout_s: 1.0
+    # UNCHANGED (safety): soft-start ease-in on every (re)seed.
+    soft_start_s: 0.7
+    start_paused: false
+    # UNCHANGED (safety): resume alignment gate; MUST stay >= chase_tol (0.06).
+    resume_align_tol: 0.08
+    # UNCHANGED: 250 Hz upsample of the 30 Hz leader stream into the 500 Hz driver.
+    publish_rate_hz: 250.0
+    joint_states_topic: "/joint_states"
+
+# ---------------------------------------------------------------------------- #
+# move-to-start handshake. Copied VERBATIM from fm_deploy.yaml / ur7e_gello.yaml.
+#
+# WHERE THE TARGET POSE COMES FROM: this node has NO start_pose parameter. In
+# start_mode "gello" (the only mode run_ur7e_ifql_real.sh allows) it subscribes to
+# /gello/joint_states and chases whatever the leader publishes -- which, while
+# policy_leader_node is in HOLD, is exactly policy_leader_node.start_pose above.
+# So the carrot start pose flows: this yaml -> leader HOLD -> /gello/joint_states ->
+# chase -> STRICT switch -> bridge ~/resume. There is a single source of truth.
+#
+# init_pose below is consulted ONLY in start_mode "init_align" (an interactive,
+# human-GELLO alignment flow whose gate can never pass with a synthetic leader that
+# holds a different pose). It is left at the generic upright value so it cannot be
+# mistaken for a carrot pose; the launcher refuses START_MODE=init_align.
+# ---------------------------------------------------------------------------- #
+gello_move_to_start:
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+    chase_tol: 0.06
+    chase_dwell_s: 0.4
+    chase_v_budget: 0.5
+    min_traj_duration: 0.5
+    chase_hard_limit: 4.0
+    chase_still_speed: 0.1
+    chase_still_window_s: 0.3
+    chase_timeout_s: 30.0
+    gello_staleness_s: 0.5
+    start_mode: "gello"
+    init_pose: [1.5708, -1.57, 1.57, -1.57, -1.57, 0.0]
+    alignment_tolerance: 0.2
+    alignment_hard_limit: 0.5
+    alignment_timeout: 0.0
+
+# ---------------------------------------------------------------------------- #
+# Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
+# Copied VERBATIM from fm_deploy.yaml. serial_port default "" is overridden to
+# /tmp/ttyUR by the launch (arm driver owns the tool bus via use_tool_communication).
+# ---------------------------------------------------------------------------- #
+robotiq_gripper:
+  ros__parameters:
+    serial_port: ""
+    speed: 150
+    force: 50
+    connect_on_start: true
+    activate_on_connect: true
+    status_rate_hz: 5.0
+    command_rate_hz: 20.0
+    command_deadband: 0.01
