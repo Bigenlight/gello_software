@@ -217,6 +217,7 @@ HF 계정 `Bigenlight`, 토큰은 `hf auth whoami`로 확인.
    ```
    raw 릴리스는 이 폴더 그대로다: take 폴더들 + `README.md`(데이터셋 카드) + `DATA_DICTIONARY.md` + `dataset_stats.json` + `assets/`(세팅 사진, 첫 프레임, depth 샘플).
 2. **raw 통계.** `python3 scripts/dataset/make_carrot_raw_stats.py --data $S` → `dataset_stats.json`(ffprobe `-count_frames`로 프레임 수 대조, NaN/Inf, 주기, 값 범위, depth 유효율, 리더/팔로워 차이). 카드의 숫자는 전부 여기서 나온다.
+   📌 2026-09-16부터는 태스크 무관 판 `scripts/dataset/make_raw_stats.py --data $S --dataset Bigenlight/<repo> --task "<task string>"`를 쓴다(`--no-depth` 자동 감지, `stamp_s` 블록과 `timestamp_lag.recorder_artefact_expected` 추가). carrot 스크립트는 그 릴리스 재현용으로 남겨 둔다.
 3. **LeRobot 변환.**
    ```bash
    cd /home/laptop3/youngwoong_ws && lr_env/bin/python /home/laptop3/gello_software/scripts/dataset/convert_carrot_to_lerobot.py \
@@ -243,6 +244,15 @@ HF 계정 `Bigenlight`, 토큰은 `hf auth whoami`로 확인.
 - LeRobot 허브 뷰어는 v3.0 데이터셋의 영상(RGB·depth 모두)을 어차피 안 보여준다. depth 렌더는 `lerobot-dataset-viz`(Rerun) 로컬.
 - 허브에 depth를 넣은 공개 데이터셋 156개 중 79개는 8-bit 컬러맵 영상이라 metric depth가 아니다 — `shape[2]==1` + `is_depth_map`가 아니면 RGB 파이프라인을 탄다.
 - 상위 lerobot의 ACT는 1채널 입력을 못 받는다(issue #4475). "depth를 올렸다" ≠ "depth로 학습된다".
+
+### 2026-09-16 — `Bigenlight/orange_bowl_in_purple_bowl_raw` (수정된 레코더로 찍은 첫 릴리스)
+
+태스크 "put the orange bowl into the purple bowl", **52 take**(take_01~54, 22·40은 조작자가 삭제), 2026-09-15 23:09~09-16 00:01,
+EEF 모드, **RGB만**(depth OFF 기본값), 16,009 프레임 / 534 s / 343 MB. 스테이징 `/home/laptop3/youngwoong_ws/Orange_bowl_in_purple_bowl/`.
+위 절차의 1·2·5단계만으로 올렸다(LeRobot 변환은 별도). 이 코퍼스가 **레코더 수정의 실기 증거**다: `stamp_s` 열이 있고,
+command 대비 `ur_joint_states` 지연이 52 take 전부 0.140~0.150 s(= 실제 서보 추종 지연, 빼면 안 됨), tcp↔joints 상호상관 ≈ 0,
+표 간 `stamp_s` 오프셋 < 40 ms, `detect_spin_starvation` 0/52. **타임스탬프 보정 불필요.** LeRobot 변환 시 τ 이동 없이
+`stamp_s`로 정렬하면 된다. 세팅 사진은 카드 「Setup photo」 자리에 추가 예정.
 
 ## 관련 문서
 
