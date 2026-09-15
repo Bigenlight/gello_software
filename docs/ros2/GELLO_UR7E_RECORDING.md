@@ -249,10 +249,15 @@ HF 계정 `Bigenlight`, 토큰은 `hf auth whoami`로 확인.
 
 태스크 "put the orange bowl into the purple bowl", **52 take**(take_01~54, 22·40은 조작자가 삭제), 2026-09-15 23:09~09-16 00:01,
 EEF 모드, **RGB만**(depth OFF 기본값), 16,009 프레임 / 534 s / 343 MB. 스테이징 `/home/laptop3/youngwoong_ws/Orange_bowl_in_purple_bowl/`.
-위 절차의 1·2·5단계만으로 올렸다(LeRobot 변환은 별도). 이 코퍼스가 **레코더 수정의 실기 증거**다: `stamp_s` 열이 있고,
+LeRobot 변환은 [`Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3)
+(52 에피소드 / 16,009 프레임 / 155 MB, 태그 `v3.0`, 변환 12분). **수정된 레코더용 새 레시피**: `scripts/dataset/convert_takes_to_lerobot.py`
+(태스크 무관, RGB 전용, depth.h5나 `stamp_s` 부재 시 거부) — 마스터 클럭 = `cam1_frames.stamp_s − t0_off`
+(`t0_off = median(ur.stamp_s − ur.t_rel_s)`), 관절·cam2는 헤더 스탬프로, command·gripper는 콜백 시각으로 최근접 정렬, **τ 이동·꼬리 삭제 없음**.
+독립 검증기 `scripts/dataset/validate_takes_conversion.py` → 43/43 PASS(state/action max|Δ| 0, 영상 상관 ≥ 0.9987, |state−action| 중앙값 0.0085 rad = 서보 지연).
+이 코퍼스가 **레코더 수정의 실기 증거**다: `stamp_s` 열이 있고,
 command 대비 `ur_joint_states` 지연이 52 take 전부 0.140~0.150 s(= 실제 서보 추종 지연, 빼면 안 됨), tcp↔joints 상호상관 ≈ 0,
 표 간 `stamp_s` 오프셋 < 40 ms, `detect_spin_starvation` 0/52. **타임스탬프 보정 불필요.** LeRobot 변환 시 τ 이동 없이
-`stamp_s`로 정렬하면 된다. 세팅 사진은 카드 「Setup photo」 자리에 추가 예정.
+`stamp_s`로 정렬하면 된다(위 변환기가 그렇게 한다). 세팅 사진은 두 카드의 「Setup photo」 자리에 추가 예정.
 
 ## 관련 문서
 
