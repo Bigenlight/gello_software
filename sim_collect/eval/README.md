@@ -332,6 +332,7 @@ mpv sim_collect/eval/runs/<run>/ep_07_cam1.mp4
 | Diffusion 50k | – | 7/20 | – |
 | FM 10k (Euler 10스텝, CPU) | – | 4/20 | – |
 | Diffusion 60k | – | 9/20 | – |
+| Diffusion 70k | – | **13/20** | – |
 | FM 20k (Euler 10스텝, CPU) | – | 7/20 | – |
 | FM 30k (Euler 10스텝, CPU) | – | 4/20 | – |
 
