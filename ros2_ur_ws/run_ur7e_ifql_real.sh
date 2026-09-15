@@ -279,12 +279,26 @@ echo "###   stdout/stderr mirrored to ${SERVER_LOG}"
 # should ever reach for the Hub at runtime; harmless if unused.
 # Process substitution (not a pipe) keeps $! = the python PID so the EXIT trap kills
 # the server itself, while tee mirrors its output to the terminal and the log file.
+# QFLOW_DIR: ifql_server.py imports the agent tree (agents/, utils/) from $QFLOW_DIR and
+# otherwise falls back to a hard-coded path on the training PC (/home/theo_lab/...). The
+# tarball ships it as <snapshot>/qflow_svf_merged next to vision_carrot/.
+# FMRL_CAM1_CROP / FMRL_CAM1_MODE MUST be unset: the real norm_stats were extracted with
+# cam1_mode=null / D_f_cam1=1024, so any crop/mode override would silently change the
+# 2055-D observation the checkpoint expects (extract_features.py, cam1 override block).
+IFQL_QFLOW_DIR="${QFLOW_DIR:-$(dirname "${IFQL_SERVER_DIR}")/qflow_svf_merged}"
+if [ ! -d "${IFQL_QFLOW_DIR}/agents" ]; then
+    echo "ERROR: QFLOW_DIR=${IFQL_QFLOW_DIR} has no agents/ (expected <snapshot>/qflow_svf_merged; set QFLOW_DIR)." >&2
+    exit 1
+fi
+echo "###   QFLOW_DIR=${IFQL_QFLOW_DIR}"
 (
     cd "${IFQL_SERVER_DIR}"
+    exec env -u FMRL_CAM1_CROP -u FMRL_CAM1_MODE \
+    QFLOW_DIR="${IFQL_QFLOW_DIR}" \
     TORCH_HOME="${TORCH_HOME:-$IFQL_ROOT/.cache/torch}" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false \
     HF_HUB_OFFLINE=1 \
-    exec "${SERVER_CMD[@]}"
+    "${SERVER_CMD[@]}"
 ) > >(tee -a "${SERVER_LOG}") 2>&1 &
 IFQL_SERVER_PID=$!
 # Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).

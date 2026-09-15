@@ -180,6 +180,16 @@ action · chunk id/step · refill ms, 에피소드당 ~90 MB), `refill_stats.jso
   HF 파생값 둘 다 있고, yaml은 HF 값).
 - **54 take 전부 성공 확인**(2026-09-15) — 학습 데이터에 실패 시연이 섞이지 않았다.
 - 런처: 포트 가드, norm_stats/sampler 로그 검사, per-launch 로그 디렉터리, `init_align` 거부.
+- **서버 기동 즉사 2건 (2026-09-16 smoke에서 발견·해결)** —
+  (a) `ifql_server.py:127` `NormStats.__init__`이 실물 norm_stats의 `"D_c": null`에서
+  `int(None)` TypeError로 죽는다(핸드오프 `hf_release/README.md`·`serve_meta.json`
+  `fallback_reason`에 "실물 전에 고칠 것"으로 기록돼 있던 알려진 결함). **로컬 타르볼 사본
+  `~/carrot_ifql/code/carrot_ifql_code_20260915/vision_carrot/ifql_server.py`에 한 줄 패치**
+  (`int(d.get("D_c") or (self.D_a + Z_PRIV_DIM))` → `D_c=2076`; `use_critic_obs=False`라 예제 배열
+  크기 외 미사용), 원본은 `ifql_server.py.orig`. 타르볼을 다시 풀면 **패치가 사라진다.**
+  (b) `QFLOW_DIR`이 없으면 서버가 학습 PC의 하드코딩 경로(`/home/theo_lab/...`)를 찾다가
+  `ModuleNotFoundError: agents` — 런처가 `<snapshot>/qflow_svf_merged`를 자동 해석해 넘긴다
+  (핸드오프의 `qflow_svf/`는 실제로 `qflow_svf_merged/`). `FMRL_CAM1_CROP/MODE`도 런처가 unset.
 
 ## 7. 남은 것 / 미검증
 
@@ -194,11 +204,18 @@ action · chunk id/step · refill ms, 에피소드당 ~90 MB), `refill_stats.jso
   구체적 스위치는 런북 `REALROBOT_RUNBOOK_IFQL.md` 참조.
 - **`FMRL_DETERMINISTIC=1`** — 서버 env. cudnn deterministic을 켜 bon 측정을 재현 가능하게 한다
   (약간 느려짐). 비교 실험에서 켤지 정한다.
-- `.venv-svf`는 아직 없고, `.cache/torch`는 비어 있다(2026-09-15 23:48). 인코더(`FeatureHeads`)가
-  ResNet18 외에 **`torch.hub.load("facebookresearch/dinov2", …)`도 무조건 로드**하므로 오프라인이면
-  hub 캐시까지 필요하다.
-- refill 레이턴시 **미실측**(런북의 21/41 ms는 픽셀 run 값). frozen-feature + BoN32 + 이 노트북은
-  첫 warmup 로그가 첫 측정이다.
+- ✅ `.venv-svf`(uv py3.11, jax 0.6.2 cuda12 + torch 2.14+cu126, 7.5 GB)와 `.cache/torch`
+  (ResNet18 + **dinov2 hub 캐시** — `FeatureHeads`가 r18_ss에서도 dinov2를 무조건 로드한다)는
+  2026-09-16에 준비됐다. `requirements-svf-infer.txt`는 `hf_release/requirements-infer.txt`(CPU jax,
+  torch 미고정)가 아니라 `vision_carrot/env/requirements.txt`의 cu126 핀에서 서빙 subset만 추린 것.
+- ✅ **CPU smoke 실측 (2026-09-16, GPU 없음, 실물 take_01 frame 0 JPEG q92 1280×720)** —
+  기동 6.2 s, RSS 1.6 GiB. bon32: refill p50 **53 ms** / max 143 ms(torch ResNet18 CPU 지터,
+  `encode_ms` 129), 캐시 틱 2 ms; bc: refill 43 ms. envelope 위반 0, 첫 knot |Δq| ≤ 0.05 rad
+  (클램프 0.5의 1/10), grip ∈ [0, 0.03]. `act_timeout_s 0.8` 대비 5배 이상 여유 → **K=32 유지**.
+  RESET 응답에 계약 외 필드(`policy_type`·`state_dim 7`·`action_dim 7`·`n_action_steps 24`·`chunk`
+  등)가 있지만 클라이언트는 `ok`만 보므로 무해. 산출물 `~/carrot_ifql/eval_runs/smoke_20260916_001204/`.
+  ⚠️ 이 프레임(시작 자세)에서는 K=32 후보의 **Q spread가 ~1e-4로 사실상 0**(argmax가 랜덤하게
+  흔들림) — 즉 시작 프레임에서 bon32 ≈ bc. 실물 bc-vs-bon 해석 시 참고.
 - 클로즈드루프 성공률: 없음. §5가 첫 측정이다.
 
 ## 관련 문서
