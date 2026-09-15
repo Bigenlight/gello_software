@@ -30,6 +30,12 @@
   <!-- PyQt5: the EEF mouse-style operator GUI (gello_eef_gui). Qt widgets only;
        imported by that node's module, not by the joint/eef control path. -->
   <exec_depend>python3-pyqt5</exec_depend>
+  <!-- gello_recorder: the EEF GUI's GO TO START POSE button reuses the task
+       recorder's hardware-verified GO HOME machinery (gello_recorder.home_move
+       + home_move_ros.HomeMoveIoMixin) towards the policy start pose. Only
+       gello_eef_gui_node imports it. No cycle: gello_recorder does not depend
+       on ur_gello_bringup (it vendors the three angle helpers it needs). -->
+  <exec_depend>gello_recorder</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

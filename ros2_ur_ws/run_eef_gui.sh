@@ -39,12 +39,38 @@
 # SetParameters on the ARM bridge and a one-time read-only GetParameters on the
 # gripper bridge (to learn the thresholds it flags against — if that read fails
 # the trigger value is still shown, only the automatic flag goes away). It never
-# commands the robot or GELLO directly.
+# commands the robot or GELLO directly -- with ONE exception, the GO TO START
+# POSE button (two-click confirm). That button pauses BOTH bridges, hands the
+# joints to scaled_joint_trajectory_controller, runs ONE FollowJointTrajectory
+# to the start pose, opens the gripper, hands back to forward_position_controller,
+# and NEVER auto-resumes teleop: the arm holds there until the operator
+# re-ENGAGEs from the GUI. Its target pose comes from START_POSE_CONFIG below.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
+
+# START_POSE_CONFIG -- the deploy yaml the GO TO START POSE button reads its
+# target from: `policy_leader_node.ros__parameters.start_pose` (6 rad, UR joint
+# order) + `start_gripper` (0=open..1=closed). It is the SAME file the inference
+# launch feeds policy_leader_node, so data collection starts from exactly the
+# pose the policy will later be started from (the resume-align gate requires the
+# live arm within ~0.1 rad of it). There is deliberately NO pose hard-coded in
+# the GUI: banana and carrot start poses look alike (pan +3.106 vs -3.164 is
+# ~2*pi apart in value) but differ by up to 0.33 rad on other joints, so a wrong
+# default would park the arm at a plausible-looking wrong pose with no error.
+#
+# Default = the carrot_in_pot deploy config. It may be ABSENT on a fresh
+# checkout (it is untracked while that work is in progress) -- then the button
+# is simply DISABLED with the reason shown on screen; nothing else changes.
+# To collect data for another task, point this at that task's deploy yaml:
+#     START_POSE_CONFIG=src/gello_policy/config/act_deploy.yaml ./run_eef_gui.sh
+# (banana: act/fm/diffusion_deploy.yaml all carry the same pose). A relative
+# path is resolved against the cwd you ran this script from (`exec ros2 run`
+# keeps it), so the example above assumes `cd ros2_ur_ws` first; an absolute
+# path is safer.
+export START_POSE_CONFIG="${START_POSE_CONFIG:-$SCRIPT_DIR/src/gello_policy/config/ifql_deploy.yaml}"
 
 exec ros2 run ur_gello_bringup gello_eef_gui

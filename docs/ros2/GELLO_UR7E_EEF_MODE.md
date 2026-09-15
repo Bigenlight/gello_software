@@ -504,13 +504,39 @@ cd <repo>/ros2_ur_ws && ./run_eef_gui.sh        # = ros2 run ur_gello_bringup ge
 
 ![EEF GUI — ENGAGED, 추적 중(녹색)](images/eef_gui_engaged.png)
 
-> 화면 구성: 맨 위 빨간 **H1 배너**(충돌 게이트 OFF, 상시) → **상태 표시줄**(HOLD 황 / ENGAGED 녹 / DISENGAGED 회) → **큰 토글** → 그리퍼 PAUSE/Resume → **감도 슬라이더**(pos_scale) → 라이브 `~/eef/state` readout(excursion·sigma_min·reject_reason·paused·`v_max`/`w_max` 읽기전용 등).
+> 화면 구성: 맨 위 빨간 **H1 배너**(충돌 게이트 OFF, 상시) → **상태 표시줄**(HOLD 황 / ENGAGED 녹 / DISENGAGED 회) → **`Start pose` 행**(GO TO START POSE / STOP / 상태, 2026-09-16 신설 — 아래 별도 항목) → **큰 토글** → 그리퍼 PAUSE/Resume → **감도 슬라이더**(pos_scale) → 라이브 `~/eef/state` readout(excursion·sigma_min·reject_reason·paused·`v_max`/`w_max` 읽기전용 등).
 
 - **큰 토글 = 켜기/끄기.** ENGAGED에서 클릭 → **disengage**(한 번, 팔 정지라 안전). HOLD/DISENGAGED에서 클릭 → **engage**(두 번 클릭 확인: 첫 클릭 주황 "다시 누르세요", 3초 내 두 번째). DISENGAGED에서는 내부적으로 `eef_resume → pos_scale 커밋 → eef_engage`를 **자동 연결**한다(브리지가 disengage 후 PAUSED라 bare engage는 G0에서 거부되므로).
 - **매 engage = "지금 로봇 자세 + 지금 GELLO"를 새 앵커.** 그래서 **껐다 켜기 자체가 새 기준 잡기**다: `켜기 → 펜처럼 이동 → 끄기 → GELLO 재배치 → 켜기`. 이 때문에 **reclutch / 재무장 / To-Joint 버튼은 없다**(토글이 전부 흡수). reclutch는 "팔을 안 멈추고 원점만 리셋"하는 니치 기능이라 재배치엔 못 쓰고, To-Joint(joint 패스스루 복귀)는 이 GUI의 마우스 워크플로 밖이라 뺐다 — 그건 콘솔에서 한다.
 - **감도 슬라이더 = `pos_scale`(DPI, 0.10 정밀 … 1.00 기본).** **A안(engage 시 커밋)**: 슬라이더는 pending 값만 바꾸고, **NOT ENGAGED일 때만**(engage 직전 / disengage 시) 백엔드에 밀어넣는다 → 스트로크 중 점프 없음. ENGAGED 중엔 "pending 0.35 → 다음 engage에 적용"으로만 표시.
 - **그리퍼 PAUSE/Resume**은 **별도 in-flight 가드**를 쓴다 — engage/disengage RPC가 떠 있어도 PAUSE는 눌린다(H2: ENGAGED를 벗어나는 순간 그리퍼가 아직 GELLO를 따라가므로 즉시 멈출 수 있어야 함). 상태가 ENGAGED를 벗어나면 GUI가 "그리퍼 PAUSE" 경고를 띄운다.
 - 라이브 readout: `state`, `excursion_m`(구간 기준·클러치마다 리셋, H4), `sigma_min`/`gamma`, `reject_reason`, `auto_reason`(마지막 고장 사유), `pos_scale`, `v_max`/`w_max`(읽기전용, H5), 리더/팔 신선도 램프. `v_max`/`w_max`를 바꾸려면 §1.3의 `ros2 param set`.
+
+#### GO TO START POSE 버튼 — 데모 시작 자세로 이동 (🟡 실기 미검증, 2026-09-16 구현)
+
+큰 토글 **위**의 `Start pose` 행. 정책 추론이 시작하는 **바로 그 자세**(`policy_leader_node`가 hold하고 resume-align 게이트가 ±0.1 rad로 요구하는 `start_pose`)로 팔을 보내, 모든 데모가 on-distribution에서 시작하게 한다. 이 GUI에서 **로봇을 직접 움직이는 유일한 버튼**이고, 동작은 task recorder의 실기 검증된 GO HOME 기계(`gello_recorder/home_move.py` + `home_move_ros.py`)를 목표 자세만 바꿔 그대로 쓴다.
+
+**순서(두 번 클릭 후):** ① 두 브리지 `pause`(팔 브리지는 EEF에서 `DISENGAGED`가 되고 아무것도 발행하지 않음) → ② `forward_position_controller` → `scaled_joint_trajectory_controller` STRICT 전환 → ③ `FollowJointTrajectory` **1회**, 목표는 라이브 `/joint_states` 기준 `wrapped_nearest(start_pose, 현재)` — carrot 자세의 `shoulder_pan`(−3.164)은 팔이 평소 앉는 +3.1 쪽과 **2π 다른 winding**이라 raw 값을 그대로 보내면 한 바퀴를 돌아간다. 그래서 반드시 현재 관절 기준으로 접어 보낸다(속도 예산 0.8 rad/s, 2~10 s) → ④ 그리퍼 OPEN(0.0, 약 1 s 재발행) → ⑤ `forward_position_controller` 복구(실패 경로에서도 반드시 수행, fail-closed).
+
+**전제:** `scaled_joint_trajectory_controller`가 **로드**되어 있고 펜던트 External Control이 **PLAYING**일 것(아니면 STJC가 inactive라 goal이 거부되고 FAILED로 끝난다). `~/eef/state`가 살아 있어야 버튼이 켜진다(브리지가 없으면 ①의 pause 서비스도 없다).
+
+**`START_POSE_CONFIG`:** `run_eef_gui.sh`가 기본으로 `src/gello_policy/config/ifql_deploy.yaml`(carrot)을 export한다. 다른 태스크는 그 태스크의 deploy yaml을 가리키면 된다:
+
+```bash
+START_POSE_CONFIG=/abs/path/ros2_ur_ws/src/gello_policy/config/act_deploy.yaml ./run_eef_gui.sh   # banana
+```
+
+읽는 키는 `policy_leader_node.ros__parameters.start_pose`(+ 선택 `start_gripper`). 코드에 **기본 자세는 없다** — banana/carrot이 비슷하게 생겨서(`pan` +3.106 vs −3.164, 나머지 최대 0.33 rad 차이) 잘못된 기본값은 에러 없이 엉뚱한 자세에 세운다. 변수가 없거나 파일이 없거나 형식이 틀리면 **버튼은 비활성**이고 상태줄에 `UNAVAILABLE: <이유>`(예: `START_POSE_CONFIG is not set -- export it to a deploy yaml`, `…/x.yaml: file does not exist`)가 뜬다. 그때 home-move I/O(구독·클라이언트·타이머)는 **아예 만들지 않으며** 나머지 GUI 동작은 그대로다. `start_gripper ≠ 0`은 경고만 하고 무시한다(시퀀스는 항상 OPEN).
+
+**끝난 뒤 teleop은 PAUSED 그대로다.** 자동 resume은 없다(리더는 조작자 손 어딘가에 있으므로 resume = 그쪽으로 추종 시작). 상태줄이 `DONE: START POSE reached; …`가 되면 상태 배너는 `DISENGAGED`이고, **큰 토글을 두 번 눌러 재-ENGAGE**한다 — 토글이 `eef_resume → pos_scale 커밋 → eef_engage`를 자동 연결하고 팔의 **지금 자세**에 새 앵커를 잡는다(§3.5). 그리퍼는 `Gripper Resume` 전에 GELLO 방아쇠를 **연 채로** 둘 것(연속 모드는 ~2 s 램프로 방아쇠 값을 따라간다).
+
+**이동 중 잠금:** 큰 토글(`ENGAGE locked — GO TO START POSE in progress`)과 `Gripper Resume`이 꺼진다 — ① 뒤 브리지가 `DISENGAGED`를 보고하므로 안 막으면 재-ENGAGE가 가능해지고, 그러면 STJC가 관절을 쥔 동안 브리지가 FPC로 스트리밍하다가 ⑤에서 팔이 튄다. `Gripper PAUSE`는 살려 둔다(멱등, H2). 슬라이더는 pending 값만 바꾸므로 그대로.
+
+**`STOP`(한 번 클릭, 확인 없음):** 진행 중 시퀀스 취소 요청. **E-stop이 아니고 즉시도 아니다** — action cancel을 부탁할 뿐이고 STJC는 제 스케줄로 감속하므로 팔은 잠깐 더 움직여 **중간 어딘가에 선다.** 그래도 ⑤ FPC 복구는 거쳐 `FAILED: STOPPED by operator; …`로 끝나고 teleop은 다시 쓸 수 있다. 진짜 비상은 펜던트.
+
+**창 닫기:** 이동 중에는 첫 닫기가 **거부**되고 STOP으로 바뀐다(창이 죽어도 STJC가 이미 받은 goal은 계속 실행되고, FPC를 되돌릴 주체가 사라진다). DONE/FAILED 뒤 다시 닫으면 정상 종료. 15 s가 지나도 시퀀스가 안 끝나면 경고와 복구 명령(`ros2 control switch_controllers --activate forward_position_controller --deactivate scaled_joint_trajectory_controller`)을 터미널에 찍고 닫힌다.
+
+🟡 **실기 미검증**(2026-09-16). 오프라인 검증: `ur_gello_bringup/test/test_eef_gui_start_pose.py`(21) + `gello_recorder/test/test_home_move.py`의 라벨 테스트. 실기 첫 시도는 펜던트 속도 슬라이더를 낮추고, 팔 주변을 비운 뒤, `STOP`에 손을 올리고 할 것.
 
 #### 3.4.2 텍스트 콘솔 — `run_operator_console.sh` (대안 / joint 핸드셰이크용)
 
