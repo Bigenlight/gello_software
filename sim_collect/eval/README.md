@@ -328,6 +328,8 @@ mpv sim_collect/eval/runs/<run>/ep_07_cam1.mp4
 | Diffusion 10k | – | 0/10 | 10 |
 | Diffusion 20k | – | 1/10 | 8 |
 | Diffusion 30k | – | **12/20** | 8 |
+| Diffusion 40k | – | 10/20 | – |
+| FM 10k (Euler 10스텝, CPU) | – | 4/20 | – |
 
 학습 데이터: `Bigenlight/carrot_in_pot_sim_lerobot_v3`(22 에피소드). fault·봉투/max_dev 클램프는 전 구간 0.
 20 seed의 Wilson 구간은 ±20 %라 체크포인트 간 차이는 통계적으로 구분되지 않는다. 지배적 실패는
