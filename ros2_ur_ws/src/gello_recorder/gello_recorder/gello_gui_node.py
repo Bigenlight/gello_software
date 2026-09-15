@@ -85,6 +85,7 @@ except ImportError:  # pragma: no cover - depends on the installed overlay
     Extrinsics = None
 
 from gello_recorder.recording_session import RecordingSession
+from gello_recorder import take_delete
 from gello_recorder.spin_health import (
     QOS_DEPTH_CAMERA,
     QOS_DEPTH_GELLO,
@@ -212,6 +213,20 @@ class GelloRecorderGuiNode(Node):
         self._session_lock = threading.Lock()
         self._session: Optional[RecordingSession] = None
         self._take_index = 0
+        # The take most recently STOPPED in this process, offered for
+        # one-shot deletion via deletable_take_dir()/delete_last_take().
+        # Written by stop_recording() (after close() has drained the
+        # writers), cleared only by a successful delete_last_take().
+        # start_recording() does NOT touch it: while the next take records,
+        # deletable_take_dir() hides it anyway (it returns None whenever a
+        # session is open), and stop_recording() then overwrites it with the
+        # new take -- so an older take is never offered again once a newer
+        # one has been stopped. The one case where leaving it alone is
+        # observable: a start_recording() that raises AFTER taking the lock
+        # (RecordingSession refused to open its files) keeps the previous
+        # take deletable, which is the honest answer since no new take
+        # exists.
+        self._last_take_dir: Optional[str] = None
         # Per-session "already pushed into this session" flags for the cached
         # depth metadata, keyed by cam index. camera_info is re-published every
         # frame, so without these each frame would re-write the same intrinsics.
@@ -473,6 +488,8 @@ class GelloRecorderGuiNode(Node):
         # background frame writer before finalising, so the counts below include
         # every frame that was accepted.
         stats = session.close()
+        with self._session_lock:
+            self._last_take_dir = session.session_dir
         stats["session_dir"] = session.session_dir
         stats.update(self._health_summary(session, stats))
         self.get_logger().info(f"Recording stopped -> {stats}")
@@ -511,6 +528,88 @@ class GelloRecorderGuiNode(Node):
             "spin_starvation_message": report["message"] or "",
             "ros_lag_s_max": None if lag_max is None else round(float(lag_max), 4),
         }
+
+    def deletable_take_dir(self) -> Optional[str]:
+        """The take directory "delete the take I just recorded" may offer.
+
+        Only the take most recently STOPPED in this process, and only while
+        nothing is currently recording -- deleting is never offered as an
+        option mid-take, so the GUI never has to reason about a delete
+        racing a write.
+        """
+        with self._session_lock:
+            return self._last_take_dir if self._session is None else None
+
+    def delete_last_take(self) -> dict:
+        """Permanently delete the take from ``deletable_take_dir()``.
+
+        Raises ``RuntimeError`` (never ``take_delete.TakeDeleteError`` and
+        never a raw ``OSError``, so the GUI has exactly one exception type
+        to catch here) if there is nothing eligible to delete, and lets the
+        underlying ``take_delete.TakeDeleteError`` message pass through as a
+        ``RuntimeError`` if the stored path somehow fails validation. An
+        ``OSError`` out of the actual ``rmtree`` (permissions, a read-only or
+        vanished mount) is wrapped the same way: ``_last_take_dir`` is left
+        SET in that case, so the take stays offered and the operator can
+        retry once the cause is fixed -- a half-deleted folder must not fall
+        off the button silently.
+
+        On success, ``_last_take_dir`` is cleared (one-shot: a second call
+        with nothing new recorded raises "no take to delete" rather than
+        deleting again) and, if the deleted take was still the most recent
+        index ever allocated, ``_take_index`` is decremented so the next
+        recording REUSES that number -- see
+        ``take_delete.next_take_index_after_delete`` for why that is safe
+        (the folder name always carries a fresh timestamp, so reuse cannot
+        collide with anything).
+
+        Locking: the take is CLAIMED under ``_session_lock`` (eligibility
+        check + ``_last_take_dir`` cleared) but the ``rmtree`` itself runs
+        OUTSIDE the lock. ``_session_lock`` is also taken by every 100 Hz
+        sample callback and every camera frame on the spin thread, so
+        holding it across file-system work would stall the whole spin
+        thread for the rmtree duration (milliseconds on this SSD, seconds
+        on a slow mount) -- and TaskRecorderGuiNode keeps this button
+        enabled during a GO HOME, whose sensor caches must stay fresh.
+        Claiming first keeps the operation one-shot without the lock: a
+        second call sees ``_last_take_dir is None``. If a new take starts
+        while the rmtree runs, the counter bookkeeping below still holds
+        because ``next_take_index_after_delete`` only decrements when the
+        deleted take is STILL the latest index.
+        """
+        with self._session_lock:
+            if self._session is not None:
+                raise RuntimeError("cannot delete while recording")
+            if self._last_take_dir is None:
+                raise RuntimeError("no take to delete")
+            take_dir = self._last_take_dir
+            self._last_take_dir = None  # claimed; restored below on failure
+        try:
+            result = take_delete.delete_take_dir(take_dir, self.output_root)
+        except (take_delete.TakeDeleteError, OSError) as exc:
+            # Validation refused it, or rmtree/scandir failed part-way
+            # (EACCES, EROFS, ENOENT under us, ...). Reported, not swallowed
+            # -- and the take is put back on offer so the operator can retry
+            # once the cause is fixed, unless a newer take has been stopped
+            # in the meantime (then the newer one rightly owns the button).
+            with self._session_lock:
+                if self._last_take_dir is None:
+                    self._last_take_dir = take_dir
+            if isinstance(exc, take_delete.TakeDeleteError):
+                raise RuntimeError(str(exc)) from exc
+            raise RuntimeError(
+                "could not delete {}: {}".format(take_dir, exc)) from exc
+        with self._session_lock:
+            self._take_index = take_delete.next_take_index_after_delete(
+                self._take_index, take_dir)
+            result["take_index_after"] = self._take_index
+        self.get_logger().info(
+            "Deleted take -> {} ({} files, {} bytes); take counter now {} "
+            "(next recording will be take_{:02d}_...)".format(
+                result["path"], result["n_files"], result["bytes"],
+                result["take_index_after"], result["take_index_after"] + 1)
+        )
+        return result
 
     def get_preview_frames(self):
         with self._state_lock:

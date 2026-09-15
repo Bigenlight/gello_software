@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -234,6 +235,24 @@ def _resolve_camera_serials(want1, want2):
 # its own background color on top without losing the size.
 _BIG_BUTTON_STYLE = "font-size: 16pt; padding: 14px 22px; min-height: 48px;"
 
+# "Delete last take" is the deliberate opposite of the big buttons above: a
+# rare, destructive, easy-to-fat-finger action, not something reached for on
+# every take the way Start/Stop are. Small + muted red (not filled, not bold)
+# says "here if you need it, and dangerous" without competing for thumb reach
+# or catching the eye the way a primary control would -- an operator scanning
+# the bar for Start/Stop should not even register it until they go looking.
+_DELETE_BUTTON_STYLE = (
+    "font-size: 9pt; padding: 2px 10px; color: #cc3333; "
+    "border: 1px solid #cc3333; background-color: transparent;"
+)
+
+_DELETE_LAST_TAKE_TOOLTIP = (
+    "Permanently deletes the take most recently STOPPED in this window -- "
+    "never a take still recording, and never an older take (from a previous "
+    "session, or from before an earlier delete). Asks for confirmation "
+    "first."
+)
+
 
 def _realsense_argv(camera_name, serial, color_profile, enable_depth=None,
                     align_depth=None):
@@ -397,6 +416,41 @@ _TELEOP_STATE_STALE_S = 2.0
 
 
 # --------------------------------------------------------------------------- #
+# Delete-last-take confirmation sizing
+# --------------------------------------------------------------------------- #
+
+def _scan_take_dir(path):
+    """Best-effort ``(n_files, total_bytes)`` for a take folder.
+
+    Used ONLY to word the delete confirmation prompt ("this removes N files,
+    X.Y MB") -- it is a hint for the operator reading the prompt, not a
+    canonical accounting, and the actual delete is done by the node, not by
+    this scan. Take folders are flat (mp4s/h5s/json sit directly under the
+    take dir, see ``RecordingSession`` / ``GelloRecorderGuiNode.start_recording``),
+    so a single ``os.scandir`` pass is enough -- no recursion.
+
+    Swallows per-entry and whole-directory errors rather than raising: a
+    partially-wrong count in the confirmation text is a cosmetic problem, and
+    is not a reason to block the prompt (or crash it) over something as
+    incidental as a file vanishing mid-scan or a permissions hiccup.
+    """
+    n_files = 0
+    total_bytes = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        n_files += 1
+                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return n_files, total_bytes
+
+
+# --------------------------------------------------------------------------- #
 # Main window
 # --------------------------------------------------------------------------- #
 
@@ -412,6 +466,14 @@ class MainWindow(QMainWindow):
         self._cam_warnings = cam_warnings or []
 
         self._record_start_wall = None  # time.monotonic() at Start, for elapsed
+
+        # Non-modal "Delete last take?" confirmation, or None when no prompt
+        # is open. Kept as a reference (rather than a fire-and-forget popup)
+        # for three reasons: a second click on the button must raise the
+        # existing prompt instead of stacking a duplicate, Start Recording
+        # must be able to close a stale one, and closeEvent must too -- see
+        # _on_delete_last_take_clicked / _on_start_clicked / closeEvent.
+        self._delete_box = None
 
         # --- Teleop control panel state (added block) --------------------- #
         # Two-click resume confirm gate + last statusBar-shown teleop message.
@@ -586,6 +648,20 @@ class MainWindow(QMainWindow):
         self._stop_button.setEnabled(False)
 
         self._take_label = QLabel("Take: 0")
+
+        # Small + secondary on purpose -- see _DELETE_BUTTON_STYLE. Right next
+        # to the take counter it replaces (the take it can delete IS the one
+        # that counter is about to move past), enabled/disabled from
+        # _refresh_controls like every other button here, never from the
+        # click handler.
+        self._delete_last_take_button = QPushButton("Delete last take")
+        self._delete_last_take_button.setStyleSheet(_DELETE_BUTTON_STYLE)
+        self._delete_last_take_button.setToolTip(_DELETE_LAST_TAKE_TOOLTIP)
+        self._delete_last_take_button.setEnabled(False)
+        self._delete_last_take_button.clicked.connect(
+            self._on_delete_last_take_clicked
+        )
+
         self._elapsed_label = QLabel("")
         self._status_label = QLabel("PREVIEW")
         self._status_label.setStyleSheet("font-weight: bold;")
@@ -594,6 +670,8 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._stop_button)
         bar.addSpacing(20)
         bar.addWidget(self._take_label)
+        bar.addSpacing(8)
+        bar.addWidget(self._delete_last_take_button)
         bar.addSpacing(20)
         bar.addWidget(self._elapsed_label)
         bar.addStretch(1)
@@ -791,6 +869,17 @@ class MainWindow(QMainWindow):
         else:
             self._take_label.setText("Take: {}".format(take_n))
 
+        # Delete-last-take is enabled iff the node currently has a deletable
+        # take (the take most recently STOPPED in this process -- see
+        # gello_gui_node.deletable_take_dir()'s docstring). The node's
+        # contract already returns None while recording, but `recording` is
+        # repeated here explicitly anyway: every other button in this bar is
+        # gated straight off it, and a destructive button should not depend
+        # on a single upstream flag staying honest.
+        self._delete_last_take_button.setEnabled(
+            not recording and self._node.deletable_take_dir() is not None
+        )
+
         # Teleop panel shares this ~5 Hz timer (added block).
         self._refresh_teleop()
 
@@ -891,6 +980,15 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- actions --
     def _on_start_clicked(self):
+        # Belt-and-braces: close any open "Delete last take?" prompt BEFORE a
+        # new take can start. The node already refuses delete_last_take() once
+        # a new take has begun (deletable_take_dir() stops naming the old
+        # path -- see _confirm_delete_last_take's own re-check), so this is
+        # not load-bearing for correctness; it is here so a stale confirmation
+        # box never sits on screen next to a take it can no longer act on.
+        if self._delete_box is not None:
+            self._delete_box.close()
+
         # Guarded by the button being disabled unless ready & not recording, but
         # re-check to be safe against a race with the 5 Hz control timer.
         if self._node.is_recording() or not self._node.cameras_ready():
@@ -936,6 +1034,137 @@ class MainWindow(QMainWindow):
             msg = "Take saved."
         self.statusBar().showMessage(msg, 8000)
 
+    # ---------------------------------------------------- delete last take --
+    def _on_delete_last_take_clicked(self):
+        """Open (or re-raise) the non-modal "Delete last take?" prompt.
+
+        NON-MODAL is the whole point: this codebase never uses a blocking
+        QMessageBox.exec_() anywhere the robot can move, because a modal
+        dialog freezes the Qt event loop, and Pause Teleop is exactly the
+        button an operator may need to hit while this prompt is sitting open.
+        So the box is built with Qt.NonModal and shown with show(), and every
+        exit path -- Yes, No, Escape, or a programmatic box.close() from
+        Start Recording / closeEvent -- is routed through the `finished`
+        signal in _on_delete_box_finished rather than a return value, because
+        show() (unlike exec_()) returns immediately with nothing to check.
+        """
+        if self._delete_box is not None:
+            # Already open: bring it to the front instead of stacking a
+            # second prompt (and a second, possibly stale, captured path).
+            self._delete_box.raise_()
+            self._delete_box.activateWindow()
+            return
+
+        path = self._node.deletable_take_dir()
+        if not path:
+            # Race with the ~5 Hz refresh that disables this button, or a
+            # click that landed the same tick the deletable take rolled
+            # over. Nothing to confirm.
+            return
+
+        basename = os.path.basename(os.path.normpath(path))
+        n_files, total_bytes = _scan_take_dir(path)
+        mb = total_bytes / (1024.0 * 1024.0)
+        text = (
+            "Delete {}? This permanently removes the folder ({} files, "
+            "{:.1f} MB). Only the take most recently stopped can be "
+            "deleted."
+        ).format(basename, n_files, mb)
+
+        box = QMessageBox(self)
+        box.setWindowModality(Qt.NonModal)
+        # Free the C++ widget once it closes; the `finished` handler has
+        # already run by then (it fires inside done(), before close()).
+        # Without this every prompt would leave a hidden child until exit.
+        box.setAttribute(Qt.WA_DeleteOnClose, True)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Delete last take")
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        # No is the default AND the escape button: Enter or Esc must never be
+        # able to delete a take, only an explicit click on Yes can.
+        box.setDefaultButton(QMessageBox.No)
+        box.setEscapeButton(QMessageBox.No)
+        # `path` is captured here, at prompt-open time, and carried through
+        # to the finished handler -- NOT re-read from the node there -- so the
+        # re-check in _confirm_delete_last_take is comparing "what this
+        # specific prompt was about" against "what the node considers
+        # deletable right now", not comparing the live value against itself.
+        box.finished.connect(
+            lambda _result, box=box, path=path: self._on_delete_box_finished(box, path)
+        )
+        self._delete_box = box
+        box.show()
+
+    def _on_delete_box_finished(self, box, path):
+        """Route every exit from the confirm box through one place.
+
+        `finished` fires for a Yes click, a No click, Escape, AND a
+        programmatic box.close() (Start Recording / closeEvent) -- the latter
+        reports QMessageBox.Rejected with no button clicked, which is why
+        this checks the clicked button explicitly rather than trusting the
+        dialog's result code: only an explicit Yes is a confirmation, every
+        other exit (including "the box got closed out from under the
+        operator") is treated as No.
+        """
+        self._delete_box = None
+        clicked = box.clickedButton()
+        if clicked is None or box.standardButton(clicked) != QMessageBox.Yes:
+            return
+        self._confirm_delete_last_take(path)
+
+    def _confirm_delete_last_take(self, path):
+        """Yes was clicked: re-validate against the LIVE node state, then delete.
+
+        WHY RE-CHECK. The prompt can sit open for a while (it is non-modal
+        precisely so the operator can keep working while it is up), and in
+        that window a new take could start -- which is exactly the take
+        deletable_take_dir() will no longer name. Comparing the path this
+        prompt was opened for against the CURRENT deletable path (not just
+        trusting that Yes was clicked) is what stops a stale confirmation
+        from deleting the wrong take, or from clashing with a node that has
+        already moved on and would refuse the call anyway.
+        """
+        if self._node.deletable_take_dir() != path:
+            self.statusBar().showMessage(
+                "Delete skipped -- the deletable take changed while the "
+                "confirmation was open.",
+                8000,
+            )
+            self._refresh_controls()
+            return
+        try:
+            result = self._node.delete_last_take()
+        except RuntimeError as exc:
+            self.statusBar().showMessage("Delete failed: {}".format(exc), 8000)
+            return
+        basename = os.path.basename(os.path.normpath(result.get("path", path)))
+        n_files = result.get("n_files", 0)
+        try:
+            mb = float(result.get("bytes", 0)) / (1024.0 * 1024.0)
+        except (TypeError, ValueError):
+            mb = 0.0
+        # take_index_after is the COUNTER (what "Take: N" shows = takes on
+        # record); start_recording() increments before naming, so the next
+        # folder is counter + 1 -- say that number, not the counter, or the
+        # operator reads "Next take: 3" and then sees take_04_... appear.
+        counter = result.get("take_index_after")
+        try:
+            next_take = "{:02d}".format(int(counter) + 1)
+        except (TypeError, ValueError):
+            next_take = "?"
+        self.statusBar().showMessage(
+            "Deleted {} ({} files, {:.1f} MB). Take count now {}; next "
+            "recording will be take_{}.".format(
+                basename, n_files, mb, counter, next_take
+            ),
+            8000,
+        )
+        # take_index() may have decreased (the number is reused) -- this is
+        # what makes the "Take: N" label on the bar reflect it immediately
+        # rather than waiting for the next unrelated ~5 Hz tick.
+        self._refresh_controls()
+
     # -------------------------------------------------------------- close ---
     def _shutdown_cameras(self):
         if self._cameras_killed:
@@ -945,6 +1174,13 @@ class MainWindow(QMainWindow):
         _kill_process_group(self._cam2_proc)
 
     def closeEvent(self, event):
+        # 0. Close a stray "Delete last take?" prompt -- belt-and-braces, same
+        # reasoning as _on_start_clicked: the window is going away regardless,
+        # but a prompt left dangling after close() would otherwise leak a
+        # QMessageBox with no window to reparent it to.
+        if self._delete_box is not None:
+            self._delete_box.close()
+
         # 1. Never abandon an in-progress take -- finalize it first.
         try:
             if self._node.is_recording():
