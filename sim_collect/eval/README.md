@@ -343,6 +343,7 @@ mpv sim_collect/eval/runs/<run>/ep_07_cam1.mp4
 | FM 60k (Euler 10스텝, CPU) | – | 7/20 | – |
 | FM 70k (Euler 10스텝, CPU) | – | **11/20** | – |
 | FM 80k (Euler 10스텝, CPU) | – | **11/20** | – |
+| FM 90k (Euler 10스텝, CPU) | – | 10/20 | – |
 
 **60-seed 최종 비교(seed 100~159)**: Diffusion 70k **33/60 = 55 %** · FM 80k **33/60 = 55 %** (Wilson 95 % 42~67 %) · ACT 50k 25/60 = 42 % (30~55 %).
 
