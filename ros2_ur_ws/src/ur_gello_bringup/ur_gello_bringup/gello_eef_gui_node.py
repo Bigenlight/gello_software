@@ -50,6 +50,26 @@ before an engage (then engage fires on the set-param success) and on a disengage
 so the next HOLD reflects it. pos_scale is NEVER pushed while ENGAGED (that would
 step p_des mid-stroke). The ACTIVE value shown comes from the ~/eef/state topic.
 
+GO TO START POSE (the ONE thing in this GUI that commands the robot itself).
+Demos must start from the SAME pose the inference stack starts the policy from
+(policy_leader_node holds ``start_pose`` and its resume-align gate refuses to
+start unless the arm is within ~0.1 rad of it), so the operator gets one
+two-click button that drives the arm there. The pose comes from
+``$START_POSE_CONFIG`` (a policy deploy yaml -- see ``start_pose.py`` for why
+there is deliberately NO pose hard-coded here), and the motion is the task
+recorder's hardware-verified GO HOME machinery reused verbatim:
+``gello_recorder.home_move`` (the state machine) + ``home_move_ros``
+(:class:`HomeMoveIoMixin`, the rclpy adapter), pointed at ``start_pose`` instead
+of HOME_JOINTS. The sequence -- pause BOTH bridges, forward_position_controller
+-> scaled_joint_trajectory_controller, ONE FollowJointTrajectory to
+``wrapped_nearest(start_pose, live /joint_states)``, open the gripper, restore
+forward_position_controller -- NEVER auto-resumes teleop. It leaves the arm
+bridge PAUSED/DISENGAGED, which is exactly the state this window's big toggle
+already knows how to leave (it chains eef_resume -> pos_scale -> eef_engage).
+FAIL-CLOSED: no usable START_POSE_CONFIG -> the row is disabled with the reason
+on screen and NONE of the home-move I/O (subscriptions, clients, timer) is
+created; every other behaviour of the GUI is unchanged.
+
 console_script entry point: ``gello_eef_gui = ur_gello_bringup.gello_eef_gui_node:main``
 """
 
@@ -63,6 +83,18 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+
+# The GO TO START POSE path. gello_recorder is a sibling package in the same
+# colcon overlay (declared as <exec_depend> in package.xml; it has no dependency
+# back on ur_gello_bringup, so there is no cycle). home_move is pure Python (no
+# ROS, no Qt, no cv2) and carries the state names this GUI paints and the
+# controller names its messages quote; home_move_ros is the rclpy half. The
+# recorder's own Qt window (task_recorder_gui) is deliberately NOT imported --
+# it drags in cv2 -- so the two small status helpers are re-implemented below.
+from gello_recorder.home_move import ACTIVE_STATES, FPC, STJC, HomeMoveState
+from gello_recorder.home_move_ros import HomeMoveIoMixin
+
+from ur_gello_bringup.start_pose import resolve_start_pose
 
 from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType, ParameterValue
@@ -180,13 +212,162 @@ _PRIMARY_ARMED = _btn_css("#ef6c00", "#e65100", big=True)       # orange = "clic
 _BTN = _btn_css("#546e7a", "#37474f")                          # neutral secondary
 _BTN_ARMED = _btn_css("#ef6c00", "#e65100")                    # secondary confirm
 _GRIP_PAUSE_HAZARD = _btn_css("#cc3333", "#a02020")            # red PAUSE (H2 active)
+_START_POSE_STOP = _btn_css("#cc3333", "#a02020")              # red STOP (start-pose move)
+
+# --------------------------------------------------------------------------- #
+# GO TO START POSE -- row text, status mapping                                 #
+# --------------------------------------------------------------------------- #
+# What the sequencer's messages call the target ("moving to START POSE over
+# ...", "START POSE reached; ..."). Passed to HomeMoveController via
+# install_home_move_io so the status line never says "HOME" for a move that
+# went somewhere else.
+START_POSE_LABEL = "START POSE"
+# The status ``state`` this node reports when the button cannot exist at all
+# (no START_POSE_CONFIG, or the file it names is unusable). Not one of
+# HomeMoveState's values on purpose: it is a CONFIG condition, not a sequencer
+# outcome, and the row paints it in the idle grey rather than the FAILED red.
+START_POSE_UNAVAILABLE = "UNAVAILABLE"
+
+# Resting / armed labels for the two-click confirm, same shape as the task
+# recorder's GO HOME: the resting label says "click twice" up front so a
+# first-time operator is never surprised that one click does nothing.
+_START_POSE_BUTTON_TEXT = "GO TO START POSE (click twice)"
+_START_POSE_BUTTON_ARMED_TEXT = "Click AGAIN to GO TO START POSE (robot WILL move)"
+# Fed to _armed_click's status-bar line ("Click AGAIN within 3 s -- {warn}.").
+_START_POSE_WARN = (
+    "teleop will be PAUSED and the robot WILL move to the start pose. Keep clear")
+# STOP is a SINGLE-click control on purpose -- the inverse of the two-click GO.
+# Two clicks exist to stop an accidental START; a stop has no such failure
+# mode, and every extra click is time the arm spends still driving.
+_START_POSE_STOP_TEXT = "STOP"
+_START_POSE_STOP_TOOLTIP = (
+    "Single click, no confirm: cancels the running GO TO START POSE.\n\n"
+    "NOT an E-stop and NOT instantaneous. All this does is ask the trajectory "
+    "action server to cancel; " + STJC + " then decelerates on its own "
+    "schedule, so the arm keeps moving briefly after the click and stops "
+    "partway between where it was and the start pose.\n\n"
+    "The sequence still routes through the fail-closed " + FPC + " restore "
+    "before it lands in FAILED, so teleop is usable again afterwards. Bridges "
+    "are NOT resumed -- re-ENGAGE with the big button.\n\n"
+    "For a real emergency stop use the pendant."
+)
+_START_POSE_TOOLTIP = (
+    "Drives the arm to the SAME start pose the inference stack starts the "
+    "policy from, so every demo starts on-distribution.\n\n"
+    "Sequence (the task recorder's hardware-verified GO HOME path):\n"
+    "  1. pause BOTH teleop bridges (arm bridge -> DISENGAGED, publishes nothing)\n"
+    "  2. " + FPC + " -> " + STJC + "\n"
+    "  3. ONE FollowJointTrajectory to the start pose, wrapped onto the arm's\n"
+    "     current 2*pi winding (never the raw literal)\n"
+    "  4. open the gripper\n"
+    "  5. " + STJC + " -> " + FPC + "\n\n"
+    "Teleop stays PAUSED afterwards: re-ENGAGE with the big button (it chains "
+    "eef_resume -> pos_scale -> eef_engage and re-anchors at the pose the arm "
+    "is now at).\n\n"
+    "Requires " + STJC + " to be loaded and the External Control program "
+    "PLAYING on the pendant. The pose comes from $START_POSE_CONFIG (a policy "
+    "deploy yaml); with no usable file this button stays disabled."
+)
+# Painted on the big toggle while a start-pose move is in flight. The lock is
+# not cosmetic: after step 1 the bridge reports DISENGAGED, which this window
+# would otherwise offer to re-ENGAGE -- and an engage mid-move streams to
+# /forward_position_controller/commands while STJC owns the joints, so nothing
+# happens until step 5 hands FPC back and the arm then JUMPS to wherever the
+# bridge's command chain had wandered.
+_PRIMARY_LOCKED_TEXT = "ENGAGE locked — GO TO START POSE in progress"
+
+# Status colours, same meaning as the task recorder's Go home line: red FAILED,
+# green DONE, orange in flight, grey otherwise (IDLE and UNAVAILABLE -- neither
+# is a fault of the robot).
+_START_POSE_COLOR_IDLE = _GRAY
+_START_POSE_COLOR_ACTIVE = "#dd8800"
+_START_POSE_COLOR_DONE = _GREEN
+_START_POSE_COLOR_FAILED = _RED
+
+# Seconds a refused close holds the operator off before a further close attempt
+# is honoured regardless -- same bounded policy as the task recorder: a wedged
+# sequencer must never be able to trap an operator inside a GUI. Measured from
+# the FIRST refused close and reset once the sequence is no longer active.
+_START_POSE_CLOSE_GRACE_S = 15.0
+_START_POSE_CLOSE_REFUSED_TEXT = (
+    "Window did NOT close -- a GO TO START POSE is still running. STOP was "
+    "requested for you: the trajectory is being cancelled and " + FPC +
+    " restored. The arm coasts briefly. Close again once the Start pose line "
+    "reads DONE or FAILED (a further close is honoured anyway after "
+    "{:.0f} s).".format(_START_POSE_CLOSE_GRACE_S)
+)
+_START_POSE_CLOSE_REFUSED_STDERR = (
+    "### eef gui: close/quit refused -- GO TO START POSE is still active. "
+    "STOP requested; the arm is being stopped and " + FPC + " restored."
+)
+# Printed when the bounded escape hatch fires, i.e. the window lets go of a
+# sequence that never finished. Ends with the recovery command, unprefixed so
+# it can be copied straight into a terminal. (Relaunching this GUI and pressing
+# GO TO START POSE once also self-heals: the sequence sees STJC already active,
+# skips the inbound switch and restores FPC at the end.)
+_START_POSE_STRANDED_WARNING = (
+    "\n"
+    "##################################################################\n"
+    "### WARNING: closed the EEF GUI while GO TO START POSE was ACTIVE.\n"
+    "### THE ARM MAY STILL BE MOVING. Closing this window does not cancel\n"
+    "### a trajectory the controller has already accepted, and the GUI can\n"
+    "### no longer restore the controller for you.\n"
+    "### THE CONTROLLER MAY BE LEFT ON {stjc}\n"
+    "### with {fpc} INACTIVE -- EEF teleop\n"
+    "### will then look fine and do NOTHING. Fix (one line):\n"
+    "##################################################################\n"
+    "ros2 control switch_controllers --activate {fpc} --deactivate {stjc}\n"
+).format(fpc=FPC, stjc=STJC)
+
+
+# Module-level FUNCTIONS, not methods, on purpose (same reasoning as the task
+# recorder's _home_status_text/_home_status_color): the row's refresh logic is
+# tested unbound against a duck-typed stand-in, where a ``self._helper(...)``
+# would resolve to the stand-in's no-op placeholder and silently paint None.
+
+def _start_pose_status_text(state, message):
+    """``STATE`` or ``STATE: message``. Never truncates the message -- it
+    carries the post-DONE operator instructions (teleop still paused, what a
+    gripper resume does) and, for UNAVAILABLE, the reason the button is off."""
+    return "{}: {}".format(state, message) if message else str(state)
+
+
+def _start_pose_status_color(state, active):
+    """Red FAILED, green DONE, orange in flight, grey otherwise."""
+    if state == HomeMoveState.FAILED:
+        return _START_POSE_COLOR_FAILED
+    if state == HomeMoveState.DONE:
+        return _START_POSE_COLOR_DONE
+    # ``active`` is the sequencer's own verdict; the ACTIVE_STATES fallback
+    # keeps the paint honest for a status dict that lacks it.
+    if active or state in ACTIVE_STATES:
+        return _START_POSE_COLOR_ACTIVE
+    return _START_POSE_COLOR_IDLE
 
 
 # --------------------------------------------------------------------------- #
 # Node: owns ALL ROS I/O                                                       #
 # --------------------------------------------------------------------------- #
-class EefGuiNode(Node):
-    """rclpy Node backing the EEF mouse GUI. Thread-safe getters + async calls."""
+class EefGuiNode(HomeMoveIoMixin, Node):
+    """rclpy Node backing the EEF mouse GUI. Thread-safe getters + async calls.
+
+    :class:`HomeMoveIoMixin` (gello_recorder.home_move_ros) is mixed in AHEAD
+    of Node, exactly as the task recorder's node does: it has no ``__init__``
+    (so ``super().__init__`` still lands on Node) and its I/O is created only by
+    the explicit :meth:`install_home_move_io` call at the end of ``__init__``
+    -- and ONLY when a start pose resolved. Without one, none of its
+    subscriptions / clients / timer exist and the three Qt-facing methods
+    (:meth:`get_home_status`, :meth:`request_go_home`,
+    :meth:`request_stop_home`) are overridden below to answer UNAVAILABLE /
+    False without touching the mixin.
+
+    Name budget (checked, no collisions): this node owns ``_lock``, ``_state*``,
+    ``_grip_*``, ``_pending``, ``_svc``, ``_set_params``, ``_get_params``,
+    ``_get_grip_params``, ``_v_max``/``_w_max``/``_vw_pending``; the mixin owns
+    ``_home_*``, ``_svc_home``, ``_gripper_cmd_pub``, ``_speed_scale_*`` and the
+    ``latest_*`` / ``_on_home_*`` / ``_on_speed_scaling`` methods. The two
+    start-pose fields added here are ``_start_pose*`` -- outside both.
+    """
 
     def __init__(self, node_name: str = "gello_eef_gui_node") -> None:
         super().__init__(node_name)
@@ -279,6 +460,86 @@ class EefGuiNode(Node):
             "gello_eef_gui_node up; listening on %s/eef/state + "
             "%s/discrete_state + %s/discrete_trigger"
             % (BRIDGE, GRIPPER, GRIPPER))
+
+        # --- GO TO START POSE: resolve the pose, then (only then) the I/O ---
+        # resolve_start_pose() never raises: (pose, describe()) on success,
+        # (None, one-line reason) otherwise. FAIL CLOSED on None -- no
+        # subscriptions, no controller_manager / action clients, no 10 Hz
+        # sequencer timer. The GUI's row is disabled with the reason and
+        # everything else in this node is byte-for-byte what it was.
+        self._start_pose, self._start_pose_reason = resolve_start_pose()
+        # Named OUTSIDE the mixin's ``_home_*`` namespace on purpose.
+        self._start_pose_io_installed = False
+        if self._start_pose is None:
+            self.get_logger().warn(
+                "GO TO START POSE disabled: %s" % self._start_pose_reason)
+        else:
+            # The gripper pause entry is an ALIAS of this node's existing
+            # client: ``self._svc["grip_pause"]`` is a plain std_srvs/Trigger
+            # client on the very same service (/gello_gripper_bridge/pause)
+            # the mixin would otherwise create a second client for -- identical
+            # service, identical semantics, so a second client would only add
+            # graph entities (the task recorder aliases its base's clients the
+            # same way). Two call_async() calls in flight on one rclpy client
+            # are fine (it tracks them by sequence number), and the GUI's
+            # _grip_pending guard is not involved: the sequencer's pause is its
+            # own request. The ARM pause is different: this node has clients
+            # for the bridge's eef_* services and eef_resume only, NOT for
+            # /gello_ur_bridge/pause, so the mixin creates that one itself.
+            self.install_home_move_io(
+                target_joints=self._start_pose.joints,
+                target_label=START_POSE_LABEL,
+                gripper_pause_client=self._svc["grip_pause"],
+            )
+            self._start_pose_io_installed = True
+            self.get_logger().info(
+                "GO TO START POSE ready: %s (source: %s). Sequence pauses both "
+                "bridges, %s -> %s, one trajectory, gripper OPEN, %s -> %s; "
+                "teleop stays PAUSED afterwards (re-ENGAGE from the GUI)."
+                % (self._start_pose.describe(), self._start_pose.source,
+                   FPC, STJC, STJC, FPC))
+            if self._start_pose.gripper != 0.0:
+                # The sequence ALWAYS opens the gripper (OPENING_GRIPPER
+                # publishes 0.0); a non-zero start_gripper cannot be honoured
+                # by this button. Warn once, do not fail -- the ARM pose is
+                # the load-bearing half and the operator can set the gripper
+                # by hand before ENGAGE.
+                self.get_logger().warn(
+                    "start_gripper=%.2f in %s is NOT supported by GO TO START "
+                    "POSE: the sequence always OPENS the gripper (0.0). The "
+                    "arm pose is honoured; set the gripper by hand afterwards."
+                    % (self._start_pose.gripper, self._start_pose.source))
+
+    # ---------------------------------------------- GO TO START POSE (Qt) ---
+    # The three mixin methods the Qt thread is allowed to call, wrapped so a
+    # node WITHOUT a start pose (no I/O installed) answers honestly instead of
+    # raising AttributeError on a ``_home_lock`` that was never created.
+    # ``HomeMoveIoMixin.<method>(self)`` rather than ``super()`` so the
+    # not-installed branch also works when these are called unbound against a
+    # duck-typed stand-in (test style of this package).
+    def start_pose_info(self):
+        """``(StartPose | None, reason_or_describe)`` -- for the row's info line."""
+        return self._start_pose, self._start_pose_reason
+
+    def get_home_status(self) -> dict:
+        if not self._start_pose_io_installed:
+            return {
+                "state": START_POSE_UNAVAILABLE,
+                "active": False,
+                "message": self._start_pose_reason,
+                "duration_s": None,
+            }
+        return HomeMoveIoMixin.get_home_status(self)
+
+    def request_go_home(self) -> bool:
+        if not self._start_pose_io_installed:
+            return False
+        return HomeMoveIoMixin.request_go_home(self)
+
+    def request_stop_home(self) -> bool:
+        if not self._start_pose_io_installed:
+            return False
+        return HomeMoveIoMixin.request_stop_home(self)
 
     # ------------------------------------------------------------- ROS in ---
     def _on_state(self, msg: String) -> None:
@@ -806,6 +1067,12 @@ class MainWindow(QMainWindow):
         # (open_at, close_at) the gripper tooltip was last rendered with. Set
         # BEFORE _build_ui, which builds that tooltip.
         self._grip_tooltip_band = self._node.grip_thresholds()
+        # GO TO START POSE window state. The last sequencer state seen (so the
+        # terminal outcome is announced exactly once) and the close-refusal
+        # deadline (see _veto_close_during_start_pose_move). Set BEFORE
+        # _build_ui / the first _refresh_eef, which read them.
+        self._start_pose_last_state = None
+        self._start_pose_close_deadline = None
 
         self.setWindowTitle("GELLO -> UR7e  EEF mouse")
         self._build_ui()
@@ -855,6 +1122,11 @@ class MainWindow(QMainWindow):
             "background-color: #888888; color: white; font-weight: bold; "
             "font-size: 20pt; padding: 18px;")
         root.addWidget(self._state_label)
+
+        # --- GO TO START POSE row (above the mouse button) ------------------
+        # Above, not below: it is the FIRST thing the operator does in a demo
+        # cycle (park the arm on-distribution), and only then ENGAGE.
+        root.addWidget(self._build_start_pose_box())
 
         # --- primary mouse-button toggle -----------------------------------
         self._primary = QPushButton("ENGAGE")
@@ -909,6 +1181,54 @@ class MainWindow(QMainWindow):
         self._h5.setWordWrap(True)
         self._h5.setStyleSheet("color: #666666; font-style: italic;")
         root.addWidget(self._h5)
+
+    def _build_start_pose_box(self):
+        """One row: GO TO START POSE | STOP | live status, + an info line.
+
+        STOP is red and sits right of GO so muscle memory aimed at GO cannot
+        land on it; its style is set exactly once here (Qt greys a disabled
+        button by itself), so the ~10 Hz refresh only drives its enabled state.
+        Both buttons start DISABLED and _apply_start_pose owns them from the
+        first refresh on.
+        """
+        box = QGroupBox("Start pose")
+        lay = QVBoxLayout(box)
+
+        row = QHBoxLayout()
+        self._start_pose_btn = QPushButton(_START_POSE_BUTTON_TEXT)
+        self._start_pose_btn.setStyleSheet(_BTN)
+        self._start_pose_btn.setToolTip(_START_POSE_TOOLTIP)
+        self._start_pose_btn.setEnabled(False)
+        self._start_pose_btn.clicked.connect(self._on_start_pose)
+        self._start_pose_stop_btn = QPushButton(_START_POSE_STOP_TEXT)
+        self._start_pose_stop_btn.setStyleSheet(_START_POSE_STOP)
+        self._start_pose_stop_btn.setToolTip(_START_POSE_STOP_TOOLTIP)
+        self._start_pose_stop_btn.setEnabled(False)
+        self._start_pose_stop_btn.clicked.connect(self._on_start_pose_stop)
+        self._start_pose_status = QLabel(HomeMoveState.IDLE)
+        self._start_pose_status.setWordWrap(True)
+        self._start_pose_status.setStyleSheet(
+            f"color: {_START_POSE_COLOR_IDLE}; font-weight: bold;")
+        row.addWidget(self._start_pose_btn)
+        row.addWidget(self._start_pose_stop_btn)
+        row.addWidget(self._start_pose_status, stretch=1)
+        lay.addLayout(row)
+
+        # Provenance line: WHICH pose, from WHICH file -- or why there is none.
+        # The banana/carrot poses look alike (start_pose.py), so the numbers
+        # and the file name are on screen, not just in a tooltip.
+        pose, reason = self._node.start_pose_info()
+        if pose is not None:
+            info = f"{pose.describe()}   (source: {pose.source})"
+        else:
+            info = f"disabled: {reason}"
+        self._start_pose_info = QLabel(info)
+        self._start_pose_info.setWordWrap(True)
+        self._start_pose_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._start_pose_info.setStyleSheet("color: #666666; font-size: 9pt;")
+        self._start_pose_info.setToolTip(_START_POSE_TOOLTIP)
+        lay.addWidget(self._start_pose_info)
+        return box
 
     def _build_slider_box(self):
         box = QGroupBox("Sensitivity — pos_scale (DPI). Rotation is 1:1 (NOT scaled)")
@@ -1049,6 +1369,68 @@ class MainWindow(QMainWindow):
         else:
             self._busy_msg()
 
+    # -- GO TO START POSE ---------------------------------------------------
+    def _on_start_pose(self):
+        """Two-click confirm through the window's existing _armed_click gate:
+        first click arms (orange, 3 s auto-disarm, warning in the status bar),
+        second click fires _do_go_start_pose."""
+        self._armed_click("start_pose", self._do_go_start_pose,
+                          warn=_START_POSE_WARN)
+
+    def _do_go_start_pose(self):
+        """The confirming click. Re-checks the one gate the node cannot see.
+
+        The armed window keeps the button live so the confirming click is not
+        swallowed by a refresh tick, which means the refresh's "eef state must
+        be live" rule is bypassed for those 3 s -- so it is re-checked HERE,
+        at fire time. The other gates ("already running", "pose unknown",
+        "no pose configured") are enforced by the node's request_go_home()
+        itself and need no duplicate.
+        """
+        if self._node.current_state_name() is None:
+            self.statusBar().showMessage(
+                "GO TO START POSE not started — ~/eef/state is stale or absent "
+                "(is the teleop bridge running?).", 6000)
+            return
+        if self._node.request_go_home():
+            self.statusBar().showMessage(
+                "GO TO START POSE started: pausing teleop, driving to the start "
+                "pose, opening the gripper. Teleop stays PAUSED afterwards — "
+                "re-ENGAGE with the big button.", 8000)
+        else:
+            # request() refuses when a sequence is already running, when the
+            # arm's pose is unknown, or when no pose is configured; the reason
+            # is in the status line the ~10 Hz refresh is already painting.
+            self.statusBar().showMessage(
+                "GO TO START POSE not started — see the Start pose status line.",
+                6000)
+
+    def _on_start_pose_stop(self):
+        """SINGLE click, no confirm: operator STOP for an in-flight move.
+
+        Nothing gates it except "is there a move to stop" (the refresh drives
+        the button's enabled state from the sequencer's ``active``). Also the
+        one abort path in this window: closeEvent calls this rather than the
+        node directly, so a refused close and a button press cannot drift.
+        Returns the node's verdict, which is surfaced either way -- a stop
+        button that silently does nothing is worse than no stop button.
+        """
+        fired = self._node.request_stop_home()
+        if fired:
+            self.statusBar().showMessage(
+                "STOP requested — cancelling the start-pose trajectory and "
+                f"restoring {FPC}. NOT instantaneous and NOT an E-stop: the "
+                "controller decelerates on its own schedule, so the arm keeps "
+                "moving briefly and stops partway. Teleop stays PAUSED.", 10000)
+        else:
+            # abort() is False when nothing is in flight; the button is
+            # normally disabled then, so this is the tail of a race with the
+            # sequence finishing on its own.
+            self.statusBar().showMessage(
+                "STOP ignored — no start-pose move is in flight. See the Start "
+                "pose status line for how the last one ended.", 6000)
+        return fired
+
     def _on_grip_pause(self):
         self._fire_and_report(self._node.request_grip_pause,
                               "Gripper pause requested.")
@@ -1079,9 +1461,16 @@ class MainWindow(QMainWindow):
         grip_pending = snap["grip_pending"]
         live = (state is not None and age is not None and age < _STATE_STALE_S)
         st = state.get("state") if (live and state is not None) else None
+        # Polled here, on the SAME tick as everything else, so the row and the
+        # primary-button lock cannot disagree about whether a move is in
+        # flight. get_home_status() is lock-protected and never touches rclpy
+        # from this (Qt) thread beyond that lock.
+        home = self._node.get_home_status()
+        home_active = bool(home.get("active", False))
 
         self._apply_state_indicator(st, live)
-        self._apply_buttons(st, pending, grip_pending)
+        self._apply_buttons(st, pending, grip_pending, home_active=home_active)
+        self._apply_start_pose(home, live)
         self._apply_readout(state, live, age, snap)
         self._apply_gripper_hazard(st)
         self._apply_grip_discrete(snap["grip_discrete"],
@@ -1107,7 +1496,40 @@ class MainWindow(QMainWindow):
             f"background-color: {color}; color: white; font-weight: bold; "
             "font-size: 20pt; padding: 18px;")
 
-    def _apply_buttons(self, st, pending, grip_pending=False):
+    def _apply_buttons(self, st, pending, grip_pending=False, home_active=False):
+        if home_active:
+            # A GO TO START POSE is in flight: LOCK everything that could
+            # re-engage teleop. After the sequence's PAUSING step the bridge
+            # reports DISENGAGED (verified: gello_ur_bridge_node._on_pause sets
+            # _eef_state="DISENGAGED", and _eef_reported_state publishes that
+            # verbatim), which this window would otherwise offer to ENGAGE --
+            # and an engage mid-move streams to /forward_position_controller/
+            # commands while STJC owns the joints, so nothing happens until the
+            # restore hands FPC back and the arm then jumps. The pos_scale
+            # COMMIT rides the same button (A안: it is pushed only inside an
+            # engage/disengage), so locking the primary locks the commit; the
+            # slider itself stays live because editing the PENDING value is
+            # harmless. Gripper Resume is locked for the same reason (it would
+            # make the gripper chase the trigger and undo the OPEN the sequence
+            # is about to command). Gripper PAUSE deliberately stays LIVE: the
+            # pause is idempotent per the bridge contract, the sequence itself
+            # fires it in step 1, and H2 says the operator must always be able
+            # to stop the gripper -- a lock there would buy nothing and cost a
+            # safety action. The reason is on the button and in the Start pose
+            # status line.
+            self._armed["primary"] = False
+            self._armed["grip_resume"] = False
+            self._primary.setText(_PRIMARY_LOCKED_TEXT)
+            self._primary.setEnabled(False)
+            self._primary.setStyleSheet(_PRIMARY_ENGAGE)
+            self._grip_pause_btn.setEnabled(not grip_pending)
+            self._style_confirmable(
+                self._grip_resume_btn, "grip_resume",
+                enabled=False,
+                resting="Gripper Resume (locked: start-pose move)",
+                armed="Click AGAIN to resume gripper")
+            return
+
         # The big toggle is the WHOLE mouse button: click = off/on, and every
         # ENGAGE re-anchors at the current pose (a fresh reference), so no
         # separate reclutch/re-arm is needed. In DISENGAGED/JOINT_BOOTSTRAP the
@@ -1149,6 +1571,68 @@ class MainWindow(QMainWindow):
             self._grip_resume_btn, "grip_resume",
             enabled=not grip_pending,
             resting="Gripper Resume", armed="Click AGAIN to resume gripper")
+
+    def _apply_start_pose(self, status, live):
+        """Drive the GO / STOP buttons and the status label from one status dict.
+
+        Single enablement path on purpose: GO, STOP, the primary-button lock
+        (in _apply_buttons, fed the same ``active``) and the close guard's
+        deadline all move on this one tick, so no second refresh can disagree
+        with it about whether a move is in flight.
+
+        GO is enabled iff a pose is configured AND no move is active AND the
+        ~/eef/state topic is live (``live``): a dead state topic means the
+        bridge is not running, and the sequence's first step needs its pause
+        service anyway -- better to say so before the click than after.
+        The one exception is the ARMED window: the button stays live so the
+        confirming click can land instead of being swallowed by a tick, but
+        ONLY while the gate itself still holds -- if the gate closes mid-window
+        (a move started, the topic went stale) the arm is dropped, exactly as
+        _apply_buttons does for the primary.
+        """
+        state = status.get("state", HomeMoveState.IDLE)
+        active = bool(status.get("active", False))
+        message = status.get("message") or ""
+        available = state != START_POSE_UNAVAILABLE
+        can_go = available and not active and live
+
+        if self._armed.get("start_pose") and can_go:
+            self._start_pose_btn.setText(_START_POSE_BUTTON_ARMED_TEXT)
+            self._start_pose_btn.setStyleSheet(_BTN_ARMED)
+            self._start_pose_btn.setEnabled(True)
+        else:
+            self._armed["start_pose"] = False
+            if not available:
+                text = "GO TO START POSE — disabled (no start pose)"
+            elif active:
+                text = "GO TO START POSE — in progress"
+            elif not live:
+                text = "GO TO START POSE — waiting for ~/eef/state"
+            else:
+                text = _START_POSE_BUTTON_TEXT
+            self._start_pose_btn.setText(text)
+            self._start_pose_btn.setStyleSheet(_BTN)
+            self._start_pose_btn.setEnabled(can_go)
+
+        # STOP is the exact complement: live only while there is something to
+        # stop. Nothing else gates it -- a stop must never wait on anything.
+        self._start_pose_stop_btn.setEnabled(active)
+
+        # A finished sequence releases the close guard, so the next move gets
+        # a full grace window instead of an expired deadline from the last one.
+        if not active:
+            self._start_pose_close_deadline = None
+
+        self._start_pose_status.setText(_start_pose_status_text(state, message))
+        self._start_pose_status.setStyleSheet(
+            f"color: {_start_pose_status_color(state, active)}; font-weight: bold;")
+
+        # Announce the terminal outcome once, on the transition into it.
+        if state != self._start_pose_last_state:
+            self._start_pose_last_state = state
+            if state in (HomeMoveState.DONE, HomeMoveState.FAILED):
+                self.statusBar().showMessage(
+                    f"GO TO START POSE {state}: {message}", 15000)
 
     def _style_confirmable(self, btn, key, enabled, resting, armed):
         if self._armed.get(key):
@@ -1295,6 +1779,17 @@ class MainWindow(QMainWindow):
         self._prev_state = st
 
     def closeEvent(self, event):
+        # Never close the window that owns a RUNNING start-pose sequencer: a
+        # FollowJointTrajectory goal STJC already accepted survives the client
+        # dying (ROS 2 actions are not cancelled when their client goes away),
+        # so the arm would finish its sweep with the joints left on STJC and
+        # the bridges paused -- teleop that looks alive and is silently dead.
+        # The first close is refused and turned into the STOP the operator
+        # actually wanted; a close after the sequence is terminal proceeds
+        # normally. Same policy as the task recorder, including its bounded
+        # escape hatch.
+        if self._veto_close_during_start_pose_move(event):
+            return
         # Stop the QTimers BEFORE tearing down rclpy, so a late _vw_timer /
         # _timer tick cannot do ROS I/O against an already-shutdown context
         # (which would raise inside a Qt slot during teardown).
@@ -1307,6 +1802,46 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
         event.accept()
+
+    def _veto_close_during_start_pose_move(self, event):
+        """True if this close was refused (and turned into a STOP).
+
+        A plain function of the status dict plus the deadline, so it is
+        callable -- and testable -- without a QApplication. Three outcomes:
+
+        * not active -> False, guard reset; the normal close proceeds.
+        * active, within the grace window -> the event is IGNORED, STOP is
+          requested through the same path as the button, the operator is told
+          why in the status bar (never a modal -- one would block the very Qt
+          thread they need in order to press STOP), and True is returned.
+        * active, grace window expired -> False, after a loud stderr warning
+          naming the recovery command. Letting go of a moving arm is bad;
+          trapping the operator in a window is worse.
+        """
+        status = self._node.get_home_status()
+        if not bool(status.get("active", False)):
+            self._start_pose_close_deadline = None
+            return False
+
+        now = time.monotonic()
+        if self._start_pose_close_deadline is None:
+            # First refusal starts the clock. NOT extended by later attempts,
+            # or repeated closing would postpone the escape hatch forever.
+            self._start_pose_close_deadline = now + _START_POSE_CLOSE_GRACE_S
+        elif now >= self._start_pose_close_deadline:
+            print(_START_POSE_STRANDED_WARNING, file=sys.stderr)
+            try:
+                sys.stderr.flush()
+            except Exception:  # noqa: BLE001 -- never block a close on stderr
+                pass
+            return False
+
+        event.ignore()
+        self._on_start_pose_stop()
+        # Shown last so it is the message left standing in the status bar.
+        self.statusBar().showMessage(_START_POSE_CLOSE_REFUSED_TEXT, 10000)
+        print(_START_POSE_CLOSE_REFUSED_STDERR, file=sys.stderr)
+        return True
 
 
 def _fmt(v):

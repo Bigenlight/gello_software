@@ -186,18 +186,19 @@ def test_the_node_ticks_fast_enough_for_the_settle_window_to_be_a_stream():
     the driver inside that window is the window divided by the node's tick
     period.  A slower _HOME_TICK_PERIOD_S silently thins the stream back towards
     the single publish this whole mechanism exists to avoid, and nothing else
-    couples the two numbers -- task_gui_node cannot be imported here (it needs
-    rclpy), so the constant is read out of the source.
+    couples the two numbers -- home_move_ros (where the tick timer now lives,
+    shared by every GUI that hosts the sequence) cannot be imported here (it
+    needs rclpy), so the constant is read out of the source.
     """
     text = open(
         _repo_file(
             "ros2_ur_ws", "src", "gello_recorder", "gello_recorder",
-            "task_gui_node.py",
+            "home_move_ros.py",
         ),
         encoding="utf-8",
     ).read()
     match = re.search(r"^_HOME_TICK_PERIOD_S\s*=\s*([0-9.]+)", text, re.MULTILINE)
-    assert match, "_HOME_TICK_PERIOD_S not found in task_gui_node.py"
+    assert match, "_HOME_TICK_PERIOD_S not found in home_move_ros.py"
     period = float(match.group(1))
     assert period > 0
     assert GRIPPER_OPEN_REASSERT_S / period >= 5.0
@@ -751,3 +752,122 @@ def test_request_gating_over_a_whole_lifecycle():
     ctrl.tick()
     assert ctrl.status()["state"] == HomeMoveState.FAILED
     assert ctrl.request() is True
+
+
+# ===================================================================== #
+# A custom target pose (the EEF GUI's GO TO START POSE)
+# ===================================================================== #
+# The same machine drives the EEF teleop GUI's GO TO START POSE button with a
+# different pose.  What is pinned: the pose given IS the pose sent (through
+# the same branch-cut-safe path as HOME), a bad pose is refused at
+# CONSTRUCTION (before any bridge is paused or any controller switched), and
+# leaving the argument out is exactly the task recorder's GO HOME.
+def test_default_target_is_home_joints_and_is_read_only():
+    _, _, ctrl = make()
+    assert ctrl.target_joints == HOME_JOINTS
+    assert isinstance(ctrl.target_joints, tuple)
+    with pytest.raises(AttributeError):
+        ctrl.target_joints = (0.0,) * 6           # a property, not a field
+
+
+def test_a_custom_target_is_what_gets_sent_and_it_is_branch_cut_safe():
+    """A start pose far from HOME, with the arm wound the other way on the
+    joints that sit near the +/-pi cut -- the EEF GUI's actual hazard case."""
+    start = (3.05, -1.20, 1.40, -1.90, -1.40, -3.05)
+    # shoulder_pan and wrist_3 read on the opposite branch: ~0.03 rad away
+    # physically, ~6.25 rad away numerically.
+    current = [-3.20, -1.5276, 1.7168, -1.7592, -1.5216, 3.20]
+    clock = FakeClock()
+    ops = FakeOps(clock, current)
+    ctrl = HomeMoveController(ops, target_joints=start)
+
+    assert ctrl.target_joints == start           # stored as given (as a tuple)
+    drive_to_moving(ctrl, ops)
+    positions, duration = ops.traj_args[0]
+
+    # The commanded pose is the given START, not HOME...
+    assert positions[1] == pytest.approx(start[1])
+    assert positions[2] == pytest.approx(start[2])
+    assert positions[3] == pytest.approx(start[3])
+    assert positions[1] != pytest.approx(HOME_JOINTS[1])
+    # ...and on the cut joints it is START's angular equivalent on the arm's
+    # CURRENT branch, never the raw literal.
+    assert positions[0] == pytest.approx(start[0] - 2.0 * 3.141592653589793, abs=1e-6)
+    assert positions[5] == pytest.approx(start[5] + 2.0 * 3.141592653589793, abs=1e-6)
+    assert max(abs(p - c) for p, c in zip(positions, current)) < 0.5
+    # Duration is sized from the WRAPPED gap (worst joint 0.3276 rad / 0.8 ->
+    # clamps to the 2.0 s minimum), not from the ~6.25 rad numeric one.
+    assert duration == 2.0
+
+
+def test_the_default_target_and_an_explicit_home_send_the_same_command():
+    current = [-3.1400, -1.5276, 1.7168, -1.7592, -1.5216, 3.1400]
+    _, ops_default, ctrl_default = make(joints=current)
+    clock = FakeClock()
+    ops_explicit = FakeOps(clock, current)
+    ctrl_explicit = HomeMoveController(ops_explicit, target_joints=list(HOME_JOINTS))
+    drive_to_moving(ctrl_default, ops_default)
+    drive_to_moving(ctrl_explicit, ops_explicit)
+    assert ops_default.traj_args == ops_explicit.traj_args
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        (0.0,) * 5,                                  # too short
+        (0.0,) * 7,                                  # too long
+        (),                                          # empty
+        (0.0, 0.0, float("nan"), 0.0, 0.0, 0.0),     # NaN
+        (0.0, 0.0, 0.0, float("inf"), 0.0, 0.0),     # inf
+        (0.0, 0.0, 0.0, 0.0, 0.0, "x"),              # not a number
+        (0.0, 0.0, 0.0, 0.0, 0.0, None),             # None
+        "abcdef",                                    # six characters is not six joints
+    ],
+    ids=["short", "long", "empty", "nan", "inf", "str_elem", "none_elem", "string"],
+)
+def test_an_invalid_target_is_rejected_at_construction(bad):
+    """Before any ops call: the FakeOps log must stay empty, i.e. the refusal
+    happened in the constructor and not somewhere inside the sequence."""
+    clock = FakeClock()
+    ops = FakeOps(clock, AT_HOME)
+    with pytest.raises(ValueError):
+        HomeMoveController(ops, target_joints=bad)
+    assert ops.calls == []
+
+
+def test_the_target_label_names_the_pose_in_the_moving_and_done_messages():
+    """The EEF GUI drives this machine to its START POSE, and its status line
+    must say so: a line reading "HOME reached" over an arm that went to the
+    start pose is exactly the kind of confident wrong text an operator stops
+    reading.  The default label keeps the task recorder byte-identical."""
+    start = (3.05, -1.20, 1.40, -1.90, -1.40, -3.05)
+    clock = FakeClock()
+    ops = FakeOps(clock, list(start))
+    ctrl = HomeMoveController(ops, target_joints=start, target_label="START POSE")
+    assert ctrl.target_label == "START POSE"
+
+    drive_to_moving(ctrl, ops)
+    moving = ctrl.status()["message"]
+    assert "moving to START POSE over" in moving, moving
+    assert "HOME" not in moving, moving
+
+    ops.traj_cb(True, "succeeded")
+    ctrl.tick()                      # -> OPENING_GRIPPER
+    ops.grip_pos = 0.01
+    ops.clock.advance(GRIPPER_OPEN_REASSERT_S)
+    ctrl.tick()                      # -> RESTORING_FPC
+    ops.switch_cb(True, "switched")
+    ctrl.tick()                      # -> DONE
+    done = ctrl.status()
+    assert done["state"] == HomeMoveState.DONE
+    assert done["message"].startswith("START POSE reached; "), done["message"]
+
+    # Default label: the recorder's wording, unchanged.
+    _, ops_home, ctrl_home = make()
+    assert ctrl_home.target_label == "HOME"
+    drive_to_done(ctrl_home, ops_home)
+    assert ctrl_home.status()["message"].startswith("HOME reached; ")
+
+    # A blank label is a construction-time programming error, like a bad pose.
+    with pytest.raises(ValueError):
+        HomeMoveController(FakeOps(FakeClock(), AT_HOME), target_label="  ")

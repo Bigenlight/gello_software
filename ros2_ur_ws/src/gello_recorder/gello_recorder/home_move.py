@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GO-HOME orchestration for the task recorder GUI -- pure Python, no ROS, no Qt.
+"""GO-HOME / go-to-pose orchestration for the operator GUIs -- pure Python, no ROS, no Qt.
 
 WHAT THIS IS
 ------------
@@ -15,24 +15,29 @@ injected through a duck-typed ``ops`` object, which makes the interesting part
 (ordering, deadlines, the fail-closed controller restore, the branch-cut-safe
 target) testable on a laptop with no robot, no ROS and no display.  This module
 imports nothing but the stdlib on purpose -- adding ``rclpy`` here would undo
-that.
+that.  The ROS half (the ``ops`` adapter, the subscriptions and the 10 Hz tick)
+lives in ``gello_recorder/home_move_ros.py`` so that any rclpy node -- the
+task recorder's GO HOME button, the EEF teleop GUI's GO TO START POSE button --
+can drive the same hardware-verified sequence towards its own target pose.
 
 THE SEQUENCE (and why it is this order)
 ---------------------------------------
 1. PAUSING            pause the GELLO->UR arm bridge AND the gripper bridge.
                       The leader arm is a passive, human-held device: if the
                       bridges keep streaming while we drive the follower to
-                      HOME, the trajectory controller and the bridge fight over
-                      the same joints.  Pausing is unconditional and idempotent
-                      per the bridge contract, so it is safe to fire always.
-                      Then ask controller_manager who is actually active.
+                      the target, the trajectory controller and the bridge
+                      fight over the same joints.  Pausing is unconditional and
+                      idempotent per the bridge contract, so it is safe to fire
+                      always.  Then ask controller_manager who is actually
+                      active.
 2. SWITCHING_TO_JTC   forward_position_controller (what teleop streams into)
                       cannot execute a timed trajectory, so hand the joints to
                       scaled_joint_trajectory_controller.  Skipped when STJC is
                       already active.
 3. MOVING             one FollowJointTrajectory goal to the branch-cut-safe
-                      equivalent of HOME_JOINTS, with a distance-proportional
-                      duration.
+                      equivalent of the target pose (HOME_JOINTS by default;
+                      ``target_joints`` in the constructor), with a
+                      distance-proportional duration.
 4. OPENING_GRIPPER    publish 0.0 (= OPEN) repeatedly and confirm via the
                       position feedback, then KEEP re-publishing for a short
                       settle window (see GRIPPER_OPEN_REASSERT_S).  WARN-ONLY
@@ -158,10 +163,10 @@ GRIPPER_OPEN_TIMEOUT_S = 3.0
 GRIPPER_OPEN_REASSERT_S = 1.0
 # Deadline for any single service-backed step (pause / query / switch).
 #
-# COUPLED TO task_gui_node._SWITCH_TIMEOUT_S (the `timeout` field the node puts
-# in the SwitchController request).  REQUIRED INEQUALITY:
+# COUPLED TO home_move_ros._SWITCH_TIMEOUT_S (the `timeout` field the ROS
+# adapter puts in the SwitchController request).  REQUIRED INEQUALITY:
 #
-#     STEP_TIMEOUT_S > task_gui_node._SWITCH_TIMEOUT_S
+#     STEP_TIMEOUT_S > home_move_ros._SWITCH_TIMEOUT_S
 #
 # i.e. this state machine's deadline must fire STRICTLY LATER than the server's
 # own, never at the same instant.  When they were equal (both 5.0) a switch that
@@ -270,6 +275,45 @@ def compute_home_duration(
         raise ValueError("compute_home_duration: min_s must be <= max_s")
     worst = max(circular_dist(target[i], current[i]) for i in range(len(target)))
     return min(max(worst / speed_budget, min_s), max_s)
+
+
+def _validate_target_joints(target_joints: Sequence[float]) -> tuple:
+    """Six finite floats in UR_JOINT_ORDER -> an immutable tuple, or ValueError.
+
+    Strict on purpose, and at CONSTRUCTION time rather than at request() time:
+    the pose is a fixed property of the button, so a bad one is a programming
+    error that should refuse to build the GUI, not a runtime condition to be
+    reported to an operator whose arm is already halfway through PAUSING /
+    SWITCHING_TO_JTC.  A string is rejected outright (it is a Sequence of
+    characters, so the length check alone would not catch a six-character one),
+    and so is anything that float() cannot convert or that converts to
+    NaN/inf -- wrapped_nearest() would turn either into a NaN target that the
+    trajectory controller rejects, or worse, executes.
+    """
+    if isinstance(target_joints, (str, bytes)):
+        raise ValueError(
+            "target_joints must be a sequence of {} floats, not a string".format(
+                len(UR_JOINT_ORDER)
+            )
+        )
+    try:
+        values = tuple(float(v) for v in target_joints)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "target_joints must be {} finite floats: {}".format(
+                len(UR_JOINT_ORDER), exc
+            )
+        ) from None
+    if len(values) != len(UR_JOINT_ORDER):
+        raise ValueError(
+            "target_joints must have exactly {} entries (UR_JOINT_ORDER), got "
+            "{}".format(len(UR_JOINT_ORDER), len(values))
+        )
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError(
+            "target_joints must be finite (no NaN/inf): {}".format(values)
+        )
+    return values
 
 
 def reorder_joint_positions(
@@ -389,12 +433,33 @@ class HomeMoveController:
           when entering MOVING, to size the move deadline.  Anything that is not
           a finite number greater than zero -- a raise, None, NaN, 0.0 -- counts
           as "unknown" and falls back to MIN_ASSUMED_SPEED_SCALE.
+
+    ``target_joints`` is the pose the MOVING step drives to, in UR_JOINT_ORDER.
+    It defaults to HOME_JOINTS (the task recorder's GO HOME) and is what the
+    EEF GUI's GO TO START POSE passes its own start pose through.  Validated
+    ONCE, here, as exactly six finite numbers and frozen into a tuple: a target
+    that is the wrong length or carries a NaN would otherwise only be found out
+    inside _enter_moving() -- i.e. after the bridges are paused and the
+    controller switched, with the arm one step from a bad trajectory.  The raw
+    tuple is never commanded; MOVING always sends ``wrapped_nearest(target,
+    current)`` (see that function for the branch-cut hazard).
+
+    ``target_label`` is the NAME of that pose as the operator reads it in the
+    status line ("moving to HOME over ...", "HOME reached; ...").  The default
+    "HOME" keeps every message the task recorder shows byte-identical; the EEF
+    GUI passes "START POSE" so its status line never claims the arm went
+    HOME when it went somewhere else.  It is display text only -- nothing is
+    keyed on it -- but it must not be blank (a blank label would print
+    " reached", which is the same class of construction-time programming
+    error as a bad target pose, so it is refused the same way).
     """
 
     def __init__(
         self,
         ops,
         *,
+        target_joints: Sequence[float] = HOME_JOINTS,
+        target_label: str = "HOME",
         speed_budget_rad_s: float = SPEED_BUDGET_RAD_S,
         min_duration_s: float = MIN_DURATION_S,
         max_duration_s: float = MAX_DURATION_S,
@@ -403,6 +468,10 @@ class HomeMoveController:
         step_timeout_s: float = STEP_TIMEOUT_S,
     ) -> None:
         self._ops = ops
+        self._target_joints = _validate_target_joints(target_joints)
+        self._target_label = str(target_label).strip()
+        if not self._target_label:
+            raise ValueError("target_label must be a non-empty string")
         self._speed_budget_rad_s = float(speed_budget_rad_s)
         self._min_duration_s = float(min_duration_s)
         self._max_duration_s = float(max_duration_s)
@@ -451,6 +520,22 @@ class HomeMoveController:
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
+    @property
+    def target_joints(self) -> tuple:
+        """The validated target pose (UR_JOINT_ORDER), as an immutable tuple.
+
+        Read-only on purpose: the target is fixed for the life of the
+        controller, so a GUI can show "where will GO HOME take the arm" and be
+        sure the answer cannot change under a move that is already in flight.
+        Want a different pose?  Build another controller.
+        """
+        return self._target_joints
+
+    @property
+    def target_label(self) -> str:
+        """The operator-facing name of the target pose ("HOME" by default)."""
+        return self._target_label
+
     def request(self) -> bool:
         """Start a GO-HOME. Returns False (and does not start) if refused.
 
@@ -469,8 +554,8 @@ class HomeMoveController:
         if self._ops.current_joints() is None:
             self._state = HomeMoveState.FAILED
             self._message = (
-                "cannot GO HOME: no robot joint states received yet "
-                "(is /joint_states publishing?)"
+                "cannot GO {}: no robot joint states received yet "
+                "(is /joint_states publishing?)".format(self._target_label)
             )
             return False
 
@@ -664,7 +749,9 @@ class HomeMoveController:
     def _finish_done(self) -> None:
         self._state = HomeMoveState.DONE
         gripper_note = self._gripper_warning or "gripper open"
-        self._message = "HOME reached; {}; {}".format(gripper_note, _DONE_TAIL)
+        self._message = "{} reached; {}; {}".format(
+            self._target_label, gripper_note, _DONE_TAIL
+        )
         self._deadline = None
 
     # ------------------------------------------------------------------ #
@@ -763,16 +850,17 @@ class HomeMoveController:
         if current is None:
             self._fail("robot joint states went stale before the move")
             return
-        if len(current) != len(HOME_JOINTS):
+        if len(current) != len(self._target_joints):
             self._fail(
                 "robot reported {} joints, expected {}".format(
-                    len(current), len(HOME_JOINTS)
+                    len(current), len(self._target_joints)
                 )
             )
             return
 
-        # NEVER send the raw HOME_JOINTS literal -- see wrapped_nearest().
-        target = wrapped_nearest(HOME_JOINTS, current)
+        # NEVER send the raw target literal (HOME_JOINTS or whatever the
+        # constructor was given) -- see wrapped_nearest().
+        target = wrapped_nearest(self._target_joints, current)
         duration = compute_home_duration(
             current,
             target,
@@ -801,8 +889,9 @@ class HomeMoveController:
         # Say why we are willing to wait this long, so a slow move does not look
         # like a stuck GUI.
         self._message = (
-            "moving to HOME over {:.1f}s planned ({}; waiting up to "
+            "moving to {} over {:.1f}s planned ({}; waiting up to "
             "{:.1f}s)".format(
+                self._target_label,
                 duration,
                 "speed scale {:.0f}% measured".format(divisor * 100.0)
                 if scale is not None
@@ -948,7 +1037,9 @@ class HomeMoveController:
                     self._finish_failed(note)
                 else:
                     self._state = HomeMoveState.FAILED
-                    self._message = "HOME reached but {}".format(note)
+                    self._message = "{} reached but {}".format(
+                        self._target_label, note
+                    )
                     self._deadline = None
             return
 
@@ -963,8 +1054,10 @@ class HomeMoveController:
         if not ok:
             self._state = HomeMoveState.FAILED
             self._message = (
-                "HOME reached but restoring {} failed: {} -- teleop is unusable "
-                "until a controller is activated by hand".format(FPC, msg)
+                "{} reached but restoring {} failed: {} -- teleop is unusable "
+                "until a controller is activated by hand".format(
+                    self._target_label, FPC, msg
+                )
             )
             self._deadline = None
             return
