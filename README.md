@@ -27,7 +27,8 @@
 
 - [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 54 에피소드. RGB 2대 + **depth 2대**(`observation.images.cam1_depth`/`cam2_depth`, 848×480 uint16 mm, lerobot 네이티브 depth video: HEVC gray12le 무손실 + 12-bit **선형** 양자화 0~10 m → ±1.25 mm, 무효 픽셀 0 보존)
 - [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) — 원본 per-take `vectors.h5` + `cam1/2.mp4` + **`depth.h5`**(16-bit PNG, K/D/외부 파라미터 포함) + `DATA_DICTIONARY.md` + `dataset_stats.json`
-- [`Bigenlight/orange_bowl_in_purple_bowl_raw`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_raw) — 2026-09-15/16 "put the orange bowl into the purple bowl" 52 take, **RGB만**, 수정된 레코더(`stamp_s` 헤더 스탬프, 타임스탬프 아티팩트 없음). LeRobot 변환은 예정
+- [`Bigenlight/orange_bowl_in_purple_bowl_raw`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_raw) — 2026-09-15/16 "put the orange bowl into the purple bowl" 52 take, **RGB만**, 수정된 레코더(`stamp_s` 헤더 스탬프, 타임스탬프 아티팩트 없음)
+- [`Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3) — 위 raw의 LeRobot v3.0 변환(52 에피소드, 16,009 프레임, RGB 2대, `stamp_s` 정렬·보정 없음, 검증 43/43)
 - 이 태스크의 변환기·검증기·통계 생성기는 **이 리포 `scripts/dataset/`** 에 있습니다(아래). cam1 = 정면 scene D435, cam2 = 손목 D435로 매핑이 확정된 첫 릴리스입니다.
 
 > **규모 주의:** cube 쪽은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. 단독으로 견고한 정책을 학습시키기엔 부족하며, 현재 학습된 cube 정책은 없습니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다.
