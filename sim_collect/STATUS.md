@@ -37,7 +37,7 @@ kanu에서 진행 중이고 체크포인트가 나올 때마다 같은 하네스
 | 모델 | 학습 | held-out SR (seed 100~119, 20 에피소드) |
 | --- | --- | --- |
 | sim ACT | ✅ 50k 종료 | 10k 7 · 20k 7 · 30k 6 · 40k 7 · **50k 10** (/20) |
-| sim Diffusion | 🔄 kanu GPU 0에서 진행 중(100k, 10k마다 저장) | 체크포인트 나오는 대로 |
+| sim Diffusion | 🔄 kanu GPU 0에서 진행 중(100k, 10k마다 저장) | 10k **0/20**(팔이 당근 쪽으로 거의 안 움직임; 초기 체크포인트) · 이후 나오는 대로 |
 | sim Flow-Matching | ⏳ 실기 FM 종료(~10:45) 후 GPU 1 | — |
 
 - 지배적 실패는 **"당근에 접근을 못 함"**(50k held-out 실패 10건 중 8건). 시연 22개의 배치 범위(당근 x 0.40~0.49, y 0.12~0.24)가
@@ -46,7 +46,33 @@ kanu에서 진행 중이고 체크포인트가 나올 때마다 같은 하네스
   (ACT 11~12/20)은 학습 배치 재현율이지 일반화 지표가 아니다. 기본 seed는 100~119로 바꿨다.
 - kanu 체크포인트 회전(사용자 승인): 각 작업의 마지막 것만 보존, 나머지는 laptop3로 복사·평가 후 삭제. ACT 10k~50k는
   laptop3 `sim_collect/eval/ckpts/`에 있다(git 제외).
+- CPU 서빙 시 Diffusion/FM은 추론이 실기 클라이언트 타임아웃(0.6 s)보다 느려 `--timeout-s 30`으로 잰다(록스텝이라 결과는
+  같고 시간만 걸린다: Diffusion 에피소드당 ~78 s). kanu GPU 서빙이면 기본값으로 된다.
+- 체크포인트 크기: lerobot Diffusion은 ResNet18×2 + U-Net(down_dims 512/1024/2048, ~2.6억 파라미터)이라 fp32 1.1 GB가
+  정상이고 kanu의 3.3 GiB는 옵티마이저 상태 포함. 줄이려면 학습 설정 `down_dims`를 낮춘다.
 - 평가 영상: `--video`로 뽑는다. ACT 50k seed 100~103 예시가 `sim_collect/eval/runs/act_carrot_sim_050000_video/`에 있다.
+
+
+## 다른 PC에서 재현하기 (리포만 받아서)
+
+GELLO 하드웨어는 **수집에만** 필요하다. 데이터셋 다운로드·변환·SR 평가는 리포 + 공개 데이터셋만으로 된다.
+
+```bash
+git clone <origin> gello_software && cd gello_software && git checkout feat/sim-data-collection
+git submodule update --init third_party/mujoco_menagerie third_party/DynamixelSDK   # UR5e 메시 + 2F-85 (필수)
+uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -r sim_collect/requirements-sim.txt \
+   && uv pip install --python .venv/bin/python -e . -e third_party/DynamixelSDK/python
+# 정책 서버(평가할 때만): python3.12 venv + sim_collect/requirements-policy-server.txt (torch는 CUDA에 맞게 먼저)
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovider sim_collect/tests   # 257 passed 기대
+```
+
+- **렌더 백엔드**: laptop3는 NVIDIA 드라이버가 없어 `MUJOCO_GL=glfw`+`DISPLAY`가 필요하지만, GPU 드라이버가 있는 PC는
+  `MUJOCO_GL=egl`로 디스플레이 없이 돌아간다(`sim_collect/eval/README.md` 트러블슈팅).
+- **데이터셋**: `Bigenlight/carrot_in_pot_sim_lerobot_v3`(학습용, LeRobot이 자동 다운로드)·`Bigenlight/carrot_in_pot_sim_raw`
+  (`hf download Bigenlight/carrot_in_pot_sim_raw --repo-type dataset`; take를 `sim_collect/tools/replay_take.py`로 재구성 가능).
+- **평가**: 체크포인트를 `sim_collect/eval/serve_policy.sh`로 서빙하고 `run_eval.py`를 돌린다(`eval/README.md` §2~§4).
+  ROS는 필요 없다 — `ros2_ur_ws/src/{ur_gello_bringup,gello_recorder,gello_policy}`의 순수 파이썬 모듈만 import한다.
+- `sim_collect/eval/ckpts/`·`eval/runs/`는 git에 없다. 체크포인트는 kanu 경로 또는 학습 세션에서 받는다.
 
 ## 알아 둘 함정 (전부 문서에 상세)
 
