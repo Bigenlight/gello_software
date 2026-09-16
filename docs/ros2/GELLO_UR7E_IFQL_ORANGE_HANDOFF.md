@@ -37,7 +37,20 @@
 학습 세션 `deploy/ifql_deploy_orange.yaml`과도 일치. start_pose 6축 envelope 안. `act_timeout 0.8 <
 obs 0.9 < staleness 1.0`, `act_port 5595`. carrot yaml 대비 바뀐 키는 start_pose·envelope뿐이어야 한다(diff로 재확인 권장).
 
-## 2. 안 된 것 ❌ — 이어받는 사람이 할 일 (순서대로)
+## 2. 진행 상황 (2026-09-16 밤 갱신)
+
+- ✅ **§2-1 런처 완료**(소넷, dry-run 검증): `IFQL_TASK=carrot|orange`, norm_stats 가드 = 로그 basename 정확 일치,
+  태스크별 yaml, px 판별(`flags.json` ↔ 서버 `agent ready: px=`), 프리플라이트(flags/params/norm_stats/act_port),
+  스냅샷 여러 개면 최신 선택, **`IFQL_DRY_RUN=1`**(서버·ROS 안 띄우고 명령만 출력). carrot 기본값 어제와 동일 확인.
+  `setup_ifql_workspace.sh`도 `IFQL_TASK=orange` 지원.
+- ✅ §2-2 yaml diff: 바뀐 키 = start_pose·joint_limits_lo/hi뿐.
+- ✅ §2-3 타르볼 20260916: sha 일치, **D_c-null 이미 수정됨(패치 불필요)**, `qflow_svf_merged/agents` 있음, 서빙 CLI 변경 없음.
+- ❌ §2-4 smoke: 준비 완료(프레임 `~/carrot_ifql/eval_runs/smoke_orange_prep/frames/`, 클라이언트
+  `~/carrot_ifql/eval_runs/smoke_orange_client.py`)했으나 **CUDA가 suspend 후유증으로 죽어 있어 미실행** —
+  `nvidia-smi`는 정상으로 보여도 `torch.cuda.is_available()`이 False면 이 상태. 모듈 재로드/재부팅 후 재시도.
+- ❌ §2-5 실물 0회.
+
+## 2(원본). 이어받는 사람이 할 일 (순서대로) — 위 진행 상황으로 갱신됨
 
 ### 2-1. `run_ur7e_ifql_real.sh` 태스크 일반화 — **반쯤 됐고, 이대로는 orange를 거부한다**
 작업 트리에 WIP가 있다(커밋 `WIP` 표시). 들어간 것: `IFQL_TASK=carrot|orange` 프로파일 블록(run dir·norm_stats·

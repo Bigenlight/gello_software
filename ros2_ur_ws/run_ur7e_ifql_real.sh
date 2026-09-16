@@ -169,6 +169,7 @@ case "${IFQL_TASK}" in
         # Literal, unchanged from the carrot session: this run dir ships exactly this file.
         _TASK_NORM_BASE="norm_stats_r18_ss_real_lead6.json"
         _TASK_YAML="ifql_deploy.yaml"
+        _TASK_PARAMS="${SCRIPT_DIR}/src/gello_policy/config/ifql_deploy.yaml"
         _TASK_LOG_TAG="ifql_lead6"
         ;;
     orange)
@@ -179,6 +180,7 @@ case "${IFQL_TASK}" in
         # .json), so a single hard-coded name would be wrong for two of the three.
         _TASK_NORM_BASE=""
         _TASK_YAML="ifql_deploy_orange.yaml"
+        _TASK_PARAMS="${SCRIPT_DIR}/src/gello_policy/config/ifql_deploy_orange.yaml"
         # Empty -> basename of the run dir, so the three candidates never share a log dir.
         _TASK_LOG_TAG=""
         ;;
@@ -222,6 +224,15 @@ if [ -z "${IFQL_NORM_STATS:-}" ]; then
     IFQL_NORM_STATS="${_NS_HITS[0]}"
 fi
 
+# Deploy yaml default: task-specific (carrot -> ifql_deploy.yaml, orange ->
+# ifql_deploy_orange.yaml), always the SRC copy under this workspace by absolute path
+# (never the install share — see the "Params file" note below, near where it is used).
+IFQL_PARAMS_FILE="${IFQL_PARAMS_FILE:-${_TASK_PARAMS}}"
+if [ ! -f "${IFQL_PARAMS_FILE}" ]; then
+    echo "ERROR: IFQL params file not found at ${IFQL_PARAMS_FILE}." >&2
+    exit 1
+fi
+
 # Sampler tag for the log dir: bon carries K (bon32 / bon16); bc is K=1 by definition
 # (the server ignores --num-samples), so "bc32" would be a lie; actor has no K.
 case "${IFQL_SAMPLER}" in
@@ -248,10 +259,12 @@ if [ "${START_MODE}" != "gello" ]; then
     exit 1
 fi
 
-# --- Resolve the server script: exactly ONE ifql_server.py under IFQL_CODE_ROOT ---
+# --- Resolve the server script: ifql_server.py under IFQL_CODE_ROOT ---
 # The code tarball's internal layout is not pinned yet (today it unpacks to
 # code/<snapshot>/vision_carrot/ifql_server.py); a find keeps this script valid when
-# the snapshot dir is renamed, and 0 or >1 hits are refused instead of guessed.
+# the snapshot dir is renamed. 0 hits is refused; >1 hits (multiple snapshot dirs, e.g.
+# 20260915 + 20260916) picks the name-sorted LAST one and logs every hit — set
+# IFQL_SERVER_PY explicitly to pin one instead of trusting the sort.
 if [ -z "${IFQL_SERVER_PY}" ]; then
     if [ ! -d "${IFQL_CODE_ROOT}" ]; then
         echo "ERROR: IFQL_CODE_ROOT '${IFQL_CODE_ROOT}' does not exist (unpack the code tarball there or set IFQL_SERVER_PY)." >&2
@@ -262,11 +275,15 @@ if [ -z "${IFQL_SERVER_PY}" ]; then
         echo "ERROR: no ifql_server.py found under ${IFQL_CODE_ROOT} (set IFQL_SERVER_PY explicitly)." >&2
         exit 1
     elif [ "${#_HITS[@]}" -gt 1 ]; then
-        echo "ERROR: ${#_HITS[@]} copies of ifql_server.py under ${IFQL_CODE_ROOT}; set IFQL_SERVER_PY to the one you mean:" >&2
-        printf '         %s\n' "${_HITS[@]}" >&2
-        exit 1
+        # Multiple code-tarball snapshots can legitimately coexist (e.g. 20260915 +
+        # 20260916). Name-sort ascending and take the LAST = newest-looking snapshot
+        # dir name by construction (YYYYMMDD-style suffixes sort correctly); this is a
+        # convenience default, not a proof of recency, so it is logged loudly and
+        # IFQL_SERVER_PY always overrides it.
+        echo "### NOTE: ${#_HITS[@]} copies of ifql_server.py under ${IFQL_CODE_ROOT}; picking the name-sorted LAST one:" >&2
+        printf '###          %s\n' "${_HITS[@]}" >&2
     fi
-    IFQL_SERVER_PY="${_HITS[0]}"
+    IFQL_SERVER_PY="${_HITS[-1]}"
 fi
 IFQL_SERVER_DIR="$(cd "$(dirname "${IFQL_SERVER_PY}")" && pwd)"
 
@@ -287,16 +304,66 @@ if [ ! -f "${IFQL_NORM_STATS}" ]; then
     echo "ERROR: IFQL_NORM_STATS '${IFQL_NORM_STATS}' not found." >&2
     exit 1
 fi
-# The lead6 checkpoint MUST be paired with the lead6 norm_stats. Same check again on
-# the server's own log below (it is the server's resolution that counts), but a wrong
-# path is cheaper to refuse here.
-case "$(basename "${IFQL_NORM_STATS}")" in
-    *real_lead6*) ;;
+# norm_stats must live INSIDE IFQL_RUN_DIR (a released run ships its own norm_stats
+# next to params_<step>.pkl) — task/lead/px agnostic on purpose, unlike the old
+# carrot-only "*real_lead6*" substring test this replaces. The FILE match that actually
+# proves the checkpoint got the right box is the server's own log line, checked below
+# AFTER it starts (it is the server's resolution that counts); this is the cheap local
+# guard against an obviously wrong path (e.g. a lead0/sim file dropped in by hand).
+IFQL_NORM_STATS_REAL="$(readlink -f "${IFQL_NORM_STATS}" 2>/dev/null || echo "${IFQL_NORM_STATS}")"
+IFQL_RUN_DIR_REAL="$(readlink -f "${IFQL_RUN_DIR}" 2>/dev/null || echo "${IFQL_RUN_DIR}")"
+case "${IFQL_NORM_STATS_REAL}" in
+    "${IFQL_RUN_DIR_REAL}"/*) ;;
     *)
-        echo "ERROR: IFQL_NORM_STATS basename '$(basename "${IFQL_NORM_STATS}")' does not contain 'real_lead6'." >&2
-        echo "       A lead0 / sim norm_stats denormalises joints into a different box. Refusing." >&2
-        exit 1 ;;
+        if [ "${IFQL_ALLOW_FOREIGN_NORM_STATS}" = "1" ]; then
+            echo "### NOTE: IFQL_NORM_STATS '${IFQL_NORM_STATS}' is OUTSIDE IFQL_RUN_DIR '${IFQL_RUN_DIR}'; allowed by IFQL_ALLOW_FOREIGN_NORM_STATS=1." >&2
+        else
+            echo "ERROR: IFQL_NORM_STATS '${IFQL_NORM_STATS}' is not inside IFQL_RUN_DIR '${IFQL_RUN_DIR}'." >&2
+            echo "       A released run ships its own norm_stats next to params_<step>.pkl; a file from" >&2
+            echo "       elsewhere risks a lead0/sim/other-task box. Set IFQL_ALLOW_FOREIGN_NORM_STATS=1 to override." >&2
+            exit 1
+        fi ;;
 esac
+
+# --- px detection: mirrors ifql_server.py::is_px_run exactly (flags.json) -----------
+# A run is pixel end-to-end iff its agent.encoder starts with "multicam", or its
+# env_name ends in "_px<digits>(_val).npz". Computed here (not guessed) so the banner
+# and the post-start "agent ready: ... px=<bool>" log check have the same expectation.
+IS_PX_RUN="$(python3 - "${IFQL_RUN_DIR}/flags.json" <<'PYEOF'
+import json, re, sys
+flags = json.load(open(sys.argv[1]))
+agent_cfg = flags.get("agent") if isinstance(flags.get("agent"), dict) else {}
+enc = (agent_cfg or {}).get("encoder")
+if isinstance(enc, str) and enc.startswith("multicam"):
+    print("true")
+else:
+    env_name = flags.get("env_name")
+    print("true" if (isinstance(env_name, str) and re.search(r"_px\d+(_val)?\.npz$", env_name)) else "false")
+PYEOF
+)"
+if [ "${IS_PX_RUN}" = "true" ]; then
+    echo "### NOTE: IFQL_RUN_DIR is a PX (pixel end-to-end) run (flags.json is_px_run rule). ⚠️ Refill/serving latency for px runs is UNMEASURED on this box — check server WARNING lines closely." >&2
+fi
+
+# --- Preflight: deploy yaml act_port must match IFQL_PORT --------------------------
+IFQL_YAML_ACT_PORT="$(python3 - "${IFQL_PARAMS_FILE}" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    doc = yaml.safe_load(f)
+try:
+    print(doc["policy_leader_node"]["ros__parameters"]["act_port"])
+except Exception:
+    print("")
+PYEOF
+)"
+if [ -z "${IFQL_YAML_ACT_PORT}" ]; then
+    echo "ERROR: could not read policy_leader_node.ros__parameters.act_port from '${IFQL_PARAMS_FILE}'." >&2
+    exit 1
+fi
+if [ "${IFQL_YAML_ACT_PORT}" != "${IFQL_PORT}" ]; then
+    echo "ERROR: deploy yaml act_port (${IFQL_YAML_ACT_PORT}) != IFQL_PORT (${IFQL_PORT}). The leader would dial the wrong port." >&2
+    exit 1
+fi
 
 # --- Device: auto -> cuda iff nvidia-smi can see a GPU ------------------------------
 # The encoder does `.to(device)` with no fallback of its own, so 'cuda' without a
@@ -321,15 +388,12 @@ source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 
 # --- Params file: the SRC copy, by absolute path, NEVER the install share ------------
-# ifql_deploy.yaml was added without a colcon build (the workspace's install/ is in
-# use by a live data-collection session and must not be rebuilt/touched). The launch
-# file takes params_file as a plain path, so pointing it at src/ is fully supported
-# and does not depend on `ros2 pkg prefix gello_policy` having a copy.
-IFQL_PARAMS_FILE="${IFQL_PARAMS_FILE:-${SCRIPT_DIR}/src/gello_policy/config/ifql_deploy.yaml}"
-if [ ! -f "${IFQL_PARAMS_FILE}" ]; then
-    echo "ERROR: IFQL params file not found at ${IFQL_PARAMS_FILE}." >&2
-    exit 1
-fi
+# ifql_deploy.yaml (or ifql_deploy_orange.yaml) was added without a colcon build (the
+# workspace's install/ is in use by a live data-collection session and must not be
+# rebuilt/touched). The launch file takes params_file as a plain path, so pointing it at
+# src/ is fully supported and does not depend on `ros2 pkg prefix gello_policy` having a
+# copy. IFQL_PARAMS_FILE itself was already resolved (task default or override) and
+# existence-checked above, before the norm_stats/px/act_port preflight.
 # The launch file itself still comes from install/ (ros2 launch gello_policy ...);
 # it must be present there from an earlier build.
 if ! ros2 pkg prefix gello_policy >/dev/null 2>&1; then
@@ -384,6 +448,47 @@ if [ ! -d "${IFQL_QFLOW_DIR}/agents" ]; then
     exit 1
 fi
 echo "###   QFLOW_DIR=${IFQL_QFLOW_DIR}"
+
+# --- Build the ros2 launch args (REUSE the policy-agnostic diffusion launch) -------
+# Built here (before the server even spawns) so IFQL_DRY_RUN can print both resolved
+# commands without starting anything. start_mode is a real override (launch ->
+# gello_move_to_start param). The launch's own `start_pose` arg is LOGGING ONLY (it is
+# never handed to policy_leader_node; the yaml's policy_leader_node.start_pose is
+# authoritative), so it is not passed — there is nothing it could override.
+ARGS=(
+    robot_ip:="${ROBOT_IP}"
+    start_mode:="${START_MODE}"
+    params_file:="${IFQL_PARAMS_FILE}"
+    act_host:="${IFQL_HOST}"
+    act_port:="${IFQL_PORT}"
+    checkpoint_path:="${IFQL_RUN_DIR}/params_${IFQL_STEP}.pkl"
+)
+[ -n "${CALIB}" ] && ARGS+=(kinematics_params_file:="${CALIB}")
+if [ "${HEADLESS}" = "true" ] || [ "${HEADLESS}" = "1" ]; then
+    ARGS+=(headless_mode:=true)
+    HEADLESS_STATE="true (Method B — REMOTE mode required, no pendant Play)"
+else
+    ARGS+=(headless_mode:=false)
+    HEADLESS_STATE="false (Method A — PLAY External Control on the pendant)"
+fi
+
+if [ "${IFQL_DRY_RUN}" = "1" ]; then
+    echo "### IFQL_DRY_RUN=1: every preflight passed; printing the two resolved commands and exiting WITHOUT starting either one."
+    echo "### task=${IFQL_TASK} run_dir=${IFQL_RUN_DIR} norm_stats=${IFQL_NORM_STATS} params_file=${IFQL_PARAMS_FILE} px=${IS_PX_RUN} act_port=${IFQL_PORT}"
+    echo "### server command:"
+    printf '###   env -u FMRL_CAM1_CROP -u FMRL_CAM1_MODE QFLOW_DIR=%q TORCH_HOME=%q XLA_PYTHON_CLIENT_PREALLOCATE=false HF_HUB_OFFLINE=1 \\\n' \
+        "${IFQL_QFLOW_DIR}" "${TORCH_HOME:-$IFQL_ROOT/.cache/torch}"
+    printf '###    '
+    printf ' %q' "${SERVER_CMD[@]}"
+    printf '\n'
+    echo "### ros2 launch command:"
+    printf '###   ros2 launch gello_policy ur7e_diffusion_real.launch.py'
+    printf ' %q' "${ARGS[@]}" "$@"
+    printf '\n'
+    trap - EXIT   # nothing was ever spawned; do not attempt to kill a nonexistent PID
+    exit 0
+fi
+
 (
     cd "${IFQL_SERVER_DIR}"
     exec env -u FMRL_CAM1_CROP -u FMRL_CAM1_MODE \
@@ -397,15 +502,19 @@ IFQL_SERVER_PID=$!
 # Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).
 trap 'kill "${IFQL_SERVER_PID}" 2>/dev/null || true' EXIT
 
-# --- Health-check: alive + norm_stats/sampler lines + port listening -----------------
+# --- Health-check: alive + norm_stats/sampler/px lines + port listening --------------
 # The server logs "norm_stats: <path>  (source: ...)" early, then "sampler: kind=.. K=..",
-# warms up, and only THEN binds ("REP bound tcp://..."). So:
-#   * norm_stats line present but NOT naming real_lead6 -> kill + fail immediately;
+# then "agent ready: ... px=<bool> ..." right before it warms up and binds
+# ("REP bound tcp://..."). So:
+#   * norm_stats line present but its BASENAME != IFQL_NORM_STATS's basename -> kill + fail;
+#   * agent-ready line present but its px=<bool> != our IS_PX_RUN verdict -> kill + fail;
 #   * port listening -> warmup already passed -> proceed;
 #   * process gone -> fail; IFQL_WARMUP_TIMEOUT_S elapsed -> fail.
+IFQL_NORM_STATS_BASE="$(basename "${IFQL_NORM_STATS}")"
 echo "### Waiting for IFQL server (pid ${IFQL_SERVER_PID}) to load, warm up and listen on :${IFQL_PORT} (<= ${IFQL_WARMUP_TIMEOUT_S} s)..."
 NORM_OK=""
 SAMPLER_OK=""
+PX_OK=""
 LISTENING=""
 for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
     if ! kill -0 "${IFQL_SERVER_PID}" 2>/dev/null; then
@@ -413,25 +522,24 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
         exit 1
     fi
     if [ -z "${NORM_OK}" ] && [ -f "${SERVER_LOG}" ]; then
-        # Loose match on purpose: the exact line is "[ifql-server] norm_stats: <path>  (source: ...)"
-        # today, but only the "norm_stats" word and the basename are relied on.
+        # The exact line is "[ifql-server] norm_stats: <path>  (source: ...)". Task/lead/px
+        # agnostic exact-basename equality against IFQL_NORM_STATS — this proves the server
+        # really resolved the SAME FILE we asked for (--norm-stats is always passed, so a
+        # mismatch means the server ignored it or the log format changed).
         NORM_LINE="$(grep -m1 -E 'norm_stats:' "${SERVER_LOG}" || true)"
         if [ -n "${NORM_LINE}" ]; then
-            # Check the BASENAME of the resolved path, not the whole line: the run dir is
-            # itself named ifql_real_lead6_*, so a lead0 file dropped into it would pass a
-            # whole-line grep. Token after "norm_stats:" = the path.
             NORM_PATH="$(printf '%s' "${NORM_LINE}" | sed -E 's/.*norm_stats:[[:space:]]*([^[:space:]]+).*/\1/')"
             NORM_BASE="$(basename "${NORM_PATH}")"
-            case "${NORM_BASE}" in
-                *real_lead6*)
-                    NORM_OK=1
-                    echo "### norm_stats check OK: ${NORM_LINE}" ;;
-                *)
-                    echo "ERROR: server resolved a norm_stats whose basename ('${NORM_BASE}') is NOT a real_lead6 file:" >&2
-                    echo "       ${NORM_LINE}" >&2
-                    echo "       (lead0/sim stats denormalise joints into a different box). Stopping the server." >&2
-                    exit 1 ;;
-            esac
+            if [ "${NORM_BASE}" = "${IFQL_NORM_STATS_BASE}" ]; then
+                NORM_OK=1
+                echo "### norm_stats check OK: ${NORM_LINE}"
+            else
+                echo "ERROR: server resolved norm_stats basename '${NORM_BASE}' != requested '${IFQL_NORM_STATS_BASE}':" >&2
+                echo "       ${NORM_LINE}" >&2
+                echo "       A different lead/task/px norm_stats denormalises joints into a different box. Stopping the server." >&2
+                kill "${IFQL_SERVER_PID}" 2>/dev/null || true
+                exit 1
+            fi
         fi
     fi
     if [ -z "${SAMPLER_OK}" ] && [ -f "${SERVER_LOG}" ]; then
@@ -448,6 +556,22 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
             else
                 echo "ERROR: server sampler line does not match the requested '${WANT}':" >&2
                 echo "       ${SAMPLER_LINE}" >&2
+                kill "${IFQL_SERVER_PID}" 2>/dev/null || true
+                exit 1
+            fi
+        fi
+    fi
+    if [ -z "${PX_OK}" ] && [ -f "${SERVER_LOG}" ]; then
+        PX_LINE="$(grep -m1 -E 'agent ready:.*px=' "${SERVER_LOG}" || true)"
+        if [ -n "${PX_LINE}" ]; then
+            SERVER_PX="$(printf '%s' "${PX_LINE}" | sed -E 's/.*px=([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')"
+            if [ "${SERVER_PX}" = "${IS_PX_RUN}" ]; then
+                PX_OK=1
+                echo "### px check OK: ${PX_LINE}"
+            else
+                echo "ERROR: server px=${SERVER_PX} does not match this run dir's flags.json is_px_run verdict (${IS_PX_RUN}):" >&2
+                echo "       ${PX_LINE}" >&2
+                kill "${IFQL_SERVER_PID}" 2>/dev/null || true
                 exit 1
             fi
         fi
@@ -468,14 +592,21 @@ if [ -z "${LISTENING}" ]; then
     echo "ERROR: IFQL server did not start listening on :${IFQL_PORT} within ${IFQL_WARMUP_TIMEOUT_S} s (see ${SERVER_LOG})." >&2
     exit 1
 fi
-# The port is up only after warmup, so the norm_stats line must have been seen by now.
-# (If the log format ever drops that line, fail closed rather than run unverified.)
+# The port is up only after warmup, so the norm_stats/sampler/px lines must have been
+# seen by now. (If the log format ever drops one, fail closed rather than run unverified.)
 if [ -z "${NORM_OK}" ]; then
-    echo "ERROR: server is listening but no 'norm_stats:' line was seen in ${SERVER_LOG}; cannot verify real_lead6. Stopping." >&2
+    echo "ERROR: server is listening but no 'norm_stats:' line was seen in ${SERVER_LOG}; cannot verify it matches ${IFQL_NORM_STATS_BASE}. Stopping." >&2
+    kill "${IFQL_SERVER_PID}" 2>/dev/null || true
     exit 1
 fi
 if [ -z "${SAMPLER_OK}" ]; then
     echo "ERROR: server is listening but no 'sampler: kind=' line was seen in ${SERVER_LOG}; cannot verify the sampler. Stopping." >&2
+    kill "${IFQL_SERVER_PID}" 2>/dev/null || true
+    exit 1
+fi
+if [ -z "${PX_OK}" ]; then
+    echo "ERROR: server is listening but no 'agent ready: ... px=' line was seen in ${SERVER_LOG}; cannot verify px. Stopping." >&2
+    kill "${IFQL_SERVER_PID}" 2>/dev/null || true
     exit 1
 fi
 echo "### IFQL server is listening on ${IFQL_HOST}:${IFQL_PORT} (warmup done)."
@@ -484,29 +615,8 @@ if grep -q 'WARNING: warmup refill' "${SERVER_LOG}" 2>/dev/null; then
     echo "### ⚠️  Refill is slow for this box. Consider Ctrl-C and IFQL_NUM_SAMPLES=16 — do NOT widen the yaml timeouts." >&2
 fi
 
-# --- Build the ros2 launch args (REUSE the policy-agnostic diffusion launch) ---
-# start_mode is a real override (launch -> gello_move_to_start param). The launch's
-# own `start_pose` arg is LOGGING ONLY (it is never handed to policy_leader_node;
-# the yaml's policy_leader_node.start_pose is authoritative), so it is not passed —
-# there is nothing it could override.
-ARGS=(
-    robot_ip:="${ROBOT_IP}"
-    start_mode:="${START_MODE}"
-    params_file:="${IFQL_PARAMS_FILE}"
-    act_host:="${IFQL_HOST}"
-    act_port:="${IFQL_PORT}"
-    checkpoint_path:="${IFQL_RUN_DIR}/params_${IFQL_STEP}.pkl"
-)
-[ -n "${CALIB}" ] && ARGS+=(kinematics_params_file:="${CALIB}")
-
-if [ "${HEADLESS}" = "true" ] || [ "${HEADLESS}" = "1" ]; then
-    ARGS+=(headless_mode:=true)
-    HEADLESS_STATE="true (Method B — REMOTE mode required, no pendant Play)"
-else
-    ARGS+=(headless_mode:=false)
-    HEADLESS_STATE="false (Method A — PLAY External Control on the pendant)"
-fi
-
+# ARGS + HEADLESS_STATE were already built above (before the server spawn, so
+# IFQL_DRY_RUN could print them without starting anything) — reused as-is here.
 echo "### REAL UR7e IFQL deploy | robot_ip=${ROBOT_IP} | calib=${CALIB:-<none>} | params=${IFQL_PARAMS_FILE}"
 echo "### headless_mode=${HEADLESS_STATE}"
 echo "### start_mode=gello — arm drives straight to the policy's HELD carrot start pose and parks."

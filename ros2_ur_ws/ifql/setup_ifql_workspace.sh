@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Reproduce the IFQL serving workspace (~/carrot_ifql) on a fresh PC.
 #
-#   ./ros2_ur_ws/ifql/setup_ifql_workspace.sh            # -> $HOME/carrot_ifql
+#   ./ros2_ur_ws/ifql/setup_ifql_workspace.sh            # -> $HOME/carrot_ifql (carrot task)
 #   IFQL_ROOT=/data/carrot_ifql ./ros2_ur_ws/ifql/setup_ifql_workspace.sh
+#   IFQL_TASK=orange ./ros2_ur_ws/ifql/setup_ifql_workspace.sh   # -> $IFQL_ROOT/hf_orange/
 #
 # What it builds (the layout run_ur7e_ifql_real.sh expects, see
-# docs/ros2/GELLO_UR7E_IFQL_DEPLOY.md §2):
-#   $IFQL_ROOT/hf/            HF snapshot: recommended run + lead0 control + cards/code/hf_release
+# docs/ros2/GELLO_UR7E_IFQL_DEPLOY.md §2 and GELLO_UR7E_IFQL_ORANGE_HANDOFF.md):
+#   carrot (IFQL_TASK=carrot, default):
+#     $IFQL_ROOT/hf/            HF snapshot: recommended run + lead0 control + cards/code/hf_release
+#   orange (IFQL_TASK=orange):
+#     $IFQL_ROOT/hf_orange/     HF snapshot: 3 candidate runs + deploy/ (yaml, real_limits.json,
+#                                norm_stats) + cards/code/hf_release — see run_ur7e_ifql_real.sh's
+#                                IFQL_TASK=orange profile for how the 3 candidates are selected
+#                                (IFQL_RUN_DIR alone).
 #   $IFQL_ROOT/code/<snap>/   the code tarball, sha256-verified, D_c-null patch applied
 #   $IFQL_ROOT/.venv-svf/     uv venv, Python 3.11, CUDA wheels (requirements-svf-infer.txt)
 #   $IFQL_ROOT/.cache/torch/  TORCH_HOME with ResNet18 IMAGENET1K_V1 + dinov2 hub cache
@@ -18,35 +25,63 @@
 set -euo pipefail
 
 IFQL_ROOT="${IFQL_ROOT:-$HOME/carrot_ifql}"
-HF_REPO="${HF_REPO:-Bigenlight/carrot-in-pot-ifql}"
-RUN="${IFQL_RUN:-ifql_real_lead6_k0.9_s0}"
-RUN_LEAD0="${IFQL_RUN_LEAD0:-ifql_real_k0.9_s0}"
+IFQL_TASK="${IFQL_TASK:-carrot}"
 STEP="${IFQL_STEP:-100000}"
 PY_VER="${IFQL_PY_VER:-3.11}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "### IFQL workspace -> ${IFQL_ROOT}"
+# --- Task profile: mirrors run_ur7e_ifql_real.sh's IFQL_TASK switch (carrot|orange). An
+# unknown IFQL_TASK is refused rather than silently falling back to carrot.
+case "${IFQL_TASK}" in
+    carrot)
+        HF_REPO="${HF_REPO:-Bigenlight/carrot-in-pot-ifql}"
+        _HF_SUBDIR="hf"
+        RUN="${IFQL_RUN:-ifql_real_lead6_k0.9_s0}"
+        RUN_LEAD0="${IFQL_RUN_LEAD0:-ifql_real_k0.9_s0}"
+        _EXTRA_RUNS=()
+        _WANT_DEPLOY_DIR=""
+        ;;
+    orange)
+        HF_REPO="${HF_REPO:-Bigenlight/orange-bowl-in-purple-bowl-ifql}"
+        _HF_SUBDIR="hf_orange"
+        # 3 candidates (docs/ros2/GELLO_UR7E_IFQL_ORANGE_HANDOFF.md §1); RUN is the
+        # aug8 candidate (val actor loss 0.151, best of 19 — try this one first).
+        RUN="${IFQL_RUN:-ifql_orange_k0.9_lead2_aug8_p0.5_s0}"
+        RUN_LEAD0="${IFQL_RUN_LEAD0:-ifql_orange_k0.9_lead2_s0}"
+        _EXTRA_RUNS=("px_orange_impala_lead2_s0")
+        # deploy/ carries ifql_deploy_orange.yaml provenance (orange_real_limits.json)
+        # and every norm_stats variant the 3 candidates need.
+        _WANT_DEPLOY_DIR="deploy/*"
+        ;;
+    *)
+        echo "ERROR: IFQL_TASK must be carrot|orange (got '${IFQL_TASK}')." >&2
+        exit 1 ;;
+esac
+
+echo "### IFQL workspace -> ${IFQL_ROOT} (task=${IFQL_TASK}, hf subdir=${_HF_SUBDIR})"
 command -v uv >/dev/null || { echo "ERROR: uv not found (curl -LsSf https://astral.sh/uv/install.sh | sh)" >&2; exit 1; }
-mkdir -p "${IFQL_ROOT}"/{hf,code,eval_runs,.cache/torch}
+mkdir -p "${IFQL_ROOT}"/{"${_HF_SUBDIR}",code,eval_runs,.cache/torch}
 
 # --- 1) HF snapshot (selective: the server reads params_<step>.pkl, NOT .infer.pkl) ------
 echo "### [1/5] snapshot_download ${HF_REPO}"
-python3 - "$IFQL_ROOT/hf" "$HF_REPO" "$RUN" "$RUN_LEAD0" "$STEP" <<'EOF'
+python3 - "$IFQL_ROOT/${_HF_SUBDIR}" "$HF_REPO" "$STEP" "$_WANT_DEPLOY_DIR" "$RUN" "$RUN_LEAD0" "${_EXTRA_RUNS[@]}" <<'EOF'
 import sys
 from huggingface_hub import snapshot_download
-root, repo, run, run0, step = sys.argv[1:]
+root, repo, step, deploy_pat, *runs = sys.argv[1:]
 pats = ["cards/*", "code/*", "hf_release/*", "models.json", "README.md"]
-for r in (run, run0):
+if deploy_pat:
+    pats.append(deploy_pat)
+for r in runs:
     pats += [f"{r}/flags.json", f"{r}/norm_stats_*.json", f"{r}/serve_meta.json",
              f"{r}/train.csv", f"{r}/RUN.md", f"{r}/params_{step}.pkl"]
 snapshot_download(repo_id=repo, repo_type="model", local_dir=root, allow_patterns=pats)
 print("snapshot ok")
 EOF
-[ -f "${IFQL_ROOT}/hf/${RUN}/params_${STEP}.pkl" ] || { echo "ERROR: params_${STEP}.pkl missing for ${RUN}" >&2; exit 1; }
+[ -f "${IFQL_ROOT}/${_HF_SUBDIR}/${RUN}/params_${STEP}.pkl" ] || { echo "ERROR: params_${STEP}.pkl missing for ${RUN}" >&2; exit 1; }
 
 # --- 2) code tarball: sha256 verify, extract, apply the D_c-null patch -----------------
 echo "### [2/5] code tarball"
-TARBALL="$(ls "${IFQL_ROOT}"/hf/code/*.tar.gz | head -1)"
+TARBALL="$(ls "${IFQL_ROOT}/${_HF_SUBDIR}"/code/*.tar.gz | head -1)"
 SNAP="$(basename "${TARBALL}" .tar.gz)"
 if [ -f "${TARBALL}.sha256" ]; then
     exp="$(awk '{print $1}' "${TARBALL}.sha256")"; got="$(sha256sum "${TARBALL}" | awk '{print $1}')"
@@ -96,10 +131,16 @@ echo "### [5/5] ifql_server.py --help"
 (cd "$(dirname "${SERVER}")" && QFLOW_DIR="${IFQL_ROOT}/code/${SNAP}/qflow_svf_merged" \
     "${IFQL_ROOT}/.venv-svf/bin/python" ifql_server.py --help >/dev/null) && echo "    ok"
 
+if [ "${IFQL_TASK}" = "orange" ]; then
+    _NEXT_ENV="IFQL_ROOT=${IFQL_ROOT} IFQL_TASK=orange IFQL_SAMPLER=bc HEADLESS=true"
+else
+    _NEXT_ENV="IFQL_ROOT=${IFQL_ROOT} IFQL_SAMPLER=bc HEADLESS=true"
+fi
 cat <<EOF
 
-### DONE. Next (robot PC, ROS Humble, this repo built):
+### DONE (task=${IFQL_TASK}). Next (robot PC, ROS Humble, this repo built):
 ###   cd ros2_ur_ws && ./launch_cameras.sh                                   # T1
-###   IFQL_ROOT=${IFQL_ROOT} IFQL_SAMPLER=bc HEADLESS=true ./run_ur7e_ifql_real.sh   # T2
-### (IFQL_ROOT is only needed if it is not \$HOME/carrot_ifql.)
+###   ${_NEXT_ENV} ./run_ur7e_ifql_real.sh   # T2
+### (IFQL_ROOT is only needed if it is not \$HOME/carrot_ifql; IFQL_TASK is only needed
+###  for orange — carrot stays the default.)
 EOF
