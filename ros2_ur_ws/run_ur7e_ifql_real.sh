@@ -82,7 +82,7 @@
 # #  ENV:                                                                    #
 # #    ROBOT_IP  (default 192.168.10.11)   CALIB (optional kinematics YAML)   #
 # #    HEADLESS  (true|1 -> Method B)      START_MODE (gello ONLY, see below)#
-# #    IFQL_ROOT (default /home/laptop3/carrot_ifql)                         #
+# #    IFQL_ROOT (default $HOME/carrot_ifql)                                #
 # #    IFQL_PY   (default $IFQL_ROOT/.venv-svf/bin/python)                   #
 # #    IFQL_CODE_ROOT (default $IFQL_ROOT/code; ifql_server.py is found by  #
 # #              `find` under it — exactly ONE hit required)                #
@@ -115,7 +115,7 @@ export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"    # gello_software
 
 # --- IFQL server settings (everything lives OUTSIDE this repo, under IFQL_ROOT) ---
-IFQL_ROOT="${IFQL_ROOT:-/home/laptop3/carrot_ifql}"
+IFQL_ROOT="${IFQL_ROOT:-$HOME/carrot_ifql}"
 IFQL_PY="${IFQL_PY:-$IFQL_ROOT/.venv-svf/bin/python}"
 IFQL_CODE_ROOT="${IFQL_CODE_ROOT:-$IFQL_ROOT/code}"
 IFQL_SERVER_PY="${IFQL_SERVER_PY:-}"

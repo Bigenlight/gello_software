@@ -1,16 +1,12 @@
 # GELLO → UR7e IFQL Policy 실기 배포 — 런북 (REAL, carrot-in-pot)
 
-> ⚠️ **실기 검증 0회.** 이 문서와 `run_ur7e_ifql_real.sh`, `ifql_deploy.yaml`은 2026-09-15에
-> 코드 읽기만으로 작성됐고 **실제 UR7e 팔을 이 경로로 한 번도 움직이지 않았다.** `bash -n`과
-> yaml 파싱만 통과했다. ROS 쪽 안전 스택(리더·브리지·핸드셰이크·클램프·그리퍼)은 ACT 실기
-> (2026-07-08)에서 검증된 코드와 **바이트 단위로 동일**하지만, IFQL 서버가 붙은 전체 경로는
-> 미확인이다. 첫 세션은 §7 순서대로, 사람이 E-STOP 옆에서.
->
-> 형제 문서: [`GELLO_UR7E_FM_DEPLOY.md`](./GELLO_UR7E_FM_DEPLOY.md)(이 문서의 직계 템플릿 —
-> 두 프로세스 구조·핸드셰이크 타임라인·안전 모델 전문은 그쪽 §1·§5·§6),
-> [`GELLO_UR7E_ACT_DEPLOY.md`](./GELLO_UR7E_ACT_DEPLOY.md)(실기 검증된 뼈대).
-> 서버 쪽 CLI·로그·프로토콜의 세부는 이 리포 밖의
-> **`~/carrot_ifql/code/<snapshot>/vision_carrot/REALROBOT_RUNBOOK_IFQL.md`**가 정본이다.
+> ✅ **첫 실물 세션 2026-09-16(laptop3, RTX 3060).** `launch_cameras.sh` → `run_ur7e_ifql_real.sh`
+> (bc) → move-to-start → START/HOLD/GO TO START 전 경로가 실제 UR7e에서 돌았다: 서버 GPU refill
+> p50 18 ms, 30 Hz 액션 발행, 클램프 WARN 0, GO TO START 0.345 rad 복귀 후 START 재수락.
+> **성공률(bc vs bon32 paired 표)은 아직 없다** — §5 프로토콜이 다음 단계다.
+> 그날 한 번 로봇이 POWER_OFF로 떨어져(원인 미확인; 드라이버는 끄지 않는다) T2 재기동으로
+> 복구했다 — 종료 시 `ur_ros2_control_node`가 futex에 걸리면 TERM/KILL로 정리해야 `ros2 launch`가
+> 빠져나온다.
 
 ## 요약 (TL;DR)
 
@@ -26,7 +22,7 @@
 | 두 프로세스 | IFQL 서버(`.venv-svf`, torch+JAX, `ifql_server.py`) ⇄ ZMQ **127.0.0.1:5595** ⇄ `policy_leader_node`(Humble py3.10). 런치는 정책-무관 `ur7e_diffusion_real.launch.py` 재사용 |
 | 안전 | 브리지 slew **0.625 rad/s**(불변) + 리더의 1.2× envelope 클램프 + live 대비 0.5 rad 클램프. 타임아웃 **0.8 < 0.9 < 1.0**(FM 0.6/0.7/0.8에서 한 번 넓힘; 더 넓히지 말 것) |
 | 포트 | **5595** 단독 (ACT 5591 / Diffusion 5592 / FM 5593 / SVF 5594) |
-| 실기 상태 | **0회.** laptop3 GPU는 재부팅 후에만(§7) |
+| 실기 상태 | **첫 실물 세션 2026-09-16** — bc 정책이 실제로 팔을 몰았다(성공률 표는 아직). GPU는 §7 |
 
 ---
 
@@ -52,21 +48,29 @@
     ifql_real_lead6_k0.9_s0/            flags.json · params_100000.pkl · norm_stats_r18_ss_real_lead6.json · serve_meta.json · RUN.md
     ifql_real_k0.9_s0/                  lead0 형제 — 쓰지 말 것 (norm_stats_r18_ss_real.json)
     cards/                              MODEL_CARD · SPEC_* · FIELD_GLOSSARY
-  code/carrot_ifql_code_<date>/       코드 타르볼 (내부 경로는 아직 미고정 — 런처가 find로 찾는다)
+  code/carrot_ifql_code_<date>/       코드 타르볼 (런처가 find로 ifql_server.py를 찾는다; D_c-null 패치 적용본)
     vision_carrot/ifql_server.py        ZMQ REP 서버 (+ action_queue · episode_logger · REALROBOT_RUNBOOK_IFQL.md)
     qflow_svf_merged/                   agent 코드 (Q/agents/ifql.py, utils.flax_utils.restore_agent)
-  .venv-svf/                          python (torch + jax); 다른 에이전트가 만드는 중
+  .venv-svf/                          uv py3.11, jax 0.6.2 cuda12 + torch 2.14+cu126 (7.5 GB)
   .cache/torch/                       TORCH_HOME — ResNet18 IMAGENET1K_V1 + torch.hub(dinov2) 오프라인 캐시
   eval_runs/real_<YYYYMMDD>/          런처가 만드는 서버 로그: ifql_lead6_<bon32|bc>/<HHMMSS>/
                                         ep_NNNN.npz · refill_stats.jsonl · server_stdout.log
 ```
 
-이 리포 쪽 세 파일:
+**다른 PC에서 재현:** 위 트리 전체를 스크립트 하나가 만든다 —
+[`ros2_ur_ws/ifql/setup_ifql_workspace.sh`](../../ros2_ur_ws/ifql/setup_ifql_workspace.sh)
+(HF 선별 다운로드 → 타르볼 sha256·추출 → **D_c-null 패치 적용**(`ifql/ifql_server_Dc_null.patch`)
+→ `uv venv` py3.11 + CUDA 휠(`ifql/requirements-svf-infer.txt`) → ResNet18·dinov2 hub 캐시 →
+`--help` smoke). 전제: `uv`, `hf auth login`(private repo 읽기 권한), 인터넷, ~8 GB.
+`IFQL_ROOT`(기본 `$HOME/carrot_ifql`)를 바꾸면 런처에도 같은 값을 준다.
+
+이 리포 쪽 파일:
 
 | 파일 | 역할 |
 |---|---|
 | [`ros2_ur_ws/src/gello_policy/config/ifql_deploy.yaml`](../../ros2_ur_ws/src/gello_policy/config/ifql_deploy.yaml) | `fm_deploy.yaml` 복제 + IFQL 값. **carrot start_pose / 1.2× envelope / 5595 / 0.8·0.9·1.0**. 숫자 출처는 파일 주석에 전부 있다 |
 | [`ros2_ur_ws/run_ur7e_ifql_real.sh`](../../ros2_ur_ws/run_ur7e_ifql_real.sh) | 서버 기동 → norm_stats·sampler 로그 검사 → 포트 대기 → `ros2 launch`(FM 런처 구조 그대로) |
+| [`ros2_ur_ws/ifql/`](../../ros2_ur_ws/ifql/) | `setup_ifql_workspace.sh` · `requirements-svf-infer.txt`(서빙 subset, cu126 핀) · `ifql_server_Dc_null.patch` |
 | 이 문서 | |
 
 > **빌드 없이 돈다.** `ifql_deploy.yaml`은 `install/`에 없다(이 PC의 `install/`은 데이터 수집이 쓰고
@@ -195,10 +199,20 @@ action · chunk id/step · refill ms, 에피소드당 ~90 MB), `refill_stats.jso
 
 - **실기 0회.** 첫 세션 순서: `.venv-svf` + `TORCH_HOME` 캐시 확인 → 서버 단독(`--no-serve`
   또는 런처를 띄우고 warmup 로그만 보기) → 카메라 hz → 그리퍼 → 감독하에 START.
-- **laptop3 GPU는 재부팅 후에만** — 현재 RT 커널(`6.8.2-rt11`)에서는 NVIDIA 드라이버가 안 뜬다.
-  런처는 `nvidia-smi`가 실패하면 `--device cpu`로 띄우고 배너에 알린다. CPU에서 warmup refill이
-  300 ms를 넘으면(서버 `WARNING: warmup refill …`) **`IFQL_NUM_SAMPLES=16`** — 타임아웃은 늘리지
-  않는다.
+- ✅ **GPU (2026-09-16 해결)** — laptop3의 문제는 RT 커널이 아니라 `nvidia-dkms-595`가
+  half-configured(`iF`)로 남아 어느 커널에도 모듈이 빌드되지 않은 것이었다. generic 커널로
+  부팅한 뒤 `sudo dkms install nvidia/595.91.07 -k $(uname -r) && sudo dpkg --configure -a &&
+  sudo modprobe nvidia`로 해결(재부팅 불필요). RTX 3060 실측 refill **p50 18 ms**(CPU 45 ms).
+  런처는 여전히 `nvidia-smi` 실패 시 `--device cpu`로 폴백하고 배너에 알린다; CPU에서 warmup
+  refill이 300 ms를 넘으면 **`IFQL_NUM_SAMPLES=16`** — 타임아웃은 늘리지 않는다.
+- 🪤 **노트북 suspend/resume 뒤 CUDA가 죽는다** (2026-09-16 16:27 실측): resume 후 새 프로세스의
+  `cuInit`이 torch·jax 모두 `CUDA unknown error`. 기존 서버 프로세스는 살아 보여도 믿지 말 것.
+  복구는 nvidia 모듈 재로드(`sudo rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia && sudo modprobe
+  nvidia_uvm`, X가 잡고 있으면 실패) 또는 재부팅. 예방은 `sudo systemctl enable nvidia-suspend
+  nvidia-resume nvidia-hibernate`. 세션 중 뚜껑을 닫지 말 것.
+- **재계획 주기는 1.25 Hz로 고정**(24프레임 chunk, `action_queue.py` 상수 `QUEUE_LEN=24`) —
+  실행은 30 Hz. GPU 한계가 아니라 학습 chunk 구조(8 knot × stride 3)이고 sim 평가도 같은
+  조건. 더 자주 재계획하려면 서버 큐 상수를 바꿔야 하고 sim과 조건이 갈리므로 학습 세션과 상의.
 - **proprio ~200 ms 미래 정렬 이슈** — `lead6`은 action만 shift하고 proprio는 그대로다(SPEC). 실기에서
   이상 거동(첫 청크에서 튐, 정지 자세에서 드리프트)이 보이면 **proprio 제외 ablation**을 먼저 본다.
   구체적 스위치는 런북 `REALROBOT_RUNBOOK_IFQL.md` 참조.
