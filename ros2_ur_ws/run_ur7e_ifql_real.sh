@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Drive the REAL UR7e AUTONOMOUSLY with the trained IFQL policy (carrot-in-pot) over ROS2 Humble.
+# Drive the REAL UR7e AUTONOMOUSLY with a trained IFQL policy over ROS2 Humble.
+# The task is selected by IFQL_TASK (carrot | orange); carrot is the default and its
+# behaviour is unchanged from the 2026-09-16 carrot session.
 #
 # ############################################################################
 # #  ⚠️  REAL HARDWARE — THE UR7e WILL PHYSICALLY MOVE, DRIVEN BY A POLICY.   #
@@ -30,8 +32,8 @@
 # #        PLAY the External Control program.                               #
 # #      • Method B (HEADLESS=true): the driver sends URScript directly (no   #
 # #        pendant Play). REQUIRES the robot in REMOTE mode.                  #
-# #   4) The arm first drives to the policy's HELD START POSE (the carrot    #
-# #      corpus frame-0 pose, ifql_deploy.yaml) and PARKS there. It stays   #
+# #   4) The arm first drives to the policy's HELD START POSE (the task      #
+# #      corpus frame-0 pose, IFQL_PARAMS_FILE) and PARKS there. It stays   #
 # #      still until you explicitly START (viewer button, or):               #
 # #        ros2 service call /policy_leader_node/start_execution \           #
 # #            std_srvs/srv/Trigger                                          #
@@ -48,12 +50,31 @@
 # ############################################################################
 # #  USAGE                                                                    #
 # #                                                                          #
-# #    ./run_ur7e_ifql_real.sh                    # bon, K=32 (default)       #
+# #    ./run_ur7e_ifql_real.sh                    # carrot, bon, K=32 (dflt)  #
 # #    IFQL_SAMPLER=bc ./run_ur7e_ifql_real.sh    # plain BC control (K=1)    #
 # #    IFQL_NUM_SAMPLES=16 ./run_ur7e_ifql_real.sh   # bon, K=16              #
+# #    IFQL_TASK=orange ./run_ur7e_ifql_real.sh   # orange-bowl task profile  #
+# #    IFQL_DRY_RUN=1 ./run_ur7e_ifql_real.sh     # print the two commands    #
+# #                                                and exit (starts nothing)  #
 # #    HEADLESS=true ./run_ur7e_ifql_real.sh      # Method B (REMOTE mode)    #
 # #    ./run_ur7e_ifql_real.sh launch_rviz:=false # extra launch args pass    #
 # #                                                through                    #
+# #                                                                          #
+# #  TASK PROFILES (IFQL_TASK, default carrot; an unknown value is REFUSED). #
+# #  A profile only supplies DEFAULTS for four things — each one is still    #
+# #  overridable on its own, which is how the 3 orange candidates are run    #
+# #  by changing IFQL_RUN_DIR alone:                                         #
+# #                                                                          #
+# #             carrot                          orange                       #
+# #    run dir  $IFQL_ROOT/hf/                  $IFQL_ROOT/hf_orange/        #
+# #             ifql_real_lead6_k0.9_s0         ifql_orange_k0.9_lead2_      #
+# #                                             aug8_p0.5_s0                 #
+# #    norm     $IFQL_RUN_DIR/norm_stats_       the single norm_stats_*.json #
+# #    stats    r18_ss_real_lead6.json          inside $IFQL_RUN_DIR         #
+# #    yaml     src/gello_policy/config/        src/gello_policy/config/     #
+# #             ifql_deploy.yaml                ifql_deploy_orange.yaml      #
+# #    log tag  ifql_lead6                      basename of $IFQL_RUN_DIR    #
+# #                                             (the 3 candidates differ)    #
 # #                                                                          #
 # #  The paired bc-vs-bon protocol switches samplers by RESTARTING this       #
 # #  script (Ctrl-C, then relaunch with the other IFQL_SAMPLER). Port 5595    #
@@ -73,34 +94,54 @@
 # #  do NOT widen the yaml timeouts (0.8 / 0.9 / 1.0 are already the         #
 # #  widened set; the leader must stay the primary fault owner).             #
 # #                                                                          #
-# #  norm_stats GUARD: the server log line "norm_stats: <path>" MUST name a  #
-# #  *real_lead6* file, otherwise the script kills the server and exits —   #
-# #  a lead0 / sim norm_stats denormalises joints into a different box and  #
-# #  the yaml envelope clamp does NOT catch the lead0 case (same action      #
-# #  box). Sampler line is checked too ("sampler: kind=<IFQL_SAMPLER> K=N"). #
+# #  norm_stats GUARD: the server log line "norm_stats: <path>" MUST carry   #
+# #  the SAME BASENAME as IFQL_NORM_STATS, otherwise the script kills the    #
+# #  server and exits. This REPLACES the old hard-coded "*real_lead6*"       #
+# #  substring test, which was carrot-only and would refuse every other      #
+# #  task outright. Exact-filename equality is task/lead/px agnostic AND     #
+# #  tighter (the whole name must match, not a substring) — it proves the    #
+# #  server really resolved the file we asked for (--norm-stats is always    #
+# #  passed, so a mismatch means the server ignored it or the log format     #
+# #  changed). The reason this matters at all: a lead0 / sim / other-task    #
+# #  norm_stats denormalises joints into a DIFFERENT box and the yaml        #
+# #  envelope clamp does NOT catch the lead0 case (same action box).         #
+# #  Paired local guard: IFQL_NORM_STATS must live INSIDE IFQL_RUN_DIR (a    #
+# #  released run ships its own norm_stats next to params_<step>.pkl); a     #
+# #  file from anywhere else is refused unless                               #
+# #  IFQL_ALLOW_FOREIGN_NORM_STATS=1. Together those two keep the old        #
+# #  carrot protection (a lead0 path is refused) without naming a task.      #
+# #  Sampler line is checked too ("sampler: kind=<IFQL_SAMPLER> K=N"), and   #
+# #  the server's "agent ready: ... px=<bool>" line is checked against the   #
+# #  run dir's own px verdict (flags.json, is_px_run rule).                  #
 # #                                                                          #
 # #  ENV:                                                                    #
 # #    ROBOT_IP  (default 192.168.10.11)   CALIB (optional kinematics YAML)   #
 # #    HEADLESS  (true|1 -> Method B)      START_MODE (gello ONLY, see below)#
+# #    IFQL_TASK (carrot|orange, default carrot — picks the 4 defaults above)#
 # #    IFQL_ROOT (default $HOME/carrot_ifql)                                #
 # #    IFQL_PY   (default $IFQL_ROOT/.venv-svf/bin/python)                   #
 # #    IFQL_CODE_ROOT (default $IFQL_ROOT/code; ifql_server.py is found by  #
 # #              `find` under it — exactly ONE hit required)                #
 # #    IFQL_SERVER_PY (explicit path to ifql_server.py; skips the find)     #
-# #    IFQL_RUN_DIR (default $IFQL_ROOT/hf/ifql_real_lead6_k0.9_s0)          #
+# #    IFQL_RUN_DIR (task default, see the table above)                      #
 # #    IFQL_STEP (default 100000)          IFQL_SAMPLER (bon|bc|actor)       #
 # #    IFQL_NUM_SAMPLES (default 32)       IFQL_PORT (default 5595)          #
 # #    IFQL_BUDGET_S (default 0.6; server-side refill log budget only)       #
-# #    IFQL_NORM_STATS (default $IFQL_RUN_DIR/norm_stats_r18_ss_real_lead6.json)
+# #    IFQL_NORM_STATS (task default, see the table above)                   #
+# #    IFQL_ALLOW_FOREIGN_NORM_STATS (1 -> allow a norm_stats outside the   #
+# #              run dir; default refuse)                                    #
+# #    IFQL_LOG_TAG (task default, see the table above)                      #
 # #    IFQL_LOG_DIR (default $IFQL_ROOT/eval_runs/real_<YYYYMMDD>/           #
-# #              ifql_lead6_<sampler tag>/<HHMMSS>; one subdir PER LAUNCH — #
-# #              the server names episodes ep_0001.npz.. from 1 on every    #
-# #              start and os.replace()s, so sharing a dir across restarts  #
-# #              would overwrite the previous run's episodes)                #
+# #              <IFQL_LOG_TAG>_<sampler tag>/<HHMMSS>; one subdir PER      #
+# #              LAUNCH — the server names episodes ep_0001.npz.. from 1 on #
+# #              every start and os.replace()s, so sharing a dir across      #
+# #              restarts would overwrite the previous run's episodes)       #
 # #    IFQL_DEVICE (auto|cuda|cpu, default auto)                             #
 # #    IFQL_WARMUP_TIMEOUT_S (default 120)                                   #
-# #    IFQL_PARAMS_FILE (default <this ws>/src/gello_policy/config/          #
-# #              ifql_deploy.yaml — the SRC copy, never the install share)  #
+# #    IFQL_PARAMS_FILE (task default under <this ws>/src/gello_policy/      #
+# #              config/ — the SRC copy, never the install share)           #
+# #    IFQL_DRY_RUN (1 -> run every preflight, print the resolved server +  #
+# #              ros2 launch commands, exit 0 WITHOUT starting either one)   #
 # #    GELLO_REPO_ROOT (default <ros2_ur_ws>/..)                             #
 # ############################################################################
 set -e
@@ -114,21 +155,72 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"    # gello_software
 
+# --- Task profile: the ONLY place a task name appears ------------------------------
+# IFQL_TASK picks DEFAULTS for exactly four things (run dir, norm_stats, deploy yaml,
+# log tag). Each stays individually overridable, which is how the three orange
+# candidates are compared by changing IFQL_RUN_DIR alone. An unknown IFQL_TASK is
+# refused (fail-closed): a typo must never silently fall back to carrot, because the
+# carrot yaml's start_pose / joint envelope would then drive the arm for another task.
+IFQL_TASK="${IFQL_TASK:-carrot}"
+case "${IFQL_TASK}" in
+    carrot)
+        _TASK_HF_SUBDIR="hf"
+        _TASK_RUN="ifql_real_lead6_k0.9_s0"
+        # Literal, unchanged from the carrot session: this run dir ships exactly this file.
+        _TASK_NORM_BASE="norm_stats_r18_ss_real_lead6.json"
+        _TASK_YAML="ifql_deploy.yaml"
+        _TASK_LOG_TAG="ifql_lead6"
+        ;;
+    orange)
+        _TASK_HF_SUBDIR="hf_orange"
+        _TASK_RUN="ifql_orange_k0.9_lead2_aug8_p0.5_s0"
+        # Empty -> resolved from the run dir (see below). The three orange candidates
+        # each ship a DIFFERENT norm_stats (the px run's is norm_stats_orange_lead2_px96
+        # .json), so a single hard-coded name would be wrong for two of the three.
+        _TASK_NORM_BASE=""
+        _TASK_YAML="ifql_deploy_orange.yaml"
+        # Empty -> basename of the run dir, so the three candidates never share a log dir.
+        _TASK_LOG_TAG=""
+        ;;
+    *)
+        echo "ERROR: IFQL_TASK must be carrot|orange (got '${IFQL_TASK}')." >&2
+        exit 1 ;;
+esac
+
 # --- IFQL server settings (everything lives OUTSIDE this repo, under IFQL_ROOT) ---
 IFQL_ROOT="${IFQL_ROOT:-$HOME/carrot_ifql}"
 IFQL_PY="${IFQL_PY:-$IFQL_ROOT/.venv-svf/bin/python}"
 IFQL_CODE_ROOT="${IFQL_CODE_ROOT:-$IFQL_ROOT/code}"
 IFQL_SERVER_PY="${IFQL_SERVER_PY:-}"
-IFQL_RUN_DIR="${IFQL_RUN_DIR:-$IFQL_ROOT/hf/ifql_real_lead6_k0.9_s0}"
+IFQL_RUN_DIR="${IFQL_RUN_DIR:-$IFQL_ROOT/${_TASK_HF_SUBDIR}/${_TASK_RUN}}"
 IFQL_STEP="${IFQL_STEP:-100000}"
 IFQL_SAMPLER="${IFQL_SAMPLER:-bon}"
 IFQL_NUM_SAMPLES="${IFQL_NUM_SAMPLES:-32}"
 IFQL_HOST="${IFQL_HOST:-127.0.0.1}"
 IFQL_PORT="${IFQL_PORT:-5595}"
 IFQL_BUDGET_S="${IFQL_BUDGET_S:-0.6}"
-IFQL_NORM_STATS="${IFQL_NORM_STATS:-$IFQL_RUN_DIR/norm_stats_r18_ss_real_lead6.json}"
 IFQL_DEVICE="${IFQL_DEVICE:-auto}"
 IFQL_WARMUP_TIMEOUT_S="${IFQL_WARMUP_TIMEOUT_S:-120}"
+IFQL_ALLOW_FOREIGN_NORM_STATS="${IFQL_ALLOW_FOREIGN_NORM_STATS:-}"
+IFQL_DRY_RUN="${IFQL_DRY_RUN:-}"
+
+# norm_stats default. With a profile basename (carrot) it is the same literal path the
+# carrot session used. Without one (orange) the run dir must contain EXACTLY ONE
+# norm_stats_*.json — 0 or >1 is refused rather than guessed, exactly like the
+# ifql_server.py find above.
+if [ -z "${IFQL_NORM_STATS:-}" ] && [ -n "${_TASK_NORM_BASE}" ]; then
+    IFQL_NORM_STATS="${IFQL_RUN_DIR}/${_TASK_NORM_BASE}"
+fi
+if [ -z "${IFQL_NORM_STATS:-}" ]; then
+    mapfile -t _NS_HITS < <(find "${IFQL_RUN_DIR}" -maxdepth 1 -type f -name 'norm_stats_*.json' 2>/dev/null | sort)
+    if [ "${#_NS_HITS[@]}" -ne 1 ]; then
+        echo "ERROR: cannot pick a norm_stats for IFQL_TASK=${IFQL_TASK}: ${#_NS_HITS[@]} norm_stats_*.json in" >&2
+        echo "       ${IFQL_RUN_DIR} (need exactly 1). Set IFQL_NORM_STATS explicitly." >&2
+        printf '         %s\n' "${_NS_HITS[@]}" >&2
+        exit 1
+    fi
+    IFQL_NORM_STATS="${_NS_HITS[0]}"
+fi
 
 # Sampler tag for the log dir: bon carries K (bon32 / bon16); bc is K=1 by definition
 # (the server ignores --num-samples), so "bc32" would be a lie; actor has no K.
@@ -140,7 +232,8 @@ case "${IFQL_SAMPLER}" in
         echo "ERROR: IFQL_SAMPLER must be bon|bc|actor (got '${IFQL_SAMPLER}')." >&2
         exit 1 ;;
 esac
-IFQL_LOG_DIR="${IFQL_LOG_DIR:-$IFQL_ROOT/eval_runs/real_$(date +%Y%m%d)/ifql_lead6_${IFQL_TAG}/$(date +%H%M%S)}"
+IFQL_LOG_TAG="${IFQL_LOG_TAG:-${_TASK_LOG_TAG:-$(basename "${IFQL_RUN_DIR}")}}"
+IFQL_LOG_DIR="${IFQL_LOG_DIR:-$IFQL_ROOT/eval_runs/real_$(date +%Y%m%d)/${IFQL_LOG_TAG}_${IFQL_TAG}/$(date +%H%M%S)}"
 
 # --- start_mode: gello ONLY -----------------------------------------------------
 # In start_mode=gello gello_move_to_start chases /gello/joint_states, i.e. the pose
