@@ -210,7 +210,11 @@ IFQL_DRY_RUN="${IFQL_DRY_RUN:-}"
 # carrot session used. Without one (orange) the run dir must contain EXACTLY ONE
 # norm_stats_*.json — 0 or >1 is refused rather than guessed, exactly like the
 # ifql_server.py find above.
-if [ -z "${IFQL_NORM_STATS:-}" ] && [ -n "${_TASK_NORM_BASE}" ]; then
+# A run dir that ships a DIFFERENT norm_stats than the profile's literal name (e.g. the
+# carrot px run: norm_stats_real_px96_lead6.json) falls through to the exactly-one rule
+# below instead of failing on the literal — the post-start basename guard still pins
+# whatever is chosen here to what the server actually loaded.
+if [ -z "${IFQL_NORM_STATS:-}" ] && [ -n "${_TASK_NORM_BASE}" ] && [ -f "${IFQL_RUN_DIR}/${_TASK_NORM_BASE}" ]; then
     IFQL_NORM_STATS="${IFQL_RUN_DIR}/${_TASK_NORM_BASE}"
 fi
 if [ -z "${IFQL_NORM_STATS:-}" ]; then
