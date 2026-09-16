@@ -103,6 +103,10 @@ class PolicyLeaderNode(Node):
         # (review: obs-freshness watchdog). ~0.5 s = a real stall, not a dropped frame.
         self.declare_parameter("obs_timeout_s", 0.5)
         self.declare_parameter("auto_start_on_stream", False)
+        # ~/go_to_start ramp speed (rad/s, per joint). The leader glides its HOLD pose
+        # back to start_pose at this rate so the bridge (slew cap 0.625 rad/s) tracks a
+        # continuous target instead of a step. Kept well under the bridge cap.
+        self.declare_parameter("go_to_start_speed_rad_s", 0.25)
         # Camera topics (match the recorder defaults; overridable).
         self.declare_parameter("cam1_topic", "/cam1/cam1/color/image_raw/compressed")
         self.declare_parameter("cam2_topic", "/cam2/cam2/color/image_raw/compressed")
@@ -114,6 +118,7 @@ class PolicyLeaderNode(Node):
         self._act_host = str(gp("act_host").value)
         self._act_port = int(gp("act_port").value)
         self._act_timeout_s = float(gp("act_timeout_s").value)
+        self._goto_speed = float(gp("go_to_start_speed_rad_s").value)
         self._transport = str(gp("inference_transport").value).lower()
         self._grpc_port = int(gp("grpc_port").value)
         self._camera_width = int(gp("camera_width").value)
@@ -162,6 +167,10 @@ class PolicyLeaderNode(Node):
         # commanded grip so pausing mid-grasp doesn't drop the object).
         self._hold_gripper = self._start_gripper
         self._last_grip_cmd = self._start_gripper
+        # ~/go_to_start: while True, _tick_hold ramps _hold_pose toward _goto_target
+        # (start_pose expressed in the hold pose's branch) instead of holding still.
+        self._goto_active = False
+        self._goto_target = None
 
         self._state = HOLD
         self._arming_generation = 0
@@ -194,6 +203,7 @@ class PolicyLeaderNode(Node):
         # --- Services (Trigger) ------------------------------------------
         self.create_service(Trigger, "~/start_execution", self._srv_start_execution)
         self.create_service(Trigger, "~/hold", self._srv_hold)
+        self.create_service(Trigger, "~/go_to_start", self._srv_go_to_start)
 
         # --- ZMQ REQ client ----------------------------------------------
         self._zmq_ctx = zmq.Context.instance()
@@ -344,6 +354,7 @@ class PolicyLeaderNode(Node):
         # Hold the LAST commanded gripper, not start_gripper -- pausing mid-grasp must
         # not open the gripper and drop the object (review).
         self._hold_gripper = self._last_grip_cmd
+        self._goto_active = False  # a ramp in progress stops where it is
         self._arming_generation += 1
         self._arming_result = None
         self._state = HOLD
@@ -357,6 +368,47 @@ class PolicyLeaderNode(Node):
         response.message = f"HOLD (holding {src}, grip {self._hold_gripper:.3f})"
         return response
 
+    def _srv_go_to_start(self, request, response):
+        """Glide the arm back to start_pose so ~/start_execution's 0.1 rad gate passes.
+
+        Legal from HOLD, FAULT and EXECUTE: it first behaves like ~/hold (policy
+        stopped, state -> HOLD, last gripper command kept so a held object is not
+        dropped mid-air), then _tick_hold ramps the published pose toward start_pose
+        at go_to_start_speed_rad_s per joint. On arrival the gripper is opened to
+        start_gripper (every demo starts open). ~/hold cancels the ramp in place.
+        No controller switch: the bridge keeps streaming FPC as during teleop."""
+        if self._state == ARMING:
+            response.success = False
+            response.message = "refused: gRPC arming in progress"
+            return response
+        if self._live_q is None:
+            response.success = False
+            response.message = "refused: no live /joint_states yet"
+            return response
+        prev = self._state
+        self._arming_generation += 1
+        self._arming_result = None
+        self._state = HOLD
+        if self._grpc_worker is not None:
+            self._grpc_worker.disarm()
+        self._auto_start_fired = True
+        # Start the ramp from where the arm actually is (not a stale hold pose), and
+        # express start_pose in that branch so a +/-pi wrapped joint takes the short way.
+        self._hold_pose = list(self._live_q)
+        self._hold_gripper = self._last_grip_cmd
+        self._goto_target = positions_near_reference(self._start_pose, self._hold_pose)
+        self._goto_active = True
+        worst = max(abs(a - b) for a, b in zip(self._hold_pose, self._goto_target))
+        eta = worst / max(self._goto_speed, 1e-6)
+        self.get_logger().info(
+            f"~/go_to_start (from {prev}) -> ramping to start_pose, worst joint "
+            f"{worst:.3f} rad @ {self._goto_speed:.2f} rad/s (~{eta:.1f}s); "
+            f"gripper opens to {self._start_gripper:.3f} on arrival."
+        )
+        response.success = True
+        response.message = f"GO TO START: {worst:.3f} rad @ {self._goto_speed:.2f} rad/s (~{eta:.1f}s)"
+        return response
+
     def _try_start_execution(self):
         """Guard the live pose, ZMQ-RESET the server, then enter EXECUTE.
 
@@ -366,6 +418,8 @@ class PolicyLeaderNode(Node):
             return False, "refused: gRPC server check/reset already in progress"
         if self._live_q is None:
             return False, "refused: no live /joint_states yet"
+        if self._goto_active:
+            return False, "refused: go_to_start ramp still in progress"
         # Require a COMPLETE, FRESH observation set before arming: otherwise EXECUTE
         # would arm with e.g. no cameras running and never actually move (review:
         # arming must verify the full obs, not just joint states).
@@ -458,8 +512,34 @@ class PolicyLeaderNode(Node):
 
     def _tick_hold(self):
         # Publish the held pose + held gripper constantly. Never query server.
+        if self._goto_active:
+            self._step_go_to_start()
         self._publish_arm(self._hold_pose)
         self._publish_gripper(self._hold_gripper)
+
+    def _step_go_to_start(self):
+        # One 1/publish_rate_hz step of the ramp: each joint moves at most
+        # go_to_start_speed_rad_s / rate toward its target, so the leader stream the
+        # bridge follows is continuous (no step for the slew clamp to saturate on).
+        rate = self._publish_rate_hz if self._publish_rate_hz > 0.0 else 30.0
+        step = self._goto_speed / rate
+        done = True
+        nxt = []
+        for cur, tgt in zip(self._hold_pose, self._goto_target):
+            d = tgt - cur
+            if abs(d) <= step:
+                nxt.append(tgt)
+            else:
+                nxt.append(cur + step * (1.0 if d > 0.0 else -1.0))
+                done = False
+        self._hold_pose = nxt
+        if done:
+            self._goto_active = False
+            self._hold_gripper = self._start_gripper
+            self.get_logger().info(
+                f"go_to_start: arrived at start_pose; gripper -> {self._start_gripper:.3f}. "
+                "Ready for ~/start_execution."
+            )
 
     def _tick_execute(self):
         # FAULT if any observation is missing or stale (frozen camera / hung stream):

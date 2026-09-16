@@ -165,7 +165,7 @@ def _render_pane(feed: _CameraFeed):
 
 
 # --- Trigger button bar ------------------------------------------------------
-# Two clickable buttons drawn in a strip BELOW the two camera panes. They call
+# Three clickable buttons drawn in a strip BELOW the two camera panes. They call
 # the running policy_leader_node's std_srvs/Trigger services so the operator can
 # arm/pause the autonomous policy WITHOUT a third terminal running
 # `ros2 service call ...` by hand.
@@ -179,6 +179,7 @@ def _render_pane(feed: _CameraFeed):
 # Full service names (policy_leader_node declares them as ~/... i.e. private).
 START_SERVICE = "/policy_leader_node/start_execution"
 HOLD_SERVICE = "/policy_leader_node/hold"
+GOTO_SERVICE = "/policy_leader_node/go_to_start"
 
 BUTTON_STRIP_HEIGHT = 90          # px tall strip appended below the camera row
 _SERVICE_CHECK_INTERVAL_S = 0.5   # re-poll service_is_ready() no more often than
@@ -192,6 +193,7 @@ _C_WAIT_FILL = (60, 60, 60)       # service absent -> dim grey
 _C_WAIT_TEXT = (150, 150, 150)
 _C_START_FILL = (170, 120, 30)    # idle START -> blue/teal
 _C_HOLD_FILL = (20, 140, 230)     # idle HOLD -> amber/orange
+_C_GOTO_FILL = (120, 120, 60)     # idle GO TO START -> teal-grey
 _C_INFLIGHT_TINT = 0.5            # multiply idle fill for the in-flight shade
 _C_BORDER = (200, 200, 200)
 _C_FLASH_BORDER = (0, 0, 255)     # red border flash on a rejected (not-ready) click
@@ -289,12 +291,15 @@ class _TriggerButton:
 
 
 class TriggerButtonBar:
-    """Lays out, draws, and routes clicks for the two Trigger buttons."""
+    """Lays out, draws, and routes clicks for the three Trigger buttons."""
 
     def __init__(self, node):
         self.start_btn = _TriggerButton(node, START_SERVICE, "START EXECUTION")
         self.hold_btn = _TriggerButton(node, HOLD_SERVICE, "HOLD")
-        self._buttons = (self.start_btn, self.hold_btn)
+        # Third button: glide the arm back to start_pose after an episode / a FAULT
+        # (START is refused unless the arm is within 0.1 rad of start_pose).
+        self.goto_btn = _TriggerButton(node, GOTO_SERVICE, "GO TO START")
+        self._buttons = (self.start_btn, self.hold_btn, self.goto_btn)
         self._last_ready_check = 0.0
 
     def _layout(self, canvas_w):
@@ -304,9 +309,15 @@ class TriggerButtonBar:
         margin, gap = 40, 40
         y1 = strip_y0 + 12
         y2 = strip_y0 + 12 + 46
-        half = canvas_w // 2
-        self.start_btn.rect = (margin, y1, half - gap // 2, y2)
-        self.hold_btn.rect = (half + gap // 2, y1, canvas_w - margin, y2)
+        # Three equal columns: START | HOLD | GO TO START.
+        inner = canvas_w - 2 * margin
+        col = (inner - 2 * gap) // 3
+        x0 = margin
+        self.start_btn.rect = (x0, y1, x0 + col, y2)
+        x0 += col + gap
+        self.hold_btn.rect = (x0, y1, x0 + col, y2)
+        x0 += col + gap
+        self.goto_btn.rect = (x0, y1, canvas_w - margin, y2)
 
     def update(self, now, canvas_w):
         """Refresh layout, availability (throttled), and in-flight calls."""
@@ -335,6 +346,7 @@ class TriggerButtonBar:
                         dtype=np.uint8)
         self._draw_button(strip, self.start_btn, _C_START_FILL, now)
         self._draw_button(strip, self.hold_btn, _C_HOLD_FILL, now)
+        self._draw_button(strip, self.goto_btn, _C_GOTO_FILL, now)
         return strip
 
     def _draw_button(self, strip, btn, idle_fill, now):
@@ -423,7 +435,7 @@ def main(argv=None):
     cv2.imshow(window, np.zeros((510, 1600, 3), dtype=np.uint8))
     cv2.waitKey(1)
 
-    # The button bar owns the two Trigger service clients; wiring its click
+    # The button bar owns the three Trigger service clients; wiring its click
     # handler here (after the window exists) lets the same OpenCV window drive
     # policy_leader_node's ~/start_execution and ~/hold. spin_once() below both
     # dispatches the service replies and updates the camera frames.
