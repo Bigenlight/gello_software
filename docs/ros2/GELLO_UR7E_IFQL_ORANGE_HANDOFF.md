@@ -20,6 +20,16 @@
 - **평가 요청**: 각 후보 **bc(K=1) 먼저 → 되면 bon32**, 같은 세션 안에서 paired(같은 물체 초기 위치),
   **조명 조건(블라인드/자연광) 기록**, 실패 양상(정지/엉뚱한 곳/그립 실패) 한 줄씩. 결과는 fm-rl-6e 세션으로.
 
+## 0b. 추가 요청 (2026-09-16 밤, fm-rl-6e) — carrot에도 증강 후보가 생겼다
+
+carrot(lead6) 후보, bc→bon32 paired, 조명·실패 양상 기록 동일:
+1. **`ifql_real_k0.9_lead6_aug8_p1.0_s0` @100000** — 증강 8뷰, 1순위. norm_stats `norm_stats_r18_ss_real_lead6.json`
+2. `ifql_real_lead6_k0.9_s0` @100000 — 대조군(어제 실물 세션에 쓴 것)
+3. `px_real_impala_lead6_s0` @**50000** — 픽셀 e2e(`ifql_px`, px96 norm_stats 동봉), latency 미실측
+1·3은 `~/carrot_ifql/hf/<run>/`에 받아 뒀다(2026-09-16 밤). 실행: `IFQL_RUN_DIR=~/carrot_ifql/hf/<run> [IFQL_STEP=50000] ./run_ur7e_ifql_real.sh`
+(carrot 기본 태스크). 학습 세션이 경고한 start_pose j0 부호 문제는 우리 `ifql_deploy.yaml`이 이미 −3.1638로 고쳐 둔 상태라 해당 없음.
+전체 정리는 학습 세션 vault `01-projects/FM_RL/IFQL_STATUS_2026-09-16.md` §3.
+
 ## 1. 된 것 ✅
 
 | 항목 | 상태 | 위치 |
