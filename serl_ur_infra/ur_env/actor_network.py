@@ -28,6 +28,7 @@ one reserved key in one place does not.
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import nullcontext
 import copy
 from dataclasses import dataclass, replace
 import hashlib
@@ -537,6 +538,7 @@ class ActorSessionService:
         allowed_actor_ids: Optional[Tuple[str, ...]] = None,
         allowed_run_ids: Optional[Tuple[str, ...]] = None,
         accept_external_policy_meta: bool = False,
+        priority_context: Optional[Callable[[], Any]] = None,
     ) -> None:
         if not isinstance(accept_external_policy_meta, bool):
             # Strict on purpose.  This flag arrives from an environment
@@ -549,6 +551,8 @@ class ActorSessionService:
             raise ValueError("cache_size must be positive")
         if in_memory_capacity <= 0:
             raise ValueError("in_memory_capacity must be positive")
+        if priority_context is not None and not callable(priority_context):
+            raise TypeError("priority_context must be callable")
         if not isinstance(reward_authority, str) or not reward_authority:
             raise ValueError("reward_authority is required")
         self._allowed_actor_ids = self._validated_allowlist(
@@ -576,6 +580,7 @@ class ActorSessionService:
             finalize_transition or self._finalize_transition_identity
         )
         self._buffer_status_provider = buffer_status_provider
+        self._priority_context = priority_context or nullcontext
         self._lock = threading.RLock()
         self._ready = True
         self._fault_detail = ""
@@ -682,7 +687,10 @@ class ActorSessionService:
             command.session_id,
             command.request_id,
         )
-        with self._lock:
+        # Enter the scheduling gate before the service lock.  A request waiting
+        # behind another actor request still advertises actor demand, preventing
+        # a learner update from slipping between two queued RPCs.
+        with self._priority_context(), self._lock:
             cached = self._cached(cache_key, fingerprint)
             if cached is not None:
                 return _copy_action_result(cached)
@@ -771,7 +779,7 @@ class ActorSessionService:
             command.session_id,
             command.request_id,
         )
-        with self._lock:
+        with self._priority_context(), self._lock:
             cached = self._cached(cache_key, fingerprint)
             if cached is not None:
                 result = _copy_step_result(cached)

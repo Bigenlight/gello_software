@@ -610,6 +610,8 @@ def test_production_service_shares_policy_and_strict_ingress_over_grpc(
 
     assert service._sample_action is assembly.policy_runtime
     assert service._accept_data is assembly.ingress
+    assert service._priority_context.__self__ is assembly.inference_gate
+    assert assembly.learner._update_context.__self__ is assembly.inference_gate
     server, port = create_grpc_server(service)
     server.start()
     client = GrpcActorNetwork(

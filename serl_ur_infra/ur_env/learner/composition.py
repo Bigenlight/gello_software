@@ -33,6 +33,7 @@ from ur_env.learner.runtime import (
     LearnerFaultError,
     LearnerNotReadyError,
 )
+from ur_env.learner.scheduling import ActorInferenceGate
 from ur_env.observation_schema import CANONICAL_OBSERVATION_SCHEMA_HASH
 
 
@@ -49,6 +50,7 @@ class LearnerAssembly:
     sampler: RLPDBatchSampler
     ingress: Any
     restored_checkpoint: RestoredCheckpoint | None
+    inference_gate: ActorInferenceGate
 
 
 @dataclass(frozen=True)
@@ -390,6 +392,7 @@ def compose_learner(
     inference_rng = prepared.inference_rng
     restored = prepared.restored_checkpoint
 
+    inference_gate = ActorInferenceGate()
     policy_runtime = VersionedPolicyRuntime(
         agent,
         policy_version=policy_version,
@@ -421,6 +424,7 @@ def compose_learner(
         policy_version=policy_version,
         parameter_validator=parameter_validator,
         candidate_postprocessor=candidate_postprocessor,
+        update_context=inference_gate.learner_update,
     )
     if policy_runtime.learner_step != learner.learner_step:
         raise LearnerCompositionError("policy and learner steps diverged")
@@ -432,6 +436,7 @@ def compose_learner(
         sampler=sampler,
         ingress=ingress,
         restored_checkpoint=restored,
+        inference_gate=inference_gate,
     )
 
 
@@ -491,6 +496,11 @@ def build_actor_service(
 
     runtime = assembly.policy_runtime
     ingress = assembly.ingress
+    # A production ``LearnerAssembly`` always carries the gate, so this getattr
+    # never fires there.  It exists for assemblies built without a learner
+    # thread to yield to -- there is nothing to prioritise against, and
+    # ``ActorSessionService`` reads a ``None`` here as "take the lock directly".
+    inference_gate = getattr(assembly, "inference_gate", None)
     return ActorSessionService(
         sample_action=runtime,
         model_id=runtime.model_id,
@@ -518,6 +528,9 @@ def build_actor_service(
         allowed_actor_ids=allowed_actor_ids,
         allowed_run_ids=allowed_run_ids,
         accept_external_policy_meta=accept_external_policy_meta,
+        priority_context=(
+            None if inference_gate is None else inference_gate.actor_request
+        ),
     )
 
 
@@ -541,9 +554,16 @@ class LearnerWorker:
         target_learner_step: int | None = None,
         poll_interval: float = 0.1,
         thread_name: str = "hil-serl-learner",
+        restored_replay_rows: int = 0,
     ) -> None:
         if not callable(replay_insert_count):
             raise TypeError("replay_insert_count must be callable")
+        if (
+            isinstance(restored_replay_rows, bool)
+            or not isinstance(restored_replay_rows, int)
+            or restored_replay_rows < 0
+        ):
+            raise ValueError("restored_replay_rows must be a non-negative integer")
         if target_learner_step is not None:
             if (
                 isinstance(target_learner_step, bool)
@@ -561,6 +581,7 @@ class LearnerWorker:
         self.target_learner_step = target_learner_step
         self.poll_interval = float(poll_interval)
         self._initial_learner_step = learner.learner_step
+        self._restored_replay_rows = restored_replay_rows
         self._last_replay_insert_count: int | None = None
         self._stop_event = threading.Event()
         self._finished_event = threading.Event()
@@ -647,6 +668,15 @@ class LearnerWorker:
         if insert_count < training_starts:
             return 0
         eligible_transitions = insert_count - training_starts + 1
+        # Rows restored from a snapshot were already paid for: the run that
+        # collected them spent their budget on them.  Letting them earn it a
+        # second time would make every restart open with a burst of thousands
+        # of updates over data the agent has already seen, which is both a
+        # silent change in the update-to-data ratio and the opposite of the
+        # run-local budget this method exists to hand out.
+        eligible_transitions -= self._restored_replay_rows
+        if eligible_transitions <= 0:
+            return 0
         return eligible_transitions * self.learner.config.utd_ratio
 
     def _has_update_budget(self) -> bool:

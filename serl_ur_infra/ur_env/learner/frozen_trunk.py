@@ -511,6 +511,22 @@ class FrozenResNet10TrunkExtractor:
             pre_pooling=True
         )
 
+        import jax
+
+        def apply_trunk(params: Any, pixels: Any) -> Any:
+            return self._trunk.apply(
+                {"params": params}, pixels, train=False
+            )
+
+        # Actor observations always contain both cameras.  Compile that live
+        # shape before the service reports ready, then serve both cameras with
+        # one XLA launch and one device-to-host transfer per observation.
+        self._apply_trunk = jax.jit(apply_trunk)
+        warmup_pixels = np.zeros(
+            (len(self.image_keys), *RAW_IMAGE_SHAPE[1:]), dtype=np.uint8
+        )
+        jax.block_until_ready(self._apply_trunk(self._params, warmup_pixels))
+
     @property
     def parameter_reference(self) -> Any:
         """Return the immutable agent trunk reference without copying it."""
@@ -679,26 +695,38 @@ class FrozenResNet10TrunkExtractor:
         )
         state = canonical["state"]
         result = {"state": state.copy() if copy_state else state}
+
+        camera_pixels = []
         for image_key in self.image_keys:
             pixels = canonical[image_key]
             if batched:
                 batch_size = int(pixels.shape[0])
-                flat_pixels = pixels.reshape(batch_size, 128, 128, 3)
+                camera_pixels.append(
+                    pixels.reshape(batch_size, *RAW_IMAGE_SHAPE[1:])
+                )
             else:
                 # EncodingWrapper removes the canonical T=1 stacking axis for
-                # a single observation.  Match that exact convolution path so
-                # the extracted trunk tensor is bit-for-bit identical.
-                flat_pixels = pixels[0]
-            value = self._trunk.apply(
-                {"params": self._params}, flat_pixels, train=False
-            )
-            feature = np.asarray(jax.device_get(value), dtype=np.float32)
+                # a single observation.  Retain that cut point while adding a
+                # camera batch axis shared by cam1 and cam2.
+                camera_pixels.append(pixels)
+
+        camera_batch_size = batch_size if batched else 1
+        combined_pixels = np.concatenate(camera_pixels, axis=0)
+        combined_features = np.asarray(
+            jax.device_get(
+                self._apply_trunk(self._params, combined_pixels)
+            ),
+            dtype=np.float32,
+        )
+
+        for camera_index, image_key in enumerate(self.image_keys):
+            start = camera_index * camera_batch_size
+            stop = start + camera_batch_size
+            feature = combined_features[start:stop]
             if batched:
                 feature = feature.reshape(
                     batch_size, *FROZEN_TRUNK_FEATURE_SHAPE
                 )
-            else:
-                feature = feature[None]
             result[image_key] = validate_frozen_trunk_feature(
                 feature,
                 name=image_key,

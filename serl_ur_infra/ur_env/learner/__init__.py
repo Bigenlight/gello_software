@@ -36,9 +36,11 @@ from ur_env.learner.checkpoint import (
     RestoredCheckpoint,
 )
 from ur_env.learner.emergency import (
+    ReplaySnapshotError,
     RescueResult,
     read_replay_snapshot_manifest,
     rescue_learner_state,
+    restore_replay_snapshot,
     save_replay_snapshot,
 )
 from ur_env.learner.config import (
@@ -59,6 +61,7 @@ from ur_env.learner.composition import (
     preflight_checkpoint_run,
     prepare_learner_state,
 )
+from ur_env.learner.scheduling import ActorInferenceGate
 from ur_env.learner.demo import (
     CanonicalTransitionPool,
     DemoContractError,
@@ -161,9 +164,11 @@ __all__ = [
     "CheckpointManager",
     "CheckpointRunLock",
     "CheckpointSpaceError",
+    "ReplaySnapshotError",
     "RescueResult",
     "read_replay_snapshot_manifest",
     "rescue_learner_state",
+    "restore_replay_snapshot",
     "save_replay_snapshot",
     "ConvertedRecordedDemos",
     "DemoContractError",
@@ -204,6 +209,7 @@ __all__ = [
     "JsonlWandbLogger",
     "LearnerBatchError",
     "LearnerAssembly",
+    "ActorInferenceGate",
     "LearnerCompositionError",
     "LearnerConfig",
     "LearnerDependencyError",

@@ -29,7 +29,7 @@ class LearnerConfig:
     training_starts: int = 100
     publish_period: int = 50
     checkpoint_period: int = 5_000
-    log_period: int = 1
+    log_period: int = 100
     discount: float = 0.97
     encoder_type: str = "resnet-pretrained"
     image_keys: tuple[str, str] = ("cam1", "cam2")

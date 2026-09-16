@@ -54,6 +54,7 @@ from ur_env.learner import (  # noqa: E402
     load_demo_pickles,
     preflight_checkpoint_run,
     prepare_learner_state,
+    restore_replay_snapshot,
     rescue_learner_state,
     system_available_memory_bytes,
     validate_learner_dependencies,
@@ -189,6 +190,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "resume the newest structurally complete checkpoint in the output "
             "root; if a higher damaged entry exists, use --resume-path with "
             "a new empty --checkpoint-root"
+        ),
+    )
+    parser.add_argument(
+        "--restore-replay-snapshot",
+        help=(
+            "refill both feature rings from a replay_<step>.npz written by a "
+            "previous run's shutdown rescue; the rows are re-validated on the "
+            "way in and do not earn a second UTD budget"
         ),
     )
     parser.add_argument("--jsonl-path")
@@ -1096,6 +1105,25 @@ def _run_locked(
                 logger_closed = True
             return 0
 
+        # Refill the rings BEFORE the gRPC server binds.  Once it accepts, the
+        # actor can insert concurrently, and a restore interleaved with live
+        # traffic would order old rows after new ones in the ring.
+        restored_replay_rows = 0
+        if args.restore_replay_snapshot:
+            restored = restore_replay_snapshot(
+                args.restore_replay_snapshot,
+                ingress=raw_ingress,
+                expected_fingerprint_sha256=fingerprint.sha256,
+            )
+            restored_replay_rows = int(restored.get("replay_rows", 0))
+            _emit("rlpd_learner_replay_snapshot_restored", **restored)
+            _log_best_effort(
+                logger,
+                "replay_snapshot_restored",
+                learner_step=assembly.learner.learner_step,
+                **restored,
+            )
+
         server, bound_port = _create_grpc_server_after_jax(
             service,
             bind_address=_grpc_bind_address(args.host, args.port),
@@ -1110,6 +1138,7 @@ def _run_locked(
             ),
             target_learner_step=args.target_learner_step,
             poll_interval=args.poll_interval,
+            restored_replay_rows=restored_replay_rows,
         )
 
         def request_shutdown(_signum, _frame) -> None:
