@@ -85,3 +85,18 @@ def test_policy_refused_aborts_instead_of_faulting(world, tmp_path):
     assert rc == 2
     assert json.load(open(tmp_path / "summary.json"))["n_episodes"] == 0
     assert "aborted" in json.load(open(tmp_path / "summary.json"))["args"]
+
+
+def test_run_episode_snapshots_policy_metadata_after_reset(world):
+    class ResetMetadataPolicy(ZeroPolicy):
+        def __init__(self):
+            super().__init__()
+            self.meta = {"policy": "test", "reset_reply": {"reset_counter": 40}}
+
+        def reset(self, world_info):
+            self.meta["reset_reply"] = {"reset_counter": 41, "seed": 123, "log_dir": "/trusted/local"}
+            return super().reset(world_info)
+
+    rec = run_episode(world, ResetMetadataPolicy(), "meta", 0, 1, None, verbose=False)
+    assert rec["policy"]["reset_reply"]["reset_counter"] == 41
+    assert rec["policy_reset"] == {"reset_counter": 41, "seed": 123, "log_dir": "/trusted/local"}

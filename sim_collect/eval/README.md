@@ -451,3 +451,63 @@ cd /home/laptop3/gello_software
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovider \
   sim_collect/tests/test_eval_*.py
 ```
+
+## 11. IFQL diagnostic video
+
+이미 끝난 eval의 `episodes.jsonl` + `ep_<episode>.h5`를 30 fps diagnostic video로 만든다. 정책은
+다시 실행하지 않고 H5 state를 `mj_forward`로 kinematic replay함. 결과는 **cam1 640×360 + cam2
+640×360 + diagnostic panel 480×360 = 1760×360**, H.264/yuv420p다.
+
+```bash
+RUN=/path/to/eval_run
+OUT=/path/to/videos
+env -u PYTHONPATH MUJOCO_GL=egl /path/to/.venv-eval/bin/python \
+  -m sim_collect.eval.render_eval_video \
+  --run-dir "$RUN" --episodes 100,101 --out "$OUT"
+```
+
+위 명령은 policy log가 없으므로 H5에서 카메라를 다시 렌더하고 panel에 `Q: MISSING / NOT
+LOGGED`를 명시함. IFQL 서버를 `--log-dir`과 함께 돌렸다면 그 디렉터리를 추가한다.
+
+```bash
+env -u PYTHONPATH MUJOCO_GL=egl /path/to/.venv-eval/bin/python \
+  -m sim_collect.eval.render_eval_video \
+  --run-dir "$RUN" --episodes 101 --out "$OUT" \
+  --policy-log-dir /trusted/local/ifql_logs
+```
+
+policy NPZ의 JPEG가 있으면 그 이미지를 우선 사용한다. panel의 Q는 **critic score이며 성공 확률이
+아님**. Q/latency는 sidecar row가 있는 chunk boundary에서만 측정되고 다음 boundary까지 화면에
+hold된다. 새 boundary의 sidecar row가 빠졌다면 `Q NOT LOGGED - PREVIOUS Q HELD`로 명시하며
+critic update로 표시하지 않는다. `q_chosen` temporal graph도 같은 held 값을 그리며, 실제 Q가 한
+건도 없으면 `UNAVAILABLE / Q NOT LOGGED`로 표시한다. panel에는 `q_chosen`, mean, min/max,
+spread/std, encode/sample/refill latency, K, decision/request index, legacy global refill label, chunk
+id/step, gripper, outcome/detail이 표시된다.
+
+> **보안 경계:** `ep_<reset_counter:04d>.npz`의 JPEG는 object array라 `allow_pickle=True`가
+> 필요함. 직접 실행한 IFQL 서버의 **trusted local log만** 입력할 것. 다운로드한 NPZ를 넣지 말 것.
+
+join은 정수 index를 그대로 비교함. v2 sidecar의 `decision_idx`/`request_idx`, legacy sidecar의
+`refill`/`t_index`, NPZ의 `chunk_t`/`chunk_id`가 모순되면 renderer가 즉시 실패함. legacy
+`refill`은 global label로만 표시하고 offset 계산에 쓰지 않는다. 과거 `run_eval`처럼 RESET metadata가
+없거나 한 episode 밀린 파일은 자동 보정하지 않는다. 정확한 값을 확인한 뒤에만
+`--reset-map 101:2,102:3`처럼 명시한다.
+
+panel 배치와 temporal graph만 확인할 fake Q sample은 아래처럼 만들 수 있다. camera 영역 하단에
+`SYNTHETIC DIAGNOSTICS - NOT AN EXPERIMENT RESULT` watermark가 들어가므로 실험 결과로 쓰면 안 됨.
+
+```bash
+env -u PYTHONPATH MUJOCO_GL=egl /path/to/.venv-eval/bin/python \
+  -m sim_collect.eval.render_eval_video \
+  --run-dir "$RUN" --episodes 101 --out "$OUT" --synthetic-diagnostics
+```
+
+2026-09-17에 만든 tracked sample. 과거 run에는 Q sidecar가 없어서 실제 두 sample의 graph는
+unavailable이며, synthetic graph는 layout 설명용일 뿐임:
+
+- [ep_101_success_diagnostic.mp4](../../artifacts/ifql_eval_video_samples/ep_101_success_diagnostic.mp4)
+  — 266 frames, camera-only fallback, Q missing 표시
+- [ep_100_timeout_diagnostic.mp4](../../artifacts/ifql_eval_video_samples/ep_100_timeout_diagnostic.mp4)
+  — 600 frames, camera-only fallback, Q missing 표시
+- [ep_101_success_diagnostic_synthetic.mp4](../../artifacts/ifql_eval_video_samples/ep_101_success_diagnostic_synthetic.mp4)
+  — 266 frames, **synthetic Q/latency watermark**, 실험 결과 아님
