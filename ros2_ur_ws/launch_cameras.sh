@@ -20,6 +20,7 @@
 # Usage:
 #     ./launch_cameras.sh                 # both cameras + live viewer (default)
 #     VIEW=false ./launch_cameras.sh      # both cameras, NO viewer window
+#     ./launch_cameras.sh --check         # enumerate and validate serial mapping only
 #
 # ENV (same names/defaults as run_recorder.sh's camera section):
 #     CAM1_SERIAL    RealSense #1 serial (auto-resolved; default 143322071682, plain D435, SCENE)
@@ -35,6 +36,10 @@
 #                    color and depth to ~25 Hz, so never make it the default.
 #     VIEW           true|1 (default) -> open the dual-camera viewer;
 #                    false|0          -> skip the viewer, just hold the cameras up
+#     CAMERA_CHECK_ONLY  1|true -> same as --check; validates USB serial mapping
+#                    without starting, stopping, or locking camera streams
+#     CAMERA_ALLOW_SERIAL_FALLBACK  1|true -> opt into the legacy non-production
+#                    model-class / serial-sort remap when the expected pair is absent
 #
 # Stop with a single Ctrl-C in THIS terminal: it stops the viewer + both cameras
 # cleanly (no orphaned background processes left to kill by hand).
@@ -46,50 +51,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 # DIFFERENT distro's setup.bash earlier would make this script pick the wrong
 # one if it just read $ROS_DISTRO. An explicit var sidesteps that ambiguity.
 GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+ROS_SETUP="/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
+[[ -r "$ROS_SETUP" ]] || { echo "### ROS setup not found: $ROS_SETUP" >&2; exit 2; }
+source "$ROS_SETUP"
 
-# Serials are a PREFERENCE, not a requirement -- resolve_serials() below falls
-# back to whatever is actually plugged in.
+CAMERA_CHECK_ONLY="${CAMERA_CHECK_ONLY:-0}"
+if [ "${1:-}" = "--check" ]; then
+    CAMERA_CHECK_ONLY=1
+fi
+
+# serial_no:= matches the RealSense device serial_number, not its ASIC serial.
+# Binding a serial that does not resolve leaves a seemingly healthy ROS node
+# publishing no frames, so the production rig requires this exact pair.
 #
-# The two "pairs" named across this repo are the SAME two cameras under two
-# different serial FIELDS.  There was no hardware swap.  Measured 2026-07-29,
-# same physical USB port reporting both values:
-#
-#   port    serial_number     asic_serial_number   device
-#   4-4.1   147122072740      151623020789         D435    -> cam1
-#   4-4.3   243222072700      322743060038         D435IF  -> cam2
-#
-# serial_no:= is matched against serial_number, NOT the ASIC serial:
-#   rs.config().enable_device('151623020789')  ->  NO MATCH
-#   rs.config().enable_device('147122072740')  ->  MATCHED
-#
-# The kernel USB descriptor (journalctl, /sys/bus/usb/devices/*/serial) exposes
-# the ASIC serial.  So grepping the journal finds only 151623020789/322743060038
-# and zero hits for 147122072740/243222072700 -- that means the kernel prints a
-# DIFFERENT FIELD, not that those cameras were never present.  607e541 read that
-# grep as a hardware swap and set these defaults to the ASIC serials, which
-# realsense2_camera can never resolve.
-#
-# Binding a serial that does not resolve does NOT fail loudly -- the node starts,
-# ros2 topic info even reports Publisher count 1, and it publishes nothing.  That
-# silence is why this is auto-detected rather than hardcoded.
-#
-# Mount assignment is by model class: plain D435 -> cam1 (SCENE), D435IF/D435i
-# -> cam2 (WRIST, gripper-mounted).  Model class is the only evidence tying each
-# unit to its mount, so confirm with one arm jog: cam2 is the WRIST camera, so
-# its background must sweep while the gripper fingers stay fixed in frame.
-#
-# 2026-09-14 LAB MOVE: the rig now carries TWO PLAIN D435 bodies (the D435IF
-# is gone), so the model-class rule below cannot separate them.  Measured on
-# the Genesys 4-port hub (bus 4), assignment confirmed from live snapshots
-# (cam2's frame shows the gripper fingers; cam1's shows the table front-on):
+# The rig has TWO PLAIN D435 bodies; model class and USB enumeration order cannot
+# identify the scene/wrist assignment. Measured on the Genesys hub and confirmed
+# from live snapshots (cam2 shows gripper fingers; cam1 shows the table front-on):
 #
 #   port    serial_number     asic_serial_number   device   fw
 #   4-4.3   143322071682      143623022572         D435     5.17.3.10  -> cam1 SCENE
 #   4-4.4   143322072540      143523020769         D435     5.17.0.10  -> cam2 WRIST
 #
-# With two plain units resolve_serials() falls back to sorted-serial order,
-# which happens to match this table -- do not rely on that: keep the defaults
-# below equal to the table so the resolver passes them through silently.
+# Keep the defaults equal to this table. A mismatched pair fails before launch;
+# CAMERA_ALLOW_SERIAL_FALLBACK=1 is only for an explicitly temporary rig.
 CAM1_SERIAL="${CAM1_SERIAL:-143322071682}"   # ASIC 143623022572
 CAM2_SERIAL="${CAM2_SERIAL:-143322072540}"   # ASIC 143523020769
 CAM1_NAME="${CAM1_NAME:-cam1}"
@@ -116,16 +100,26 @@ fi
 VIEW="${VIEW:-true}"
 
 # --- Resolve serials against what is actually on the USB bus ------------------
-# resolve_serials() is shared with run_recorder.sh -- see
-# _resolve_camera_serials.sh for the full behaviour description (model-class
-# matching, ambiguous fallback, hard error below 2 devices, etc). Enumeration
-# does NOT open a streaming lock, so this is safe to run even while another
-# process holds the cameras (it just re-reports the same devices).
+# resolve_serials() is shared with run_recorder.sh. It validates the expected
+# serial pair before launch; see _resolve_camera_serials.sh for the optional
+# legacy fallback. Enumeration does NOT open a streaming lock, so this is safe
+# even while another process holds the cameras.
 source "$SCRIPT_DIR/_resolve_camera_serials.sh"
-resolve_serials
+if ! resolve_serials; then
+    exit 1
+fi
+
+case "${CAMERA_CHECK_ONLY,,}" in
+    1|true|yes|on)
+        echo "### CAMERA CHECK OK"
+        echo "###   cam1 (scene): ${CAM1_SERIAL} -> /${CAM1_NAME}/${CAM1_NAME}/color/image_raw/compressed"
+        echo "###   cam2 (wrist): ${CAM2_SERIAL} -> /${CAM2_NAME}/${CAM2_NAME}/color/image_raw/compressed"
+        echo "### No camera process was started or stopped."
+        exit 0
+        ;;
+esac
 
 # --- ROS2 Jazzy environment -------------------------------------------------
-source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 
 # --- Per-run temp dir for the launch logs -----------------------------------
@@ -133,12 +127,26 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 TMPDIR_RUN="/tmp/launch_cameras_${STAMP}"
 mkdir -p "${TMPDIR_RUN}"
 
-# Color topics realsense2_camera publishes under the chosen namespaces.
+# realsense2_camera uses image_transport for color publishing. With its
+# compressed plugin installed, it natively provides the policy's JPEG endpoints.
 CAM1_TOPIC="/${CAM1_NAME}/${CAM1_NAME}/color/image_raw/compressed"
 CAM2_TOPIC="/${CAM2_NAME}/${CAM2_NAME}/color/image_raw/compressed"
 TOPIC_CHECKER="${SCRIPT_DIR}/_hil_topic_rate_check.py"
 if [ ! -f "${TOPIC_CHECKER}" ]; then
     echo "FATAL: topic probe helper missing: ${TOPIC_CHECKER}" >&2
+    exit 1
+fi
+TOPIC_CHECKER_PY="/usr/bin/python3"
+if [ ! -x "${TOPIC_CHECKER_PY}" ]; then
+    echo "FATAL: system Python missing: ${TOPIC_CHECKER_PY}" >&2
+    exit 1
+fi
+
+# Fail before opening either USB camera if the native JPEG publisher plugin is
+# missing from the active Jazzy overlay.
+if ! ros2 run image_transport list_transports 2>/dev/null | grep -q '"image_transport/compressed"'; then
+    echo "FATAL: Jazzy image_transport compressed publisher plugin is unavailable." >&2
+    echo "### Install ros-${GELLO_ROS_DISTRO}-compressed-image-transport, then retry." >&2
     exit 1
 fi
 
@@ -265,7 +273,7 @@ ros2 launch realsense2_camera rs_launch.py \
 CAM2_PID=$!
 echo "started (pid ${CAM2_PID})"
 
-echo "### Waiting for both streams (up to 30s) ..."
+echo "### Waiting for both JPEG streams (up to 30s) ..."
 
 # Block until <topic> is flowing at ~25+ Hz, or fail after ~30s.  The bounded
 # helper receives five fresh, advancing messages using production-compatible
@@ -273,19 +281,18 @@ echo "### Waiting for both streams (up to 30s) ..."
 # `ros2 topic hz`: repeated forced termination of large-image readers has left
 # the Fast DDS writer serving an existing viewer but dropping every new reader.
 wait_for_stream() {
-    local name="$1" topic="$2" pid="$3" logf="$4"
+    local name="$1" topic="$2" camera_pid="$3" camera_log="$4"
     local deadline hz
     deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "${deadline}" ]; do
-        # The camera process dying is a hard failure — don't keep polling a corpse.
-        if ! kill -0 "${pid}" 2>/dev/null; then
+        if ! kill -0 "${camera_pid}" 2>/dev/null; then
             echo ""
-            echo "### FAILED — ${name} launch process (pid ${pid}) exited during startup." >&2
-            echo "###   See ${logf} for the cause (bad serial? camera unplugged?)." >&2
+            echo "### FAILED — ${name} camera launch process (pid ${camera_pid}) exited during startup." >&2
+            echo "###   See ${camera_log} for the cause (bad serial? camera unplugged?)." >&2
             return 1
         fi
-        # Sample the source-header rate and exit normally after five frames.
-        hz=$(python3 "${TOPIC_CHECKER}" --topic "${topic}" \
+        # Sample the actual policy endpoint and exit normally after five frames.
+        hz=$("${TOPIC_CHECKER_PY}" "${TOPIC_CHECKER}" --topic "${topic}" \
              --type compressed_image --samples 5 --timeout 3 --min-rate 25 \
              2>/dev/null | sed -n 's/.* rate=\([0-9.][0-9.]*\) Hz.*/\1/p' \
              | tail -1 || true)
@@ -297,7 +304,7 @@ wait_for_stream() {
     done
     echo ""
     echo "### FAILED — ${name} never reached ~25 Hz on ${topic} within 30s." >&2
-    echo "###   See ${logf} for the cause (bad serial? camera unplugged? USB bandwidth?)." >&2
+    echo "###   See ${camera_log} for the cause." >&2
     return 1
 }
 

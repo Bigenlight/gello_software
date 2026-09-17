@@ -43,17 +43,19 @@
 #                    CPU per camera node with BOTH streams dropping to ~25 Hz, so
 #                    it is opt-in only; align offline from the recorded
 #                    intrinsics/extrinsics instead.
-# The serials above are a PREFERENCE, not a requirement: resolve_serials()
-# (shared with launch_cameras.sh, see _resolve_camera_serials.sh) checks them
-# against what pyrealsense2 actually enumerates on the USB bus and falls back
-# by model class -- or errors loudly -- if the configured pair isn't plugged
-# in. See _resolve_camera_serials.sh for why this matters (binding to an
-# absent serial does not fail loudly; the node just publishes nothing).
+# The serials above identify the production scene/wrist pair. resolve_serials()
+# (shared with launch_cameras.sh, see _resolve_camera_serials.sh) validates that
+# exact pair against what rs-enumerate-devices reports and fails before launch when
+# either camera is absent. CAMERA_ALLOW_SERIAL_FALLBACK=1 explicitly opts into
+# the legacy temporary-rig fallback. Binding an absent serial otherwise does not
+# fail loudly: the node starts but publishes no frames.
 # The cameras are launched via realsense2_camera rs_launch.py. The recorder node
 # subscribes to the color topics realsense2_camera publishes under
 # /<CAM1_NAME>/<CAM1_NAME>/color/image_raw/compressed (and likewise CAM2) and
-# writes them to cam1.mp4 / cam2.mp4 in the session folder. With depth on it
-# also gets record_depth:=true plus the six depth topic params
+# writes them to cam1.mp4 / cam2.mp4 in the session folder. The RealSense
+# driver publishes this native image_transport endpoint when its compressed
+# plugin is installed; Jazzy checks that plugin before opening either camera.
+# With depth on it also gets record_depth:=true plus the six depth topic params
 # (/<cam>/<cam>/depth/image_rect_raw/compressedDepth, .../depth/camera_info,
 # .../extrinsics/depth_to_color -- or the aligned_depth_to_color variants when
 # ALIGN_DEPTH=1) and writes depth.h5.
@@ -83,24 +85,30 @@ mkdir -p "${SESSION}"
 echo "### gello_ur_recorder -> ${SESSION}  (sample ${RATE} Hz)"
 
 BAG_PID=""
+CAM1_PID=""
+CAM2_PID=""
+DEPTH_NODE_ARGS=()   # filled below only when CAMS=true and depth is on
+
+# Stop the bag + cameras cleanly when the recorder exits (including a camera
+# preflight failure after BAG=true has already started the bag recorder).
+cleanup() {
+    [ -n "${BAG_PID}" ] && kill -INT "${BAG_PID}" 2>/dev/null || true
+    [ -n "${CAM1_PID}" ] && kill -INT "${CAM1_PID}" 2>/dev/null || true
+    [ -n "${CAM2_PID}" ] && kill -INT "${CAM2_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 if [ "${BAG}" = "true" ] || [ "${BAG}" = "1" ]; then
     echo "### BAG=true -> also recording ALL topics to ${SESSION}/rosbag"
     ros2 bag record -a -o "${SESSION}/rosbag" >/dev/null 2>&1 &
     BAG_PID=$!
 fi
 
-CAM1_PID=""
-CAM2_PID=""
-DEPTH_NODE_ARGS=()   # filled below only when CAMS=true and depth is on
 if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
-    # Serials are a PREFERENCE, not a requirement -- see _resolve_camera_serials.sh
-    # (shared with launch_cameras.sh) for why: the two D435 "pairs" named across
-    # this repo are the same two cameras under two different serial FIELDS
-    # (serial_number vs asic_serial_number), and serial_no:= matches the former.
-    # Binding a serial that does not resolve does NOT fail loudly -- the node
-    # comes up, publishes nothing, and the recorder writes an empty cam*.mp4.
-    # 2026-09-14 lab move: two PLAIN D435 bodies now (see launch_cameras.sh
-    # for the measured port/serial table).  cam1=SCENE, cam2=WRIST.
+    # serial_no:= matches the RealSense device serial_number, not its ASIC
+    # serial. The production pair is strict by default; see
+    # _resolve_camera_serials.sh for the explicit temporary-rig fallback.
+    # 2026-09-14 lab move: two PLAIN D435 bodies now. cam1=SCENE, cam2=WRIST.
     CAM1_SERIAL="${CAM1_SERIAL:-143322071682}"   # ASIC 143623022572
     CAM2_SERIAL="${CAM2_SERIAL:-143322072540}"   # ASIC 143523020769
     CAM1_NAME="${CAM1_NAME:-cam1}"
@@ -163,6 +171,17 @@ if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
     # (enumeration takes no streaming lock, so this is safe here).
     source "$SCRIPT_DIR/_resolve_camera_serials.sh"
     resolve_serials
+
+    if [ "${GELLO_ROS_DISTRO}" = "jazzy" ]; then
+        # The RealSense image_transport publisher supplies the existing JPEG
+        # endpoint directly. Check its plugin before either USB camera opens.
+        if ! ros2 run image_transport list_transports 2>/dev/null | grep -q '"image_transport/compressed"'; then
+            echo "FATAL: Jazzy image_transport compressed publisher plugin is unavailable." >&2
+            echo "### Install ros-${GELLO_ROS_DISTRO}-compressed-image-transport, then retry." >&2
+            exit 1
+        fi
+    fi
+
     echo "### CAMS=true -> launching RealSense ${CAM1_NAME} (${CAM1_SERIAL}) + ${CAM2_NAME} (${CAM2_SERIAL}) @ ${COLOR_PROFILE} | depth ${DEPTH_ARG#enable_depth:=} | aligned ${ALIGN_ON}"
     echo "###   camera launch logs -> ${SESSION}/cam1_launch.log , ${SESSION}/cam2_launch.log"
     # NOTE: serial_no MUST be wrapped in embedded single-quotes ('"'"'...'"'"') --
@@ -184,14 +203,6 @@ if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
         > "${SESSION}/cam2_launch.log" 2>&1 &
     CAM2_PID=$!
 fi
-
-# Stop the bag + cameras cleanly when the recorder node exits (Ctrl-C).
-cleanup() {
-    [ -n "${BAG_PID}" ] && kill -INT "${BAG_PID}" 2>/dev/null || true
-    [ -n "${CAM1_PID}" ] && kill -INT "${CAM1_PID}" 2>/dev/null || true
-    [ -n "${CAM2_PID}" ] && kill -INT "${CAM2_PID}" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
 
 # DEPTH_NODE_ARGS is empty unless CAMS=true and depth is on (record_depth then
 # defaults to false in the node, so a signal-only run never opens depth.h5).

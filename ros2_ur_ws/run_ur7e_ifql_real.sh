@@ -149,6 +149,8 @@
 # #              config/ — the SRC copy, never the install share)           #
 # #    IFQL_DRY_RUN (1 -> run every preflight, print the resolved server +  #
 # #              ros2 launch commands, exit 0 WITHOUT starting either one)   #
+# #    ROS child processes use /usr/bin/python3 before an active conda base; #
+# #              Jazzy's UR tool-comm script requires distro python3-pytest. #
 # #    GELLO_REPO_ROOT (default <ros2_ur_ws>/..)                             #
 # ############################################################################
 set -e
@@ -163,6 +165,17 @@ START_MODE="${START_MODE:-gello}"            # gello ONLY (init_align refused be
 # both), $ROS_DISTRO would already say "humble" here and this script would silently
 # source the wrong one. An explicit var sidesteps that ambiguity entirely.
 GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+
+# Jazzy's UR driver launches the canonical tool-communication script directly:
+#   /opt/ros/jazzy/lib/ur_client_library/tool_communication.py
+# Its shebang is /usr/bin/env python3 and the script imports pytest for bundled
+# self-tests. A shell with conda base active used to resolve that shebang to conda's
+# Python 3.13, where pytest is absent, so ur_tool_comm exited before creating
+# /tmp/ttyUR. Keep the complete ROS launch tree on the distro interpreter instead.
+# IFQL itself is unaffected because IFQL_PY is always an absolute path.
+JAZZY_SYSTEM_PYTHON="/usr/bin/python3"
+JAZZY_TOOL_COMM_SCRIPT="/opt/ros/${GELLO_ROS_DISTRO}/lib/ur_client_library/tool_communication.py"
+JAZZY_RUNTIME_PATH="/usr/bin:/bin:${PATH}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -446,6 +459,39 @@ case "${IFQL_DEVICE}" in cuda|cpu) ;; *) echo "ERROR: IFQL_DEVICE must be auto|c
 # Also honor headless_mode:=true passed as a launch arg so the banner can never
 # disagree with the effective launch (ros2 launch is last-wins on dupes).
 case " $* " in *" headless_mode:=true "*|*"headless_mode:=true"*) HEADLESS=true ;; esac
+
+# --- Jazzy UR tool-communication interpreter preflight ---------------------------
+# ur_control.launch.py executes JAZZY_TOOL_COMM_SCRIPT by pathname, so its
+# /usr/bin/env python3 shebang follows PATH inherited from this launcher. Do this
+# before sourcing ROS and retain it for ros2 launch; otherwise an active conda base
+# can hide the distro's python3-pytest and leave the Robotiq serial PTY absent.
+if [ ! -x "${JAZZY_SYSTEM_PYTHON}" ]; then
+    echo "ERROR: Jazzy runtime Python is missing or not executable: ${JAZZY_SYSTEM_PYTHON}" >&2
+    exit 1
+fi
+if [ ! -f "${JAZZY_TOOL_COMM_SCRIPT}" ]; then
+    echo "ERROR: Jazzy UR tool-communication script is missing: ${JAZZY_TOOL_COMM_SCRIPT}" >&2
+    echo "       Install/repair ros-${GELLO_ROS_DISTRO}-ur-client-library before running IFQL." >&2
+    exit 1
+fi
+
+# PYTHONHOME can make even an absolute /usr/bin/python3 import from conda. It is not
+# needed by ROS and must not leak into the direct tool-communication subprocess.
+unset PYTHONHOME
+export PATH="${JAZZY_RUNTIME_PATH}"
+if [ "$(command -v python3)" != "${JAZZY_SYSTEM_PYTHON}" ]; then
+    echo "ERROR: could not prioritize ${JAZZY_SYSTEM_PYTHON} for Jazzy child processes." >&2
+    echo "       Resolved python3: $(command -v python3)" >&2
+    exit 1
+fi
+if ! JAZZY_PYTEST_PATH="$(/usr/bin/env python3 -c 'import pytest; print(pytest.__file__)' 2>/dev/null)"; then
+    echo "ERROR: Jazzy UR tool communication cannot import pytest with ${JAZZY_SYSTEM_PYTHON}." >&2
+    echo "       ${JAZZY_TOOL_COMM_SCRIPT} imports pytest before it can create /tmp/ttyUR." >&2
+    echo "       Install the distro dependency python3-pytest, then rerun this command." >&2
+    echo "       This launcher will not install or use packages from conda base." >&2
+    exit 1
+fi
+echo "### Jazzy UR tool-comm preflight OK: /usr/bin/env python3 -> ${JAZZY_SYSTEM_PYTHON}; pytest=${JAZZY_PYTEST_PATH}"
 
 # --- ROS2 Jazzy environment -------------------------------------------------
 source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"

@@ -44,6 +44,7 @@ sudo apt install -y \
     python3-rosdep \
     python3-vcstool \
     python3-pip \
+    python3-pytest \
     python3-grpcio \
     python3-protobuf \
     python3-h5py \
@@ -65,7 +66,9 @@ sudo apt install -y \
 sudo apt install -y \
     ros-jazzy-realsense2-camera \
     ros-jazzy-realsense2-camera-msgs \
-    ros-jazzy-librealsense2
+    ros-jazzy-librealsense2 \
+    ros-jazzy-compressed-image-transport \
+    ros-jazzy-compressed-depth-image-transport
 
 # udev rules for non-root USB access to the D435.  Without these the camera node
 # starts and then fails with LIBUSB_ERROR_ACCESS -- the usbfs node is root:root.
