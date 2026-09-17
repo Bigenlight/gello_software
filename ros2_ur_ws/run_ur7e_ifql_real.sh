@@ -258,6 +258,11 @@ IFQL_DEVICE="${IFQL_DEVICE:-auto}"
 IFQL_WARMUP_TIMEOUT_S="${IFQL_WARMUP_TIMEOUT_S:-120}"
 IFQL_ALLOW_FOREIGN_NORM_STATS="${IFQL_ALLOW_FOREIGN_NORM_STATS:-}"
 IFQL_DRY_RUN="${IFQL_DRY_RUN:-}"
+REAL_EVAL_RECORDING="${REAL_EVAL_RECORDING:-1}"
+REAL_EVAL_MIN_FREE_GIB="${REAL_EVAL_MIN_FREE_GIB:-10}"
+REAL_EVAL_FINALIZE_TIMEOUT_S="${REAL_EVAL_FINALIZE_TIMEOUT_S:-20}"
+REAL_EVAL_POLICY_TYPE="${REAL_EVAL_POLICY_TYPE:-ifql}"
+case "${REAL_EVAL_RECORDING}" in 0|1) ;; *) echo "ERROR: REAL_EVAL_RECORDING must be 0 or 1." >&2; exit 1 ;; esac
 
 # norm_stats default. With a profile basename (carrot) it is the same literal path the
 # carrot session used. Without one (orange) the run dir must contain EXACTLY ONE
@@ -306,7 +311,13 @@ case "${IFQL_SAMPLER}" in
         exit 1 ;;
 esac
 IFQL_LOG_TAG="${IFQL_LOG_TAG:-${_TASK_LOG_TAG:-$(basename "${IFQL_RUN_DIR}")}}"
-IFQL_LOG_DIR="${IFQL_LOG_DIR:-$SCRIPT_DIR/log/ifql/real_$(date +%Y%m%d)/${IFQL_LOG_TAG}_${IFQL_TAG}/$(date +%H%M%S)}"
+# Keep IFQL_LOG_DIR as a compatibility input for an existing per-task root, but never
+# give two policy launches the same leaf: episode writers restart their numbering on
+# each server start. UTC nanoseconds + PID identify a run; mkdir below makes a collision
+# fail closed rather than silently reusing a stale partial recording.
+IFQL_LOG_ROOT="${IFQL_LOG_ROOT:-${IFQL_LOG_DIR:-$SCRIPT_DIR/log/ifql/real_$(date -u +%Y%m%d)/${IFQL_LOG_TAG}_${IFQL_TAG}}}"
+REAL_EVAL_RUN_DIR="${REAL_EVAL_RUN_DIR:-${IFQL_LOG_ROOT}/run_$(date -u +%Y%m%dT%H%M%S.%NZ)_pid$$}"
+IFQL_LOG_DIR="${REAL_EVAL_RUN_DIR}"
 
 # --- start_mode: gello ONLY -----------------------------------------------------
 # In start_mode=gello gello_move_to_start chases /gello/joint_states, i.e. the pose
@@ -348,6 +359,15 @@ if [ -z "${IFQL_SERVER_PY}" ]; then
     IFQL_SERVER_PY="${_HITS[-1]}"
 fi
 IFQL_SERVER_DIR="$(cd "$(dirname "${IFQL_SERVER_PY}")" && pwd)"
+REAL_EVAL_PREFLIGHT="${SCRIPT_DIR}/setup_jazzy/real_eval_recording_preflight.py"
+REAL_EVAL_HDF5_LOG_DIR="${REAL_EVAL_HDF5_LOG_DIR:-${REAL_EVAL_RUN_DIR}/hdf5}"
+REAL_EVAL_MP4_PATH="${REAL_EVAL_MP4_PATH:-${REAL_EVAL_RUN_DIR}/policy_render.mp4}"
+# Team 1 owns this hook beside its server implementation. Keeping the hook explicit
+# means a staged server can use a different renderer without changing policy safety.
+REAL_EVAL_RENDERER_HOOK="${REAL_EVAL_RENDERER_HOOK:-${SCRIPT_DIR}/../sim_collect/eval/render_eval_video.py}"
+# This is only a path until the unique run directory is created below.  Defining it
+# here keeps the pre-spawn banner truthful without changing any server or ROS command.
+SERVER_LOG="${REAL_EVAL_RUN_DIR}/server_stdout.log"
 
 # --- Preflight: interpreter / checkpoint / norm_stats ------------------------------
 if [ ! -x "${IFQL_PY}" ]; then
@@ -522,9 +542,7 @@ if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${IFQL_PORT
     exit 1
 fi
 
-# --- Start the IFQL inference server in the BACKGROUND (before ros2 launch) ------
-mkdir -p "${IFQL_LOG_DIR}"
-SERVER_LOG="${IFQL_LOG_DIR}/server_stdout.log"
+# --- Build the IFQL server command (it is printed before either process starts) ---
 SERVER_CMD=(
     "${IFQL_PY}" -B "${IFQL_SERVER_ENTRY[@]}"
     --run-dir "${IFQL_RUN_DIR}" --step "${IFQL_STEP}"
@@ -533,6 +551,15 @@ SERVER_CMD=(
     --norm-stats "${IFQL_NORM_STATS}" --log-dir "${IFQL_LOG_DIR}"
     --device "${IFQL_DEVICE}"
 )
+if [ "${REAL_EVAL_RECORDING}" = "1" ]; then
+    # Team 1's server CLI. These are recording-only outputs; the policy wire protocol,
+    # start pose, joint envelope, and timing settings above remain exactly untouched.
+    SERVER_CMD+=(
+        --hdf5-log-dir "${REAL_EVAL_HDF5_LOG_DIR}"
+        --renderer-hook "${REAL_EVAL_RENDERER_HOOK}"
+        --renderer-output-path "${REAL_EVAL_MP4_PATH}"
+    )
+fi
 echo "### Starting IFQL server: py=${IFQL_PY}"
 echo "###   server=${IFQL_SERVER_PY}"
 echo "###   run_dir=${IFQL_RUN_DIR} step=${IFQL_STEP} sampler=${IFQL_SAMPLER} K=${IFQL_NUM_SAMPLES} device=${IFQL_DEVICE}"
@@ -581,10 +608,106 @@ else
     ARGS+=(headless_mode:=false)
     HEADLESS_STATE="false (Method A — PLAY External Control on the pendant)"
 fi
+EXTRA_LAUNCH_ARGS=("$@")
+
+write_launch_manifest() {
+    local phase="$1"
+    export REAL_EVAL_MANIFEST_PHASE="$phase"
+    export REAL_EVAL_SERVER_COMMAND="$(printf '%q ' "${SERVER_CMD[@]}")"
+    export REAL_EVAL_ROS_COMMAND="ros2 launch gello_policy ur7e_diffusion_real.launch.py $(printf '%q ' "${ARGS[@]}" "${EXTRA_LAUNCH_ARGS[@]}")"
+    export REAL_EVAL_HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
+    "${JAZZY_SYSTEM_PYTHON}" - "${REAL_EVAL_RUN_DIR}/launch_manifest.json" <<'PYEOF'
+import hashlib, json, os, socket, sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+
+def digest(path):
+    path = Path(path)
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+def named_path(name, value):
+    return {"path": value, "sha256": digest(value)}
+
+hdf5_dir = Path(os.environ["REAL_EVAL_HDF5_LOG_DIR"])
+hdf5_files = [named_path(path.name, str(path)) for path in sorted(hdf5_dir.rglob("*.h5"))] if hdf5_dir.is_dir() else []
+svf = {key.lower().removeprefix("real_eval_svf_"): os.environ[key]
+       for key in ("REAL_EVAL_SVF_RUN_DIR", "REAL_EVAL_SVF_QFLOW_DIR", "REAL_EVAL_SVF_REAL_DATA")
+       if os.environ.get(key)}
+document = {
+    "schema": "real-eval-recording/v1",
+    "phase": os.environ["REAL_EVAL_MANIFEST_PHASE"],
+    "hostname": os.environ.get("REAL_EVAL_HOSTNAME", socket.gethostname()),
+    "policy": {
+        "type": os.environ["REAL_EVAL_POLICY_TYPE"],
+        "family": "svf" if os.environ["REAL_EVAL_POLICY_TYPE"] == "svf" else "ifql",
+        "task": os.environ["IFQL_TASK"], "sampler": os.environ["IFQL_SAMPLER"],
+        "num_samples": int(os.environ["IFQL_NUM_SAMPLES"]), "step": int(os.environ["IFQL_STEP"]),
+        "device": os.environ["IFQL_DEVICE"], "svf_staged_provenance": svf or None,
+    },
+    "commands": {"server_shell": os.environ["REAL_EVAL_SERVER_COMMAND"], "ros_shell": os.environ["REAL_EVAL_ROS_COMMAND"]},
+    "artifacts": {
+        "run_dir": os.environ["REAL_EVAL_RUN_DIR"],
+        "inputs": {
+            "checkpoint": named_path("checkpoint", os.environ["IFQL_CHECKPOINT"]),
+            "norm_stats": named_path("norm_stats", os.environ["IFQL_NORM_STATS"]),
+            "flags": named_path("flags", str(Path(os.environ["IFQL_RUN_DIR"]) / "flags.json")),
+            "server": named_path("server", os.environ["IFQL_SERVER_PY"]),
+            "renderer_hook": named_path("renderer_hook", os.environ["REAL_EVAL_RENDERER_HOOK"]),
+        },
+        "outputs": {"hdf5_log_dir": str(hdf5_dir), "hdf5_files": hdf5_files,
+                    "mp4": named_path("mp4", os.environ["REAL_EVAL_MP4_PATH"])},
+    },
+    "recording": {"enabled": os.environ["REAL_EVAL_RECORDING"] == "1",
+                  "ffmpeg": os.environ.get("REAL_EVAL_FFMPEG") or None,
+                  "min_free_gib": float(os.environ["REAL_EVAL_MIN_FREE_GIB"])},
+}
+tmp = manifest_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+tmp.replace(manifest_path)
+PYEOF
+}
+
+# --- Recording preflight and manifest: no robot/camera/server process starts here --
+mkdir -p "${IFQL_LOG_ROOT}"
+if [ -e "${REAL_EVAL_RUN_DIR}" ]; then
+    echo "ERROR: real-eval run directory already exists; refusing stale/colliding run: ${REAL_EVAL_RUN_DIR}" >&2
+    exit 1
+fi
+if [ "${REAL_EVAL_RECORDING}" = "1" ]; then
+    [ -f "${REAL_EVAL_PREFLIGHT}" ] || { echo "ERROR: missing recording preflight: ${REAL_EVAL_PREFLIGHT}" >&2; exit 1; }
+    REAL_EVAL_FFMPEG="$("${IFQL_PY}" "${REAL_EVAL_PREFLIGHT}" \
+        --inference-python "${IFQL_PY}" --run-dir "${REAL_EVAL_RUN_DIR}" \
+        --hdf5-log-dir "${REAL_EVAL_HDF5_LOG_DIR}" --mp4-path "${REAL_EVAL_MP4_PATH}" \
+        --renderer-hook "${REAL_EVAL_RENDERER_HOOK}" --min-free-gib "${REAL_EVAL_MIN_FREE_GIB}" --print-ffmpeg)"
+    mkdir "${REAL_EVAL_RUN_DIR}"
+    "${IFQL_PY}" "${REAL_EVAL_PREFLIGHT}" \
+        --inference-python "${IFQL_PY}" --run-dir "${REAL_EVAL_RUN_DIR}" \
+        --hdf5-log-dir "${REAL_EVAL_HDF5_LOG_DIR}" --mp4-path "${REAL_EVAL_MP4_PATH}" \
+        --renderer-hook "${REAL_EVAL_RENDERER_HOOK}" --ffmpeg "${REAL_EVAL_FFMPEG}" \
+        --min-free-gib "${REAL_EVAL_MIN_FREE_GIB}"
+else
+    echo "### REAL_EVAL_RECORDING=0: paired HDF5+MP4 is explicitly disabled for this launch." >&2
+    mkdir "${REAL_EVAL_RUN_DIR}"
+    REAL_EVAL_FFMPEG=""
+fi
+export REAL_EVAL_RUN_DIR REAL_EVAL_HDF5_LOG_DIR REAL_EVAL_MP4_PATH REAL_EVAL_RENDERER_HOOK
+export REAL_EVAL_FFMPEG REAL_EVAL_RECORDING REAL_EVAL_MIN_FREE_GIB REAL_EVAL_POLICY_TYPE
+export IFQL_TASK IFQL_SAMPLER IFQL_NUM_SAMPLES IFQL_STEP IFQL_DEVICE IFQL_CHECKPOINT
+export IFQL_NORM_STATS IFQL_RUN_DIR IFQL_SERVER_PY
+write_launch_manifest launching
 
 if [ "${IFQL_DRY_RUN}" = "1" ]; then
     echo "### IFQL_DRY_RUN=1: every preflight passed; printing the two resolved commands and exiting WITHOUT starting either one."
     echo "### task=${IFQL_TASK} run_dir=${IFQL_RUN_DIR} norm_stats=${IFQL_NORM_STATS} params_file=${IFQL_PARAMS_FILE} px=${IS_PX_RUN} act_port=${IFQL_PORT}"
+    echo "### recording=${REAL_EVAL_RECORDING} manifest=${REAL_EVAL_RUN_DIR}/launch_manifest.json hdf5_dir=${REAL_EVAL_HDF5_LOG_DIR} mp4=${REAL_EVAL_MP4_PATH} ffmpeg=${REAL_EVAL_FFMPEG:-<disabled>}"
     echo "### server command:"
     printf '###   env -u FMRL_CAM1_CROP -u FMRL_CAM1_MODE QFLOW_DIR=%q TORCH_HOME=%q XLA_PYTHON_CLIENT_PREALLOCATE=false HF_HUB_OFFLINE=1 \\\n' \
         "${IFQL_QFLOW_DIR}" "${TORCH_HOME:-$IFQL_ROOT/.cache/torch}"
@@ -606,11 +729,59 @@ fi
     TORCH_HOME="${TORCH_HOME:-$IFQL_ROOT/.cache/torch}" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false \
     HF_HUB_OFFLINE=1 \
+    REAL_EVAL_RUN_DIR="${REAL_EVAL_RUN_DIR}" \
+    REAL_EVAL_HDF5_LOG_DIR="${REAL_EVAL_HDF5_LOG_DIR}" \
+    REAL_EVAL_MP4_PATH="${REAL_EVAL_MP4_PATH}" \
+    REAL_EVAL_RENDERER_HOOK="${REAL_EVAL_RENDERER_HOOK}" \
+    REAL_EVAL_FFMPEG="${REAL_EVAL_FFMPEG}" \
     "${SERVER_CMD[@]}"
 ) > >(tee -a "${SERVER_LOG}") 2>&1 &
 IFQL_SERVER_PID=$!
-# Kill the server on ANY exit of this script (clean exit, error, or Ctrl-C).
-trap 'kill "${IFQL_SERVER_PID}" 2>/dev/null || true' EXIT
+ROS_PID=""
+
+wait_for_owned_pid() {
+    local pid="$1" timeout="$2" label="$3"
+    local elapsed=0
+    while kill -0 "${pid}" 2>/dev/null && [ "${elapsed}" -lt "${timeout}" ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    if kill -0 "${pid}" 2>/dev/null; then
+        echo "### WARNING: owned ${label} pid ${pid} did not exit within ${timeout}s after SIGINT; sending SIGTERM." >&2
+        kill -TERM "${pid}" 2>/dev/null || true
+        elapsed=0
+        while kill -0 "${pid}" 2>/dev/null && [ "${elapsed}" -lt 5 ]; do
+            sleep 1
+            elapsed=$((elapsed + 1))
+        done
+    fi
+    wait "${pid}" 2>/dev/null || true
+}
+
+cleanup_real_eval() {
+    local status="$?"
+    trap - EXIT INT TERM
+    set +e
+    # The ROS launch owns robot/camera processes; ask it to stop first so the server
+    # can finish its writers only after no further requests arrive. Only PIDs created
+    # by this script are signalled; unrelated processes are never selected or killed.
+    if [ -n "${ROS_PID}" ] && kill -0 "${ROS_PID}" 2>/dev/null; then
+        echo "### stopping owned ROS launch (pid ${ROS_PID}) before server finalization..." >&2
+        kill -INT "${ROS_PID}" 2>/dev/null || true
+        wait_for_owned_pid "${ROS_PID}" "${REAL_EVAL_FINALIZE_TIMEOUT_S}" "ROS launch"
+    fi
+    if [ -n "${IFQL_SERVER_PID:-}" ] && kill -0 "${IFQL_SERVER_PID}" 2>/dev/null; then
+        echo "### stopping owned IFQL/SVF server (pid ${IFQL_SERVER_PID}) and waiting for HDF5/MP4 finalization..." >&2
+        kill -INT "${IFQL_SERVER_PID}" 2>/dev/null || true
+        wait_for_owned_pid "${IFQL_SERVER_PID}" "${REAL_EVAL_FINALIZE_TIMEOUT_S}" "policy server"
+    fi
+    if [ -d "${REAL_EVAL_RUN_DIR}" ]; then
+        write_launch_manifest finalized || true
+    fi
+    exit "${status}"
+}
+trap cleanup_real_eval EXIT
+trap 'exit 130' INT TERM
 
 # --- Health-check: alive + norm_stats/sampler/px lines + port listening --------------
 # The server logs "norm_stats: <path>  (source: ...)" early, then "sampler: kind=.. K=..",
@@ -743,6 +914,13 @@ else
     echo "### Confirm External Control is PLAYING on the pendant before the handshake."
 fi
 
-# NOT exec'd on purpose: when the launch exits (including on Ctrl-C) control
-# returns here and the EXIT trap kills the IFQL server so nothing is orphaned.
-ros2 launch gello_policy ur7e_diffusion_real.launch.py "${ARGS[@]}" "$@"
+# Keep the ROS launch as an owned child so cleanup can request its graceful shutdown
+# before it asks the policy server to close its HDF5/MP4 writers.
+ros2 launch gello_policy ur7e_diffusion_real.launch.py "${ARGS[@]}" "${EXTRA_LAUNCH_ARGS[@]}" &
+ROS_PID=$!
+set +e
+wait "${ROS_PID}"
+ROS_STATUS=$?
+set -e
+ROS_PID=""
+exit "${ROS_STATUS}"

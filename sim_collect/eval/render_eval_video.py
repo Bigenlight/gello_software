@@ -48,7 +48,7 @@ OUTCOME_BGR = {
 }
 Q_FIELDS = ("K", "q_chosen", "q_mean", "q_std", "q_min", "q_max", "q_spread", "q_argmax")
 Q_HEADS_FIELD = "q_heads"
-LATENCY_FIELDS = ("encode_ms", "sample_ms", "refill_ms")
+LATENCY_FIELDS = ("encode_ms", "sample_ms", "refill_ms", "latency_ms")
 
 
 class JoinError(ValueError):
@@ -79,6 +79,7 @@ class Diagnostic:
     latency: Optional[Mapping[str, float]] = None
     sidecar_refill: Optional[int] = None
     sidecar_updated: bool = False
+    values: Optional[Mapping[str, Any]] = None
 
 
 @dataclass
@@ -107,6 +108,36 @@ class H5Episode:
     qvel: np.ndarray
     ctrl: np.ndarray
     frame_rows: np.ndarray
+
+
+@dataclass(frozen=True)
+class RealDecision:
+    """One recorded policy decision, keyed by its exact request index."""
+    request_idx: int
+    decision_idx: int
+    values: Mapping[str, Any]
+
+
+@dataclass
+class RealH5Episode:
+    """The small, explicit subset of the real_eval/v1 recording contract used here."""
+    path: Path
+    schema: str
+    policy: str
+    checkpoint: str
+    sampler: str
+    finalize_reason: str
+    outcome: str
+    request_idx: np.ndarray
+    cam1_jpeg: np.ndarray
+    cam2_jpeg: np.ndarray
+    state: Optional[np.ndarray]
+    output: Optional[np.ndarray]
+    gripper: Optional[np.ndarray]
+    chunk_step: Optional[np.ndarray]
+    t_rel_s: Optional[np.ndarray]
+    request_values: Mapping[str, np.ndarray]
+    decisions: List[RealDecision]
 
 
 def _strict_int(value: Any, name: str, *, minimum: Optional[int] = None,
@@ -488,6 +519,164 @@ def load_h5_episode(run_dir: os.PathLike[str] | str, meta: EpisodeMeta, fps: int
     return H5Episode(path, xml, config, layout, t, qpos, qvel, ctrl, rows)
 
 
+def _h5_text(value: Any) -> str:
+    """Decode an HDF5 scalar without turning missing metadata into a claim."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, np.bytes_):
+        return bytes(value).decode("utf-8", errors="replace")
+    if isinstance(value, np.ndarray) and value.shape == ():
+        return _h5_text(value.item())
+    return str(value)
+
+
+def _real_dataset(f: h5py.File, name: str, *, required: bool = False) -> Optional[h5py.Dataset]:
+    """Locate a documented real_eval/v1 field across its two common layouts."""
+    candidates = (f"requests/{name}", f"frames/{name}", name)
+    for candidate in candidates:
+        if candidate in f and isinstance(f[candidate], h5py.Dataset):
+            return f[candidate]
+    if required:
+        raise KeyError(f"{f.filename}: missing real_eval/v1 dataset; tried {', '.join('/' + x for x in candidates)}")
+    return None
+
+
+def _real_decision_dataset(f: h5py.File, name: str, *, required: bool = False) -> Optional[h5py.Dataset]:
+    candidates = (f"decisions/{name}", f"decision/{name}", f"decision_{name}")
+    for candidate in candidates:
+        if candidate in f and isinstance(f[candidate], h5py.Dataset):
+            return f[candidate]
+    if required:
+        raise KeyError(f"{f.filename}: missing decision dataset; tried {', '.join('/' + x for x in candidates)}")
+    return None
+
+
+def _strict_monotonic_h5_indices(value: Any, name: str, path: Path) -> np.ndarray:
+    arr = np.asarray(value)
+    if arr.ndim != 1 or arr.dtype.kind not in "iu" or len(arr) == 0:
+        raise JoinError(f"{path}: {name} must be a non-empty one-dimensional integer dataset")
+    arr = arr.astype(np.int64, copy=False)
+    if np.any(np.diff(arr) <= 0):
+        raise JoinError(f"{path}: {name} must be strictly increasing (no repeated, shifted, or reordered indices)")
+    return arr
+
+
+def _real_attr(f: h5py.File, name: str, default: str = "missing") -> str:
+    for owner in (f, f.get("meta"), f.get("metadata")):
+        if owner is not None and name in owner.attrs:
+            return _h5_text(owner.attrs[name])
+    return default
+
+
+def _real_complete(f: h5py.File, path: Path) -> None:
+    value: Any = None
+    found = False
+    for owner in (f, f.get("meta"), f.get("metadata")):
+        if owner is not None and "complete" in owner.attrs:
+            value, found = owner.attrs["complete"], True
+            break
+    is_true = isinstance(value, (bool, np.bool_)) and bool(value)
+    is_true |= isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)) and int(value) == 1
+    is_true |= isinstance(value, (bytes, str, np.bytes_)) and _h5_text(value).strip().lower() == "true"
+    if not found or not is_true:
+        raise JoinError(f"{path}: real_eval/v1 requires complete=true; refusing an incomplete recording")
+
+
+def _real_scalar(value: Any) -> Any:
+    arr = np.asarray(value)
+    if arr.shape == ():
+        item = arr.item()
+        return item.item() if isinstance(item, np.generic) else item
+    return arr.astype(float).tolist()
+
+
+def _real_value_at(dataset: h5py.Dataset, index: int, n: int, path: Path) -> Any:
+    if dataset.ndim == 0:
+        return _real_scalar(dataset[()])
+    if len(dataset) != n:
+        raise JoinError(f"{path}: decision field /{dataset.name.lstrip('/')} has {len(dataset)} rows, expected {n}")
+    return _real_scalar(dataset[index])
+
+
+def load_real_h5_episode(path_or_h5: os.PathLike[str] | str) -> RealH5Episode:
+    """Load one self-contained real_eval/v1 H5 without index inference.
+
+    The loader accepts root-level request datasets or ``/requests`` (and the
+    equivalent ``/frames`` alias), while decision values live under
+    ``/decisions``.  Each decision joins by its recorded request_idx exactly;
+    no time-based nearest-neighbour alignment is permitted for real data.
+    """
+    path = Path(path_or_h5).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    with h5py.File(path, "r") as f:
+        _real_complete(f, path)
+        schema = _real_attr(f, "schema", _real_attr(f, "schema_version", "missing"))
+        if schema != "real_eval/v1":
+            raise JoinError(f"{path}: expected schema real_eval/v1, got {schema!r}")
+        request_idx = _strict_monotonic_h5_indices(_real_dataset(f, "request_idx", required=True)[:],
+                                                   "request_idx", path)
+        n = len(request_idx)
+        cam1 = np.asarray(_real_dataset(f, "cam1_jpeg", required=True)[:], dtype=object)
+        cam2 = np.asarray(_real_dataset(f, "cam2_jpeg", required=True)[:], dtype=object)
+        if len(cam1) != n or len(cam2) != n:
+            raise JoinError(f"{path}: JPEG rows must equal request_idx rows ({n}); got cam1={len(cam1)}, cam2={len(cam2)}")
+
+        def request_rows(name: str) -> Optional[np.ndarray]:
+            dataset = _real_dataset(f, name)
+            if dataset is None:
+                return None
+            data = np.asarray(dataset[:])
+            if data.ndim == 0 or len(data) != n:
+                raise JoinError(f"{path}: /{dataset.name.lstrip('/')} must have exactly {n} request rows")
+            return data
+
+        state, output = request_rows("state"), request_rows("output")
+        gripper, chunk_step, t_rel_s = request_rows("gripper"), request_rows("chunk_step"), request_rows("t_rel_s")
+        # The common logger may retain its normalized model input, decoded
+        # output, or stochastic trace at request rate.  Keep only explicitly
+        # named fields: scanning every root dataset could accidentally turn
+        # metadata into a per-request value.
+        request_values = {
+            name: data for name in (
+                "input", "inputs", "observation", "obs", "model_input",
+                "model_output", "action", "executed_action", "noise", "noise_norm",
+            ) if (data := request_rows(name)) is not None
+        }
+        if chunk_step is not None:
+            _strict_monotonic_h5_indices(np.arange(n, dtype=np.int64), "internal request row", path)
+            if chunk_step.ndim != 1 or chunk_step.dtype.kind not in "iu":
+                raise JoinError(f"{path}: chunk_step must be a one-dimensional integer request field")
+
+        decision_req = _strict_monotonic_h5_indices(_real_decision_dataset(f, "request_idx", required=True)[:],
+                                                    "decisions/request_idx", path)
+        decision_idx = _strict_monotonic_h5_indices(_real_decision_dataset(f, "decision_idx", required=True)[:],
+                                                    "decisions/decision_idx", path)
+        if len(decision_req) != len(decision_idx):
+            raise JoinError(f"{path}: decision request_idx and decision_idx lengths differ")
+        request_set = {int(x) for x in request_idx}
+        unknown_requests = [int(x) for x in decision_req if int(x) not in request_set]
+        if unknown_requests:
+            raise JoinError(f"{path}: decisions/request_idx contains no exact request row: {unknown_requests[:3]}")
+        group = f.get("decisions")
+        if group is None:
+            group = f.get("decision")
+        if not isinstance(group, h5py.Group):
+            raise JoinError(f"{path}: decisions must be an HDF5 group")
+        ignored = {"request_idx", "decision_idx"}
+        value_sets = {name: dataset for name, dataset in group.items()
+                      if isinstance(dataset, h5py.Dataset) and name not in ignored}
+        decisions = [RealDecision(int(req), int(idx), {
+            name: _real_value_at(dataset, row, len(decision_idx), path)
+            for name, dataset in value_sets.items()
+        }) for row, (req, idx) in enumerate(zip(decision_req, decision_idx))]
+        return RealH5Episode(
+            path, schema, _real_attr(f, "policy"), _real_attr(f, "checkpoint"), _real_attr(f, "sampler"),
+            _real_attr(f, "finalize_reason", "unknown"), _real_attr(f, "outcome", "unknown"),
+            request_idx, cam1, cam2, state, output, gripper, chunk_step, t_rel_s, request_values, decisions,
+        )
+
+
 def _rebuild_assets(h5: H5Episode) -> Tuple[Dict[str, bytes], List[str]]:
     notes: List[str] = []
     assets: Dict[str, bytes] = {}
@@ -533,7 +722,8 @@ def _fmt(value: Any, digits: int = 3) -> str:
     if value is None:
         return "missing"
     try:
-        return f"{float(value):+.{digits}f}"
+        numeric = float(value)
+        return f"{numeric:+.{digits}f}" if np.isfinite(numeric) else "missing"
     except (TypeError, ValueError):
         return str(value)
 
@@ -563,9 +753,20 @@ def _q_history_values(history: Sequence[Diagnostic]) -> np.ndarray:
 
 def _chosen_q_heads(q: Optional[Mapping[str, Any]]) -> Tuple[Optional[float], Optional[float]]:
     """Return Q1/Q2 for the aggregate-selected candidate, if the row logged them."""
-    if q is None or q.get(Q_HEADS_FIELD) is None or q.get("q_argmax") is None:
+    if q is None:
         return None, None
-    heads = np.asarray(q[Q_HEADS_FIELD], dtype=np.float64)
+    # real_eval/v1 may log the already-selected scalar heads directly.  They
+    # are displayed only as recorded; no aggregate or candidate is inferred.
+    if q.get("q1") is not None or q.get("q2") is not None:
+        q1 = _finite_scalar(q.get("q1"))
+        q2 = _finite_scalar(q.get("q2"))
+        return q1, q2
+    if q.get(Q_HEADS_FIELD) is None or q.get("q_argmax") is None:
+        return None, None
+    try:
+        heads = np.asarray(q[Q_HEADS_FIELD], dtype=np.float64)
+    except (TypeError, ValueError):
+        return None, None
     try:
         choice = _strict_int(q["q_argmax"], "q_argmax", minimum=0, line="diagnostic")
     except JoinError:
@@ -575,8 +776,8 @@ def _chosen_q_heads(q: Optional[Mapping[str, Any]]) -> Tuple[Optional[float], Op
         # Diagnostic.  Do not substitute another candidate if malformed data
         # somehow reaches a caller directly.
         return None, None
-    q1 = float(heads[0, choice]) if heads.shape[0] >= 1 else None
-    q2 = float(heads[1, choice]) if heads.shape[0] >= 2 else None
+    q1 = _finite_scalar(heads[0, choice]) if heads.shape[0] >= 1 else None
+    q2 = _finite_scalar(heads[1, choice]) if heads.shape[0] >= 2 else None
     return q1, q2
 
 
@@ -587,7 +788,9 @@ def _q_history_series(history: Sequence[Diagnostic], kind: str) -> np.ndarray:
         if item.q is None:
             continue
         if kind == "aggregate" and item.q.get("q_chosen") is not None:
-            values[i] = float(item.q["q_chosen"])
+            value = _finite_scalar(item.q["q_chosen"])
+            if value is not None:
+                values[i] = value
         elif kind in {"q1", "q2"}:
             q1, q2 = _chosen_q_heads(item.q)
             value = q1 if kind == "q1" else q2
@@ -770,6 +973,187 @@ def draw_dashboard(meta: EpisodeMeta, diag: Diagnostic, gripper: Optional[float]
     return panel
 
 
+def _recorded_value(values: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in values and values[name] is not None:
+            return values[name]
+    return None
+
+
+def _finite_scalar(value: Any) -> Optional[float]:
+    """Return a recorded finite scalar, never coercing a vector into one."""
+    if value is None:
+        return None
+    arr = np.asarray(value)
+    if arr.shape != ():
+        return None
+    try:
+        numeric = float(arr.item())
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def _vector_text(value: Any, *, limit: int = 3) -> str:
+    if value is None:
+        return "missing"
+    arr = np.asarray(value)
+    if arr.shape == ():
+        return _fmt(arr.item())
+    flat = arr.reshape(-1)
+    prefix = ", ".join(_fmt(x, 2) for x in flat[:limit])
+    return f"[{prefix}{', ...' if len(flat) > limit else ''}] (n={len(flat)})"
+
+
+def _real_q_values(values: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """Return only logged critic fields, with aliases normalized for display."""
+    q: Dict[str, Any] = {}
+    aliases = {
+        "q1": ("q1", "Q1", "q1_selected", "selected_q1"),
+        "q2": ("q2", "Q2", "q2_selected", "selected_q2"),
+        "q_chosen": ("q_chosen", "q_aggregate", "q_selected", "aggregate_q"),
+        "q_mean": ("q_mean",), "q_std": ("q_std",), "q_min": ("q_min",),
+        "q_max": ("q_max",), "q_spread": ("q_spread",),
+        "K": ("K", "k"), "q_argmax": ("q_argmax", "chosen_idx", "candidate_idx", "selected_idx"),
+        "q_heads": ("q_heads", "critic_heads"),
+    }
+    for target, candidates in aliases.items():
+        value = _recorded_value(values, *candidates)
+        if value is not None:
+            q[target] = value
+    return q or None
+
+
+def _real_diagnostics(real: RealH5Episode) -> List[Diagnostic]:
+    """Exact zero-order-hold join from decision/request_idx onto video frames."""
+    by_request = {item.request_idx: item for item in real.decisions}
+    held: Optional[RealDecision] = None
+    diagnostics: List[Diagnostic] = []
+    for row, request in enumerate(real.request_idx):
+        request_i = int(request)
+        update = by_request.get(request_i)
+        if update is not None:
+            held = update
+        values = held.values if held is not None else {}
+        chunk_step = None
+        if real.chunk_step is not None:
+            chunk_step = int(real.chunk_step[row])
+        elif _recorded_value(values, "chunk_step") is not None:
+            chunk_step = int(_recorded_value(values, "chunk_step"))
+        diagnostics.append(Diagnostic(
+            request_i, held.decision_idx if held is not None else -1,
+            held.decision_idx if held is not None else -1, chunk_step if chunk_step is not None else -1,
+            update is not None, _real_q_values(values),
+            {key: float(value) for key, value in values.items()
+             if key in LATENCY_FIELDS and np.asarray(value).shape == ()} or None,
+            sidecar_updated=update is not None, values=values or None,
+        ))
+    return diagnostics
+
+
+def _real_elapsed_s(real: RealH5Episode, row: int, fps: int) -> Optional[float]:
+    if real.t_rel_s is not None and np.asarray(real.t_rel_s).ndim == 1:
+        value = float(real.t_rel_s[row])
+        if np.isfinite(value):
+            return value
+    return None
+
+
+def _real_request_value(real: RealH5Episode, row: int, *names: str) -> Any:
+    """Return one request-rate field by name without deriving a substitute."""
+    for name in names:
+        values = real.request_values.get(name)
+        if values is not None:
+            return _real_scalar(values[row])
+    return None
+
+
+def _real_panel_value(real: RealH5Episode, row: int, values: Mapping[str, Any],
+                      decision_names: Sequence[str], request_names: Sequence[str],
+                      fallback: Any = None) -> Any:
+    """Prefer logged decision values, then logged request values, then an explicit fallback."""
+    value = _recorded_value(values, *decision_names)
+    if value is not None:
+        return value
+    value = _real_request_value(real, row, *request_names)
+    return fallback if value is None else value
+
+
+def draw_real_dashboard(real: RealH5Episode, row: int, diag: Diagnostic,
+                        history: Sequence[Diagnostic], fps: int = FPS) -> np.ndarray:
+    """Render recorded real-policy facts, preserving unavailable fields as missing."""
+    import cv2
+
+    w, h = DASHBOARD_SIZE
+    panel = np.full((h, w, 3), (22, 25, 31), dtype=np.uint8)
+    cv2.rectangle(panel, (0, 0), (w - 1, h - 1), (75, 80, 90), 1)
+    outcome = real.outcome if real.outcome and real.outcome != "missing" else "unknown"
+    cv2.rectangle(panel, (0, 0), (w, 35), OUTCOME_BGR.get(outcome.lower(), (155, 155, 155)), -1)
+    _put_text(panel, f"REAL RECORDING  outcome {outcome.upper()}  |  finalize {real.finalize_reason}",
+              (14, 24), 0.57, (10, 10, 10), 2)
+    _draw_q_graph(panel, history, fps)
+    x = 817
+    values = diag.values or {}
+    kind = real.policy.lower()
+    _put_text(panel, f"{real.policy}  |  {real.schema}", (x, 62), 0.48, (115, 210, 255), 1)
+    _put_text(panel, f"ckpt {_vector_text(real.checkpoint, limit=1)}", (x, 83), 0.40)
+    _put_text(panel, f"sampler {_vector_text(real.sampler, limit=1)}", (x, 102), 0.40)
+    gripper = None if real.gripper is None else _real_scalar(real.gripper[row])
+    state = None if real.state is None else real.state[row]
+    output = None if real.output is None else real.output[row]
+    elapsed = _real_elapsed_s(real, row, fps)
+    input_value = _real_panel_value(
+        real, row, values, ("model_input", "input", "inputs", "observation", "obs"),
+        ("model_input", "input", "inputs", "observation", "obs"), state,
+    )
+    output_value = _real_panel_value(
+        real, row, values, ("model_output", "decoded_chunk", "output", "action", "executed_action"),
+        ("model_output", "output", "action", "executed_action"), output,
+    )
+    _put_text(panel, f"t={f'{elapsed:.3f}s' if elapsed is not None else 'missing'}  request {diag.request_idx}  decision {diag.decision_idx}",
+              (x, 124), 0.40)
+    _put_text(panel, f"chunk step {diag.chunk_step if diag.chunk_step >= 0 else 'missing'}  gripper {_fmt(gripper)}",
+              (x, 144), 0.42)
+    _put_text(panel, f"input {_vector_text(input_value)}", (x, 164), 0.39)
+    _put_text(panel, f"output {_vector_text(output_value)}", (x, 184), 0.39)
+
+    if kind == "ifql":
+        _put_text(panel, "IFQL DECISION (recorded / held)", (x, 209), 0.46, (115, 210, 255), 1)
+        q = diag.q or {}
+        q1, q2 = _chosen_q_heads(q)
+        _put_text(panel, f"Q1 selected {_fmt(q1)}  Q2 selected {_fmt(q2)}  aggregate {_fmt(q.get('q_chosen'))}",
+                  (x, 229), 0.36)
+        _put_text(panel, f"K {_fmt(q.get('K'), 0)}  selected candidate {_fmt(q.get('q_argmax'), 0)}  mean {_fmt(q.get('q_mean'))}",
+                  (x, 249), 0.35)
+        _put_text(panel, f"min {_fmt(q.get('q_min'))}  max {_fmt(q.get('q_max'))}  spread {_fmt(q.get('q_spread'))}  std {_fmt(q.get('q_std'))}",
+                  (x, 269), 0.34)
+        _put_text(panel, f"candidate norm {_fmt(_recorded_value(values, 'candidate_norm', 'candidates_norm'))}  noise norm {_fmt(_recorded_value(values, 'noise_norm'))}",
+                  (x, 288), 0.35)
+    elif kind == "svf":
+        _put_text(panel, "SVF FLOW STATE (no critic fabricated)", (x, 209), 0.46, (115, 210, 255), 1)
+        _put_text(panel, f"PRNG {_vector_text(_recorded_value(values, 'prng', 'prng_key'), limit=2)}", (x, 229), 0.40)
+        noise = _real_panel_value(real, row, values, ("noise", "flow_noise"), ("noise",), None)
+        _put_text(panel, f"noise {_vector_text(noise, limit=2)}  norm {_fmt(_recorded_value(values, 'noise_norm'))}",
+                  (x, 249), 0.39)
+        _put_text(panel, f"chunk norm {_fmt(_recorded_value(values, 'chunk_norm', 'action_chunk_norm'))}",
+                  (x, 269), 0.39)
+    elif kind == "dsrl":
+        _put_text(panel, "DSRL LATENT STATE (Q only when logged)", (x, 209), 0.46, (115, 210, 255), 1)
+        latent = _real_panel_value(real, row, values, ("latent_z", "z"), (), None)
+        _put_text(panel, f"latent z {_vector_text(latent, limit=2)}", (x, 229), 0.40)
+        _put_text(panel, f"z norm {_fmt(_recorded_value(values, 'z_norm', 'z_abs_mean'))}  bound frac {_fmt(_recorded_value(values, 'z_bound_fraction', 'z_bound_frac', 'bound_fraction'))}",
+                  (x, 249), 0.40)
+        _put_text(panel, f"z max {_fmt(_recorded_value(values, 'z_max', 'z_abs_max'))}  noise scale {_fmt(_recorded_value(values, 'noise_scale'))}",
+                  (x, 269), 0.40)
+    else:
+        _put_text(panel, "RECORDED DECISION VALUES", (x, 209), 0.46, (115, 210, 255), 1)
+        _put_text(panel, ", ".join(sorted(values)[:4]) or "missing", (x, 229), 0.40)
+    latency = _recorded_value(values, "latency_ms", "sample_ms", "refill_ms")
+    _put_text(panel, f"latency {_fmt(latency, 1)} ms  {'NEW DECISION' if diag.boundary else 'DECISION HELD'}", (x, 314), 0.42)
+    _put_text(panel, "Q graph contains only Q1/Q2/aggregate fields actually logged.", (x, 338), 0.34, (160, 175, 190))
+    return panel
+
+
 def _synthetic_diagnostics(n_steps: int) -> List[Diagnostic]:
     out: List[Diagnostic] = []
     held: Optional[Dict[str, Any]] = None
@@ -794,7 +1178,7 @@ def _synthetic_diagnostics(n_steps: int) -> List[Diagnostic]:
                 "refill_ms": 42.0 + decision % 6,
             }
         q = {key: held[key] for key in (*Q_FIELDS, Q_HEADS_FIELD)} if held else None
-        latency = {k: float(held[k]) for k in LATENCY_FIELDS} if held else None
+        latency = {key: float(held[key]) for key in LATENCY_FIELDS if key in held} if held else None
         out.append(Diagnostic(i, decision, decision, i % 24, boundary, q, latency,
                               sidecar_refill=decision + 1, sidecar_updated=boundary))
     return out
@@ -820,20 +1204,62 @@ def _overlay_camera_label(frame: np.ndarray, label: str, meta: EpisodeMeta, fram
               (255, 255, 255), 1)
 
 
-def _encode_h264(temp_input: Path, output: Path, fps: int) -> None:
+def _resolve_ffmpeg() -> str:
+    """Resolve a usable encoder on servers that ship imageio's static binary only."""
     ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg is required to produce H.264/yuv420p output")
+    if ffmpeg is not None:
+        return ffmpeg
+    try:
+        import imageio_ffmpeg
+
+        candidate = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("ffmpeg is required to produce H.264/yuv420p output") from exc
+    if not candidate or not Path(candidate).is_file():
+        raise RuntimeError("imageio_ffmpeg did not provide an executable ffmpeg binary")
+    return candidate
+
+
+def _verify_h264_output(path: Path, expected_frames: int, fps: int, ffmpeg: str) -> None:
+    """Verify the deliverable before publish, without requiring a separate ffprobe binary."""
+    # The bundled imageio binary is ffmpeg only on several inference hosts.
+    # Its stream description is authoritative for codec/pixel format, while
+    # OpenCV reads the decoded stream's exact frame count and frame rate.
+    inspected = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(path), "-map", "0:v:0", "-f", "null", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    report = inspected.stderr
+    stream_ok = ("Video: h264" in report and "yuv420p" in report and
+                 (f"{fps} fps" in report or f"{fps}.00 fps" in report))
+    import cv2
+
+    cap = cv2.VideoCapture(str(path))
+    try:
+        actual_frames = int(round(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        opened = cap.isOpened()
+    finally:
+        cap.release()
+    if not opened or not stream_ok or actual_frames != expected_frames or not np.isclose(actual_fps, fps):
+        raise RuntimeError(
+            f"encoded video verification failed: opened={opened}, frames={actual_frames}/{expected_frames}, "
+            f"fps={actual_fps}/{fps}, h264-yuv420p={stream_ok}; ffmpeg report: {report[-700:]}"
+        )
+
+
+def _encode_h264(temp_input: Path, output: Path, fps: int, expected_frames: int) -> None:
+    ffmpeg = _resolve_ffmpeg()
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(prefix=f".{output.stem}.", suffix=".h264.mp4",
-                                     dir=output.parent, delete=False) as fh:
-        encoded = Path(fh.name)
+    encoded = output.with_name(f"{output.stem}.partial.mp4")
+    encoded.unlink(missing_ok=True)
     try:
         subprocess.run(
             [ffmpeg, "-y", "-loglevel", "error", "-i", str(temp_input), "-r", str(fps),
              "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(encoded)],
             check=True,
         )
+        _verify_h264_output(encoded, expected_frames, fps, ffmpeg)
         encoded.chmod(0o644)
         os.replace(encoded, output)
     finally:
@@ -911,10 +1337,63 @@ def render_episode(
         if rig is not None:
             rig.close()
     try:
-        _encode_h264(temp_path, final_path, fps)
+        _encode_h264(temp_path, final_path, fps, meta.n_steps)
     finally:
         temp_path.unlink(missing_ok=True)
     print(f"[render_eval_video] ep {meta.episode}: {meta.n_steps} frames -> {final_path}", flush=True)
+    return final_path
+
+
+def _overlay_real_camera_label(frame: np.ndarray, label: str, request_idx: int, elapsed_s: Optional[float]) -> None:
+    import cv2
+
+    cv2.rectangle(frame, (0, 0), (frame.shape[1], 30), (0, 0, 0), -1)
+    elapsed_label = f"{elapsed_s:6.3f}s" if elapsed_s is not None else "missing"
+    _put_text(frame, f"{label}  request {request_idx}  t={elapsed_label}", (10, 21), 0.52,
+              (255, 255, 255), 1)
+
+
+def render_real_h5_episode(
+    real_h5: os.PathLike[str] | str,
+    out_path: os.PathLike[str] | str,
+    *,
+    fps: int = FPS,
+) -> Path:
+    """Render one complete real_eval/v1 episode to an atomically published MP4."""
+    import cv2
+
+    if fps != FPS:
+        raise ValueError(f"diagnostic video contract is fixed at {FPS} fps")
+    real = load_real_h5_episode(real_h5)
+    diagnostics = _real_diagnostics(real)
+    final_path = Path(out_path).expanduser().resolve()
+    if final_path.suffix.lower() != ".mp4":
+        raise ValueError("--out for --real-h5 must be an .mp4 path")
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{final_path.stem}.", suffix=".mp4v.mp4", dir=final_path.parent)
+    os.close(fd)
+    temp_path = Path(temp_name)
+    writer = cv2.VideoWriter(str(temp_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, OUTPUT_SIZE)
+    if not writer.isOpened():
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"OpenCV VideoWriter could not open {temp_path}")
+    try:
+        for row, diag in enumerate(diagnostics):
+            request = int(real.request_idx[row])
+            cam1 = _decode_jpeg(real.cam1_jpeg[row], f"{real.path.name} cam1 request {request}")
+            cam2 = _decode_jpeg(real.cam2_jpeg[row], f"{real.path.name} cam2 request {request}")
+            elapsed = _real_elapsed_s(real, row, fps)
+            _overlay_real_camera_label(cam1, "cam1", request, elapsed)
+            _overlay_real_camera_label(cam2, "cam2", request, elapsed)
+            dashboard = draw_real_dashboard(real, row, diag, diagnostics[:row + 1], fps)
+            writer.write(np.vstack((np.hstack((cam1, cam2)), dashboard)))
+    finally:
+        writer.release()
+    try:
+        _encode_h264(temp_path, final_path, fps, len(diagnostics))
+    finally:
+        temp_path.unlink(missing_ok=True)
+    print(f"[render_eval_video] real {real.path.name}: {len(diagnostics)} frames -> {final_path}", flush=True)
     return final_path
 
 
@@ -936,7 +1415,9 @@ def _parse_reset_map(spec: Optional[str]) -> Dict[str, int]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run-dir", required=True, help="directory containing episodes.jsonl and ep_<episode>.h5")
+    ap.add_argument("--run-dir", default=None, help="directory containing episodes.jsonl and ep_<episode>.h5")
+    ap.add_argument("--real-h5", default=None,
+                    help="one complete real_eval/v1 ep_NNNN.h5; use with --out /path/video.mp4")
     ap.add_argument("--episodes", default=None, help="comma-separated episode ids (default: all JSONL rows)")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--policy-log-dir", default=None,
@@ -948,6 +1429,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     os.environ.setdefault("MUJOCO_GL", "glfw")
+    if args.real_h5:
+        if args.run_dir or args.episodes or args.policy_log_dir or args.reset_map or args.synthetic_diagnostics:
+            ap.error("--real-h5 cannot be combined with sim replay options")
+        try:
+            render_real_h5_episode(args.real_h5, args.out)
+        except (JoinError, KeyError, ValueError) as exc:
+            ap.error(str(exc))
+        return 0
+    if not args.run_dir:
+        ap.error("--run-dir is required unless --real-h5 is supplied")
     episodes = load_episodes_jsonl(args.run_dir)
     selected = list(episodes) if not args.episodes else [x.strip() for x in args.episodes.split(",") if x.strip()]
     unknown = [x for x in selected if x not in episodes]
