@@ -2,7 +2,8 @@
 # Laptop: SSH tunnel + ROS camera client + read-only classifier viewer.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source /opt/ros/humble/setup.bash
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 python3 -c 'import zmq, rclpy' || {
     echo "Missing python3-zmq/rclpy; install: sudo apt install python3-zmq" >&2

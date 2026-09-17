@@ -3,6 +3,7 @@
 
 # large files
 *.png
+!sim_collect/assets/**/*.png
 *.gif
 
 # mac
@@ -58,6 +59,7 @@ third_party/i2rt/
 
 # 3D Model Files
 *.stl
+!sim_collect/assets/**/*.stl
 # MujocoRobotServer가 실행 시 생성하는 런타임 산출물
 arena.xml
 

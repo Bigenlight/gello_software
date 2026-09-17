@@ -166,14 +166,21 @@ HOME_TRAJECTORY_ACTION = "/{}/follow_joint_trajectory".format(STJC)
 GRIPPER_COMMAND_TOPIC = "/robotiq_gripper/command_percent"
 GRIPPER_POSITION_TOPIC = "/robotiq_gripper/position_percent"
 JOINT_STATES_TOPIC = "/joint_states"
-# The UR driver's speed-scaling broadcaster. READ OFF THIS SYSTEM, not guessed:
-#   * /opt/ros/humble/share/ur_robot_driver/config/ur_controllers.yaml declares
+# The UR driver's speed-scaling broadcaster. READ OFF THIS SYSTEM, not guessed
+# (originally verified on Humble at /opt/ros/humble/share/ur_robot_driver/config/
+# ur_controllers.yaml -- same relative path and controller/topic names live
+# under /opt/ros/jazzy/share/ur_robot_driver/ too, since ur_robot_driver's
+# config layout did not change between distros, but this has NOT been
+# re-confirmed against an installed Jazzy ur_robot_driver on this machine):
+#   * ur_controllers.yaml declares
 #     `speed_scaling_state_broadcaster: type: ur_controllers/SpeedScalingStateBroadcaster`
 #     and ur_control.launch.py spawns it by that name (so the node name, and
 #     hence the topic namespace, is speed_scaling_state_broadcaster);
-#   * ur_controllers 2.8.1's speed_scaling_state_broadcaster.hpp declares
+#   * ur_controllers' speed_scaling_state_broadcaster.hpp declares
 #     `rclcpp::Publisher<std_msgs::msg::Float64>` and the shipped library's
-#     string table contains the node-relative topic "~/speed_scaling".
+#     string table contains the node-relative topic "~/speed_scaling"
+#     (version 2.8.1 confirmed on Humble; Jazzy's ur_controllers version not
+#     re-checked here).
 # => /speed_scaling_state_broadcaster/speed_scaling, std_msgs/msg/Float64,
 #    field `data`.
 SPEED_SCALING_TOPIC = "/speed_scaling_state_broadcaster/speed_scaling"
@@ -517,7 +524,10 @@ class HomeMoveOps:
             return
 
         request = SwitchController.Request()
-        # Humble field names (Foxy-era 'start_controllers' is long gone).
+        # activate_controllers/deactivate_controllers are the field names on
+        # both Humble and Jazzy (Foxy-era 'start_controllers'/'stop_controllers'
+        # were removed by Jazzy -- using those old names would raise at
+        # message-construction time, not silently no-op).
         request.activate_controllers = activate_list
         request.deactivate_controllers = deactivate_list
         request.strictness = _STRICT

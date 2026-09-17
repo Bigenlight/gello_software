@@ -148,9 +148,12 @@ source "$HANDOFF_LIB"
 # ---------------------------------------------------------------------------
 # 설정 (환경변수로 덮어쓸 수 있음)
 # ---------------------------------------------------------------------------
+# ACTOR_VENV 기본값은 laptop3 전용 경로다 — 이 PC(junhyeong_ai worktree)에는
+# 존재하지 않는다. venv가 다른 곳에 있으면 반드시 ACTOR_VENV=... 로 덮어쓸 것.
 ACTOR_VENV="${ACTOR_VENV:-/home/laptop3/venvs/gello-hil-actor}"
 ACTOR_PY="$ACTOR_VENV/bin/python"
-ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/${GELLO_ROS_DISTRO}/setup.bash}"
 WS_SETUP="$REPO_ROOT/ros2_ur_ws/install/setup.bash"
 ACTOR_SCRIPT="$REPO_ROOT/serl_ur_infra/scripts/run_remote_rlpd_actor.py"
 
@@ -575,9 +578,13 @@ export PYTHONPATH="$REPO_ROOT/serl_ur_infra:$REPO_ROOT/third_party/hil-serl/serl
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$REPO_ROOT}"
 p_info "PYTHONPATH(앞 3개) = $REPO_ROOT/serl_ur_infra : .../serl_launcher : .../examples"
 # 함정 #2의 직접 확인: 오버레이가 PYTHONPATH 뒤쪽에 살아남았는가.
+# site-packages 아래 python ABI 디렉터리명은 배포판마다 다르다 (Humble/py3.10,
+# Jazzy/py3.12) — 시스템 python3의 실제 버전으로 동적으로 구한다. 하드코딩하지
+# 않는다.
+PY_ABI_TAG="python$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo '3')"
 if [ "$OVERLAY_OK" -eq 1 ]; then
     case ":$PYTHONPATH:" in
-        *":$REPO_ROOT/ros2_ur_ws/install/ur_gello_bringup/lib/python3.10/site-packages:"*)
+        *":$REPO_ROOT/ros2_ur_ws/install/ur_gello_bringup/lib/$PY_ABI_TAG/site-packages:"*)
             p_ok "ROS 오버레이가 PYTHONPATH에 살아 있다 (덮어쓰기 아님)"
             ;;
         *)

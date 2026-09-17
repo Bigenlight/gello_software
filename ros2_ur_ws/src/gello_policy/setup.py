@@ -8,8 +8,10 @@ package_name = 'gello_policy'
 setup(
     name=package_name,
     version='0.1.0',
-    # Only the rclpy package belongs in the (py3.10 Humble) ament install space.
-    # The sibling `policy_server/` is the py3.12 torch/lerobot side and must NOT be
+    # Only the rclpy package belongs in the ament install space (py3.10 on
+    # Humble; py3.12 -- same interpreter version as the venv below -- on
+    # Jazzy/noble, so the split below is about which venv, not which python).
+    # The sibling `policy_server/` is the torch/lerobot side and must NOT be
     # installed here (review L3) — it runs from its source dir in the separate venv.
     packages=find_packages(include=['gello_policy', 'gello_policy.*']),
     data_files=[

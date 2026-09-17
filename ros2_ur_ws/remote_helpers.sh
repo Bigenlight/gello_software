@@ -48,6 +48,11 @@
 _RH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$_RH_DIR/.." && pwd)}"
 export ROBOT_IP="${ROBOT_IP:-192.168.10.11}"
+# Declared explicitly rather than trusted from $ROS_DISTRO: that var is EXPORTED
+# by /opt/ros/<distro>/setup.bash itself, so a shell that already sourced a
+# DIFFERENT distro's setup.bash earlier would make ur_env() pick the wrong one
+# if it just read $ROS_DISTRO. An explicit var sidesteps that ambiguity.
+export GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
 
 # Overlay names (kept as functions/vars so they are easy to re-source).
 _UR_WS_SETUP="${_RH_DIR}/install/setup.bash"
@@ -55,7 +60,7 @@ _UR_WS_SETUP="${_RH_DIR}/install/setup.bash"
 # Source ROS2 + workspace overlay (idempotent; safe to call repeatedly).
 ur_env() {
   # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
+  source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
   # shellcheck disable=SC1091
   [ -f "${_UR_WS_SETUP}" ] && source "${_UR_WS_SETUP}"
 }

@@ -37,7 +37,10 @@ import os, sys
 try:
     import pyrealsense2 as rs
 except ImportError:
-    print("SKIP pyrealsense2 not importable; using configured serials as-is", file=sys.stderr)
+    print("SKIP optional pyrealsense2 binding is not importable in this interpreter; "
+          "using configured serials as-is. The ROS camera driver can still run. "
+          "Inspect attached devices with rs-enumerate-devices -s after sourcing ROS.",
+          file=sys.stderr)
     raise SystemExit(3)
 
 want1, want2 = os.environ["CAM1_SERIAL"], os.environ["CAM2_SERIAL"]

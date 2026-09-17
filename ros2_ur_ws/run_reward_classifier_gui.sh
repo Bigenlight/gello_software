@@ -36,11 +36,12 @@ if [[ ! -e "$REWARD_CLASSIFIER_CHECKPOINT" ]]; then
     exit 2
 fi
 
-source /opt/ros/humble/setup.bash
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 
-# ROS Humble uses Python 3.10. The venv must use that ABI and expose ROS
-# packages via --system-site-packages.
+# ROS Jazzy (Ubuntu 24.04) uses Python 3.12. The venv must use that ABI and
+# expose ROS packages via --system-site-packages.
 if ! "$CLASSIFIER_PYTHON" - "$CLASSIFIER_THRESHOLD" <<'PY'
 import math
 import os

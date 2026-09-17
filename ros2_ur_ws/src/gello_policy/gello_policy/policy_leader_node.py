@@ -6,7 +6,10 @@ EXACT same ``/gello/joint_states`` + gripper contract ``gello_publisher_node``
 does, so the existing ``gello_ur_bridge`` + ``gello_move_to_start`` handshake and
 the Robotiq modbus stack run UNMODIFIED. The joint targets come from a trained
 ACT policy that lives in a separate py3.12 process, reached over localhost ZMQ
-(REQ here / REP there) -- keeping torch/lerobot out of this py3.10 ROS process.
+(REQ here / REP there) -- keeping torch/lerobot out of this ROS process (py3.10
+on Humble, py3.12 on Jazzy/noble; the split is about which venv, torch/lerobot
+vs. plain rclpy, not which python interpreter -- see the ament vs. venv note
+in gello_policy/setup.py).
 
 State machine (BUILD_SPEC §5):
   HOLD  (boot default): publish a constant held pose (start_pose) + start_gripper
@@ -26,7 +29,12 @@ Services (std_srvs/Trigger):
 
 Distro note: written to be distro-agnostic (std sensor_msgs/std_msgs/std_srvs +
 rclpy). Verified to construct under ROS2 Jazzy on the dev PC; the target robot PC
-runs Humble -- no Jazzy-only APIs are used (see module docstring caveats below).
+runs Humble -- no Jazzy-only APIs are used. Re-audited for the Jazzy/noble
+python-3.12 port: still no removed-in-3.12 stdlib, no numpy dtype aliases, no
+QoS/action-client API drift, and every declare_parameter() call below passes a
+default (rclpy raises if you omit both a default and an explicit type on
+recent rclpy, so an accidental no-default declare would break constructor
+time, not silently misbehave).
 """
 
 import time

@@ -96,6 +96,7 @@ from gello_recorder.gello_recorder_gui import (
     _resolve_camera_serials,
     _spin_node,
 )
+from gello_recorder.paths import default_repo_root
 
 # home_move is pure Python (no rclpy, no Qt), so importing it at module scope
 # costs nothing and keeps the state names the GUI paints identical to the ones
@@ -818,10 +819,7 @@ def main(args=None):
         os.environ.get(
             "RECORDER_OUTPUT_ROOT",
             os.path.join(
-                os.environ.get(
-                    "GELLO_REPO_ROOT",
-                    os.path.expanduser("~/gello_software"),
-                ),
+                default_repo_root(),
                 "ros2_ur_ws", "gello_logs",
             ),
         ),

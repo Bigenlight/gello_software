@@ -17,6 +17,7 @@ episodes strictly sequential (memory guardrail).
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as _dt
 import json
 import math
@@ -110,6 +111,17 @@ def run_episode(world: EvalWorld, policy, ep_id: str, seed: Optional[int], max_s
         if verbose:
             print(f"[run_eval] {ep_id}: FAULT at reset: {rec['fault']}", flush=True)
         return rec
+    # RESET may add episode-specific metadata (notably IFQL reset_counter/log_dir)
+    # to policy.meta.  Snapshot it *after* RESET: taking this copy before RESET makes
+    # every episode point at the previous episode's policy log.
+    rec["policy"] = copy.deepcopy(dict(getattr(policy, "meta", {}) or {}))
+    reset_reply = rec["policy"].get("reset_reply")
+    if isinstance(reset_reply, dict):
+        rec["policy_reset"] = {
+            k: copy.deepcopy(reset_reply[k])
+            for k in ("reset_counter", "seed", "torch_seed", "log_dir")
+            if k in reset_reply
+        }
     need_images = bool(getattr(policy, "needs_images", True)) or video
     obs = world.reset(seed=seed, layout_override=info.get("layout_override"), q0=info.get("q0"),
                       video_dir=out_dir, video_tag=f"ep_{ep_id}", images=need_images)
@@ -157,7 +169,8 @@ def run_episode(world: EvalWorld, policy, ep_id: str, seed: Optional[int], max_s
             pass
     if out_dir and save_state:
         rec["state_h5"] = os.path.relpath(world.save_episode(os.path.join(out_dir, f"ep_{ep_id}.h5"),
-                                                             {"episode": ep_id, "outcome": outcome}), _ROOT)
+                                                             {"episode": ep_id, "outcome": outcome,
+                                                              "policy_reset": rec.get("policy_reset")}), _ROOT)
     if video and getattr(world, "video_paths", None):
         rec["video"] = {k: os.path.relpath(v, _ROOT) for k, v in world.video_paths.items()}
         world._close_video()

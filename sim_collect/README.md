@@ -6,6 +6,16 @@
 > 이 문서는 **조작 절차서**다. 설계 계약(왜 이렇게 만들었나, 프로세스/IPC 키, 각 파일의 소유자)은
 > [`DESIGN.md`](DESIGN.md)에 있다. 실기 HIL 세션(`run_hil_*.sh` 3-CLI)과는 **완전히 다른 스택이다** — 섞지 말 것.
 
+## Ubuntu 24.04 / Jazzy 새 머신 이전
+
+새 머신 `/home/junhyeong/gello_software_jazzy`는 전용 Conda 환경 `gello-sim`(Python 3.11),
+RTX 5070 Ti / driver 590.48.01, `DISPLAY=:1`을 쓴다. 인터랙티브는 GLFW, headless는 EGL로
+검증한다. 설치, 서브모듈, 에셋, launcher Python 우선순위, opt-in durable smoke 절차는
+[`UBUNTU24_JAZZY_MIGRATION.md`](UBUNTU24_JAZZY_MIGRATION.md)가 정본이다.
+
+아래의 `/home/laptop3/gello_software`, `.venv`, `DISPLAY=:0`, 소프트웨어 GLFW 성능 수치는
+기존 laptop3 운용 기록이다. 새 머신 사실로 옮겨 읽지 않는다.
+
 ## 0. 실기와 같은 것 / 다른 것
 
 | | 같다 |
@@ -59,19 +69,24 @@ pgrep -af "launch_yaml.py|sim_collect.sim_main"   # 나오면 전부 종료한 �
 
 | 항목 | 값 / 확인 |
 | --- | --- |
-| 인터프리터 | `/home/laptop3/gello_software/.venv/bin/python` **하나뿐** (mujoco 3.10, h5py, zmq, tkinter) |
+| 새 머신 인터프리터 | Conda `gello-sim` Python 3.11. `SIM_COLLECT_PY`로 명시 가능 |
+| laptop3 인터프리터 | `/home/laptop3/gello_software/.venv/bin/python` (legacy fallback) |
 | 시리얼 권한 | `Permission denied`면 `dialout` 그룹 (`groups`로 확인, 로그아웃 후 재로그인) |
 | 포트 | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0` (by-id는 불변. `configs/carrot_in_pot_sim.yaml`의 `leader.port`) |
-| 디스플레이 | `DISPLAY=:0` 필요 (`echo $DISPLAY`). 렌더링 백엔드는 **`MUJOCO_GL=glfw`만 된다** — 이 PC엔 NVIDIA 드라이버가 안 떠 있어 EGL/OSMESA가 죽는다. 런처가 자동으로 설정한다 |
+| 새 머신 디스플레이 | interactive `DISPLAY=:1`, GLFW. headless `MUJOCO_GL=egl` |
+| laptop3 디스플레이 | `DISPLAY=:0`, GLFW만 검증됨. EGL/OSMESA 실패는 laptop3 기록 |
 
 ---
 
 ## 2. 실행
 
 ```bash
-cd /home/laptop3/gello_software
+cd /home/junhyeong/gello_software_jazzy
+conda activate gello-sim
 ./sim_collect/run_sim_collect.sh
 ```
+
+laptop3에서는 기존 `/home/laptop3/gello_software/.venv/bin/python` fallback을 계속 쓸 수 있다.
 
 옵션:
 
@@ -81,11 +96,16 @@ cd /home/laptop3/gello_software
 | `--control-mode joint` | joint 모드로 시작 (기본 `eef`). GUI 라디오로도 바꾼다 |
 | `--root <디렉터리>` | take 저장 위치 (기본 `ros2_ur_ws/gello_logs/sim/`) |
 | `--config <yaml>` | 씬 설정 (기본 `sim_collect/configs/carrot_in_pot_sim.yaml`) |
+| `--headless` | `--no-viewer` + `--no-gui`. backend 미지정 시 EGL |
+| `--no-viewer` | MuJoCo viewer만 생략 |
+| `--no-gui` | Tk 조작자 GUI만 생략 |
 
-환경변수: `DISPLAY`(기본 `:0`) · `SIM_COLLECT_OUTPUT_ROOT`(take 루트) · `LOG_DIR`(로그) ·
-`SIM_COLLECT_IPC=tcp`(ipc 소켓 대신 127.0.0.1 포트).
+환경변수: `SIM_COLLECT_PY`(최우선 Python override) · `MUJOCO_GL`(호출자 값 보존) ·
+`DISPLAY`(interactive 기본 `:0`) · `SIM_COLLECT_OUTPUT_ROOT`(take 루트) · `LOG_DIR`(로그) ·
+`SIM_COLLECT_IPC=tcp`(ipc 소켓 대신 127.0.0.1 포트). 자동 Python 순서는
+`SIM_COLLECT_PY` → 활성 `gello-sim` → 이름으로 찾은 `gello-sim` → legacy `.venv`다.
 
-**뜨는 것 3개:**
+interactive에서 **뜨는 것 3개:**
 
 1. **MuJoCo 뷰어 창** — 물리 프로세스 `sim_main`의 것. 마우스로 시점을 돌려도 시뮬에 영향 없다.
 2. **조작자 GUI 창**(tkinter) — 아래 3절의 버튼이 전부 여기 있다.
@@ -94,6 +114,8 @@ cd /home/laptop3/gello_software
 **종료는 터미널에서 Ctrl-C** — 런처가 **캡처를 먼저** 내려 녹화 중이던 take를 마무리(mp4/HDF5 닫기)한 뒤 sim과 GUI를 내리고, 프로세스 그룹에 남은 렌더 워커까지 정리한다. 그래도 녹화 중이면 **STOP TAKE를 먼저 누르는 것이 정석**이다. 셋 중 하나라도 죽으면 런처가 나머지를 정리하고 끝난다.
 
 로그: `sim_collect/logs/<YYYYmmdd_HHMMSS>/{sim_main,capture,gui}.log`. **무언가 안 될 때 제일 먼저 볼 곳이다.**
+`--headless`에서는 `gui.log`가 생기지 않는다. GUI 없이 take를 제어하는 전체 경로는
+`python -m sim_collect.tools.smoke_collect --output <새 디렉터리>`로 검증한다.
 
 ---
 
@@ -288,8 +310,9 @@ demo pickle 계약은
 ## 6. 테스트
 
 ```bash
-cd /home/laptop3/gello_software
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovider sim_collect/tests
+cd /home/junhyeong/gello_software_jazzy
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MUJOCO_GL=egl DISPLAY=:1 \
+  conda run -n gello-sim python -m pytest -q -p no:cacheprovider sim_collect/tests
 ```
 
 - 2026-09-14 저녁 기준 **151 passed**(36 s). 한때 `test_capture.py::test_capture_records_a_take_end_to_end`가
@@ -298,8 +321,8 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovid
   그래도 검수 프로세스 여러 개가 동시에 돌 때는 타이밍 검사가 흔들릴 수 있다.
 - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`은 **필수**다. ROS overlay를 source한 셸에서는 `launch_testing`
   플러그인이 끼어들어 수집 단계에서 죽는다.
-- **인터프리터는 `.venv/bin/python` 하나뿐이다.** 시스템 `python3`에는 mujoco가 없고,
-  `venvs/gello-hil-actor`는 이 코드의 것이 아니다. (`scripts/gello_probe.py`만 예외로 시스템 `python3`를 쓴다.)
+- 새 머신의 정본은 Conda `gello-sim`, laptop3의 정본은 `.venv/bin/python`이다.
+  `venvs/gello-hil-actor`는 어느 쪽에서도 이 코드의 환경이 아니다.
 - 렌더가 필요한 테스트는 `DISPLAY`가 없으면 skip된다.
 
 ---
@@ -348,9 +371,10 @@ GELLO 샘플 시각, 프레임 테이블은 렌더 캡처 시각이다(`t_rel_s`
 필요 없고, depth feature를 넣는 `convert_carrot_to_lerobot.py`와 `make_carrot_raw_stats.py`(4개 파일 기대)는
 **depth를 켠 take만** 받는다.
 
-## 6.5 카메라 프레임레이트 — 이 PC의 한계
+## 6.5 카메라 프레임레이트 — laptop3의 역사적 한계
 
-렌더는 소프트웨어 GL(NVIDIA 드라이버 미로드)이라 **CPU 부하에 그대로 노출된다.** 실측(2026-09-14):
+laptop3 렌더는 소프트웨어 GL(NVIDIA 드라이버 미로드)이어서 **CPU 부하에 그대로 노출됐다.** 아래는
+laptop3 실측(2026-09-14)이며 RTX 5070 Ti 새 머신의 성능 수치가 아니다.
 
 | 상황 | cam1/cam2 프레임레이트 | 프레임당 렌더 |
 | --- | --- | --- |
@@ -371,7 +395,7 @@ GUI에 `SLOW`(주황), `stop_take` 응답과 `sim_meta.problems`에 `"cam1 captu
 | `gello_probe`에서 서보 **0개** | 5 V 외부 전원 미인가가 1순위. 그다음 U2D2 케이블 |
 | `GELLO driver fell back to the FAKE driver ... (port missing/busy?)` | 포트가 없거나 다른 프로세스가 잡고 있다. 1-2절 `pgrep`. **가짜 리더로 조용히 넘어가지 않게 일부러 실패시킨다** — 정말 원하면 `--fake-leader` |
 | `a sim_collect process is already running` | 런처의 안전장치(sim_main·capture·gui, 고아 렌더 워커 포함). 표시된 pid를 `kill -TERM`하고 다시 시작한다 |
-| 뷰어 창이 안 뜬다 | `echo $DISPLAY`(보통 `:0`). `sim_main.log`에 GL 오류가 있으면 백엔드 문제다 — **`MUJOCO_GL=glfw` 말고는 이 PC에서 안 된다**(EGL/OSMESA는 NVIDIA 드라이버가 없어 죽는다) |
+| 뷰어 창이 안 뜬다 | 새 머신 interactive는 `DISPLAY=:1` + GLFW, laptop3는 `DISPLAY=:0` + GLFW를 확인한다. headless는 `--headless` + EGL이다. `sim_main.log`의 GL 오류와 현재 `MUJOCO_GL`을 같이 본다 |
 | GUI가 `sim: DISCONNECTED` / `capture: DISCONNECTED` | 그 프로세스가 죽었거나 재기동 중이다. `logs/<시각>/{sim_main,capture}.log`를 본다. GUI는 **스스로 계속 재접속**하므로 살아나면 알아서 붙는다 |
 | `render`의 `dropped`가 는다 | 렌더가 30 Hz를 못 맞춘다(CPU 부하). 프레임을 버려서 **녹화가 sim보다 뒤처지지 않게** 하는 설계다. 다른 무거운 프로그램을 끄거나 `--fps`를 낮춘다 |
 | ENGAGE가 안 먹는다 | 3-2절 표에서 `reason` 키를 찾는다. 가장 흔한 둘은 `leader_moving`(손을 떼라)과 `singular_anchor`(HOME 후 재시도) |

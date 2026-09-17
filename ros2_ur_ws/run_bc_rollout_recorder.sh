@@ -63,7 +63,8 @@ export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # Same two setup files as run_recorder.sh; -u is relaxed only across them
 # because the ROS setup scripts reference unbound vars.
 set +u
-source /opt/ros/humble/setup.bash
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 set -u
 

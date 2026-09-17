@@ -41,6 +41,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # = ros2_ur_ws
+# Declared explicitly rather than trusted from $ROS_DISTRO: that var is EXPORTED
+# by /opt/ros/<distro>/setup.bash itself, so a shell that already sourced a
+# DIFFERENT distro's setup.bash earlier would make this script pick the wrong
+# one if it just read $ROS_DISTRO. An explicit var sidesteps that ambiguity.
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
 
 # Serials are a PREFERENCE, not a requirement -- resolve_serials() below falls
 # back to whatever is actually plugged in.
@@ -119,8 +124,8 @@ VIEW="${VIEW:-true}"
 source "$SCRIPT_DIR/_resolve_camera_serials.sh"
 resolve_serials
 
-# --- ROS2 Humble environment -------------------------------------------------
-source /opt/ros/humble/setup.bash
+# --- ROS2 Jazzy environment -------------------------------------------------
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 
 # --- Per-run temp dir for the launch logs -----------------------------------

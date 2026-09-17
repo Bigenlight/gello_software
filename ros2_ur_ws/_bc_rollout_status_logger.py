@@ -33,7 +33,7 @@ Run with SYSTEM ``python3`` under the ROS overlay.  NOT the actor's gRPC venv
 (no rclpy there), and do not overwrite ``PYTHONPATH`` -- see
 ``docs/testing/00_SETUP_AND_SAFETY.md`` §3.4.
 
-    set +u; source /opt/ros/humble/setup.bash
+    set +u; source "/opt/ros/${GELLO_ROS_DISTRO:-jazzy}/setup.bash"
     source ros2_ur_ws/install/setup.bash; set -u
     ./ros2_ur_ws/_bc_rollout_status_logger.py --output <run_dir>
 

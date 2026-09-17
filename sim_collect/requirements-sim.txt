@@ -1,9 +1,12 @@
-# sim_collect — MuJoCo side (.venv, Python 3.11). Pinned to what laptop3 verified on 2026-09-15.
+# sim_collect — MuJoCo side (Python 3.11). See UBUNTU24_JAZZY_MIGRATION.md for gello-sim.
+# Legacy laptop3 setup:
 #   uv venv --python 3.11 .venv
 #   uv pip install --python .venv/bin/python -r sim_collect/requirements-sim.txt
 #   uv pip install --python .venv/bin/python -e . -e third_party/DynamixelSDK/python
 # Also needed: git submodules third_party/mujoco_menagerie (UR5e meshes + Robotiq 2F-85) and
 # third_party/DynamixelSDK (only for the physical GELLO; eval does not need it).
+# Diagnostic MP4 rendering also needs ffmpeg with libx264 on PATH; install it with apt or
+# `conda install -n gello-sim -c conda-forge ffmpeg` (not a pip dependency).
 mujoco==3.10.0
 dm-control==1.0.43
 glfw==2.10.0
@@ -13,6 +16,7 @@ scipy==1.17.1
 pyzmq==27.1.0
 h5py==3.16.0
 opencv-python-headless==5.0.0.93
+pillow==12.3.0
 pyyaml==6.0.3
 tyro==1.0.15
 omegaconf==2.3.0

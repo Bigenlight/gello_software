@@ -73,6 +73,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
 CAMERA_SCRIPT="$SCRIPT_DIR/launch_cameras.sh"
 GUI_SCRIPT="$SCRIPT_DIR/run_hil_gui.sh"
 PREPOSITION_SCRIPT="$SCRIPT_DIR/run_hil_preposition.sh"
@@ -487,7 +488,7 @@ hil_owner_pid_list() {
 # 같은 세 probe를 같은 helper로 돌린다(같은 type/min-rate). ROS overlay는 이
 # 서브셸 안에서만 source해서 세션 셸의 환경을 오염시키지 않는다.
 hil_hardware_topics_ready() {
-    local ros_setup="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+    local ros_setup="${ROS_SETUP:-/opt/ros/${GELLO_ROS_DISTRO}/setup.bash}"
     local ws_setup="$SCRIPT_DIR/install/setup.bash"
     [[ -f "$ros_setup" && -f "$ws_setup" && -f "$TOPIC_CHECKER" ]] || return 1
     (
@@ -542,7 +543,7 @@ EOF
 # "준비 안 됨"으로 보고 계속 기다린다 → 증거 없이 재arming하지 않는다.
 # 성공하면 한 줄 요약을 stdout으로 낸다(실패해도 읽은 만큼은 낸다).
 hil_robot_state_ready() {
-    local ros_setup="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+    local ros_setup="${ROS_SETUP:-/opt/ros/${GELLO_ROS_DISTRO}/setup.bash}"
     local ws_setup="$SCRIPT_DIR/install/setup.bash"
     [[ -f "$ros_setup" && -f "$ws_setup" ]] || {
         echo "dashboard probe 불가 (ROS overlay 없음)"
@@ -559,7 +560,7 @@ hil_robot_state_ready() {
             exit 1
         }
         # RobotMode.mode=7 == RUNNING, SafetyMode.mode=1 == NORMAL
-        # (/opt/ros/humble/share/ur_dashboard_msgs/msg/{RobotMode,SafetyMode}.msg).
+        # (/opt/ros/${GELLO_ROS_DISTRO}/share/ur_dashboard_msgs/msg/{RobotMode,SafetyMode}.msg).
         # 숫자 enum으로 판정한다 — dashboard의 answer 문자열은 펌웨어 판에 따라
         # 문구가 바뀔 수 있지만 enum은 메시지 정의가 보장한다.
         probe() {  # $1=service $2=type $3=expected repr fragment

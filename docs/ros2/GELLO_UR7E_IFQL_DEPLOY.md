@@ -53,9 +53,20 @@
     qflow_svf_merged/                   agent 코드 (Q/agents/ifql.py, utils.flax_utils.restore_agent)
   .venv-svf/                          uv py3.11, jax 0.6.2 cuda12 + torch 2.14+cu126 (7.5 GB)
   .cache/torch/                       TORCH_HOME — ResNet18 IMAGENET1K_V1 + torch.hub(dinov2) 오프라인 캐시
-  eval_runs/real_<YYYYMMDD>/          런처가 만드는 서버 로그: ifql_lead6_<bon32|bc>/<HHMMSS>/
-                                        ep_NNNN.npz · refill_stats.jsonl · server_stdout.log
+  eval_runs/                        이전 런처의 로그 위치 (기존 기록 보존)
 ```
+
+Jazzy 브랜치의 새 로그 기본 위치는
+`ros2_ur_ws/log/ifql/real_<YYYYMMDD>/ifql_lead6_<bon32|bc>/<HHMMSS>/`이며
+`IFQL_LOG_DIR`로 바꿀 수 있다. 모델/데이터 디렉터리에 새 로그를 쓰지 않는다.
+
+이 PC는 기존 conda `il`을 `IFQL_PY`의 마지막 폴백으로 사용한다.
+`IFQL_COMPAT=auto`(기본)는 전체 `params_<step>.pkl` 없이
+`params_<step>.infer.pkl`만 있는 경우 `setup_jazzy/ifql_server_compat.py`를 사용한다.
+이 어댑터는 원본 서버 파일을 수정하지 않고 r18_ss 인코더와 추론 전용 복원을 연결한다.
+`IFQL_COMPAT=0`은 전체 체크포인트를 요구하는 원본 경로,
+`IFQL_COMPAT=1`은 호환 어댑터를 명시적으로 선택한다.
+호환 경로는 로컬 ResNet18 가중치가 필요하며 다른 인코더 variant는 거부한다.
 
 **다른 PC에서 재현:** 위 트리 전체를 스크립트 하나가 만든다 —
 [`ros2_ur_ws/ifql/setup_ifql_workspace.sh`](../../ros2_ur_ws/ifql/setup_ifql_workspace.sh)

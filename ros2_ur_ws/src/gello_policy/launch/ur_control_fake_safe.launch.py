@@ -1,10 +1,10 @@
 """Run the installed UR control launch without real-robot-only URScript I/O.
 
-The Humble ur_robot_driver version installed on this laptop starts
-``urscript_interface`` unconditionally, even when ``use_fake_hardware`` is
-true.  This wrapper is used only by our fake-hardware validation path and
-filters that one action from the official launch result.  Real hardware keeps
-using the official launch file directly.
+The Humble driver can include ``urscript_interface`` even for
+``use_fake_hardware``.  Jazzy already guards that action with
+``UnlessCondition(use_mock_hardware)``, but keeping this filter makes the
+fake-hardware validation path safe on both supported distros.  Real hardware
+keeps using the official launch file directly.
 """
 
 import importlib.util

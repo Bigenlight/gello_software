@@ -76,7 +76,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-VENV_PY="$REPO/.venv/bin/python"                       # probe interpreter (mujoco venv, has pyzmq)
+VENV_PY=""
 ACT_VENV="$REPO/ros2_ur_ws/act_venv"                   # local torch/lerobot venv
 SCRIPTS_DIR="$REPO/ros2_ur_ws/src/gello_policy/scripts"
 POLICY_SERVER_SRC="$REPO/ros2_ur_ws/src/gello_policy/policy_server"
@@ -109,6 +109,25 @@ WAIT_S=600
 EXTRA=()
 
 die() { echo "serve_policy.sh: $*" >&2; exit 2; }
+
+resolve_probe_python() {
+    [ -z "$VENV_PY" ] || return 0
+    if [ -n "${SIM_COLLECT_PY:-}" ]; then
+        VENV_PY="$SIM_COLLECT_PY"
+    elif [ "${CONDA_DEFAULT_ENV:-}" = "gello-sim" ] && [ -x "${CONDA_PREFIX:-}/bin/python" ]; then
+        VENV_PY="$CONDA_PREFIX/bin/python"
+    elif command -v conda >/dev/null 2>&1; then
+        VENV_PY="$(conda run -n gello-sim python -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+    fi
+    if [ -z "$VENV_PY" ]; then
+        VENV_PY="$REPO/.venv/bin/python"
+    elif [[ "$VENV_PY" != */* ]]; then
+        VENV_PY="$(command -v "$VENV_PY" 2>/dev/null || true)"
+    elif [[ "$VENV_PY" != /* ]]; then
+        VENV_PY="$(cd "$(dirname "$VENV_PY")" && pwd -P)/$(basename "$VENV_PY")"
+    fi
+    [ -x "$VENV_PY" ] || die "probe interpreter missing: set SIM_COLLECT_PY, create conda env gello-sim, or restore $REPO/.venv/bin/python"
+}
 
 usage() { sed -n '2,80p' "${BASH_SOURCE[0]}"; }
 
@@ -186,7 +205,7 @@ fi
 # ---------------------------------------------------------------------------
 probe_endpoint() {   # probe_endpoint <port> <deadline_s> [per_try_timeout_s]
     local port="$1" wait_s="$2" per_try="${3:-2.0}"
-    [ -x "$VENV_PY" ] || die "probe interpreter missing: $VENV_PY"
+    resolve_probe_python
     GELLO_POLICY_PY="$GELLO_POLICY_PY" "$VENV_PY" - "$port" "$wait_s" "$per_try" <<'PY'
 import json
 import os
@@ -249,6 +268,7 @@ PY
 }
 
 port_is_free() {   # port_is_free <port>  (laptop side)
+    resolve_probe_python
     "$VENV_PY" - "$1" <<'PY'
 import socket
 import sys
@@ -498,7 +518,7 @@ fi
 # ---------------- remote (kanu) ---------------------------------------------
 # Checked BEFORE the remote is touched: the probe and the local-port check both
 # need it, and failing after the server is up would leave a process behind.
-[ -x "$VENV_PY" ] || die "probe interpreter missing: $VENV_PY (the eval venv)"
+resolve_probe_python
 ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" true \
     || die "ssh $REMOTE_HOST failed (BatchMode: is the key/agent set up?)"
 

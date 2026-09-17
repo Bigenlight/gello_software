@@ -6,12 +6,9 @@
 # urscript_interface). Publishes /joint_states so the HIL env
 # (serl_ur_infra/tests/run_rviz_hil.py) can drive the arm in RViz.
 #
-# WHY THIS WRAPPER EXISTS: this laptop's Humble ur_robot_driver uses
-#   use_fake_hardware:=true    (NOT the Jazzy 'use_mock_hardware:=true').
-# Passing use_mock_hardware here is SILENTLY IGNORED, so the real hardware
-# interface loads and the driver tries to reach a real robot at robot_ip,
-# failing forever with "Failed to connect to robot on IP 0.0.0.0:30001/30004".
-# This wrapper bakes in the correct arg so that footgun can't recur.
+# WHY THIS WRAPPER EXISTS: the mock-hardware launch argument changed between
+# Humble and Jazzy.  Select the spelling with GELLO_ROS_DISTRO so the default
+# is safe on Jazzy while the Humble opt-in remains usable.
 #
 # The four terminals of the RViz HIL test:
 #   T1:  ./run_mock_rviz.sh
@@ -25,10 +22,16 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source /opt/ros/humble/setup.bash
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 
-echo "### MOCK UR7e + RViz (use_fake_hardware:=true) — no real robot, no 0.0.0.0 connect."
+case "$GELLO_ROS_DISTRO" in
+    humble) MOCK_HARDWARE_ARG=use_fake_hardware ;;
+    *) MOCK_HARDWARE_ARG=use_mock_hardware ;;
+esac
+
+echo "### MOCK UR7e + RViz (${MOCK_HARDWARE_ARG}:=true) — no real robot, no 0.0.0.0 connect."
 echo "### RViz view = rviz/hil_operator_view.rviz (camera on the OPERATOR's side)."
 echo "### The stock ur_description view orbits from the opposite azimuth (~180 about Z),"
 echo "### which makes a CORRECT base-frame arm motion LOOK X/Y-reversed while Z stays"
@@ -45,5 +48,5 @@ cleanup() { kill "$RVIZ_PID" 2>/dev/null || true; }
 trap cleanup INT TERM EXIT
 
 ros2 launch gello_policy ur_control_fake_safe.launch.py \
-    ur_type:=ur7e robot_ip:=0.0.0.0 use_fake_hardware:=true \
+    ur_type:=ur7e robot_ip:=0.0.0.0 "${MOCK_HARDWARE_ARG}:=true" \
     initial_joint_controller:=forward_position_controller launch_rviz:=false "$@"

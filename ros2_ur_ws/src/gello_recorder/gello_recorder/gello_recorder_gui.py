@@ -48,6 +48,7 @@ from PyQt5.QtWidgets import (
 # re-exported here at module level because run_recorder.sh's headless node and
 # the tests need the SAME single definition without going through main().
 from gello_recorder.gello_gui_node import depth_topics_for  # noqa: F401 (re-export)
+from gello_recorder.paths import default_repo_root
 from gello_recorder.spin_health import (  # noqa: F401 (DEPTH_ON_BANNER re-export)
     DEPTH_ON_BANNER,
     stop_health_suffix as _stop_health_suffix,
@@ -1267,10 +1268,7 @@ def main(args=None):
     output_root = os.environ.get(
         "RECORDER_OUTPUT_ROOT",
         os.path.join(
-            os.environ.get(
-                "GELLO_REPO_ROOT",
-                os.path.expanduser("~/gello_software"),
-            ),
+            default_repo_root(),
             "ros2_ur_ws", "gello_logs",
         ),
     )

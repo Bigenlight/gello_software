@@ -153,8 +153,14 @@ esac
 # ROS sourcing — same as the other run_*.sh wrappers.
 # --------------------------------------------------------------------------- #
 set +u
-source /opt/ros/humble/setup.bash
-source "$SCRIPT_DIR/install/setup.bash"
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+ROS_SETUP="/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
+WORKSPACE_SETUP="$SCRIPT_DIR/install/setup.bash"
+[[ -r "$ROS_SETUP" ]] || die "ROS setup not found: $ROS_SETUP"
+[[ -r "$WORKSPACE_SETUP" ]] || die "Workspace is not built: $WORKSPACE_SETUP"
+source "$ROS_SETUP"
+source "$WORKSPACE_SETUP"
+export PATH="/opt/ros/${GELLO_ROS_DISTRO}/bin:/usr/bin:/bin:${PATH}"
 set -u
 
 # The launch always gets launch_rviz:=false (see RVIZ note in the header); our

@@ -1,6 +1,6 @@
 # gello_recorder
 
-GELLO 리더암 + UR7e 로봇암 teleop 파이프라인의 진단 신호(HDF5)와 듀얼 RealSense 카메라 영상(MP4)을 기록하는 ROS2 (Humble, ament_python) 패키지. **실제 물리 로봇 하드웨어**(real UR7e + real GELLO + 2x real Intel RealSense)를 대상으로 하며, 완전히 read-only(구독만, 로봇/GELLO에 명령을 내리지 않음)이다. `ur_gello_bringup`(UR 전용 브링업 패키지)과 의도적으로 분리되어 있어 UR-specific 의존성이 전혀 없다.
+GELLO 리더암 + UR7e 로봇암 teleop 파이프라인의 진단 신호(HDF5)와 듀얼 RealSense 카메라 영상(MP4)을 기록하는 ROS2 (Jazzy, ament_python) 패키지. **실제 물리 로봇 하드웨어**(real UR7e + real GELLO + 2x real Intel RealSense)를 대상으로 하며, 완전히 read-only(구독만, 로봇/GELLO에 명령을 내리지 않음)이다. `ur_gello_bringup`(UR 전용 브링업 패키지)과 의도적으로 분리되어 있어 UR-specific 의존성이 전혀 없다.
 
 두 가지 실행 방법이 있다:
 - **헤드리스 CLI** (`gello_ur_recorder`, `run_recorder.sh`): launch부터 Ctrl-C까지 연속 기록.
@@ -21,7 +21,7 @@ GELLO 리더암 + UR7e 로봇암 teleop 파이프라인의 진단 신호(HDF5)�
 
 ### 1. Prerequisites
 
-- **ROS2 Humble** on **Ubuntu 22.04**.
+- **ROS2 Jazzy** on **Ubuntu 24.04** (this branch; `feat/gello-ur7e-humble-22.04` targets ROS2 Humble on Ubuntu 22.04 instead).
 - 빌드된 워크스페이스 (`ros2_ur_ws/` 에서 `colcon build --symlink-install`, 아래 2번 참고).
 - Python 런타임 의존성 (package.xml 의 `exec_depend`):
   - `python3-h5py` (HDF5 벡터 로그)
@@ -33,8 +33,8 @@ GELLO 리더암 + UR7e 로봇암 teleop 파이프라인의 진단 신호(HDF5)�
 ### 2. Build
 
 ```bash
-source /opt/ros/humble/setup.bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+source /opt/ros/jazzy/setup.bash
+cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -47,13 +47,13 @@ source install/setup.bash
 
 ```bash
 # 첫 번째 터미널: teleop 구동 (기록기와 같은 ros2_ur_ws/ 에 있는 스크립트)
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
 HEADLESS=true ./run_ur7e_gello_real.sh
 ```
 
 ```bash
 # 두 번째 터미널: 기록기
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
 
 ./run_recorder.sh                 # 신호만 기록 (vectors.h5)
 BAG=true ./run_recorder.sh        # 위 + 전체 토픽을 `ros2 bag -a` 로 캡처
@@ -70,8 +70,8 @@ RATE=200 ./run_recorder.sh        # synchronized 테이블 샘플링 레이트(H
 GUI 는 카메라 스택을 매번 재실행하지 않고 Start/Stop 버튼으로 여러 "take" 를 찍는 방식입니다.
 
 ```bash
-source /opt/ros/humble/setup.bash
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
+source /opt/ros/jazzy/setup.bash
+source /home/junhyeong/gello_software_jazzy/ros2_ur_ws/install/setup.bash
 
 ros2 run gello_recorder gello_recorder_gui
 ```
@@ -191,7 +191,7 @@ GUI 창의 녹화 컨트롤 **바로 위**에는 **Teleop 바**가 있습니다.
 
 ```bash
 # 터미널 1: EEF 텔레옵
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
 HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef
 
 # 터미널 2: EEF 조작 GUI (ENGAGE/DISENGAGE)

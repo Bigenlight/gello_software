@@ -51,7 +51,13 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-source /opt/ros/humble/setup.bash
-source "$SCRIPT_DIR/install/setup.bash"
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+ROS_SETUP="/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
+WORKSPACE_SETUP="$SCRIPT_DIR/install/setup.bash"
+[[ -r "$ROS_SETUP" ]] || { echo "### ROS setup not found: $ROS_SETUP" >&2; exit 2; }
+[[ -r "$WORKSPACE_SETUP" ]] || { echo "### Workspace is not built: $WORKSPACE_SETUP" >&2; exit 2; }
+source "$ROS_SETUP"
+source "$WORKSPACE_SETUP"
+export PATH="/opt/ros/${GELLO_ROS_DISTRO}/bin:/usr/bin:/bin:${PATH}"
 
 exec ros2 run gello_recorder task_recorder_gui

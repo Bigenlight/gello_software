@@ -114,8 +114,9 @@ source "$HANDOFF_LIB"
 
 # ROS setup 스크립트는 unset 변수를 참조하므로 -u 를 잠시 끈다.
 set +u
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
 # shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/install/setup.bash"
 set -u

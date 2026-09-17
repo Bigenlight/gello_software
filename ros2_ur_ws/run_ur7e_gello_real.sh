@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive the REAL UR7e from the PHYSICAL GELLO leader arm over ROS2 Humble.
+# Drive the REAL UR7e from the PHYSICAL GELLO leader arm over ROS2 Jazzy.
 #
 # ############################################################################
 # #  ⚠️  REAL HARDWARE — THE UR7e WILL PHYSICALLY MOVE.                       #
@@ -112,8 +112,14 @@ case " $* " in *" headless_mode:=true "*|*"headless_mode:=true"*) HEADLESS=true 
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export GELLO_REPO_ROOT="${GELLO_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-source /opt/ros/humble/setup.bash
-source "$SCRIPT_DIR/install/setup.bash"
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+ROS_SETUP="/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
+WORKSPACE_SETUP="$SCRIPT_DIR/install/setup.bash"
+[[ -r "$ROS_SETUP" ]] || { echo "### ROS setup not found: $ROS_SETUP" >&2; exit 2; }
+[[ -r "$WORKSPACE_SETUP" ]] || { echo "### Workspace is not built: $WORKSPACE_SETUP" >&2; exit 2; }
+source "$ROS_SETUP"
+source "$WORKSPACE_SETUP"
+export PATH="/opt/ros/${GELLO_ROS_DISTRO}/bin:/usr/bin:/bin:${PATH}"
 
 ARGS=(robot_ip:="${ROBOT_IP}")
 [ -n "${START_MODE}" ] && ARGS+=(start_mode:="${START_MODE}")

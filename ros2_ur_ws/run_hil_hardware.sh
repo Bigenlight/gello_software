@@ -18,7 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROS_SETUP="${ROS_SETUP:-/opt/ros/humble/setup.bash}"
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+ROS_SETUP="${ROS_SETUP:-/opt/ros/${GELLO_ROS_DISTRO}/setup.bash}"
 WS_SETUP="$SCRIPT_DIR/install/setup.bash"
 TOPIC_CHECKER="$SCRIPT_DIR/_hil_topic_rate_check.py"
 ROBOT_IP="${ROBOT_IP:-192.168.10.11}"

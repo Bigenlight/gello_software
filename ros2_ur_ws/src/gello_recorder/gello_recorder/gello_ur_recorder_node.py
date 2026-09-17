@@ -76,6 +76,7 @@ import time
 from datetime import datetime
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from sensor_msgs.msg import CameraInfo, CompressedImage, JointState
@@ -90,6 +91,7 @@ from gello_recorder.gello_gui_node import (
     stamp_to_seconds,
 )
 from gello_recorder.recording_session import RecordingSession
+from gello_recorder.paths import default_repo_root
 from gello_recorder.spin_health import (
     DEPTH_ON_BANNER,
     QOS_DEPTH_CAMERA,
@@ -133,7 +135,7 @@ class GelloUrRecorder(Node):
 
         # --- Parameters --------------------------------------------------
         default_root = os.path.join(
-            os.environ.get("GELLO_REPO_ROOT", "/home/laptop3/gello_software"),
+            default_repo_root(),
             "ros2_ur_ws", "gello_logs",
         )
         self.output_root = str(
@@ -582,7 +584,7 @@ def main(args=None):
     node = GelloUrRecorder()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

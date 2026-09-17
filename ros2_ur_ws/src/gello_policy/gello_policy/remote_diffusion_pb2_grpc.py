@@ -1,8 +1,12 @@
 """Minimal client-side gRPC bindings for remote_diffusion.proto.
 
-This stays handwritten so ROS Humble's grpcio 1.30 remains supported. Regenerate
-``remote_diffusion_pb2.py`` with ``scripts/generate_remote_diffusion_stubs.sh``
-when the schema changes, then update these four method bindings if needed.
+This stays handwritten so old, low-featured grpcio releases remain supported
+(originally: ROS Humble/Jammy's apt grpcio 1.30, which cannot even complete
+this service's HTTP/2 handshake -- see
+``ros2_ur_ws/setup_jazzy/NOTES_grpcio.md`` for the Jazzy/noble situation,
+where apt ships grpcio 1.51.1 instead). Regenerate ``remote_diffusion_pb2.py``
+with ``scripts/generate_remote_diffusion_stubs.sh`` when the schema changes,
+then update these four method bindings if needed.
 """
 
 import grpc

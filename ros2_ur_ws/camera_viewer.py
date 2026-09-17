@@ -2,7 +2,7 @@
 """Side-by-side live viewer for the two ACT-deploy RealSense cameras.
 
 Standalone rclpy script (NOT part of the colcon build) -- run it directly with
-ROS2 Humble sourced:
+ROS2 Jazzy sourced:
 
     python3 camera_viewer.py \
         --cam1-topic /cam1/cam1/color/image_raw/compressed \

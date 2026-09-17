@@ -31,11 +31,12 @@ if [[ ! -e "$REWARD_CLASSIFIER_CHECKPOINT" ]]; then
     exit 2
 fi
 
-source /opt/ros/humble/setup.bash
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 
-# ROS Humble uses Python 3.10.  The classifier venv must therefore also use
-# Python 3.10 and be created with --system-site-packages so it can import rclpy:
+# ROS Jazzy (Ubuntu 24.04) uses Python 3.12.  The classifier venv must therefore
+# also use Python 3.12 and be created with --system-site-packages so it can import rclpy:
 #   REWARD_CLASSIFIER_PYTHON=~/.venvs/hilserl/bin/python ./run_classifier_viewer.sh
 if ! "$CLASSIFIER_PYTHON" - "$CLASSIFIER_THRESHOLD" <<'PY'
 import math

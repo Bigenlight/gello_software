@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drive the REAL UR7e AUTONOMOUSLY with the trained Diffusion policy over ROS2 Humble.
+# Drive the REAL UR7e AUTONOMOUSLY with the trained Diffusion policy over ROS2 Jazzy.
 #
 # ############################################################################
 # #  ⚠️  REAL HARDWARE — THE UR7e WILL PHYSICALLY MOVE, DRIVEN BY A POLICY.   #
@@ -9,7 +9,7 @@
 # #        project lr_env), started in the BACKGROUND first (loads the        #
 # #        checkpoint, overrides to DDIM-N, listens on localhost ZMQ          #
 # #        :DIFFUSION_PORT), and                                             #
-# #    (B) the Humble (py3.10) ros2 launch (arm driver + synthetic Diffusion  #
+# #    (B) the Jazzy (py3.12) ros2 launch (arm driver + synthetic Diffusion   #
 # #        leader + bridge handshake + Robotiq gripper).                     #
 # #  They live on different interpreters/distros; localhost ZMQ joins them.  #
 # #  Ctrl-C tears down BOTH (an EXIT trap kills the server).                 #
@@ -120,8 +120,9 @@ fi
 # disagree with the effective launch (ros2 launch is last-wins on dupes).
 case " $* " in *" headless_mode:=true "*|*"headless_mode:=true"*) HEADLESS=true ;; esac
 
-# --- ROS2 Humble environment -------------------------------------------------
-source /opt/ros/humble/setup.bash
+# --- ROS2 Jazzy environment ---------------------------------------------------
+GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
+source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 source "$SCRIPT_DIR/install/setup.bash"
 
 # --- Refuse to start if the ZMQ port is already occupied ---------------------
