@@ -35,8 +35,10 @@ if _ROOT not in sys.path:
 
 FPS = 30
 CAM_SIZE = (640, 360)
-PANEL_SIZE = (480, 360)
-OUTPUT_SIZE = (CAM_SIZE[0] * 2 + PANEL_SIZE[0], CAM_SIZE[1])
+DASHBOARD_SIZE = (CAM_SIZE[0] * 2, 360)
+# The two policy cameras stay pixel-for-pixel 640x360.  Diagnostics live in a
+# separate lower dashboard rather than shrinking either observation.
+OUTPUT_SIZE = (CAM_SIZE[0] * 2, CAM_SIZE[1] + DASHBOARD_SIZE[1])
 
 OUTCOME_BGR = {
     "success": (70, 210, 80),
@@ -45,6 +47,7 @@ OUTCOME_BGR = {
     "fault": (0, 170, 255),
 }
 Q_FIELDS = ("K", "q_chosen", "q_mean", "q_std", "q_min", "q_max", "q_spread", "q_argmax")
+Q_HEADS_FIELD = "q_heads"
 LATENCY_FIELDS = ("encode_ms", "sample_ms", "refill_ms")
 
 
@@ -106,6 +109,55 @@ class H5Episode:
     frame_rows: np.ndarray
 
 
+def _strict_int(value: Any, name: str, *, minimum: Optional[int] = None,
+                maximum: Optional[int] = None, line: Any = "?") -> int:
+    """Parse a lossless schema integer.
+
+    Accepted values are Python/JSON integers and NumPy integer scalars only.
+    Booleans, floats (including ``1.0``), and numeric strings are rejected so
+    indices can never be silently truncated or coerced.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise JoinError(
+            f"refill_stats line {line}: {name} must be an integer token "
+            f"(not bool, float, or string), got {value!r}"
+        )
+    parsed = int(value)
+    if minimum is not None and parsed < minimum:
+        raise JoinError(f"refill_stats line {line}: {name}={parsed} must be >= {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise JoinError(f"refill_stats line {line}: {name}={parsed} must be <= {maximum}")
+    return parsed
+
+
+_SIDECAR_DISCRETE_MINIMUMS = {
+    "schema_version": 1,
+    "reset_counter": 1,
+    "request_idx": 0,
+    "t_index": 0,
+    "decision_idx": 0,
+    "refill": 1,
+    "K": 1,
+    "q_argmax": 0,
+}
+
+
+def _validate_discrete_sidecar_fields(row: Mapping[str, Any], *, require_reset: bool = False) -> Dict[str, Any]:
+    """Return a copy with every present discrete sidecar field strictly validated."""
+    out = dict(row)
+    line = out.get("_line", "?")
+    if require_reset and "reset_counter" not in out:
+        raise JoinError(f"refill_stats line {line}: missing reset_counter")
+    for name, minimum in _SIDECAR_DISCRETE_MINIMUMS.items():
+        if name in out and out[name] is not None:
+            out[name] = _strict_int(out[name], name, minimum=minimum, line=line)
+    if out.get("q_argmax") is not None and out.get("K") is not None and out["q_argmax"] >= out["K"]:
+        raise JoinError(
+            f"refill_stats line {line}: q_argmax={out['q_argmax']} outside K={out['K']} candidates"
+        )
+    return out
+
+
 def load_episodes_jsonl(path_or_run_dir: os.PathLike[str] | str) -> Dict[str, EpisodeMeta]:
     path = Path(path_or_run_dir)
     if path.is_dir():
@@ -118,7 +170,7 @@ def load_episodes_jsonl(path_or_run_dir: os.PathLike[str] | str) -> Dict[str, Ep
             try:
                 row = json.loads(line)
                 episode = str(row["episode"])
-                n_steps = int(row["n_steps"])
+                n_steps = _strict_int(row["n_steps"], "n_steps", minimum=1, line=lineno)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ValueError(f"{path}:{lineno}: invalid episode row: {exc}") from exc
             if episode in episodes:
@@ -132,7 +184,7 @@ def load_episodes_jsonl(path_or_run_dir: os.PathLike[str] | str) -> Dict[str, Ep
             seed = row.get("seed")
             episodes[episode] = EpisodeMeta(
                 episode=episode,
-                seed=None if seed is None else int(seed),
+                seed=None if seed is None else _strict_int(seed, "seed", minimum=0, line=lineno),
                 outcome=str(row.get("outcome") or "unknown"),
                 n_steps=n_steps,
                 detail=str(row.get("detail") or ""),
@@ -151,23 +203,20 @@ def _as_int_vector(value: Any, name: str) -> np.ndarray:
     if arr.ndim != 1:
         raise JoinError(f"{name} must be one-dimensional, got shape {arr.shape}")
     if arr.dtype.kind not in "iu":
-        if arr.dtype.kind not in "f" or not np.all(np.isfinite(arr)) or not np.all(arr == np.floor(arr)):
-            raise JoinError(f"{name} must contain integers")
+        raise JoinError(f"{name} must use an integer dtype, got {arr.dtype}")
     return arr.astype(np.int64, copy=False)
 
 
 def _policy_reset_counter(meta: EpisodeMeta, override: Optional[int]) -> int:
     recorded = meta.policy_reset.get("reset_counter")
     if override is not None:
-        if int(override) <= 0:
-            raise JoinError(f"episode {meta.episode}: reset counter override must be positive")
-        return int(override)
+        return _strict_int(override, "reset_counter override", minimum=1, line=f"episode {meta.episode}")
     if recorded is None:
         raise JoinError(
             f"episode {meta.episode}: no reset_counter in episodes.jsonl; pass an explicit "
             "--reset-map EPISODE:COUNTER (indices are never shifted or inferred)"
         )
-    return int(recorded)
+    return _strict_int(recorded, "reset_counter", minimum=1, line=f"episode {meta.episode}")
 
 
 def _load_refill_rows(path: Path, reset_counter: int) -> List[Dict[str, Any]]:
@@ -182,8 +231,9 @@ def _load_refill_rows(path: Path, reset_counter: int) -> List[Dict[str, Any]]:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise JoinError(f"{path}:{lineno}: invalid JSON: {exc}") from exc
-            if int(row.get("reset_counter", -1)) == reset_counter:
-                row["_line"] = lineno
+            row["_line"] = lineno
+            row = _validate_discrete_sidecar_fields(row, require_reset=True)
+            if row["reset_counter"] == reset_counter:
                 rows.append(row)
     return rows
 
@@ -223,6 +273,52 @@ def _validate_policy_indices(
     return boundary_pos, {int(req): i for i, req in enumerate(boundary_requests)}
 
 
+def _normalise_q_heads(row: Mapping[str, Any]) -> Optional[List[List[float]]]:
+    """Validate optional raw critic-head scores without inferring missing data.
+
+    A v2 sidecar may omit this field.  When it is present, it is the exact
+    ``[ensemble_head][candidate]`` tensor evaluated for this refill.  Keeping
+    the candidate axis lets the dashboard derive Q1/Q2 for the *chosen*
+    candidate from the existing ``q_argmax`` rather than inventing a value.
+    """
+    raw = row.get(Q_HEADS_FIELD)
+    if raw is None:
+        return None
+    try:
+        heads = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise JoinError(f"refill_stats line {row.get('_line', '?')}: q_heads must be numeric") from exc
+    if heads.ndim != 2 or heads.shape[0] < 1 or heads.shape[1] < 1 or not np.all(np.isfinite(heads)):
+        raise JoinError(
+            f"refill_stats line {row.get('_line', '?')}: q_heads must have finite [E][K] shape, got {heads.shape}"
+        )
+    line = row.get("_line", "?")
+    k = _strict_int(row["K"], "K", minimum=1, line=line) if row.get("K") is not None else None
+    if k is not None and k != heads.shape[1]:
+        raise JoinError(
+            f"refill_stats line {row.get('_line', '?')}: K={row['K']} but q_heads has {heads.shape[1]} candidates"
+        )
+    if row.get("q_argmax") is None:
+        raise JoinError(f"refill_stats line {row.get('_line', '?')}: q_heads requires q_argmax")
+    chosen = _strict_int(row["q_argmax"], "q_argmax", minimum=0, line=line)
+    if chosen < 0 or chosen >= heads.shape[1]:
+        raise JoinError(
+            f"refill_stats line {row.get('_line', '?')}: q_argmax={chosen} outside q_heads candidate axis"
+        )
+    if row.get("q_chosen") is None:
+        raise JoinError(f"refill_stats line {row.get('_line', '?')}: q_heads requires aggregate q_chosen")
+    return heads.astype(float).tolist()
+
+
+def _q_values_from_row(row: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    values: Dict[str, Any] = {k: row[k] for k in Q_FIELDS if k in row and row[k] is not None}
+    heads = _normalise_q_heads(row)
+    if heads is not None:
+        values[Q_HEADS_FIELD] = heads
+    # K alone describes sampler configuration, not an observed critic score.
+    return values if "q_chosen" in values else None
+
+
 def _join_diagnostics(
     request_idx: np.ndarray,
     chunk_t: np.ndarray,
@@ -234,16 +330,17 @@ def _join_diagnostics(
     by_request: Dict[int, Mapping[str, Any]] = {}
     notes: List[str] = []
     used_legacy = False
-    for row in rows:
+    for raw_row in rows:
+        row = _validate_discrete_sidecar_fields(raw_row)
         explicit = row.get("request_idx")
         legacy = row.get("t_index")
         if explicit is None and legacy is None:
             raise JoinError(f"refill_stats line {row.get('_line', '?')}: missing request_idx and legacy t_index")
-        if explicit is not None and legacy is not None and int(explicit) != int(legacy):
+        if explicit is not None and legacy is not None and explicit != legacy:
             raise JoinError(
                 f"refill_stats line {row.get('_line', '?')}: request_idx={explicit} disagrees with t_index={legacy}"
             )
-        req = int(explicit if explicit is not None else legacy)
+        req = explicit if explicit is not None else legacy
         used_legacy |= explicit is None
         if req not in boundary_by_request:
             raise JoinError(
@@ -252,7 +349,7 @@ def _join_diagnostics(
         if req in by_request:
             raise JoinError(f"duplicate refill diagnostic for request_idx {req}")
         expected_decision = boundary_by_request[req]
-        if row.get("decision_idx") is not None and int(row["decision_idx"]) != expected_decision:
+        if row.get("decision_idx") is not None and row["decision_idx"] != expected_decision:
             raise JoinError(
                 f"refill_stats line {row.get('_line', '?')}: decision_idx={row['decision_idx']} "
                 f"but exact boundary ordinal is {expected_decision}"
@@ -276,11 +373,10 @@ def _join_diagnostics(
         # must never make the new chunk inherit the older decision label.
         decision_idx = int(chunk_id[pos])
         if held is not None:
-            q_values = {k: held[k] for k in Q_FIELDS if k in held and held[k] is not None}
-            q = q_values if "q_chosen" in q_values else None
+            q = _q_values_from_row(held)
             latency_values = {k: float(held[k]) for k in LATENCY_FIELDS if held.get(k) is not None}
             latency = latency_values or None
-            sidecar_refill = int(held["refill"]) if held.get("refill") is not None else None
+            sidecar_refill = held["refill"] if held.get("refill") is not None else None
         diagnostics.append(
             Diagnostic(
                 request_idx=req_i,
@@ -326,7 +422,10 @@ def load_policy_episode(
         request_idx = _as_int_vector(z["request_idx"], "request_idx") if has_request_idx else np.arange(len(cam1))
         state = np.asarray(z["state"]) if "state" in z else None
         action = np.asarray(z["action"]) if "action" in z else None
-        npz_counter = int(np.asarray(z["reset_counter"]).item()) if "reset_counter" in z else None
+        npz_counter = (
+            _strict_int(np.asarray(z["reset_counter"]).item(), "NPZ reset_counter", minimum=1, line=npz_path)
+            if "reset_counter" in z else None
+        )
     if npz_counter is not None and npz_counter != counter:
         raise JoinError(f"{npz_path}: reset_counter={npz_counter}, expected {counter}")
     n = len(request_idx)
@@ -459,29 +558,103 @@ def _chunk_status(diag: Diagnostic) -> str:
 
 def _q_history_values(history: Sequence[Diagnostic]) -> np.ndarray:
     """Return held q_chosen values; NaN means no logged critic value."""
+    return _q_history_series(history, "aggregate")
+
+
+def _chosen_q_heads(q: Optional[Mapping[str, Any]]) -> Tuple[Optional[float], Optional[float]]:
+    """Return Q1/Q2 for the aggregate-selected candidate, if the row logged them."""
+    if q is None or q.get(Q_HEADS_FIELD) is None or q.get("q_argmax") is None:
+        return None, None
+    heads = np.asarray(q[Q_HEADS_FIELD], dtype=np.float64)
+    try:
+        choice = _strict_int(q["q_argmax"], "q_argmax", minimum=0, line="diagnostic")
+    except JoinError:
+        return None, None
+    if heads.ndim != 2 or choice < 0 or choice >= heads.shape[1]:
+        # This is defensive only: sidecars are validated before entering a
+        # Diagnostic.  Do not substitute another candidate if malformed data
+        # somehow reaches a caller directly.
+        return None, None
+    q1 = float(heads[0, choice]) if heads.shape[0] >= 1 else None
+    q2 = float(heads[1, choice]) if heads.shape[0] >= 2 else None
+    return q1, q2
+
+
+def _q_history_series(history: Sequence[Diagnostic], kind: str) -> np.ndarray:
+    """Return one held critic trace; unavailable heads are represented by NaN."""
     values = np.full(len(history), np.nan, dtype=np.float64)
     for i, item in enumerate(history):
-        if item.q is not None and item.q.get("q_chosen") is not None:
+        if item.q is None:
+            continue
+        if kind == "aggregate" and item.q.get("q_chosen") is not None:
             values[i] = float(item.q["q_chosen"])
+        elif kind in {"q1", "q2"}:
+            q1, q2 = _chosen_q_heads(item.q)
+            value = q1 if kind == "q1" else q2
+            if value is not None:
+                values[i] = value
     return values
 
 
-def _draw_q_graph(panel: np.ndarray, history: Sequence[Diagnostic], fps: int) -> None:
-    """Draw q_chosen over elapsed episode time in a compact fixed panel area."""
+def _step_trace_points(
+    values: np.ndarray,
+    point_fn: Any,
+) -> List[List[Tuple[int, int]]]:
+    """Build finite zero-order-hold paths without diagonal boundary interpolation."""
+    segments: List[List[Tuple[int, int]]] = []
+    segment: List[Tuple[int, int]] = []
+    previous_value: Optional[float] = None
+    for idx, value in enumerate(values):
+        if not np.isfinite(value):
+            if segment:
+                segments.append(segment)
+                segment = []
+            previous_value = None
+            continue
+        value = float(value)
+        current = point_fn(idx, value)
+        if not segment:
+            segment = [current]
+        else:
+            # Hold the old score through the interval, then jump vertically at
+            # the new sample.  A plain polyline would imply a critic update
+            # happened gradually before the chunk boundary.
+            x, _ = current
+            segment.append((x, point_fn(idx - 1, float(previous_value))[1]))
+            segment.append(current)
+        previous_value = value
+    if segment:
+        segments.append(segment)
+    return segments
+
+
+def _draw_q_graph(dashboard: np.ndarray, history: Sequence[Diagnostic], fps: int) -> None:
+    """Draw selected Q1/Q2 and aggregate Q over the episode's elapsed time."""
     import cv2
 
-    x0, y0, x1, y1 = 238, 72, 468, 166
-    cv2.rectangle(panel, (x0, y0), (x1, y1), (62, 68, 78), 1)
-    _put_text(panel, "q_chosen over time", (x0 + 7, y0 + 15), 0.38, (180, 190, 205))
-    values = _q_history_values(history)
-    finite = np.flatnonzero(np.isfinite(values))
-    if not len(finite):
-        _put_text(panel, "UNAVAILABLE", (x0 + 55, y0 + 47), 0.50, (80, 150, 255), 2)
-        _put_text(panel, "Q NOT LOGGED", (x0 + 55, y0 + 68), 0.38, (80, 150, 255), 1)
+    x0, y0, x1, y1 = 14, 52, 790, 340
+    cv2.rectangle(dashboard, (x0, y0), (x1, y1), (62, 68, 78), 1)
+    _put_text(dashboard, "CHUNK CRITIC SCORES  (not p(success))", (x0 + 10, y0 + 22), 0.52,
+              (195, 210, 225), 1)
+    legend = (("Q1 chosen", "q1", (95, 225, 95)),
+              ("Q2 chosen", "q2", (230, 130, 220)),
+              ("aggregate q_chosen", "aggregate", (80, 215, 255)))
+    for j, (label, _, color) in enumerate(legend):
+        lx = x0 + 12 + j * 205
+        cv2.line(dashboard, (lx, y0 + 36), (lx + 18, y0 + 36), color, 2, cv2.LINE_AA)
+        _put_text(dashboard, label, (lx + 24, y0 + 40), 0.36, color)
+
+    series = {key: _q_history_series(history, key) for _, key, _ in legend}
+    finite_values = [values[np.isfinite(values)] for values in series.values() if np.any(np.isfinite(values))]
+    if not finite_values:
+        _put_text(dashboard, "UNAVAILABLE / Q NOT LOGGED", (x0 + 220, y0 + 155), 0.72, (80, 150, 255), 2)
+        _put_text(dashboard, "No raw Q1/Q2 or aggregate score was fabricated.", (x0 + 185, y0 + 184),
+                  0.43, (160, 175, 190))
         return
 
-    q_min = float(np.nanmin(values))
-    q_max = float(np.nanmax(values))
+    all_values = np.concatenate(finite_values)
+    q_min = float(np.min(all_values))
+    q_max = float(np.max(all_values))
     if np.isclose(q_min, q_max):
         pad = max(0.05, abs(q_min) * 0.05)
         q_min -= pad
@@ -490,9 +663,10 @@ def _draw_q_graph(panel: np.ndarray, history: Sequence[Diagnostic], fps: int) ->
         pad = 0.08 * (q_max - q_min)
         q_min -= pad
         q_max += pad
-    plot_l, plot_r = x0 + 7, x1 - 7
-    plot_t, plot_b = y0 + 22, y1 - 17
-    cv2.line(panel, (plot_l, plot_b), (plot_r, plot_b), (78, 84, 94), 1)
+    plot_l, plot_r = x0 + 48, x1 - 14
+    plot_t, plot_b = y0 + 57, y1 - 29
+    cv2.line(dashboard, (plot_l, plot_b), (plot_r, plot_b), (78, 84, 94), 1)
+    cv2.line(dashboard, (plot_l, plot_t), (plot_l, plot_b), (78, 84, 94), 1)
     n_total = max(2, len(history))
 
     def point(idx: int, value: float) -> Tuple[int, int]:
@@ -500,91 +674,99 @@ def _draw_q_graph(panel: np.ndarray, history: Sequence[Diagnostic], fps: int) ->
         y = int(round(plot_b - (value - q_min) * (plot_b - plot_t) / (q_max - q_min)))
         return x, y
 
-    # Do not bridge gaps where no Q was logged. A normal held trace is
-    # continuous because each Diagnostic contains the explicitly held value.
-    segments: List[List[Tuple[int, int]]] = []
-    segment: List[Tuple[int, int]] = []
-    for idx, value in enumerate(values):
-        if np.isfinite(value):
-            segment.append(point(idx, float(value)))
-        elif segment:
-            segments.append(segment)
-            segment = []
-    if segment:
-        segments.append(segment)
-    for points in segments:
-        if len(points) > 1:
-            cv2.polylines(panel, [np.asarray(points, np.int32)], False, (80, 215, 255), 1,
-                          cv2.LINE_AA)
-        else:
-            cv2.circle(panel, points[0], 1, (80, 215, 255), -1, cv2.LINE_AA)
-    current_idx = int(finite[-1])
-    current = point(current_idx, float(values[current_idx]))
-    cv2.circle(panel, current, 3, (80, 90, 255), -1, cv2.LINE_AA)
-    _put_text(panel, f"{q_max:+.2f}", (x0 + 3, plot_t + 7), 0.28, (145, 155, 170))
-    _put_text(panel, f"{q_min:+.2f}", (x0 + 3, plot_b), 0.28, (145, 155, 170))
-    _put_text(panel, f"0s", (plot_l, y1 - 3), 0.28, (145, 155, 170))
-    _put_text(panel, f"{(len(history) - 1) / fps:.1f}s", (plot_r - 34, y1 - 3), 0.28,
-              (145, 155, 170))
+    # Faint vertical rules make the refill semantics visible without inventing
+    # a continuous value between decisions.  Values themselves are held from
+    # the sidecar score at one chunk boundary to the next.
+    for idx, item in enumerate(history):
+        if item.boundary:
+            x, _ = point(idx, q_min)
+            cv2.line(dashboard, (x, plot_t), (x, plot_b), (48, 54, 64), 1)
+
+    for _, key, color in legend:
+        values = series[key]
+        segments = _step_trace_points(values, point)
+        for points in segments:
+            if len(points) > 1:
+                cv2.polylines(dashboard, [np.asarray(points, np.int32)], False, color, 2, cv2.LINE_AA)
+            else:
+                cv2.circle(dashboard, points[0], 2, color, -1, cv2.LINE_AA)
+        finite = np.flatnonzero(np.isfinite(values))
+        if len(finite):
+            current = point(int(finite[-1]), float(values[finite[-1]]))
+            cv2.circle(dashboard, current, 4, color, -1, cv2.LINE_AA)
+            cv2.circle(dashboard, current, 6, (28, 31, 38), 1, cv2.LINE_AA)
+    _put_text(dashboard, f"{q_max:+.3f}", (x0 + 4, plot_t + 7), 0.34, (150, 160, 175))
+    _put_text(dashboard, f"{q_min:+.3f}", (x0 + 4, plot_b), 0.34, (150, 160, 175))
+    _put_text(dashboard, "0.0s", (plot_l, y1 - 7), 0.34, (150, 160, 175))
+    _put_text(dashboard, f"{(len(history) - 1) / fps:.1f}s", (plot_r - 48, y1 - 7), 0.34,
+              (150, 160, 175))
+    _put_text(dashboard, "vertical rules = chunk boundaries; values hold until next boundary",
+              (plot_l + 98, y1 - 7), 0.33, (125, 138, 150))
 
 
-def draw_panel(meta: EpisodeMeta, diag: Diagnostic, gripper: Optional[float], source: str,
-               history: Optional[Sequence[Diagnostic]] = None, fps: int = FPS) -> np.ndarray:
+def draw_dashboard(meta: EpisodeMeta, diag: Diagnostic, gripper: Optional[float], source: str,
+                   history: Optional[Sequence[Diagnostic]] = None, fps: int = FPS,
+                   synthetic: bool = False) -> np.ndarray:
     import cv2
 
-    w, h = PANEL_SIZE
+    w, h = DASHBOARD_SIZE
     panel = np.full((h, w, 3), (22, 25, 31), dtype=np.uint8)
     accent = OUTCOME_BGR.get(meta.outcome, (180, 180, 180))
     cv2.rectangle(panel, (0, 0), (w - 1, h - 1), (75, 80, 90), 1)
-    cv2.rectangle(panel, (0, 0), (w, 34), accent, -1)
-    _put_text(panel, f"{meta.outcome.upper()}  episode {meta.episode}", (12, 23), 0.58, (10, 10, 10), 2)
+    if synthetic:
+        # Reserved dashboard banner: cameras and the graph/info regions remain
+        # pixel-for-pixel untouched by the warning.
+        cv2.rectangle(panel, (0, 0), (w, 35), (20, 20, 185), -1)
+        _put_text(
+            panel,
+            f"SYNTHETIC DIAGNOSTICS - NOT AN EXPERIMENT RESULT  |  {meta.outcome.upper()} "
+            f"ep {meta.episode}  |  {source}",
+            (45, 24), 0.55, (255, 255, 255), 2,
+        )
+    else:
+        cv2.rectangle(panel, (0, 0), (w, 35), accent, -1)
+        _put_text(panel, f"{meta.outcome.upper()}  episode {meta.episode}  |  {source}", (14, 24), 0.62,
+                  (10, 10, 10), 2)
     status = _chunk_status(diag)
     if diag.boundary:
-        cv2.rectangle(panel, (0, 34), (w, 56), (0, 185, 255), -1)
-        _put_text(panel, status, (12, 50), 0.38, (20, 20, 20), 1)
+        cv2.rectangle(panel, (806, 43), (1265, 68), (0, 185, 255), -1)
+        _put_text(panel, status, (817, 61), 0.40, (20, 20, 20), 1)
     else:
-        _put_text(panel, status, (12, 50), 0.42, (160, 170, 180))
-
-    _put_text(panel, "CRITIC SCORE (not p(success))", (12, 76), 0.52, (115, 210, 255), 1)
-    q = diag.q
-    if q is None:
-        _put_text(panel, "Q: MISSING", (12, 101), 0.54, (80, 150, 255), 2)
-        q_lines = ["mean/range: missing", "spread/std: missing"]
-        q_line_y = 124
-    else:
-        q_lines = [
-            f"chosen {_fmt(q.get('q_chosen'))}",
-            f"mean {_fmt(q.get('q_mean'))}",
-            f"range [{_fmt(q.get('q_min'))}, {_fmt(q.get('q_max'))}]",
-            f"spread {_fmt(q.get('q_spread'))}  std {_fmt(q.get('q_std'))}",
-        ]
-        q_line_y = 94
-    for j, line in enumerate(q_lines):
-        _put_text(panel, line, (12, q_line_y + 18 * j), 0.40)
+        _put_text(panel, status, (817, 61), 0.42, (160, 170, 180))
 
     _draw_q_graph(panel, history if history is not None else [diag], fps)
 
+    x = 817
+    _put_text(panel, "CURRENT CHUNK", (x, 94), 0.52, (115, 210, 255), 1)
+    q = diag.q
+    q1, q2 = _chosen_q_heads(q)
+    if q is None:
+        _put_text(panel, "aggregate: MISSING", (x, 119), 0.52, (80, 150, 255), 2)
+    else:
+        _put_text(panel, f"aggregate {_fmt(q.get('q_chosen'))}", (x, 119), 0.52, (80, 215, 255), 1)
+    _put_text(panel, f"Q1 chosen {_fmt(q1)}", (x, 143), 0.47, (95, 225, 95))
+    _put_text(panel, f"Q2 chosen {_fmt(q2)}", (x, 165), 0.47, (230, 130, 220))
+    disagreement = None if q1 is None or q2 is None else abs(q1 - q2)
+    _put_text(panel, f"|Q1-Q2| {_fmt(disagreement)}", (x, 187), 0.45, (195, 205, 215))
+    if q is not None:
+        _put_text(panel, f"range [{_fmt(q.get('q_min'))}, {_fmt(q.get('q_max'))}]", (x, 209), 0.42)
+        _put_text(panel, f"spread {_fmt(q.get('q_spread'))}  std {_fmt(q.get('q_std'))}", (x, 229), 0.42)
+        _put_text(panel, f"K {q.get('K', 'missing')}  selected candidate {q.get('q_argmax', 'missing')}",
+                  (x, 250), 0.43)
     latency = diag.latency or {}
-    _put_text(panel, "LATENCY (chunk boundary measurement)", (12, 176), 0.45, (115, 210, 255))
-    _put_text(panel,
-              f"encode {_fmt(latency.get('encode_ms'), 1)} ms   sample {_fmt(latency.get('sample_ms'), 1)} ms",
-              (12, 198), 0.45)
+    _put_text(panel, "LATENCY (measured at refill, then held)", (x, 274), 0.42, (115, 210, 255))
+    _put_text(panel, f"encode {_fmt(latency.get('encode_ms'), 1)} ms  sample {_fmt(latency.get('sample_ms'), 1)} ms",
+              (x, 294), 0.42)
     refill_label = str(diag.sidecar_refill) if diag.sidecar_refill is not None else "missing"
-    _put_text(panel,
-              f"refill {_fmt(latency.get('refill_ms'), 1)} ms   global refill {refill_label}",
-              (12, 219), 0.45)
-
-    k = q.get("K") if q else None
-    _put_text(panel,
-              f"K {k if k is not None else 'missing'}  decision {diag.decision_idx}  request {diag.request_idx}",
-              (12, 245), 0.47)
-    _put_text(panel, f"chunk_id {diag.chunk_id}  chunk_step {diag.chunk_step}", (12, 266), 0.47)
-    _put_text(panel, f"gripper {_fmt(gripper)}", (12, 287), 0.47)
-    _put_text(panel, f"camera source: {source}", (12, 309), 0.42, (170, 180, 190))
+    _put_text(panel, f"refill {_fmt(latency.get('refill_ms'), 1)} ms  global refill {refill_label}",
+              (x, 314), 0.42)
+    _put_text(panel, f"request {diag.request_idx}  decision {diag.decision_idx}  chunk {diag.chunk_id}/{diag.chunk_step}",
+              (x, 334), 0.40)
+    _put_text(panel, f"gripper {_fmt(gripper)}", (x + 310, 334), 0.40)
     detail = meta.fault or meta.failure or meta.detail or "(no detail)"
-    detail_lines = textwrap.wrap(str(detail), width=53)[:2]
+    detail_lines = textwrap.wrap(str(detail), width=70)[:1]
     for j, line in enumerate(detail_lines):
-        _put_text(panel, line, (12, 331 + 18 * j), 0.40, (190, 195, 205))
+        _put_text(panel, line, (14, 355 - 17 * j), 0.40, (190, 195, 205))
     return panel
 
 
@@ -595,19 +777,26 @@ def _synthetic_diagnostics(n_steps: int) -> List[Diagnostic]:
         decision = i // 24
         boundary = i % 24 == 0
         if boundary:
-            centre = -0.45 + 0.12 * np.sin(decision * 0.8)
-            spread = 0.18 + 0.03 * (decision % 3)
+            k = 32
+            candidates = np.arange(k, dtype=np.float64)
+            # These are deliberately two distinct ensemble heads.  They are
+            # only a layout fixture, never a claim about an evaluation run.
+            q1 = -0.54 + 0.11 * np.sin(decision * 0.73 + candidates * 0.31)
+            q2 = -0.43 + 0.13 * np.cos(decision * 0.57 + candidates * 0.27)
+            aggregate = 0.5 * (q1 + q2)
+            chosen = int(np.argmax(aggregate))
             held = {
-                "K": 32, "q_chosen": centre + spread / 2, "q_mean": centre,
-                "q_std": spread / 3, "q_min": centre - spread / 2,
-                "q_max": centre + spread / 2, "q_spread": spread, "q_argmax": 7,
+                "K": k, "q_chosen": float(aggregate[chosen]), "q_mean": float(np.mean(aggregate)),
+                "q_std": float(np.std(aggregate)), "q_min": float(np.min(aggregate)),
+                "q_max": float(np.max(aggregate)), "q_spread": float(np.ptp(aggregate)),
+                "q_argmax": chosen, "q_heads": [q1.tolist(), q2.tolist()],
                 "encode_ms": 17.0 + decision % 4, "sample_ms": 23.0 + decision % 5,
                 "refill_ms": 42.0 + decision % 6,
             }
-        q = {k: held[k] for k in Q_FIELDS} if held else None
+        q = {key: held[key] for key in (*Q_FIELDS, Q_HEADS_FIELD)} if held else None
         latency = {k: float(held[k]) for k in LATENCY_FIELDS} if held else None
         out.append(Diagnostic(i, decision, decision, i % 24, boundary, q, latency,
-                              sidecar_updated=boundary))
+                              sidecar_refill=decision + 1, sidecar_updated=boundary))
     return out
 
 
@@ -713,15 +902,9 @@ def render_episode(
                 cam2 = cv2.cvtColor(rig.render_color("cam2"), cv2.COLOR_RGB2BGR)
             _overlay_camera_label(cam1, "cam1", meta, i, fps)
             _overlay_camera_label(cam2, "cam2", meta, i, fps)
-            panel = draw_panel(meta, diagnostics[i], _gripper(policy, h5, i), source,
-                               diagnostics[:i + 1], fps)
-            composed = np.hstack((cam1, cam2, panel))
-            if synthetic_diagnostics:
-                # Keep the diagnostic panel fully readable. The watermark is
-                # deliberately confined to the two camera panes.
-                cv2.rectangle(composed, (0, 326), (CAM_SIZE[0] * 2, 360), (10, 10, 10), -1)
-                _put_text(composed, "SYNTHETIC DIAGNOSTICS - NOT AN EXPERIMENT RESULT",
-                          (205, 350), 0.72, (40, 70, 255), 2)
+            dashboard = draw_dashboard(meta, diagnostics[i], _gripper(policy, h5, i), source,
+                                       diagnostics[:i + 1], fps, synthetic=synthetic_diagnostics)
+            composed = np.vstack((np.hstack((cam1, cam2)), dashboard))
             writer.write(composed)
     finally:
         writer.release()
@@ -745,6 +928,8 @@ def _parse_reset_map(spec: Optional[str]) -> Dict[str, int]:
             raise ValueError(f"invalid --reset-map item {item!r}; expected EPISODE:COUNTER")
         if episode in out:
             raise ValueError(f"duplicate --reset-map episode {episode!r}")
+        if not counter.isascii() or not counter.isdecimal() or int(counter) <= 0:
+            raise ValueError(f"invalid --reset-map counter {counter!r}; expected a positive decimal integer")
         out[episode] = int(counter)
     return out
 

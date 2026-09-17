@@ -455,8 +455,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -p no:cacheprovid
 ## 11. IFQL diagnostic video
 
 이미 끝난 eval의 `episodes.jsonl` + `ep_<episode>.h5`를 30 fps diagnostic video로 만든다. 정책은
-다시 실행하지 않고 H5 state를 `mj_forward`로 kinematic replay함. 결과는 **cam1 640×360 + cam2
-640×360 + diagnostic panel 480×360 = 1760×360**, H.264/yuv420p다.
+다시 실행하지 않고 H5 state를 `mj_forward`로 kinematic replay함. 결과는 **1280×720**, H.264/yuv420p
+30 fps다. 위 1280×360에는 policy가 본 그대로의 **cam1 640×360 + cam2 640×360**가 들어가고, 아래
+1280×360에는 diagnostic dashboard가 들어감.
 
 ```bash
 RUN=/path/to/eval_run
@@ -476,13 +477,23 @@ env -u PYTHONPATH MUJOCO_GL=egl /path/to/.venv-eval/bin/python \
   --policy-log-dir /trusted/local/ifql_logs
 ```
 
-policy NPZ의 JPEG가 있으면 그 이미지를 우선 사용한다. panel의 Q는 **critic score이며 성공 확률이
-아님**. Q/latency는 sidecar row가 있는 chunk boundary에서만 측정되고 다음 boundary까지 화면에
-hold된다. 새 boundary의 sidecar row가 빠졌다면 `Q NOT LOGGED - PREVIOUS Q HELD`로 명시하며
-critic update로 표시하지 않는다. `q_chosen` temporal graph도 같은 held 값을 그리며, 실제 Q가 한
-건도 없으면 `UNAVAILABLE / Q NOT LOGGED`로 표시한다. panel에는 `q_chosen`, mean, min/max,
-spread/std, encode/sample/refill latency, K, decision/request index, legacy global refill label, chunk
-id/step, gripper, outcome/detail이 표시된다.
+policy NPZ의 JPEG가 있으면 그 이미지를 우선 사용한다. dashboard의 Q는 **critic score이며 성공
+확률이 아님**. Q/latency는 sidecar row가 있는 chunk boundary에서만 측정되고 다음 boundary까지
+화면에 hold된다. 새 boundary의 sidecar row가 빠졌다면 `Q NOT LOGGED - PREVIOUS Q HELD`로
+명시하며 critic update로 표시하지 않는다.
+
+아래 dashboard의 왼쪽 큰 영역은 chunk boundary를 세로선으로 표시한 time-series graph다. sidecar가
+`q_heads: [E][K]`를 기록한 새 IFQL log면 `q_argmax`로 선택된 candidate의 **Q1, Q2, aggregate
+`q_chosen`** 세 curve를 별도 색으로 그린다. 오른쪽에는 현재 Q1/Q2/aggregate와 disagreement,
+candidate K/index, range/spread/std, encode/sample/refill latency, request/decision/chunk/refill,
+gripper, source, outcome/detail을 보여준다. 과거 log처럼 `q_heads`가 없으면 aggregate graph는 유지하고
+Q1/Q2는 `missing`으로 명시한다. 실제 Q가 한 건도 없으면 `UNAVAILABLE / Q NOT LOGGED`로 표시하며
+값을 채워 넣지 않는다.
+
+`q_heads`의 shape는 `[critic_head][candidate]`다. 예를 들어 두 critic과 `K=32`면 `[2][32]`이고,
+dashboard는 `q_heads[0][q_argmax]`, `q_heads[1][q_argmax]`를 각각 Q1/Q2 chosen으로 표시함. 즉 두
+curve는 aggregate가 선택한 **동일 action chunk**에 대한 head score이며, 24개 control frame마다 새로
+평가한 값이 아님.
 
 > **보안 경계:** `ep_<reset_counter:04d>.npz`의 JPEG는 object array라 `allow_pickle=True`가
 > 필요함. 직접 실행한 IFQL 서버의 **trusted local log만** 입력할 것. 다운로드한 NPZ를 넣지 말 것.
@@ -493,8 +504,16 @@ join은 정수 index를 그대로 비교함. v2 sidecar의 `decision_idx`/`reque
 없거나 한 episode 밀린 파일은 자동 보정하지 않는다. 정확한 값을 확인한 뒤에만
 `--reset-map 101:2,102:3`처럼 명시한다.
 
-panel 배치와 temporal graph만 확인할 fake Q sample은 아래처럼 만들 수 있다. camera 영역 하단에
-`SYNTHETIC DIAGNOSTICS - NOT AN EXPERIMENT RESULT` watermark가 들어가므로 실험 결과로 쓰면 안 됨.
+sidecar의 discrete field `schema_version`, `reset_counter`, `request_idx`, `t_index`, `decision_idx`,
+`refill`, `K`, `q_argmax`는 JSON integer token만 받는다. Python으로 읽었을 때 `int`인 값만 허용하며
+JSON boolean, float(`1.0` 포함), numeric string(`"1"`)은 거부함. 범위는 `schema_version`,
+`reset_counter`, `refill`, `K`가 1 이상, 나머지가 0 이상이고, `q_argmax < K`여야 한다. `q_heads`가
+있으면 candidate 축 길이가 정확히 `K`와 같아야 함. renderer는 `int()`로 소수점을 버리거나 string을
+암묵 변환하지 않는다. CLI 전용 `--reset-map`은 예외적으로 positive decimal text를 받음.
+
+dashboard 배치와 temporal graph만 확인할 fake Q sample은 아래처럼 만들 수 있다. dashboard 맨 위의
+reserved banner에 `SYNTHETIC DIAGNOSTICS - NOT AN EXPERIMENT RESULT`가 들어간다. camera pixel이나
+graph/info 영역을 덮지 않으며, 이 영상은 실험 결과로 쓰면 안 됨.
 
 ```bash
 env -u PYTHONPATH MUJOCO_GL=egl /path/to/.venv-eval/bin/python \
@@ -506,8 +525,8 @@ env -u PYTHONPATH MUJOCO_GL=egl /path/to/.venv-eval/bin/python \
 unavailable이며, synthetic graph는 layout 설명용일 뿐임:
 
 - [ep_101_success_diagnostic.mp4](../../artifacts/ifql_eval_video_samples/ep_101_success_diagnostic.mp4)
-  — 266 frames, camera-only fallback, Q missing 표시
+  — 266 frames, camera-only fallback, Q1/Q2/aggregate missing 표시
 - [ep_100_timeout_diagnostic.mp4](../../artifacts/ifql_eval_video_samples/ep_100_timeout_diagnostic.mp4)
-  — 600 frames, camera-only fallback, Q missing 표시
+  — 600 frames, camera-only fallback, Q1/Q2/aggregate missing 표시
 - [ep_101_success_diagnostic_synthetic.mp4](../../artifacts/ifql_eval_video_samples/ep_101_success_diagnostic_synthetic.mp4)
-  — 266 frames, **synthetic Q/latency watermark**, 실험 결과 아님
+  — 266 frames, **synthetic Q1/Q2/aggregate/latency watermark**, 실험 결과 아님
