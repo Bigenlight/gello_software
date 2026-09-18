@@ -79,16 +79,24 @@ if [[ "$DSRL_DRY_RUN" == 1 ]]; then
     echo "### delegated launcher: $SCRIPT_DIR/run_ur7e_ifql_real.sh (server=$DSRL_SERVER_PY, port=$IFQL_PORT)"
 fi
 
+# The shared HDF5 recorder accepts numeric decision fields. Keep the upstream
+# DSRL server immutable and route it through a tracked compatibility entrypoint
+# that leaves full JSON diagnostics intact while filtering HDF5 diagnostics.
+DSRL_RECORDING_COMPAT="$SCRIPT_DIR/setup_jazzy/dsrl_recording_compat.py"
+if [[ ! -f "$DSRL_RECORDING_COMPAT" ]]; then
+    echo "ERROR: DSRL recording compatibility entrypoint missing: $DSRL_RECORDING_COMPAT" >&2
+    exit 2
+fi
+
 # The existing launcher owns the ROS safety stack, hold/start gate, stale-port
 # refusal, process teardown, and the common real_eval/v1 HDF5 + MP4 recorder.
-# dsrl_server.py exposes the same recording flags as ifql_server.py.
 exec env \
     IFQL_RUN_DIR="$DSRL_RUN_DIR" IFQL_STEP="$DSRL_STEP" \
     IFQL_TASK="$IFQL_TASK" IFQL_LOG_TAG="dsrl_${IFQL_TASK}_${DSRL_SAMPLER}" \
     IFQL_SAMPLER="$IFQL_SAMPLER" IFQL_NUM_SAMPLES="$IFQL_NUM_SAMPLES" \
     IFQL_NORM_STATS="$DSRL_NORM_STATS" IFQL_PARAMS_FILE="$DSRL_PARAMS_FILE" \
-    IFQL_SERVER_PY="$DSRL_SERVER_PY" IFQL_PY="$DSRL_PY" IFQL_COMPAT=0 \
-    QFLOW_DIR="$DSRL_QFLOW_DIR" \
+    IFQL_SERVER_PY="$DSRL_RECORDING_COMPAT" IFQL_PY="$DSRL_PY" IFQL_COMPAT=0 \
+    DSRL_UPSTREAM_SERVER_PY="$DSRL_SERVER_PY" QFLOW_DIR="$DSRL_QFLOW_DIR" \
     IFQL_PORT="$IFQL_PORT" DSRL_REAL_SERVE_META="$DSRL_REAL_SERVE_META" \
     IFQL_DRY_RUN="$DSRL_DRY_RUN" REAL_EVAL_EXPECTED_SAMPLER="$DSRL_SAMPLER" \
     REAL_EVAL_POLICY_TYPE=dsrl REAL_EVAL_RECORDING="${REAL_EVAL_RECORDING:-1}" \
