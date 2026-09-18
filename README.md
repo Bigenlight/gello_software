@@ -25,6 +25,18 @@
 
 > **규모 주의:** cube 쪽은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. 단독으로 견고한 정책을 학습시키기엔 부족하며, 현재 학습된 cube 정책은 없습니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다.
 
+**"put the carrot in the pot"** — 65 데모 / 20,472 프레임 / ~11.4분 (2026-09-18 수집, **추가 조명 설치**)
+
+- [`Bigenlight/carrot_in_pot_lighting_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.1, 65 에피소드 / 20,472 프레임
+- [`Bigenlight/carrot_in_pot_lighting_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_raw) — 원본 per-take h5 + mp4, 수집 전경 사진 포함
+- `recover` / `recover_twice` 폴더 라벨은 수집 중 실패 뒤 재시도한 테이크를 구분하기 위해 원본과 LeRobot 메타데이터에 그대로 보존했습니다.
+
+**"Stack the orange bowl on the purple bowl."** — 71 데모 / 17,945 프레임 / ~10.0분 (2026-09-18 수집, **추가 조명 설치**)
+
+- [`Bigenlight/bowl_stack_lighting_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.1, 71 에피소드 / 17,945 프레임
+- [`Bigenlight/bowl_stack_lighting_raw`](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_raw) — 원본 per-take h5 + mp4, 수집 전경 사진 포함
+- 폴더 라벨 `other_side`, `recover`, `recover_other_side`는 원본과 LeRobot 메타데이터에 보존했습니다. `recover`는 실패 후 재시도한 테이크이고, `other_side`는 다른 쪽에서 수집한 테이크입니다.
+
 ### 데이터셋 만드는 법 (h5 → LeRobot)
 
 변환기는 **이 리포에 없습니다** — 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)의 `convert_to_lerobot.py`입니다. 요점:
