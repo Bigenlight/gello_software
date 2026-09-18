@@ -47,6 +47,8 @@ HEADLESS=true ./run_real_policy.sh dsrl-orange
 
 server가 warmup되고 arm이 start pose에서 HOLD한 뒤 viewer의 START를 눌러야 policy가 움직임. task가 바뀌면 물체 배치와 start pose도 해당 profile에 맞춰야 함.
 
+기록 구간은 viewer의 **START부터 HOLD까지**임. HOLD는 로봇을 먼저 즉시 정지시키고, 별도 background RESET으로 직전 HDF5를 finalize하고 MP4를 렌더링함. finalize가 끝나기 전에 START를 다시 누르면 episode 혼합을 막기 위해 잠시 거절되므로, 로그의 `HOLD episode finalize complete`를 확인한 뒤 다음 trial을 시작함.
+
 ## 3. 기록 위치
 
 매 launch는 새 디렉터리를 만들고 기본으로 HDF5+MP4를 함께 남김.

@@ -25,7 +25,8 @@ State machine (BUILD_SPEC §5):
 Services (std_srvs/Trigger):
   ~/start_execution : HOLD (or FAULT) -> EXECUTE. Guards that the live arm pose is
                       within ~0.1 rad of start_pose, then ZMQ-RESETs the server.
-  ~/hold            : -> HOLD, republishing the current live pose held constant.
+  ~/hold            : -> HOLD immediately, republishing the current live pose held
+                      constant, then finalizing the recorder episode in background.
 
 Distro note: written to be distro-agnostic (std sensor_msgs/std_msgs/std_srvs +
 rclpy). Verified to construct under ROS2 Jazzy on the dev PC; the target robot PC
@@ -86,6 +87,11 @@ class PolicyLeaderNode(Node):
         self.declare_parameter("act_host", "127.0.0.1")
         self.declare_parameter("act_port", 5591)
         self.declare_parameter("act_timeout_s", 0.5)
+        # HOLD finalizes the active recorder episode by issuing a RESET from a
+        # dedicated background ZMQ client.  Rendering the diagnostic MP4 may
+        # take much longer than the per-action deadline, so keep this timeout
+        # separate and never block the safety-critical HOLD service on it.
+        self.declare_parameter("episode_finalize_timeout_s", 120.0)
         self.declare_parameter("inference_transport", "zmq")
         self.declare_parameter("grpc_port", 50051)
         self.declare_parameter("camera_width", 1280)
@@ -126,6 +132,9 @@ class PolicyLeaderNode(Node):
         self._act_host = str(gp("act_host").value)
         self._act_port = int(gp("act_port").value)
         self._act_timeout_s = float(gp("act_timeout_s").value)
+        self._episode_finalize_timeout_s = float(
+            gp("episode_finalize_timeout_s").value
+        )
         self._goto_speed = float(gp("go_to_start_speed_rad_s").value)
         self._transport = str(gp("inference_transport").value).lower()
         self._grpc_port = int(gp("grpc_port").value)
@@ -184,6 +193,10 @@ class PolicyLeaderNode(Node):
         self._arming_generation = 0
         self._arming_origin = HOLD
         self._arming_result = None
+        self._episode_finalize_lock = threading.Lock()
+        self._episode_finalize_inflight = False
+        self._episode_finalize_generation = 0
+        self._episode_finalize_thread = None
 
         # --- Publishers (EXACT synthetic-leader contract) ----------------
         # Plain depth-10 publishers (default QoS), matching gello_publisher_node.
@@ -352,6 +365,7 @@ class PolicyLeaderNode(Node):
         return response
 
     def _srv_hold(self, request, response):
+        previous_state = self._state
         # Republish the current live pose held (fall back to start_pose if unseen).
         if self._live_q is not None:
             self._hold_pose = list(self._live_q)
@@ -372,9 +386,80 @@ class PolicyLeaderNode(Node):
         self.get_logger().info(
             f"~/hold -> HOLD, holding {src}, gripper={self._hold_gripper:.3f}."
         )
+        finalizing = False
+        if previous_state in (EXECUTE, FAULT) and self._transport == "zmq":
+            finalizing = self._begin_episode_finalize()
         response.success = True
-        response.message = f"HOLD (holding {src}, grip {self._hold_gripper:.3f})"
+        suffix = "; episode finalizing in background" if finalizing else ""
+        response.message = (
+            f"HOLD (holding {src}, grip {self._hold_gripper:.3f}){suffix}"
+        )
         return response
+
+    def _begin_episode_finalize(self):
+        """Finalize the active ZMQ episode after HOLD without blocking HOLD.
+
+        The legacy policy protocol has no separate FINALIZE command.  RESET has
+        the required semantics: it atomically closes/publishes the previous H5
+        (and renders its MP4), then opens a new empty episode.  The next START
+        sends another RESET, which simply discards that empty episode.
+
+        A dedicated REQ socket is required because ZeroMQ sockets are not
+        thread-safe.  START is refused while this worker is active, preventing
+        two RESETs from racing and mixing episode boundaries.
+        """
+        with self._episode_finalize_lock:
+            if self._episode_finalize_inflight:
+                return False
+            self._episode_finalize_inflight = True
+            self._episode_finalize_generation += 1
+            generation = self._episode_finalize_generation
+        thread = threading.Thread(
+            target=self._finalize_episode_zmq,
+            args=(generation,),
+            name="policy-episode-finalize",
+            daemon=True,
+        )
+        self._episode_finalize_thread = thread
+        thread.start()
+        return True
+
+    def _finalize_episode_zmq(self, generation):
+        sock = None
+        ok = False
+        detail = "unknown error"
+        try:
+            sock = self._zmq_ctx.socket(zmq.REQ)
+            sock.setsockopt(zmq.LINGER, 0)
+            timeout_ms = max(1, int(self._episode_finalize_timeout_s * 1000))
+            sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
+            sock.connect(f"tcp://{self._act_host}:{self._act_port}")
+            sock.send_multipart(obs_assembler.build_reset_request())
+            reply = sock.recv_multipart()
+            obj = obs_assembler.parse_reply(reply)
+            if not obj.get(obs_assembler.KEY_OK, False):
+                raise RuntimeError(f"server RESET returned ok:false ({obj})")
+            ok = True
+            detail = "HDF5 finalized; renderer completed"
+        except Exception as exc:  # noqa: BLE001 - reported, HOLD remains safe
+            detail = f"{type(exc).__name__}: {exc}"
+        finally:
+            if sock is not None:
+                try:
+                    sock.close(0)
+                except Exception:  # noqa: BLE001
+                    pass
+            with self._episode_finalize_lock:
+                if generation == self._episode_finalize_generation:
+                    self._episode_finalize_inflight = False
+        if ok:
+            self.get_logger().info(f"HOLD episode finalize complete: {detail}.")
+        else:
+            self.get_logger().error(
+                f"HOLD episode finalize failed: {detail}. "
+                "The server will retry finalization on the next START or shutdown."
+            )
 
     def _srv_go_to_start(self, request, response):
         """Glide the arm back to start_pose so ~/start_execution's 0.1 rad gate passes.
@@ -422,6 +507,9 @@ class PolicyLeaderNode(Node):
 
         Returns (ok, message). On refusal/failure the state is unchanged (stays
         HOLD/FAULT) so the operator can safely retry."""
+        with self._episode_finalize_lock:
+            if self._episode_finalize_inflight:
+                return False, "refused: previous episode is still finalizing"
         if self._state == ARMING:
             return False, "refused: gRPC server check/reset already in progress"
         if self._live_q is None:
