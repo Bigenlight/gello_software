@@ -547,7 +547,7 @@ fi
 # A leftover server holding IFQL_PORT would make the NEW server die on bind, yet the
 # health-check below could still see *something* listening and pass -> the leader would
 # silently drive the arm from the STALE server. Fail loudly BEFORE spawning.
-if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${IFQL_PORT}([^0-9]|$)"; then
+if [ "${IFQL_DRY_RUN}" != "1" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${IFQL_PORT}([^0-9]|$)"; then
     echo "ERROR: port ${IFQL_PORT} is already in use (a stale IFQL/SVF/FM server?)." >&2
     echo "       Starting now would leave the arm driven by that stale server. Free it first:" >&2
     echo "         ss -ltnp | grep :${IFQL_PORT}     # then stop that PID and re-check" >&2
