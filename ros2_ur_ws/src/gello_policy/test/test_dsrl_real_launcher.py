@@ -18,6 +18,7 @@ import pytest
 WORKSPACE = Path(__file__).resolve().parents[3]
 PREFLIGHT = WORKSPACE / "setup_jazzy" / "dsrl_real_preflight.py"
 LAUNCHER = WORKSPACE / "run_ur7e_dsrl_real.sh"
+GENERIC_LAUNCHER = WORKSPACE / "run_ur7e_ifql_real.sh"
 SERVER = WORKSPACE.parents[1] / "model_code" / "vision_carrot" / "dsrl" / "dsrl_server.py"
 
 
@@ -130,3 +131,15 @@ def test_dry_run_stops_before_ros_or_server_bind(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "no ROS, server bind, or robot process will start" in completed.stdout
     assert "staged only (not a released real DSRL)" in completed.stdout
+
+
+def test_dsrl_health_check_does_not_skip_sleep_or_port_probe() -> None:
+    """Regression: an unconditional continue made the advertised 120 s wait busy-spin in ~2 s."""
+    text = GENERIC_LAUNCHER.read_text()
+    start = text.index('if [ -z "${PX_OK}" ]')
+    end = text.index('if command -v ss', start)
+    dsrl_px_block = text[start:end]
+    assert "continue" not in dsrl_px_block
+    loop_start = text.index('for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}")')
+    loop_end = text.index('if [ -z "${LISTENING}" ]', loop_start)
+    assert "sleep 1" in text[loop_start:loop_end]

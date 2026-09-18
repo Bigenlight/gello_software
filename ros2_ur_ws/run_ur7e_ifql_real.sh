@@ -869,20 +869,23 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
     if [ -z "${PX_OK}" ] && [ -f "${SERVER_LOG}" ]; then
         if [ "${REAL_EVAL_POLICY_TYPE}" = dsrl ]; then
             PX_LINE="$(grep -m1 -E 'agent ready: dsrl_na ' "${SERVER_LOG}" || true)"
-            [ -n "${PX_LINE}" ] && PX_OK=1 && echo "### px check OK: DSRL real profile is pinned to frozen r18_ss features"
-            continue
-        fi
-        PX_LINE="$(grep -m1 -E 'agent ready:.*px=' "${SERVER_LOG}" || true)"
-        if [ -n "${PX_LINE}" ]; then
-            SERVER_PX="$(printf '%s' "${PX_LINE}" | sed -E 's/.*px=([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')"
-            if [ "${SERVER_PX}" = "${IS_PX_RUN}" ]; then
+            if [ -n "${PX_LINE}" ]; then
                 PX_OK=1
-                echo "### px check OK: ${PX_LINE}"
-            else
-                echo "ERROR: server px=${SERVER_PX} does not match this run dir's flags.json is_px_run verdict (${IS_PX_RUN}):" >&2
-                echo "       ${PX_LINE}" >&2
-                kill "${IFQL_SERVER_PID}" 2>/dev/null || true
-                exit 1
+                echo "### px check OK: DSRL real profile is pinned to frozen r18_ss features"
+            fi
+        else
+            PX_LINE="$(grep -m1 -E 'agent ready:.*px=' "${SERVER_LOG}" || true)"
+            if [ -n "${PX_LINE}" ]; then
+                SERVER_PX="$(printf '%s' "${PX_LINE}" | sed -E 's/.*px=([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')"
+                if [ "${SERVER_PX}" = "${IS_PX_RUN}" ]; then
+                    PX_OK=1
+                    echo "### px check OK: ${PX_LINE}"
+                else
+                    echo "ERROR: server px=${SERVER_PX} does not match this run dir's flags.json is_px_run verdict (${IS_PX_RUN}):" >&2
+                    echo "       ${PX_LINE}" >&2
+                    kill "${IFQL_SERVER_PID}" 2>/dev/null || true
+                    exit 1
+                fi
             fi
         fi
     fi
