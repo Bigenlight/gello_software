@@ -306,8 +306,12 @@ esac
 # (the server ignores --num-samples), so "bc32" would be a lie; actor has no K.
 case "${IFQL_SAMPLER}" in
     bon)   IFQL_TAG="bon${IFQL_NUM_SAMPLES}" ;;
-    bc)    IFQL_TAG="bc" ;;
-    actor) IFQL_TAG="actor" ;;
+    bc)    IFQL_NUM_SAMPLES=1; IFQL_TAG="bc" ;;
+    actor)
+        # Distilled SVF has no candidate set; DSRL actor compatibility emits one
+        # latent/chunk. Keep the manifest truthful for both policy families.
+        if [ "${REAL_EVAL_POLICY_TYPE}" = dsrl ]; then IFQL_NUM_SAMPLES=1; else IFQL_NUM_SAMPLES=0; fi
+        IFQL_TAG="actor" ;;
     *)
         echo "ERROR: IFQL_SAMPLER must be bon|bc|actor (got '${IFQL_SAMPLER}')." >&2
         exit 1 ;;
