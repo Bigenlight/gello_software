@@ -72,7 +72,6 @@ if [[ "$DSRL_DRY_RUN" == 1 ]]; then
     echo "### base_checkpoint=$DSRL_BASE_CHECKPOINT sha256=$DSRL_BASE_CHECKPOINT_SHA256"
     echo "### norm_stats=$DSRL_NORM_STATS sha256=$DSRL_NORM_STATS_SHA256"
     echo "### delegated launcher: $SCRIPT_DIR/run_ur7e_ifql_real.sh (server=$DSRL_SERVER_PY, port=$IFQL_PORT)"
-    exit 0
 fi
 
 # The existing launcher owns the ROS safety stack, hold/start gate, stale-port
@@ -85,5 +84,6 @@ exec env \
     IFQL_NORM_STATS="$DSRL_NORM_STATS" IFQL_PARAMS_FILE="$DSRL_PARAMS_FILE" \
     IFQL_SERVER_PY="$DSRL_SERVER_PY" IFQL_PY="$DSRL_PY" IFQL_COMPAT=0 \
     IFQL_PORT="$IFQL_PORT" DSRL_REAL_SERVE_META="$DSRL_REAL_SERVE_META" \
+    IFQL_DRY_RUN="$DSRL_DRY_RUN" REAL_EVAL_EXPECTED_SAMPLER="$DSRL_SAMPLER" \
     REAL_EVAL_POLICY_TYPE=dsrl REAL_EVAL_RECORDING="${REAL_EVAL_RECORDING:-1}" \
     "$SCRIPT_DIR/run_ur7e_ifql_real.sh" "$@"

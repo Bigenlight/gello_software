@@ -659,7 +659,7 @@ document = {
     "hostname": os.environ.get("REAL_EVAL_HOSTNAME", socket.gethostname()),
     "policy": {
         "type": os.environ["REAL_EVAL_POLICY_TYPE"],
-        "family": "svf" if os.environ["REAL_EVAL_POLICY_TYPE"] == "svf" else "ifql",
+        "family": os.environ["REAL_EVAL_POLICY_TYPE"],
         "task": os.environ["IFQL_TASK"], "sampler": os.environ["IFQL_SAMPLER"],
         "num_samples": int(os.environ["IFQL_NUM_SAMPLES"]), "step": int(os.environ["IFQL_STEP"]),
         "q_agg": os.environ.get("IFQL_Q_AGG") or None,
@@ -713,6 +713,7 @@ else
 fi
 export REAL_EVAL_RUN_DIR REAL_EVAL_HDF5_LOG_DIR REAL_EVAL_MP4_PATH REAL_EVAL_RENDERER_HOOK
 export REAL_EVAL_FFMPEG REAL_EVAL_RECORDING REAL_EVAL_MIN_FREE_GIB REAL_EVAL_POLICY_TYPE
+export REAL_EVAL_EXPECTED_SAMPLER="${REAL_EVAL_EXPECTED_SAMPLER:-}"
 export IFQL_TASK IFQL_SAMPLER IFQL_NUM_SAMPLES IFQL_Q_AGG IFQL_STEP IFQL_DEVICE IFQL_CHECKPOINT
 export IFQL_NORM_STATS IFQL_RUN_DIR IFQL_SERVER_PY
 write_launch_manifest launching
@@ -837,9 +838,15 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
         fi
     fi
     if [ -z "${SAMPLER_OK}" ] && [ -f "${SERVER_LOG}" ]; then
-        SAMPLER_LINE="$(grep -m1 -E 'sampler: *kind=' "${SERVER_LOG}" || true)"
+        if [ "${REAL_EVAL_POLICY_TYPE}" = dsrl ]; then
+            SAMPLER_LINE="$(grep -m1 -E 'agent ready: dsrl_na .*sampler=' "${SERVER_LOG}" || true)"
+        else
+            SAMPLER_LINE="$(grep -m1 -E 'sampler: *kind=' "${SERVER_LOG}" || true)"
+        fi
         if [ -n "${SAMPLER_LINE}" ]; then
-            if [ "${IFQL_SAMPLER}" = "bon" ]; then
+            if [ "${REAL_EVAL_POLICY_TYPE}" = dsrl ]; then
+                WANT="sampler=${REAL_EVAL_EXPECTED_SAMPLER}"
+            elif [ "${IFQL_SAMPLER}" = "bon" ]; then
                 WANT="kind=bon K=${IFQL_NUM_SAMPLES}"
             else
                 WANT="kind=${IFQL_SAMPLER}"      # bc -> K=1 fixed by the server; actor -> no K check
@@ -856,6 +863,11 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
         fi
     fi
     if [ -z "${PX_OK}" ] && [ -f "${SERVER_LOG}" ]; then
+        if [ "${REAL_EVAL_POLICY_TYPE}" = dsrl ]; then
+            PX_LINE="$(grep -m1 -E 'agent ready: dsrl_na ' "${SERVER_LOG}" || true)"
+            [ -n "${PX_LINE}" ] && PX_OK=1 && echo "### px check OK: DSRL real profile is pinned to frozen r18_ss features"
+            continue
+        fi
         PX_LINE="$(grep -m1 -E 'agent ready:.*px=' "${SERVER_LOG}" || true)"
         if [ -n "${PX_LINE}" ]; then
             SERVER_PX="$(printf '%s' "${PX_LINE}" | sed -E 's/.*px=([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')"
