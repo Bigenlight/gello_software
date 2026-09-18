@@ -42,6 +42,35 @@ if [[ -z "$DSRL_REAL_SERVE_META" ]]; then
     DSRL_REAL_SERVE_META="$DSRL_RUN_DIR/real_serve_meta.json"
 fi
 
+# DSRL imports the shared image encoder through ifql_server (torch) before JAX.
+# On the robot workstation one cold torch import once stalled until the generic
+# 120 s server timeout killed it, even though the same artifact then loaded in
+# seconds. Warm the dynamic libraries/CUDA context in an isolated process so a
+# transient import stall fails here with a useful message and never reaches ROS.
+if [[ "$DSRL_DRY_RUN" != 1 ]]; then
+    DSRL_TORCH_PREWARM_TIMEOUT_S="${DSRL_TORCH_PREWARM_TIMEOUT_S:-30}"
+    case "$DSRL_TORCH_PREWARM_TIMEOUT_S" in
+        *[!0-9]*|"") echo "ERROR: DSRL_TORCH_PREWARM_TIMEOUT_S must be a positive integer." >&2; exit 2 ;;
+        0) echo "ERROR: DSRL_TORCH_PREWARM_TIMEOUT_S must be > 0." >&2; exit 2 ;;
+    esac
+    DSRL_TORCH_HOME="${TORCH_HOME:-${IFQL_ROOT:-$HOME/carrot_ifql}/.cache/torch}"
+    _torch_ready=0
+    for _attempt in 1 2; do
+        if env TORCH_HOME="$DSRL_TORCH_HOME"             timeout --signal=TERM "${DSRL_TORCH_PREWARM_TIMEOUT_S}s"             "$DSRL_PY" -c             "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(torch.__version__)"             >/dev/null 2>&1; then
+            _torch_ready=1
+            break
+        fi
+        echo "WARNING: DSRL torch/CUDA prewarm attempt ${_attempt}/2 failed or timed out after ${DSRL_TORCH_PREWARM_TIMEOUT_S}s." >&2
+        sleep 1
+    done
+    if [[ "$_torch_ready" != 1 ]]; then
+        echo "ERROR: DSRL torch/CUDA import prewarm failed twice; refusing to start ROS." >&2
+        echo "       Run the configured DSRL_PY manually and test importing torch plus torch.cuda.is_available()." >&2
+        exit 1
+    fi
+    echo "### DSRL torch/CUDA prewarm OK: py=$DSRL_PY timeout=${DSRL_TORCH_PREWARM_TIMEOUT_S}s"
+fi
+
 # The preflight emits only shell-quoted assignments after validating every value.
 # This keeps the selected checkpoint, base checkpoint, norm stats, and YAML tied to
 # the same signed-by-content manifest before a child can bind or source ROS.
