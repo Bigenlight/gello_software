@@ -33,6 +33,11 @@ if [[ ! -x "$DSRL_PY" || ! -f "$PREFLIGHT" || ! -f "$DSRL_SERVER_PY" ]]; then
     echo "ERROR: need an executable DSRL_PY plus existing preflight/server files." >&2
     exit 2
 fi
+DSRL_QFLOW_DIR="${DSRL_QFLOW_DIR:-$(cd "$(dirname "$DSRL_SERVER_PY")/../.." && pwd)/qflow_svf_merged}"
+if [[ ! -d "$DSRL_QFLOW_DIR/agents" ]]; then
+    echo "ERROR: DSRL_QFLOW_DIR has no agents/: $DSRL_QFLOW_DIR" >&2
+    exit 2
+fi
 if [[ -z "$DSRL_REAL_SERVE_META" ]]; then
     DSRL_REAL_SERVE_META="$DSRL_RUN_DIR/real_serve_meta.json"
 fi
@@ -83,6 +88,7 @@ exec env \
     IFQL_SAMPLER="$IFQL_SAMPLER" IFQL_NUM_SAMPLES="$IFQL_NUM_SAMPLES" \
     IFQL_NORM_STATS="$DSRL_NORM_STATS" IFQL_PARAMS_FILE="$DSRL_PARAMS_FILE" \
     IFQL_SERVER_PY="$DSRL_SERVER_PY" IFQL_PY="$DSRL_PY" IFQL_COMPAT=0 \
+    QFLOW_DIR="$DSRL_QFLOW_DIR" \
     IFQL_PORT="$IFQL_PORT" DSRL_REAL_SERVE_META="$DSRL_REAL_SERVE_META" \
     IFQL_DRY_RUN="$DSRL_DRY_RUN" REAL_EVAL_EXPECTED_SAMPLER="$DSRL_SAMPLER" \
     REAL_EVAL_POLICY_TYPE=dsrl REAL_EVAL_RECORDING="${REAL_EVAL_RECORDING:-1}" \
