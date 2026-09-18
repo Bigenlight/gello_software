@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Fail-closed DSRL entrypoint.  It deliberately has no default checkpoint: no
-# released real DSRL artifact exists.  A future staged artifact must bring its
-# own real_serve_meta.json, which is validated before this script can reach ROS.
+# Fail-closed DSRL entrypoint. A staged artifact must bring its own
+# real_serve_meta.json, which is validated before this script can reach ROS.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,8 +17,8 @@ Usage (only after staging an attested real DSRL artifact):
   DSRL_RUN_DIR=/path/to/run DSRL_SERVER_PY=/path/to/dsrl_server.py \
     DSRL_PY=/path/to/python ./run_ur7e_dsrl_real.sh
 
-There is no released real DSRL checkpoint.  This launcher refuses every run
-without <DSRL_RUN_DIR>/real_serve_meta.json containing domain=real, an explicit
+This launcher refuses every run without <DSRL_RUN_DIR>/real_serve_meta.json
+containing domain=real, an explicit
 nonprivileged actor, use_critic_obs=false, and matching checkpoint/base/norm hashes.
 Set DSRL_DRY_RUN=1 to validate and print the delegated command without ROS, a
 policy server bind, or any robot process.
@@ -60,6 +59,11 @@ esac
 IFQL_SAMPLER=actor
 IFQL_PORT=5596
 IFQL_NUM_SAMPLES=1
+case "$DSRL_TASK" in
+    carrot|carrot_in_pot) IFQL_TASK=carrot ;;
+    orange|orange_bowl_in_purple_bowl) IFQL_TASK=orange ;;
+    *) echo "ERROR: unsupported DSRL_TASK from manifest: $DSRL_TASK" >&2; exit 2 ;;
+esac
 
 if [[ "$DSRL_DRY_RUN" == 1 ]]; then
     echo "### DSRL_DRY_RUN=1: real_serve_meta passed; no ROS, server bind, or robot process will start."
@@ -76,6 +80,7 @@ fi
 # dsrl_server.py exposes the same recording flags as ifql_server.py.
 exec env \
     IFQL_RUN_DIR="$DSRL_RUN_DIR" IFQL_STEP="$DSRL_STEP" \
+    IFQL_TASK="$IFQL_TASK" IFQL_LOG_TAG="dsrl_${IFQL_TASK}_${DSRL_SAMPLER}" \
     IFQL_SAMPLER="$IFQL_SAMPLER" IFQL_NUM_SAMPLES="$IFQL_NUM_SAMPLES" \
     IFQL_NORM_STATS="$DSRL_NORM_STATS" IFQL_PARAMS_FILE="$DSRL_PARAMS_FILE" \
     IFQL_SERVER_PY="$DSRL_SERVER_PY" IFQL_PY="$DSRL_PY" IFQL_COMPAT=0 \

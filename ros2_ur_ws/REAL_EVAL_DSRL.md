@@ -1,6 +1,13 @@
 # DSRL real-evaluation gate
 
-**현재 released real DSRL checkpoint는 없음.** `run_ur7e_dsrl_real.sh`는 기본 run/checkpoint를 제공하지 않는다. 실물 실행 후보를 새로 stage할 때만 explicit `real_serve_meta.json`을 만들고 아래 gate를 통과해야 함.
+현재 5070에는 carrot/orange real-demo DSRL 후보가 `setup_jazzy/staged_models/` 아래 stage되어 있음. 둘 다 non-privileged actor/critic이고 아직 **실물 rollout 성능은 미검증**임. 직접 경로를 조립하기보다 [[REAL_EVAL_QUICKSTART]]의 profile을 사용함.
+
+```bash
+./run_real_policy.sh dsrl-carrot --dry-run
+./run_real_policy.sh dsrl-orange --dry-run
+```
+
+`run_ur7e_dsrl_real.sh` 자체는 계속 default checkpoint를 추측하지 않으며, explicit `real_serve_meta.json` gate를 요구함.
 
 ```bash
 DSRL_DRY_RUN=1 \

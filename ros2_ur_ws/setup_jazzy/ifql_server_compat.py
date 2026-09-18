@@ -26,6 +26,8 @@ def parse_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--server-script", required=True)
     parser.add_argument("--inference-checkpoint", default=None)
+    parser.add_argument("--q-agg-override", choices=("mean", "min"), default=None,
+                        help="override flags.agent.q_agg before constructing the agent")
     known, server_args = parser.parse_known_args()
     return known, server_args
 
@@ -107,7 +109,19 @@ def main() -> int:
     previous_handler = signal.signal(signal.SIGTERM, terminate)
     stage_dir = Path(tempfile.mkdtemp(prefix="ifql_compat_"))
     try:
-        os.symlink(run_dir / "flags.json", stage_dir / "flags.json")
+        flags_path = run_dir / "flags.json"
+        if adapter_args.q_agg_override:
+            flags = json.loads(flags_path.read_text())
+            agent_config = flags.get("agent")
+            if not isinstance(agent_config, dict):
+                raise SystemExit(f"{flags_path} has no agent config")
+            trained_q_agg = agent_config.get("q_agg")
+            agent_config["q_agg"] = adapter_args.q_agg_override
+            (stage_dir / "flags.json").write_text(json.dumps(flags, indent=2, sort_keys=True) + "\n")
+            print(f"IFQL compatibility q_agg: trained={trained_q_agg} "
+                  f"inference={adapter_args.q_agg_override}", flush=True)
+        else:
+            os.symlink(flags_path, stage_dir / "flags.json")
         staged_name = f"params_{step}.pkl"
         os.symlink(selected_checkpoint, stage_dir / staged_name)
         server_args[run_index + 1] = str(stage_dir)
@@ -152,6 +166,9 @@ def main() -> int:
             policy_server.meta["run_dir"] = str(original_run_dir)
             policy_server.logger.meta["ckpt"] = actual
             policy_server.logger.meta["run_dir"] = str(original_run_dir)
+            if adapter_args.q_agg_override:
+                policy_server.meta["q_agg"] = adapter_args.q_agg_override
+                policy_server.logger.meta["q_agg"] = adapter_args.q_agg_override
             if selected_checkpoint.name.endswith(".infer.pkl"):
                 policy_server.meta["network_step"] = int(np.asarray(network["step"]))
                 policy_server.logger.meta["network_step"] = policy_server.meta["network_step"]

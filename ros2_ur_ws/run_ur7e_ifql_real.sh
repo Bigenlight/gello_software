@@ -251,6 +251,7 @@ IFQL_RUN_DIR="${IFQL_RUN_DIR:-$IFQL_ROOT/${_TASK_HF_SUBDIR}/${_TASK_RUN}}"
 IFQL_STEP="${IFQL_STEP:-100000}"
 IFQL_SAMPLER="${IFQL_SAMPLER:-bon}"
 IFQL_NUM_SAMPLES="${IFQL_NUM_SAMPLES:-32}"
+IFQL_Q_AGG="${IFQL_Q_AGG:-}"
 IFQL_HOST="${IFQL_HOST:-127.0.0.1}"
 IFQL_PORT="${IFQL_PORT:-5595}"
 IFQL_BUDGET_S="${IFQL_BUDGET_S:-0.6}"
@@ -263,6 +264,7 @@ REAL_EVAL_MIN_FREE_GIB="${REAL_EVAL_MIN_FREE_GIB:-10}"
 REAL_EVAL_FINALIZE_TIMEOUT_S="${REAL_EVAL_FINALIZE_TIMEOUT_S:-20}"
 REAL_EVAL_POLICY_TYPE="${REAL_EVAL_POLICY_TYPE:-ifql}"
 case "${REAL_EVAL_RECORDING}" in 0|1) ;; *) echo "ERROR: REAL_EVAL_RECORDING must be 0 or 1." >&2; exit 1 ;; esac
+case "${IFQL_Q_AGG}" in ""|mean|min) ;; *) echo "ERROR: IFQL_Q_AGG must be empty|mean|min." >&2; exit 1 ;; esac
 
 # norm_stats default. With a profile basename (carrot) it is the same literal path the
 # carrot session used. Without one (orange) the run dir must contain EXACTLY ONE
@@ -310,6 +312,9 @@ case "${IFQL_SAMPLER}" in
         echo "ERROR: IFQL_SAMPLER must be bon|bc|actor (got '${IFQL_SAMPLER}')." >&2
         exit 1 ;;
 esac
+if [ -n "${IFQL_Q_AGG}" ]; then
+    IFQL_TAG="${IFQL_TAG}_q${IFQL_Q_AGG}"
+fi
 IFQL_LOG_TAG="${IFQL_LOG_TAG:-${_TASK_LOG_TAG:-$(basename "${IFQL_RUN_DIR}")}}"
 # Keep IFQL_LOG_DIR as a compatibility input for an existing per-task root, but never
 # give two policy launches the same leaf: episode writers restart their numbering on
@@ -384,12 +389,19 @@ if [ "$IFQL_COMPAT" = auto ]; then
         IFQL_COMPAT=1
     fi
 fi
+if [ -n "${IFQL_Q_AGG}" ]; then
+    # q_agg is an inference-time ensemble reduction for IFQL BoN.  The pinned
+    # server reads it from flags.json, so route through the compatibility adapter,
+    # which stages a temporary flags copy while keeping the checkpoint immutable.
+    IFQL_COMPAT=1
+fi
 IFQL_SERVER_ENTRY=("${IFQL_SERVER_PY}")
 IFQL_CHECKPOINT="${IFQL_RUN_DIR}/params_${IFQL_STEP}.pkl"
 if [ "$IFQL_COMPAT" = 1 ]; then
     IFQL_ADAPTER="$SCRIPT_DIR/setup_jazzy/ifql_server_compat.py"
     [ -f "$IFQL_ADAPTER" ] || { echo "ERROR: missing IFQL compatibility adapter: $IFQL_ADAPTER" >&2; exit 1; }
     IFQL_SERVER_ENTRY=("$IFQL_ADAPTER" --server-script "$IFQL_SERVER_PY")
+    [ -n "${IFQL_Q_AGG}" ] && IFQL_SERVER_ENTRY+=(--q-agg-override "${IFQL_Q_AGG}")
     [ -f "$IFQL_CHECKPOINT" ] || IFQL_CHECKPOINT="${IFQL_RUN_DIR}/params_${IFQL_STEP}.infer.pkl"
     echo "### IFQL compatibility adapter enabled (r18_ss, inference-checkpoint support): $IFQL_ADAPTER"
 fi
@@ -562,7 +574,7 @@ if [ "${REAL_EVAL_RECORDING}" = "1" ]; then
 fi
 echo "### Starting IFQL server: py=${IFQL_PY}"
 echo "###   server=${IFQL_SERVER_PY}"
-echo "###   run_dir=${IFQL_RUN_DIR} step=${IFQL_STEP} sampler=${IFQL_SAMPLER} K=${IFQL_NUM_SAMPLES} device=${IFQL_DEVICE}"
+echo "###   run_dir=${IFQL_RUN_DIR} step=${IFQL_STEP} sampler=${IFQL_SAMPLER} K=${IFQL_NUM_SAMPLES} q_agg=${IFQL_Q_AGG:-checkpoint-default} device=${IFQL_DEVICE}"
 echo "###   norm_stats=${IFQL_NORM_STATS}"
 echo "###   bind=${IFQL_HOST}:${IFQL_PORT} budget_s=${IFQL_BUDGET_S} log_dir=${IFQL_LOG_DIR}"
 echo "###   stdout/stderr mirrored to ${SERVER_LOG}"
@@ -650,6 +662,7 @@ document = {
         "family": "svf" if os.environ["REAL_EVAL_POLICY_TYPE"] == "svf" else "ifql",
         "task": os.environ["IFQL_TASK"], "sampler": os.environ["IFQL_SAMPLER"],
         "num_samples": int(os.environ["IFQL_NUM_SAMPLES"]), "step": int(os.environ["IFQL_STEP"]),
+        "q_agg": os.environ.get("IFQL_Q_AGG") or None,
         "device": os.environ["IFQL_DEVICE"], "svf_staged_provenance": svf or None,
     },
     "commands": {"server_shell": os.environ["REAL_EVAL_SERVER_COMMAND"], "ros_shell": os.environ["REAL_EVAL_ROS_COMMAND"]},
@@ -700,13 +713,13 @@ else
 fi
 export REAL_EVAL_RUN_DIR REAL_EVAL_HDF5_LOG_DIR REAL_EVAL_MP4_PATH REAL_EVAL_RENDERER_HOOK
 export REAL_EVAL_FFMPEG REAL_EVAL_RECORDING REAL_EVAL_MIN_FREE_GIB REAL_EVAL_POLICY_TYPE
-export IFQL_TASK IFQL_SAMPLER IFQL_NUM_SAMPLES IFQL_STEP IFQL_DEVICE IFQL_CHECKPOINT
+export IFQL_TASK IFQL_SAMPLER IFQL_NUM_SAMPLES IFQL_Q_AGG IFQL_STEP IFQL_DEVICE IFQL_CHECKPOINT
 export IFQL_NORM_STATS IFQL_RUN_DIR IFQL_SERVER_PY
 write_launch_manifest launching
 
 if [ "${IFQL_DRY_RUN}" = "1" ]; then
     echo "### IFQL_DRY_RUN=1: every preflight passed; printing the two resolved commands and exiting WITHOUT starting either one."
-    echo "### task=${IFQL_TASK} run_dir=${IFQL_RUN_DIR} norm_stats=${IFQL_NORM_STATS} params_file=${IFQL_PARAMS_FILE} px=${IS_PX_RUN} act_port=${IFQL_PORT}"
+    echo "### task=${IFQL_TASK} run_dir=${IFQL_RUN_DIR} norm_stats=${IFQL_NORM_STATS} params_file=${IFQL_PARAMS_FILE} px=${IS_PX_RUN} act_port=${IFQL_PORT} q_agg=${IFQL_Q_AGG:-checkpoint-default}"
     echo "### recording=${REAL_EVAL_RECORDING} manifest=${REAL_EVAL_RUN_DIR}/launch_manifest.json hdf5_dir=${REAL_EVAL_HDF5_LOG_DIR} mp4=${REAL_EVAL_MP4_PATH} ffmpeg=${REAL_EVAL_FFMPEG:-<disabled>}"
     echo "### server command:"
     printf '###   env -u FMRL_CAM1_CROP -u FMRL_CAM1_MODE QFLOW_DIR=%q TORCH_HOME=%q XLA_PYTHON_CLIENT_PREALLOCATE=false HF_HUB_OFFLINE=1 \\\n' \
