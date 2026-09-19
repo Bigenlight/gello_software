@@ -10,7 +10,7 @@
 
 ## 데이터셋 (Hugging Face)
 
-이 GELLO/UR7e 텔레오퍼레이션 스택으로 수집한 데이터셋을 공개했습니다. 두 태스크 모두 동일한 리그(UR7e + GELLO 리더 + Robotiq 2F-85 + RealSense 2대)와 동일한 recorder·변환 파이프라인을 씁니다.
+이 GELLO/UR7e 텔레오퍼레이션 스택으로 수집한 데이터셋을 공개했습니다. 아래 데이터셋은 UR7e + GELLO 리더 + Robotiq 2F-85 + RealSense 2대 리그를 사용합니다. 수집 날짜·조명·태스크와 recorder 버전별 변환 규칙을 구분하세요.
 
 **"put the right banana in the pot"** — 51 데모 / 21,524 프레임 / ~12분
 
@@ -31,13 +31,31 @@
 - [`Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3) — 위 raw의 LeRobot v3.0 변환(52 에피소드, 16,009 프레임, RGB 2대, `stamp_s` 정렬·보정 없음, 검증 43/43)
 - 이 태스크의 변환기·검증기·통계 생성기는 **이 리포 `scripts/dataset/`** 에 있습니다(아래). cam1 = 정면 scene D435, cam2 = 손목 D435로 매핑이 확정된 첫 릴리스입니다.
 
-> **규모 주의:** cube 쪽은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. 단독으로 견고한 정책을 학습시키기엔 부족하며, 현재 학습된 cube 정책은 없습니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다.
+> **규모 주의:** 위 `cube_in_cup`은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다. 아래의 2026-09-19 `cube_stack`과는 다른 태스크·데이터셋입니다.
+
+### 최근 RGB 데이터셋 (2026-09-18/19)
+
+기존 무조명/depth 릴리스와 별도 데이터셋입니다. 모든 행 수는 LeRobot의 cam1 master frame 수이며, RL transition 수와 다릅니다.
+
+| 데이터셋 | 수집일 | episodes / frames | 공개 파일 |
+|---|---|---|---|
+| Carrot in pot, 추가 조명 | 2026-09-18 | 65 / 20,472 | [raw](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_lerobot_v3) |
+| Bowl stack, 추가 조명 | 2026-09-18 | 71 / 17,945 | [raw](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_lerobot_v3) |
+| Bowl stack triple | 2026-09-19 | 60 / 36,030 | [raw](https://huggingface.co/datasets/Bigenlight/bowl_stack_triple_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/bowl_stack_triple_lerobot_v3) |
+| Cube stack | 2026-09-19 | 60 / 20,177 | [raw](https://huggingface.co/datasets/Bigenlight/cube_stack_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/cube_stack_lerobot_v3) |
+
+Triple task: `stack the orange bowls and place them into the purple bowl`.
+Cube task: `stack the red cube on the blue cube`.
+
+로컬 raw는 `ros2_ur_ws/gello_logs/{carrot_in_pot,bowl_stack,bowl_stack_triple,cube_stack}/take_*/`에 있습니다. HF raw는 `raw/<원본 take 이름>/{vectors.h5,cam1.mp4,cam2.mp4}` 구조이고, LeRobot에는 `meta/source_takes.json`으로 episode와 원본 이름을 연결합니다. 폴더 태그는 해당 sidecar에 보존되며, triple/cube는 `folder_tag`, `folder_labels`, `recovery_label`로 복구 변형을 선택할 수 있습니다. 태그 자체는 성공/실패 라벨이 아닙니다. 기본 LeRobot `train` 범위는 전체 코퍼스를 뜻하며 논문용 평가 split은 별도로 고정해야 합니다.
+
+Cube 릴리스의 상세 변환·검증·태그 계약은 [Cube stack release](docs/ros2/CUBE_STACK_DATASET_2026-09-19.md)를 참고하세요. Triple 카드에는 조작자가 제공한 전경 사진, cube 카드에는 녹화에서 추출한 preview가 포함됩니다.
 
 ### 데이터셋 만드는 법 (h5 → LeRobot)
 
 banana/cube 변환기는 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)의 `convert_to_lerobot.py`입니다. **carrot(2026-09-14, depth 포함)부터는 이 리포 [`scripts/dataset/`](scripts/dataset/)에 있습니다** — `convert_carrot_to_lerobot.py`(변환), `validate_carrot_conversion.py`(변환기를 import하지 않는 독립 검증, depth 왕복 오차까지), `make_carrot_raw_stats.py`(raw `dataset_stats.json`). 절차 전체는 [`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md)의 「허깅페이스 업로드」절. 요점:
 
-- 마스터 클럭은 `cam1_frames/t_rel_s` (30fps). 모든 로봇 스트림을 각자의 `t_rel_s` 기준 **nearest-timestamp**로 이 격자에 리샘플링합니다. 샘플링이 균일하지 않으므로 인덱스 산술로 정렬하면 안 됩니다.
+- 수정된 recorder의 RGB 데이터는 `convert_takes_to_lerobot.py` → `validate_takes_conversion.py`를 사용합니다. 마스터 클럭은 cam1의 `stamp_s − t0_off`, `t0_off = median(ur.stamp_s − ur.t_rel_s)`입니다. 관절·cam2는 헤더 stamp, command·gripper는 callback `t_rel_s`로 최근접 정렬합니다. 서보 지연을 빼거나 cam1 프레임을 삭제하지 않습니다. 과거 depth carrot의 지연 보정 규칙과 혼용하지 마세요. 샘플링이 균일하지 않으므로 인덱스 산술로 정렬하면 안 됩니다.
 - `observation.state`(7) = `ur_q1..6` + `grip_pos`, `action`(7) = `cmd1..6` + `grip_cmd`. `gello_*` 리더 스트림은 추론 시 관측 불가라 제외합니다.
 - `lerobot 0.6.1`이 필요한데 PyPI에 없습니다 (최신 0.6.0). 커밋 `8a74e0a` 핀으로 설치하세요. **`ros2_ur_ws/act_venv`에는 설치하지 마세요** — 실기 배포가 검증된 환경이므로 별도 venv를 쓰십시오.
 - `hf upload`는 `LeRobotDataset(repo_id)` 로딩에 필요한 `v3.0` 태그를 만들지 않습니다. 업로드 후 `HfApi().create_tag(repo_id, tag="v3.0", repo_type="dataset")`를 별도로 실행해야 합니다.
