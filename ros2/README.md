@@ -38,7 +38,7 @@ If you add new dependencies to your packages, remember to update the relevant `r
 
 ## Getting Started - Pre-assembled Franka GELLO Single with the Franka Hand
 
-- Configure the `com_port` in `franka_gello_single.yaml` and `example_fr3_config_franka_hand.yaml`, and set the `robot_ip` in `example_fr3_config.yaml`. For a complete description, see the [Detailed Launch Routine](#detailed-launch-routine) section.
+- Configure the `com_port` in `franka_gello_single.yaml` and `example_fr3_config_franka_hand.yaml`, and set the `robot_ip` in `example_fr3_config.yaml`. For a complete description, see the [Detailed Launch Routine](#detailed-launch-routine-and-configuration) section.
 - Run the following commands:
     ```bash
       # Follow the Setup Environment section. If using Option 2, substitute /workspace/ with the path to the gello_software folder
@@ -55,7 +55,7 @@ If you add new dependencies to your packages, remember to update the relevant `r
 
 ## Getting Started - Pre-assembled Franka GELLO Duo with the Franka Vision and Manipulation Kit
 
-- Configure the `com_port` in `franka_gello_duo.yaml` and `example_fr3_duo_config_robotiq.yaml`, and set the `robot_ip` in `example_fr3_duo_config.yaml`. For a complete description, see the [Detailed Launch Routine](#detailed-launch-routine) section.
+- Configure the `com_port` in `franka_gello_duo.yaml` and `example_fr3_duo_config_robotiq.yaml`, and set the `robot_ip` in `example_fr3_duo_config.yaml`. For a complete description, see the [Detailed Launch Routine](#detailed-launch-routine-and-configuration) section.
 - Run the following commands:
     ```bash
       # Follow the Setup Environment section. If using Option 2, substitute /workspace/ with the path to the gello_software folder

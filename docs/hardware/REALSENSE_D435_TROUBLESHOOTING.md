@@ -44,7 +44,7 @@ Everything looks like a dead camera, from every angle except one:
 - `realsense2_camera` starts normally and **does not exit**. It stays up and retries forever.
 - `ros2 topic info /camN/camN/color/image_raw/compressed` reports **Publisher count: 1**.
 - `ros2 topic hz` on that topic prints nothing.
-- Every consumer (viewer, recorder, policy leader, `ur7e_env.get_im()`) reports
+- Every consumer (viewer, recorder, and any policy/RL client on a research branch) reports
   **"no frame" / stale frame**, never "wrong serial".
 
 **Nothing in the stack distinguishes an unplugged camera from a misconfigured one.**
@@ -91,36 +91,75 @@ two identifier namespaces.**
 > is the wrong number for `serial_no`.** Only `rs-enumerate-devices -s` / `pyrealsense2`
 > give the value the ROS node matches.
 
-## Fix: do not hardcode serials at all
+## 현재 동작: 설정된 시리얼을 live 버스와 **엄격히** 대조한다
 
-`launch_cameras.sh` and `run_recorder.sh` source `ros2_ur_ws/_resolve_camera_serials.sh`
-and resolve against the live USB bus before launching anything;
-`gello_recorder_gui.py` has equivalent Python-side logic. Behaviour:
+`launch_cameras.sh`와 `run_recorder.sh`는 카메라 노드를 띄우기 전에
+`ros2_ur_ws/_resolve_camera_serials.sh`를 source해 설정된 `CAM1_SERIAL`/`CAM2_SERIAL`을
+`rs-enumerate-devices`(ros-jazzy-librealsense2에 포함, `pyrealsense2` 불필요) 출력과 대조한다.
+`gello_recorder_gui.py`도 같은 규칙을 Python 쪽에 갖고 있다.
 
-| Situation | What happens |
+| 상황 | 동작 |
 |---|---|
-| Both configured serials are connected | passed through unchanged, **silently** |
-| Otherwise, one plain + one D435i/IF | assigned by model class (**plain D435 → cam1 SCENE, D435i/IF → cam2 WRIST**) with a `WARN auto-selected by model class:` line |
-| Otherwise, both the same model class | falls back to sorted serial order + `WARN VERIFY THE PANES BEFORE RECORDING` |
-| Fewer than 2 devices connected | **hard error**: lists what *is* connected, prints the override syntax, exits 1 |
-| `pyrealsense2` not importable | non-fatal `SKIP`; configured serials are used as-is |
+| 설정된 두 시리얼이 **둘 다** 연결돼 있음 | 그대로 사용(물리적 cam1/cam2 배정 보존) |
+| 그 외 | 카메라 노드를 띄우기 **전에 실패**한다. 두 D435를 모델 클래스나 USB 열거 순서로 안전하게 배정할 수 없기 때문이다 |
+| `CAMERA_ALLOW_SERIAL_FALLBACK=1` | 옛 모델 클래스/정렬 순서 fallback을 켠다(임시 리그용, 항상 WARN) |
 
-Enumeration takes **no streaming lock**, so it is safe to run while another process
-already holds the cameras. Override only if you have a specific reason:
+기본값은 **module serial**이다(2026-10 기준 cam1 `143322071682`, cam2 `143322072540`, 둘 다 plain D435 —
+위 표의 2026-07-29 값은 그 이전 카메라 쌍의 기록이다). 기본값의 위치는 `launch_cameras.sh`/`run_recorder.sh`
+머리말을 볼 것. 카메라를 바꾸면 기본값을 고치거나 환경변수로 덮어쓴다:
 
 ```bash
 CAM1_SERIAL=<module-serial> CAM2_SERIAL=<module-serial> ./launch_cameras.sh
+./launch_cameras.sh --check     # 스트림을 열지 않고 시리얼 매핑만 검사
 ```
 
-> ⚠️ **Known wart (2026-07-29):** the configured defaults in `launch_cameras.sh`,
-> `run_recorder.sh` and `gello_recorder_gui.py` are the **ASIC** serials
-> (`151623020789` / `322743060038`), so on this rig the "silent passthrough" row above
-> never happens — every launch takes the model-class `WARN` path. It resolves to the
-> right cameras today only because the two units are different model classes. If
-> `pyrealsense2` were ever missing, the `SKIP` row would hand those unmatched serials
-> straight to `realsense2_camera` and both cameras would silently never come up.
+열거는 스트리밍 락을 잡지 않으므로 다른 프로세스가 카메라를 쓰는 중에도 안전하다.
+
+---
+
+# cam1 / cam2 역할 계약과 손목 확인
+
+| | cam1 | cam2 |
+|---|---|---|
+| 역할 | **SCENE** — 삼각대 고정, 3인칭 | **WRIST** — 그리퍼에 강체 장착, 팔과 함께 움직인다 |
+| 토픽 | `/cam1/cam1/color/image_raw/compressed` | `/cam2/cam2/color/image_raw/compressed` |
+| 프로파일 | `1280x720x30` | 동일 |
+
+매핑이 뒤집혀도 **에러는 나지 않는다** — 녹화 데이터와 그 데이터로 학습한 정책이 조용히 망가진다.
+그래서 `launch_cameras.sh`는 뷰어(좌 = cam1, 우 = cam2)를 **기본으로 띄운다**(`VIEW=false`로 끔).
+판정은 팔을 한 번 움직여 보는 것이다:
+
+- **좌측 창(cam1)**: 팔을 움직여도 배경이 고정돼 있다.
+- **우측 창(cam2)**: 팔을 움직이면 **화면 전체가 흐르고**, 그리퍼 손가락은 **같은 픽셀에 남는다.**
+  "화면에 물체가 안 보인다"는 조준 문제가 아니라 팔이 다른 곳을 보고 있을 뿐일 수 있다.
+
+> `launch_cameras.sh` 머리말 주석의 `cam2 = CLOSE-UP (workspace)` 류 문구는 낡은 표현이다 —
+> cam2는 손목 카메라다.
+
+손으로 한 대만 띄울 때는 시리얼을 **따옴표로 감싼다**. `ros2 launch`는 전부 숫자인 인자를 정수로
+바꾸고, `serial_no`는 STRING 파라미터라 노드가 즉사한다:
+
+```bash
+ros2 launch realsense2_camera rs_launch.py \
+    camera_name:=cam1 camera_namespace:=cam1 "serial_no:='<module-serial>'" \
+    "rgb_camera.color_profile:='1280x720x30'"
+```
+
+## 카메라 판정 체크리스트
+
+- [ ] `./launch_cameras.sh`가 30초 안에 두 스트림 ~30 Hz 도달 (`wait_for_stream`)
+- [ ] 뷰어 좌 = cam1 SCENE(배경 고정) / 우 = cam2 WRIST(배경이 흐르고 손가락은 제자리)
+- [ ] `lsusb -t`에서 두 카메라 모두 `5000M`(USB3). `480M`이면 USB2로 폴백된 것 — 케이블/포트 교체
+- [ ] `cat /sys/module/uvcvideo/parameters/quirks` = `4294967295`
+- [ ] 유량은 `ros2 topic hz`로 판정한다. RealSense 퍼블리셔는 RELIABLE/TRANSIENT_LOCAL이라
+      늦게 붙은 구독자는 **캐시된 마지막 프레임**을 즉시 받는다 — `echo --once` 성공은
+      카메라가 살아 있다는 증거가 아니다.
+
+> "두 대가 같은 USB 허브에 있으면 문제"라는 말은 **가설**이다. 리포 안에 이를 뒷받침하는 근거는
+> 없고, 확인된 근본 원인은 위 `uvcvideo` quirks였다. 별도 버스로 옮겨 재현이 사라지면 그때 기록한다.
 
 ## Related
 
-- `docs/testing/06_SENSORS.md` §1 — cam1/cam2 role contract and the arm-jog check for which unit is on the wrist.
-- `ros2_ur_ws/_resolve_camera_serials.sh` — the helper itself, with the full behaviour description in its header.
+- `ros2_ur_ws/_resolve_camera_serials.sh` — 시리얼 해석 헬퍼. 전체 동작은 파일 머리말에 있다.
+- `ros2_ur_ws/launch_cameras.sh` — 카메라 2대 + 뷰어. `ENABLE_DEPTH`/`ALIGN_DEPTH` 등 옵션은 머리말.
+- `ros2_ur_ws/camera_viewer.py` — 단독 2-카메라 뷰어.
