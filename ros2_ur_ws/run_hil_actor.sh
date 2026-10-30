@@ -136,7 +136,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HANDOFF_LIB="$SCRIPT_DIR/_hil_controller_handoff.sh"
 POSE_CHECKER="$SCRIPT_DIR/_hil_joint_pose_check.py"
 DEADMAN_CHECKER="$SCRIPT_DIR/_hil_deadman_check.py"
-TOPIC_CHECKER="$SCRIPT_DIR/_hil_topic_rate_check.py"
+TOPIC_CHECKER="$SCRIPT_DIR/_topic_rate_check.py"
 if [ ! -f "$HANDOFF_LIB" ] || [ ! -f "$POSE_CHECKER" ] || \
    [ ! -f "$DEADMAN_CHECKER" ] || [ ! -f "$TOPIC_CHECKER" ]; then
     echo "FATAL: HIL handoff/deadman/topic helper missing under $SCRIPT_DIR" >&2

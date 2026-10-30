@@ -10,10 +10,10 @@ import pytest
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT = _ROOT / "ros2_ur_ws" / "_hil_topic_rate_check.py"
+_SCRIPT = _ROOT / "ros2_ur_ws" / "_topic_rate_check.py"
 _ACTOR = _ROOT / "ros2_ur_ws" / "run_hil_actor.sh"
 _CAMERAS = _ROOT / "ros2_ur_ws" / "launch_cameras.sh"
-_SPEC = importlib.util.spec_from_file_location("hil_topic_rate_check", _SCRIPT)
+_SPEC = importlib.util.spec_from_file_location("topic_rate_check", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
@@ -49,7 +49,7 @@ def test_rate_rejects_non_advancing_or_insufficient_arrivals(values):
 
 def test_actor_preflight_uses_graceful_helper_not_ros2_topic_hz():
     text = _ACTOR.read_text()
-    assert 'TOPIC_CHECKER="$SCRIPT_DIR/_hil_topic_rate_check.py"' in text
+    assert 'TOPIC_CHECKER="$SCRIPT_DIR/_topic_rate_check.py"' in text
     assert 'python3 "$TOPIC_CHECKER"' in text
     assert not re.search(r"^\s*(?:timeout\s+\S+\s+)?ros2 topic hz", text, re.MULTILINE)
     assert "timeout --signal=TERM --kill-after=2" in text
@@ -80,6 +80,9 @@ def test_actor_session_checks_liveness_without_startup_rate_gate():
 
 def test_camera_launcher_uses_graceful_helper_not_ros2_topic_hz():
     text = _CAMERAS.read_text()
-    assert 'TOPIC_CHECKER="${SCRIPT_DIR}/_hil_topic_rate_check.py"' in text
-    assert 'python3 "${TOPIC_CHECKER}"' in text
+    assert 'TOPIC_CHECKER="${SCRIPT_DIR}/_topic_rate_check.py"' in text
+    # launch_cameras.sh pins the probe to the system interpreter (rclpy) via
+    # TOPIC_CHECKER_PY rather than a bare `python3` from PATH.
+    assert 'TOPIC_CHECKER_PY="/usr/bin/python3"' in text
+    assert '"${TOPIC_CHECKER_PY}" "${TOPIC_CHECKER}"' in text
     assert not re.search(r"^\s*(?:timeout\s+\S+\s+)?ros2 topic hz", text, re.MULTILINE)

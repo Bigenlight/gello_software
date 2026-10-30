@@ -79,7 +79,7 @@ GUI_SCRIPT="$SCRIPT_DIR/run_hil_gui.sh"
 PREPOSITION_SCRIPT="$SCRIPT_DIR/run_hil_preposition.sh"
 ACTOR_SCRIPT="$SCRIPT_DIR/run_hil_actor.sh"
 LOCAL_POLICY_SCRIPT="$SCRIPT_DIR/run_hil_local_policy.sh"
-TOPIC_CHECKER="$SCRIPT_DIR/_hil_topic_rate_check.py"
+TOPIC_CHECKER="$SCRIPT_DIR/_topic_rate_check.py"
 CAMERA_READY_TIMEOUT_S="${HIL_CAMERA_READY_TIMEOUT_S:-90}"
 # proxy는 파라미터 첫 blob을 기다리고(기본 최대 300 s) 그 뒤 두 policy trace를
 # JIT 컴파일한다(0.7~1.6 s씩). 그래서 camera READY보다 훨씬 넉넉해야 한다.
