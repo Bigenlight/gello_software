@@ -1,0 +1,11 @@
+--- a/vision_carrot/ifql_server.py
++++ b/vision_carrot/ifql_server.py	2026-09-16 00:13:39.897686120 +0900
+@@ -124,7 +124,7 @@
+         self.D_f1 = int(d.get("D_f_cam1", self.D_f))
+         self.D_f2 = int(d.get("D_f_cam2", self.D_f))
+         self.D_a = int(d["D_a"])
+-        self.D_c = int(d.get("D_c", self.D_a + Z_PRIV_DIM))
++        self.D_c = int(d.get("D_c") or (self.D_a + Z_PRIV_DIM))
+         self.action = aq.ActionNorm(d["action"]["lo"], d["action"]["hi"])
+         self.p_mean = np.asarray(d["proprio"]["mean"], np.float32).reshape(STATE_DIM)
+         self.p_std = np.asarray(d["proprio"]["std"], np.float32).reshape(STATE_DIM)

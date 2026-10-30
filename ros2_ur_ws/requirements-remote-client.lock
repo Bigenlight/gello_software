@@ -1,0 +1,4 @@
+# Robot-laptop-only override. Ubuntu 22.04's python3-grpcio 1.30.2 can open
+# the SSH-forwarded TCP socket but does not complete this server's HTTP/2
+# handshake. Keep this version aligned with the verified remote service.
+grpcio==1.74.0

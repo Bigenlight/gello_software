@@ -1,0 +1,11 @@
+# Downloaded ACT checkpoints / datasets are large binary artifacts and are
+# regenerable from the Hugging Face Hub (Bigenlight/act_banana_in_pot,
+# Bigenlight/banana_in_pot_lerobot_v3) via scripts/download_checkpoint.sh — same
+# "keep a tracked pointer, ignore the payload" convention as ros2_ur_ws/gello_logs.
+# NEVER commit them here.
+checkpoints/
+datasets/
+
+# py3.12 ACT server dependency lock is tracked (policy_server/requirements-act.lock),
+# but any local venv created from it is not.
+.venv-act/

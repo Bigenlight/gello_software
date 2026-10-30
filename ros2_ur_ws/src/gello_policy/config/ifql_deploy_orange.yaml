@@ -1,0 +1,262 @@
+# ifql_deploy_orange.yaml — single parameter file for the IFQL real-robot deploy pipeline
+# (ORANGE-bowl-in-purple-bowl, UR7e + Robotiq 2F-85, ROS2 Jazzy).  2026-09-16.
+#
+# SIBLING of ifql_deploy.yaml (carrot-in-pot).  Model: IFQL = flow-matching BC actor +
+# IQL critic, served with best-of-N (BoN) rejection sampling at deploy time (K=32; K=1
+# == plain BC control from the SAME checkpoint).  Observation = frozen ResNet18
+# spatial-softmax features of cam1 + cam2 (1024-D each) + 7-D proprio = 2055-D.  The
+# server emits one 56-D chunk = 8 knots x 7 (q1..q6 target rad + grip_cmd 0..1) at
+# 10 Hz stride-3, expands it into a 24-frame 30 Hz action queue, pops one frame per ACT
+# and re-plans (refill) only when the queue is empty -> re-plan every 24 ticks ~= 0.8 s
+# @ 30 Hz.  This corpus was trained with action_lead 2 (the sim convention), so the
+# lead2 norm_stats is the matching one.  The 7-D per-tick action contract on the wire is
+# IDENTICAL to ACT/diffusion/FM/carrot-IFQL, so the whole ROS2 safety stack (leader node,
+# bridge, clamps, handshake, gripper) is reused UNCHANGED; only the checkpoint, the
+# norm_stats and the two task-specific values in this file differ.
+#
+# CHECKPOINT CANDIDATES (handoff cards/MODEL_CARD.md §4, val-loss order — NONE of them
+# has been verified on the real robot):
+#   1. ifql_orange_k0.9_lead2_aug8_p0.5_s0 @100k  (norm_stats_r18_ss_orange_lead2.json)
+#        val actor loss 0.151, the best of all 19 runs.  aug8 = offline feature-space
+#        image augmentation aimed at DAYLIGHT ILLUMINATION SHIFT -> the only candidate
+#        that directly addresses the suspected cause of yesterday's real-robot failure
+#        (natural light entering the cell).  Server-side drop-in: the augmentation is
+#        training-only, the deploy feature path is unchanged.  >>> TRY THIS FIRST. <<<
+#   2. ifql_orange_k0.9_lead2_s0 @100k            (norm_stats_r18_ss_orange_lead2.json)
+#        same recipe without aug (p=0 would be bit-identical).  NOTE: it is THIS family
+#        that already failed once on the real robot (no quantitative trial log survives).
+#   3. px_orange_impala_lead2_s0 @100k            (norm_stats_orange_lead2_px96.json)
+#        end-to-end pixel encoder (impala), i.e. it side-steps the frozen-ImageNet
+#        feature limitation; highest val critic, real-robot unverified.
+#   (alternate: ifql_orange_k0.9_lead6_s0 @100k with norm_stats_r18_ss_orange_lead6.json,
+#    only if lead2 reacts too slowly on hardware.)
+#   The clamp box below encloses the action box of ALL of these norm_stats (see the
+#   joint_limits note), so the candidates are interchangeable w.r.t. this file.
+#
+# SERVER (outside this repo): ~/carrot_ifql/code/carrot_ifql_code_20260916/vision_carrot/
+#   ifql_server.py  (.venv-svf: torch for the ResNet18 encoder + JAX for the agent),
+#   ZMQ REP on 127.0.0.1:5595.  Launcher: ros2_ur_ws/run_ur7e_ifql_real.sh (point it at
+#   THIS file and at the orange run-dir + the MATCHING norm_stats).  Runbook:
+#   vision_carrot/REALROBOT_RUNBOOK_IFQL.md and docs/ros2/GELLO_UR7E_IFQL_DEPLOY.md.
+#
+# TIMEOUTS: identical to the carrot ifql_deploy.yaml (0.8 / 0.9 / 1.0).  An IFQL refill =
+# JPEG decode + 2x ResNet18 forward (torch) + K flow-matching samples + critic scoring
+# (JAX); that path on this laptop is UNMEASURED and K=32 is the slow case, hence the
+# widened budget.  Ordering invariant preserved:
+# act_timeout_s < obs_timeout_s < staleness_timeout_s (0.8 < 0.9 < 1.0) -> the leader's
+# ZMQ timeout stays the clean primary fault owner.
+#
+# >>> If the measured warmup/refill exceeds 300 ms (server prints
+#     "WARNING: warmup refill ... > 300 ms"), REDUCE K (--num-samples 32 -> 16) rather
+#     than widening these timeouts further. Do NOT raise the timeouts again.
+#
+# !! JOINT-0 SIGN / WRAP -- THE ONE THING THAT DIFFERS PHYSICALLY FROM CARROT !!
+# This corpus has shoulder_pan (j0) around +3.07 rad (observed range +2.40 .. +3.63).
+# The carrot corpus recorded pan at -3.16, i.e. the OTHER branch of the same wrap.  The
+# policy, its norm_stats and the envelope below are ALL in the +pi convention, so
+# /joint_states MUST report j0 in +2.4 .. +3.6 at deploy time.  If the driver reports it
+# wrapped to -3.x, the 0.1 rad start gate never passes and max_dev_rad = 0.5 blocks every
+# command.  Check `ros2 topic echo /joint_states --once` BEFORE ~/start_execution.
+# (Confirmed by the training session: "j0 +3.x".)
+#
+# PROVENANCE OF THE NUMBERS (all rad, UR joint order pan, lift, elbow, w1, w2, w3):
+#   * start_pose / joint_limits come from the REAL orange_bowl_in_purple_bowl corpus,
+#     52 takes / 16,009 frames recorded 2026-09-15..16 with the FIXED recorder (stamp_s
+#     present, no tau correction needed).  Primary source, taken VERBATIM:
+#       ~/carrot_ifql/hf_orange/deploy/orange_real_limits.json  (training-session handoff,
+#       computed from Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3 @v3.0,
+#       snapshot 8c65562b6d237461d2974ebf8d06fd97b14b52f5).
+#     Re-derived INDEPENDENTLY on laptop3 2026-09-16 from the local raw takes
+#     (/home/laptop3/youngwoong_ws/Orange_bowl_in_purple_bowl, the 52 takes listed in
+#     scripts/dataset/orange_bowl_in_purple_bowl_validation_2026-09-16.json) by replaying
+#     scripts/dataset/convert_takes_to_lerobot.py::load_take_arrays -> 16,009 rows, and
+#     every number below matched the handoff file to all 4 decimals.
+#   * The carrot values (start_pose j0 = -3.1638, envelope [-3.81, -2.58] on pan) are a
+#     DIFFERENT robot placement AND the other wrap branch; nothing carrot remains here.
+#   * config/joint_safety_limits.json is the BANANA provenance file for ACT/diffusion.
+#     It is NOT read at runtime and is deliberately left untouched.
+
+# ---------------------------------------------------------------------------- #
+# Synthetic leader (this package). Policy-agnostic; see gello_policy README.
+# ---------------------------------------------------------------------------- #
+policy_leader_node:
+  ros__parameters:
+    # Single rclpy timer rate driving BOTH /gello/joint_states and the gripper
+    # command each tick. MUST stay 30.0: the server's 24-frame queue is laid out on
+    # the dataset's 30 Hz clock (8 knots x stride 3); changing this stretches the
+    # chunk time axis.
+    publish_rate_hz: 30.0
+
+    # HELD start pose (rad, UR joint order: pan, lift, elbow, w1, w2, w3). While in
+    # HOLD the leader publishes THIS pose perfectly still so gello_move_to_start
+    # converges on it and the resume-align gate passes. The live arm must be within
+    # START_GATE_RAD (0.1 rad, policy_leader_node.py) of it before ~/start_execution
+    # is accepted.
+    #
+    # SOURCE (2026-09-16): orange_real_limits.json
+    # "episode_start_pose_stats_for_reference.mean" = mean of observation.state at
+    # frame 0 over the 52 orange takes; reproduced exactly by the local re-derivation.
+    # This corpus needs NO de-staling shift: the fixed recorder stamps rows with the
+    # header time (stamp_s), so frame 0 already is the arm pose at the first camera
+    # capture (contrast the carrot corpus, which needed tau_q = 0.89 s).
+    # Per-joint std [0.1098, 0.1094, 0.1214, 0.1113, 0.0822, 0.1357], max |take start -
+    # mean| [0.3063, 0.2748, 0.3743, 0.3320, 0.2118, 0.3295] -> the takes themselves did
+    # NOT all start within START_GATE_RAD of this mean, which is fine: move-to-start
+    # drives the arm TO this pose and the gate is checked against the leader, not the
+    # takes. Do NOT "widen" START_GATE_RAD because of those numbers.
+    # NOTE j0 = +3.07 (see the JOINT-0 SIGN block in the header).
+    start_pose: [3.0719, -1.5399, 1.8313, -1.9200, -1.5763, -3.2654]
+    # Held gripper command while in HOLD (0.0 = OPEN .. 1.0 = CLOSED). Every take
+    # starts fully open (orange dataset frame-0 grip_pos mean 0.0119, min 0.0118 =
+    # the open end stop; identical to carrot). UNCHANGED from ifql_deploy.yaml.
+    start_gripper: 0.0
+
+    # IFQL inference server endpoint (ZMQ REQ/REP over localhost). Overridable by the
+    # launch act_host / act_port args; run_ur7e_ifql_real.sh passes IFQL_PORT.
+    act_host: "127.0.0.1"
+    act_port: 5595  # IFQL server port (ACT=5591, diffusion=5592, FM=5593, SVF=5594)
+    # REQ socket receive timeout (s). On timeout/error the node FAULTS: it STOPS
+    # publishing /gello/joint_states so the bridge's staleness watchdog trips and
+    # halts the arm (never hold-last-target through an outage).
+    act_timeout_s: 0.8  # widened from FM's 0.6 for BoN K=32 / possible CPU fallback; the
+                        # leader still FAULTs first and stays the PRIMARY fault owner.
+
+    # SAFETY CLAMP (a): per-joint hard limits = the 1.2x dataset envelope, expanded
+    # symmetrically about the centre of the OBSERVED joint range of the 52 ORANGE takes.
+    # Any commanded joint outside this is clipped (OOD guard). Order = UR joint order.
+    #
+    # SOURCE: orange_real_limits.json safety_lo_1p2x / safety_hi_1p2x, taken VERBATIM.
+    # RULE (same formula as carrot_real_limits.json and config/joint_safety_limits.json):
+    #   per joint, over the UNION of the parquet columns 'action' and 'observation.state'
+    #   (16,009 rows, 52 episodes):
+    #     center = (min + max) / 2 ; half = (max - min) / 2 * 1.2 ; lo/hi = center -+ half
+    # UNION raw min [ 2.4026, -1.8623,  1.3560, -2.6593, -1.8037, -3.8684]
+    #            max [ 3.6262, -0.9603,  2.3128, -1.5776, -1.2755, -2.4284]
+    # (local re-derivation on laptop3 gave the identical numbers at 4 decimals; the 1.2x
+    #  rule therefore leaves a per-side margin of 0.0528 .. 0.1440 rad around the demos.)
+    # NOTE the ORANGE envelope is NOT a superset of the carrot one: pan/lift/elbow leave
+    # the carrot box entirely (different placement + other wrap branch). Never mix.
+    #
+    # The box encloses every candidate server denormalisation box: the action lo/hi of
+    # norm_stats_r18_ss_orange_lead2.json == _lead6.json == (unsuffixed) .json
+    #   lo [ 2.3428, -1.9074,  1.3082, -2.7028, -1.8299, -3.9394]
+    #   hi [ 3.6873, -0.9155,  2.3607, -1.5240, -1.2491, -2.3564]
+    # and norm_stats_orange_lead2_px96.json matches those to 1e-7 rad. Those files are a
+    # 1.1x expansion of the same corpus, this clamp a 1.2x one, so the clamp sits
+    # 0.027..0.073 rad OUTSIDE them per joint and can only fire on a genuinely OOD
+    # sample -- a steady "SAFETY CLAMP engaged: joint_limits (OOD)" WARN therefore means
+    # the server was started with a CARROT/sim norm_stats, not a policy quirk.
+    # (Also note: as on carrot, the lead0/lead2/lead6 REAL files share one action box, so
+    #  a lead mix-up is NOT caught here -- only by the launcher's norm_stats log check.)
+    joint_limits_lo: [2.2802, -1.9525, 1.2604, -2.7674, -1.8565, -4.0124]
+    joint_limits_hi: [3.7485, -0.8701, 2.4085, -1.4695, -1.2226, -2.2844]
+
+    # SAFETY CLAMP (b): per-joint max deviation (rad) of a commanded target from the
+    # LIVE /joint_states. Bounds any single-step jump from the actual pose.
+    # Unchanged from ACT/diffusion/FM.
+    max_dev_rad: 0.5
+
+    # OBS FRESHNESS WATCHDOG: in EXECUTE, if any observation (joint_states, grip_pos,
+    # cam1, cam2) is missing or older than this many seconds, the node FAULTs (stops
+    # publishing -> bridge halts the arm). Catches a frozen/hung camera driving the
+    # policy on a stale frame.
+    # Kept ABOVE act_timeout_s: the node is single-threaded, so during a refill tick it
+    # BLOCKS inside the ZMQ round-trip and cannot service camera callbacks -> obs
+    # timestamps freeze for the refill duration. Keeping obs_timeout_s (0.9) above
+    # act_timeout_s (0.8) makes the ZMQ timeout the real primary fault owner while a
+    # genuinely frozen camera is still caught (0.1 s later).
+    obs_timeout_s: 0.9
+
+    # If true, auto-enter EXECUTE when /forward_position_controller/commands starts
+    # streaming (i.e. the bridge released), instead of waiting for the operator's
+    # ~/start_execution call. MUST stay false for the trial protocol: nothing moves
+    # autonomously before the operator presses START.
+    auto_start_on_stream: false
+
+# ---------------------------------------------------------------------------- #
+# GELLO -> UR bridge. REUSED from ur7e_gello.yaml / fm_deploy.yaml. Byte-identical
+# to the carrot ifql_deploy.yaml: these are bridge safety values, not task values.
+# ---------------------------------------------------------------------------- #
+gello_ur_bridge:
+  ros__parameters:
+    filter_type: "one_euro"
+    # OPENED UP for the policy (was 1.0). The policy emits a smooth, already-filtered
+    # target stream at 30 Hz; a low min_cutoff only adds at-rest lag.
+    one_euro_min_cutoff: 3.0
+    # OPENED UP for the policy (was 2.0). Higher beta => cutoff opens faster with speed
+    # => snappier tracking of the policy's intended motion.
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    # UNCHANGED (safety): per-cycle slew ceiling. 0.0025 rad @ 250 Hz => 0.625 rad/s
+    # sustained, worst-case two-coalesce 2.5 rad/s (~20% margin under the 3.14 rad/s
+    # driver limit). Do NOT raise.
+    max_step_rad: 0.0025
+    deadband_rad: 0.004
+    # Kept ABOVE act_timeout_s (0.8) so the bridge does NOT halt during a legitimate
+    # <=0.8s IFQL refill gap while the leader blocks on ZMQ. The leader (0.8s) faults
+    # FIRST and cleanly on a real outage. Ordering: act_timeout_s (0.8) <
+    # obs_timeout_s (0.9) < staleness (1.0).
+    staleness_timeout_s: 1.0
+    # UNCHANGED (safety): soft-start ease-in on every (re)seed.
+    soft_start_s: 0.7
+    start_paused: false
+    # UNCHANGED (safety): resume alignment gate; MUST stay >= chase_tol (0.06).
+    resume_align_tol: 0.08
+    # UNCHANGED: 250 Hz upsample of the 30 Hz leader stream into the 500 Hz driver.
+    publish_rate_hz: 250.0
+    joint_states_topic: "/joint_states"
+
+# ---------------------------------------------------------------------------- #
+# move-to-start handshake. Copied VERBATIM from the carrot ifql_deploy.yaml /
+# fm_deploy.yaml / ur7e_gello.yaml.
+#
+# WHERE THE TARGET POSE COMES FROM: this node has NO start_pose parameter. In
+# start_mode "gello" (the only mode run_ur7e_ifql_real.sh allows) it subscribes to
+# /gello/joint_states and chases whatever the leader publishes -- which, while
+# policy_leader_node is in HOLD, is exactly policy_leader_node.start_pose above.
+# So the orange start pose flows: this yaml -> leader HOLD -> /gello/joint_states ->
+# chase -> STRICT switch -> bridge ~/resume. There is a single source of truth.
+#
+# init_pose below is consulted ONLY in start_mode "init_align" (an interactive,
+# human-GELLO alignment flow whose gate can never pass with a synthetic leader that
+# holds a different pose). It is left at the generic upright value so it cannot be
+# mistaken for an orange pose; the launcher refuses START_MODE=init_align.
+# ---------------------------------------------------------------------------- #
+gello_move_to_start:
+  ros__parameters:
+    source_controller: "scaled_joint_trajectory_controller"
+    target_controller: "forward_position_controller"
+    trajectory_duration: 5.0
+    arrival_tolerance: 0.05
+    chase_tol: 0.06
+    chase_dwell_s: 0.4
+    chase_v_budget: 0.5
+    min_traj_duration: 0.5
+    chase_hard_limit: 4.0
+    chase_still_speed: 0.1
+    chase_still_window_s: 0.3
+    chase_timeout_s: 30.0
+    gello_staleness_s: 0.5
+    start_mode: "gello"
+    init_pose: [1.5708, -1.57, 1.57, -1.57, -1.57, 0.0]
+    alignment_tolerance: 0.2
+    alignment_hard_limit: 0.5
+    alignment_timeout: 0.0
+
+# ---------------------------------------------------------------------------- #
+# Robotiq 2F-85 Modbus gripper driver (node name 'robotiq_gripper').
+# Copied VERBATIM from the carrot ifql_deploy.yaml / fm_deploy.yaml. serial_port
+# default "" is overridden to /tmp/ttyUR by the launch (arm driver owns the tool bus
+# via use_tool_communication).
+# ---------------------------------------------------------------------------- #
+robotiq_gripper:
+  ros__parameters:
+    serial_port: ""
+    speed: 150
+    force: 50
+    connect_on_start: true
+    activate_on_connect: true
+    status_rate_hz: 5.0
+    command_rate_hz: 20.0
+    command_deadband: 0.01

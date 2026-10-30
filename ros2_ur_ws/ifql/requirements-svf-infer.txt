@@ -1,0 +1,21 @@
+# .venv-svf -- ifql_server.py serving subset of
+# code/carrot_ifql_code_20260915/vision_carrot/env/requirements.txt (the CUDA-pinned file the
+# training box used; hf_release/requirements-infer.txt is the CPU-only load_example.py list).
+# Kept: everything ifql_server.py / extract_features.VariantEncoder / qflow agents+utils import at
+# module level. Dropped (training/offline only): wandb ogbench scikit-learn av pyarrow pandas
+# h5py huggingface_hub pytest pyyaml  (av/pandas/pyarrow are function-local imports in
+# extract_features.py: load_tables/decode_worker/main -- not touched by VariantEncoder).
+# torch pinned to the cu126 build so torch and jax share ONE nvidia-*-cu12 runtime set
+# (PyPI torch 2.14 default wheel is CUDA 13 -> second cudnn/cublas in-process).
+--index-url https://download.pytorch.org/whl/cu126
+--extra-index-url https://pypi.org/simple
+jax[cuda12]==0.6.2
+flax==0.10.7
+optax==0.2.8
+distrax==0.1.5
+ml_collections==1.1.0
+torch==2.14.0+cu126
+torchvision==0.29.0+cu126
+opencv-python-headless==5.0.0.93
+pyzmq==27.2.0
+numpy==2.4.6
