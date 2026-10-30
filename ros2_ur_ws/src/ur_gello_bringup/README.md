@@ -1,7 +1,10 @@
 # ur_gello_bringup
 
-ROS2 (Humble/Jazzy) `ament_python` package that teleoperates a Universal
-Robots arm (ur5e/ur7e) from a GELLO leader arm, with RViz visualization.
+ROS 2 `ament_python` package that teleoperates a Universal Robots arm
+(ur5e/ur7e) from a GELLO leader arm, with RViz visualization. This branch
+(`ur7e-jazzy`) targets ROS 2 **Jazzy** / Ubuntu 24.04; the same code also runs
+on Humble (`feat/gello-ur7e-humble-22.04`). Install/build: 
+[`docs/ros2/GELLO_UR7E_JAZZY_24.04_SETUP.md`](../../../docs/ros2/GELLO_UR7E_JAZZY_24.04_SETUP.md).
 
 ## Nodes
 
@@ -28,6 +31,17 @@ Robots arm (ur5e/ur7e) from a GELLO leader arm, with RViz visualization.
   STRICT-switches control to `forward_position_controller` for streaming
   teleop. (Target is the live GELLO pose, NOT `start_joints`.) Not needed on
   the fake/mock path.
+- **gello_gripper_bridge** — GELLO trigger → `/robotiq_gripper/command_percent`
+  (continuous, or `gripper_mode:=discrete` with 0.3/0.7 hysteresis).
+- **robotiq_gripper_modbus** / **robotiq_gripper_action** — Robotiq 2F-85 over
+  Modbus RTU on the UR tool-communication port (`ur7e_gripper_only.launch.py`,
+  `run_ur7e_gripper.sh`). Topic convention: 0.0 = open, 1.0 = closed. See
+  [`docs/ros2/GELLO_UR7E_GRIPPER.md`](../../../docs/ros2/GELLO_UR7E_GRIPPER.md).
+- **gello_eef_gui** / **eef_recorder_gui** — EEF teleop operator GUI and the
+  integrated EEF data-collection GUI (`run_eef_gui.sh`,
+  `run_eef_collection_gui.sh`).
+- **gello_operator_console** — numbered-menu console for the `init_align`
+  start handshake (`run_operator_console.sh`).
 
 ### Topics
 
@@ -43,8 +57,9 @@ UR joint order:
 ## Build
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-colcon build --packages-select ur_gello_bringup
+cd ~/gello_software/ros2_ur_ws
+./build_ur7e.sh            # colcon build --symlink-install (ur_gello_bringup + gello_recorder)
+source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
@@ -65,7 +80,7 @@ Reads the physical GELLO leader arm and drives **mock** hardware in RViz.
 Config (serial port, joint offsets/signs, gripper) is in `config/ur_gello.yaml`.
 
 ```bash
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
+export GELLO_REPO_ROOT=~/gello_software
 ros2 launch ur_gello_bringup ur_gello_rviz.launch.py source:=gello
 ```
 
@@ -77,18 +92,18 @@ ros2 launch ur_gello_bringup ur_gello_rviz.launch.py source:=gello
 > on the UR control PC (the machine connected to the robot and the GELLO serial
 > adapter).
 
-## UR7e (Humble)
+## UR7e
 
 UR7e support reuses the same nodes unchanged (ur5e and ur7e share identical
 joint limits) via a dedicated `ur7e_gello_rviz.launch.py` (fake/mock) and
 `ur7e_gello_real.launch.py` (real robot) launch pair, plus the new
 `gello_move_to_start` node for a safe handshake before streaming teleop.
 
-> Note: with `ros-humble-ur` 2.8.1, ur7e visuals in RViz currently render the
-> ur5e mesh (`config/ur7e` visual_parameters point at `meshes/ur5e`, not yet
-> updated upstream) and a missing `ur7e_update_rate.yaml` produces a harmless
-> warning; joint-space teleop itself is unaffected. Upgrade to
-> `ros-humble-ur` >= 2.13.2 for accurate ur7e visuals/kinematics.
+> Note: `ur_description`'s `config/ur7e/visual_parameters.yaml` points at
+> `meshes/ur5e` (both Humble 2.8.1 and the Jazzy 3.8.0 apt build), so RViz
+> renders the ur5e mesh; joint-space teleop is unaffected (identical joint
+> limits). Humble 2.8.1 additionally warned about a missing
+> `ur7e_update_rate.yaml`; the Jazzy build ships it.
 
 **Safety invariant:** GELLO is always a passive, read-only input device —
 its Dynamixel torque is never enabled, and it never receives commands.
@@ -104,18 +119,18 @@ its Dynamixel torque is never enabled, and it never receives commands.
    hardware/RViz, no real robot):
 
    ```bash
-   export GELLO_REPO_ROOT=/home/laptop3/gello_software
+   export GELLO_REPO_ROOT=~/gello_software
    ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=gello
    ```
 
 3. **Real robot** (physical ur7e; runs on the UR control PC):
 
    ```bash
-   export GELLO_REPO_ROOT=/home/laptop3/gello_software
+   export GELLO_REPO_ROOT=~/gello_software
    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py robot_ip:=<IP>
    ```
 
-See `../../../docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md` for the full pipeline
+See [`docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md`](../../../docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md) for the full pipeline
 diagram, node-role/topic-contract tables, and troubleshooting.
 
 ## Integrated EEF data-collection GUI (Jazzy)
@@ -318,7 +333,7 @@ robot. In one terminal bring up the fake pipeline
 `./run_ur7e_gello_sim.sh`); in a second terminal run:
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./check_pause_resume_sim.sh
 ```
 

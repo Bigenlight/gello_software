@@ -83,7 +83,8 @@ if [ ! -f /etc/udev/rules.d/99-realsense-libusb.rules ]; then
 fi
 
 # --------------------------------------------------------------- 5. GELLO / sim diagnostics / misc
-# ffmpeg provides libx264 for sim_collect/eval/render_eval_video.py. The Python
+# ffmpeg provides libx264 for the recorder's MP4 output (and, on the research/*
+# branches, sim_collect/eval/render_eval_video.py). The Python
 # requirements cover frame composition, but the final H.264/yuv420p encode is an
 # explicit system-process contract and fails closed when ffmpeg is unavailable.
 sudo apt install -y \

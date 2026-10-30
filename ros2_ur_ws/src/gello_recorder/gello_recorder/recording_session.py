@@ -16,7 +16,7 @@ and the four proven sibling modules (:mod:`gello_recorder.hdf5_writer`,
 :mod:`gello_recorder.spin_health`), so it is fully importable and testable
 standalone -- run ``python3 recording_session.py`` for the built-in self-test.
 
-NO LONGER thread-free (2026-09-14). Two threads may now touch one session:
+THREADING. Two threads may touch one session:
 
   * the caller's thread (in the recorders: the single rclpy spin thread), which
     writes every VECTOR row synchronously -- those are a handful of float
@@ -24,8 +24,8 @@ NO LONGER thread-free (2026-09-14). Two threads may now touch one session:
   * ONE background frame writer (:class:`~gello_recorder.spin_health.FrameWriteQueue`,
     created lazily by the first :meth:`submit_cam_frame` /
     :meth:`submit_cam_depth_frame`) which performs the expensive per-frame I/O:
-    JPEG decode + MP4 encode (measured 9.3 + 6.9 ms per 1280x720 frame on
-    laptop3) and the ~740 kB depth-PNG HDF5 append (1.4 ms).
+    JPEG decode + MP4 encode (measured 9.3 + 6.9 ms per 1280x720 frame on a
+    laptop CPU) and the ~740 kB depth-PNG HDF5 append (1.4 ms).
 
 That split is the fix for the timestamp artifact described in
 :mod:`gello_recorder.spin_health`: with both cameras' colour AND depth handled
@@ -39,7 +39,7 @@ around the message counters. The MP4 encode holds no lock at all -- each
 ``Mp4FrameWriter`` is touched only by the frame writer thread (and by
 :meth:`close`, after the queue has drained).
 
-HEADER STAMPS (2026-09-14). Every table fed by a STAMPED ROS message carries a
+HEADER STAMPS. Every table fed by a STAMPED ROS message carries a
 trailing ``stamp_s`` column: float64 seconds taken from ``msg.header.stamp``,
 NaN when absent. It is APPENDED, so every pre-existing column keeps its name,
 its order and its meaning and old readers are unaffected. The tables that have
@@ -180,8 +180,8 @@ class RecordingSession:
         )
         # NOTE on every header below: ``stamp_s`` is APPENDED LAST on purpose.
         # Existing columns keep their names, their order and their meaning, so a
-        # reader written before 2026-09-14 sees an unchanged table and a reader
-        # written after it gets the publisher's own capture time as well.
+        # reader that predates the column sees an unchanged table and a newer
+        # reader gets the publisher's own capture time as well.
         self._gello_w = open_h5_table(
             self._h5,
             "gello_joint_states",
@@ -960,7 +960,7 @@ if __name__ == "__main__":
     again_d = dsess.close()  # idempotent with depth on, too
     assert again_d["message_counts"] == dres["message_counts"], again_d
 
-    # --- Header stamps + background writer (2026-09-14) -----------------------
+    # --- Header stamps + background writer ------------------------------------
     stamp_dir = os.path.join(scratch, "session_selftest_stamps")
     ssess = RecordingSession(stamp_dir, camera_fps=30.0)
     # Stamped tables take a real epoch second; omitting it must give NaN.

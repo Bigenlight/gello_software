@@ -32,7 +32,7 @@ Outputs (in <output_root>/session_<YYYYmmdd_HHMMSS>/ unless session_dir is given
                          depth->color extrinsics. See depth_writer.py.
   * metadata.json      -- params, start time, and per-topic message counts on exit.
 
-Depth (2026-09-14): ``record_depth`` (bool, default false) switches on
+Depth: ``record_depth`` (bool, default false) switches on
 subscriptions to ``cam1_depth_topic`` / ``cam2_depth_topic`` (CompressedImage,
 ``16UC1; compressedDepth``), ``cam*_depth_info_topic`` (CameraInfo) and
 ``cam*_extrinsics_topic`` (realsense2_camera_msgs/Extrinsics; the one-shot
@@ -48,16 +48,16 @@ columns (no error), so this works in sim (fake), arm-only, or full arm+gripper r
 For EVERYTHING else (speed scaling, IO/status, TF, controller states...) start the
 recorder with BAG=true (run_recorder.sh) to also capture a full `ros2 bag -a`.
 
-Header stamps + spin-thread budget (2026-09-14). Every table fed by a STAMPED
+Header stamps + spin-thread budget. Every table fed by a STAMPED
 message carries a trailing ``stamp_s`` column (float64 seconds from
 ``msg.header.stamp``, NaN when absent): ``gello_joint_states``,
 ``ur_joint_states``, ``tcp_pose``, ``wrench``, ``cam1_frames``, ``cam2_frames``.
 ``command`` (``Float64MultiArray``) and ``gripper`` (three ``Float32`` topics)
 get NO stamp column -- those message types have no header at all, so ``t_rel_s``
 (arrival) is the only timestamp they can have. The high-rate robot
-subscriptions also dropped to depth ``QOS_DEPTH_ROBOT_STATE`` and the camera /
-depth frame I/O moved to ``RecordingSession``'s background writer thread.
-``metadata.json`` gains ``ros_lag_s_max``, ``spin_starvation_suspected``,
+subscriptions use depth ``QOS_DEPTH_ROBOT_STATE`` and the camera / depth frame
+I/O runs on ``RecordingSession``'s background writer thread.
+``metadata.json`` carries ``ros_lag_s_max``, ``spin_starvation_suspected``,
 ``native_rates_hz`` and ``dropped_frames``. The reason all of that exists is in
 :mod:`gello_recorder.spin_health`.
 
@@ -303,9 +303,8 @@ class GelloUrRecorder(Node):
         self._write_metadata(final=False, counts={})
         if self.record_depth:
             # Say the bill out loud. Depth is opt-in (ENABLE_DEPTH=1) precisely
-            # because it is expensive, and on 2026-09-14 that expense silently
-            # back-dated every robot row in a 54-take corpus. The guards are in
-            # place now; the cost is not gone.
+            # because it is expensive (see spin_health): the guards are in
+            # place, but the cost is not gone.
             self.get_logger().warn(DEPTH_ON_BANNER)
             depth_desc = (
                 f"depth ON (aligned={str(self.depth_aligned_to_color).lower()}) "
@@ -535,7 +534,7 @@ class GelloUrRecorder(Node):
     def _health_summary(self, counts: dict, duration_s: float) -> dict:
         """Spin-health verdict for metadata.json (see gello_recorder.spin_health).
 
-        ``spin_starvation_suspected`` is the 2026-09-14 regression alarm: four
+        ``spin_starvation_suspected`` is the regression alarm: four
         topics with different publish rates recording at the SAME rate means all
         four were being read out of a full queue, and every row in them is
         stale. ``ros_lag_s_max`` is the same defect measured directly, from the

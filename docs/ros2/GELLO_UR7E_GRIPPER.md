@@ -1,6 +1,6 @@
-# UR7e Robotiq 2F-85 그리퍼 제어 (Modbus over tool-comm · Humble · 검증됨)
+# UR7e Robotiq 2F-85 그리퍼 제어 (Modbus over tool-comm · 검증됨)
 
-이 문서는 **UR7e의 tool 포트에 배선된 Robotiq 2F-85 그리퍼**를, UR 컨트롤러의 RS485 tool-communication TCP 포트를 통해 **Modbus RTU로 직접** 구동하는 ROS 2 Humble 경로를 다룹니다. 실기(UR7e, PolyScope 5.24)에서 **오늘 실제로 열고/닫고/상태를 읽어 검증한(verified) 경로**입니다. 사용하는 패키지는 `ros2_ur_ws/src/ur_gello_bringup`이며, 그리퍼만 단독으로 브링업합니다 — 팔도, ros2_control도 띄우지 않습니다.
+이 문서는 **UR7e의 tool 포트에 배선된 Robotiq 2F-85 그리퍼**를, UR 컨트롤러의 RS485 tool-communication TCP 포트를 통해 **Modbus RTU로 직접** 구동하는 ROS 2 경로를 다룹니다. 실기(UR7e, PolyScope 5.24)에서 **실제로 열고/닫고/상태를 읽어 검증한(verified) 경로**입니다(최초 검증은 Humble 리그, 노드는 배포판과 무관한 순수 Python/TCP라 Jazzy에서도 같습니다). 사용하는 패키지는 `ros2_ur_ws/src/ur_gello_bringup`이며, 그리퍼만 단독으로 브링업합니다 — 팔도, ros2_control도 띄우지 않습니다.
 
 > **이 문서가 검증하는 것**: 이 PC(eno1 = 192.168.10.10)에서 UR7e(192.168.10.11, PolyScope **5.24** — PolyScope X 아님)의 2F-85를 `ur7e_gripper_only.launch.py`로 브링업하여, `set_closed` 서비스 / `GripperCommand` 액션 / 상태 토픽까지 실기에서 동작 확인했습니다. **팔(GELLO 텔레오퍼) 경로와는 완전히 독립**입니다 — 그리퍼만 필요할 때 이 문서를 쓰면 됩니다.
 
@@ -17,7 +17,7 @@
 echo -e 'robotmode\n' | nc 192.168.10.11 29999
 
 # 2) 빌드 (한 번)
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./build_ur7e.sh
 
 # 3) 그리퍼 노드 실행
@@ -27,7 +27,7 @@ source install/setup.bash
 #   ros2 launch ur_gello_bringup ur7e_gripper_only.launch.py robot_ip:=192.168.10.11
 ```
 
-다른 터미널에서 제어 (각 터미널마다 `source /opt/ros/humble/setup.bash && source install/setup.bash` 먼저):
+다른 터미널에서 제어 (각 터미널마다 `source /opt/ros/jazzy/setup.bash && source install/setup.bash` 먼저):
 
 ```bash
 # 편의 서비스로 열기/닫기 (가장 간단)
@@ -110,8 +110,8 @@ echo -e 'brake release\n'  | nc 192.168.10.11 29999
 
 ### 1-4. ROS 2 환경
 
-- OS: Ubuntu 22.04, ROS 2: **Humble**.
-- 매 새 터미널에서: `source /opt/ros/humble/setup.bash`, 빌드 후에는 `source install/setup.bash`.
+- OS: Ubuntu 24.04, ROS 2: **Jazzy** (이 브랜치). 22.04/Humble은 `feat/gello-ur7e-humble-22.04` 브랜치.
+- 매 새 터미널에서: `source /opt/ros/jazzy/setup.bash`, 빌드 후에는 `source install/setup.bash`.
 - 이 경로는 **GELLO도, dynamixel-sdk도, `GELLO_REPO_ROOT`도 필요 없습니다** — 그리퍼 노드는 GELLO/팔과 무관합니다.
 
 ---
@@ -121,10 +121,10 @@ echo -e 'brake release\n'  | nc 192.168.10.11 29999
 ### 2-1. 빌드
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./build_ur7e.sh
 #   또는 직접:
-#   source /opt/ros/humble/setup.bash
+#   source /opt/ros/jazzy/setup.bash
 #   colcon build --packages-select ur_gello_bringup
 #   source install/setup.bash
 ```
@@ -289,7 +289,7 @@ Robotiq 2F-85/2F-140 매뉴얼 기준. 드라이버(`robotiq_2f85_modbus.py`)는
 4. **External Control 프로그램을 Play**(펜던트 또는 헤드리스)로 시작.
 5. 그리퍼가 **여전히 응답하는지** 재확인. 멈추면 → External Control이 tool 전압을 끊은 것(충돌 확정), 계속 응답하면 → 동시 운용 안전.
 
-참고: [UR ToolComm Forwarder URCap](https://github.com/UniversalRobots/Universal_Robots_ToolComm_Forwarder_URCap), [tool communication 설정 문서](https://docs.ros.org/en/humble/p/ur_robot_driver/doc/setup_tool_communication.html).
+참고: [UR ToolComm Forwarder URCap](https://github.com/UniversalRobots/Universal_Robots_ToolComm_Forwarder_URCap), [tool communication 설정 문서](https://docs.ros.org/en/jazzy/p/ur_robot_driver/doc/setup_tool_communication.html).
 
 ---
 
@@ -316,7 +316,7 @@ DISCRETE 모드는 **0.3 이하를 전부 정확히 `0.0`으로 스냅**합니�
 launch 인자 `gripper_mode`(기본 `continuous`) 하나입니다. 팔 텔레오퍼 명령줄 **끝에 그대로 덧붙이면** 됩니다(`run_ur7e_gello_real.sh`가 뒤에 붙은 인자를 `ros2 launch`로 그대로 넘깁니다).
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 source install/setup.bash
 
 # EEF 모드 + DISCRETE 그리퍼
@@ -359,7 +359,7 @@ ros2 topic echo --once /gello_gripper_bridge/discrete_state
 - **0.3 / 0.7은 새로 정한 값이 아닙니다.** 오프라인 RL 데모 변환기가 이미 쓰고 있던 **정본 상수**이며, 근거는 §5.1입니다. **다른 값을 발명해 넣지 마세요.**
 - **`UNKNOWN`은 기동 직후의 정상 상태이며, 일시정지 뒤에도 여기로 돌아옵니다.** 래치는 **어느 쪽으로도 추정하지 않습니다** — "아마 열려 있겠지"로 시작하면 **추측을 근거로 실제 모션을 명령**하게 되고, "아마 닫혀 있겠지"는 끼임입니다. 조작자의 방아쇠가 임계값을 **직접 한 번 넘을 때까지** 브릿지는 새 명령을 내지 않습니다. 비용은 사실상 0입니다: take 125개 중 **임계값에 도달하지 못한 take는 0개**이고, 보통 첫 잡기 사이클 안에 해소됩니다.
 
-> ⚠️ **규약 주의 — 이 토픽들에서는 `0.0 = 열림`, `1.0 = 닫힘`입니다.** (§3-3의 `position_percent`와 같은 방향이고, 액션 API의 미터 규약과는 반대입니다.) 그리고 **HIL-SERL의 RL 액션은 이것과 정확히 반대**(+1=열림, −1=닫힘)입니다. 그 뒤집기는 오프라인 데모 변환 단계에서만 일어나고 **녹화는 언제나 0/1 규약**입니다 — 계층별 전체 대조표는 [`GELLO_UR7E_UNITS_REFERENCE.md`](./GELLO_UR7E_UNITS_REFERENCE.md) **§5**에 있으니 여기서 다시 설명하지 않습니다.
+> ⚠️ **규약 주의 — 이 토픽들에서는 `0.0 = 열림`, `1.0 = 닫힘`입니다.** (§3-3의 `position_percent`와 같은 방향이고, 액션 API의 미터 규약과는 반대입니다.) 그리고 **RL 액션(`action[6]`, `research/hil-serl` 브랜치)은 이것과 정확히 반대**(+1=열림, −1=닫힘)입니다. 그 뒤집기는 그 브랜치의 오프라인 데모 변환 단계에서만 일어나고 **녹화는 언제나 0/1 규약**입니다 — 계층별 전체 대조표는 [`GELLO_UR7E_UNITS_REFERENCE.md`](./GELLO_UR7E_UNITS_REFERENCE.md) **§5**에 있으니 여기서 다시 설명하지 않습니다.
 
 ### 8-4. `discrete_state` / `discrete_trigger` 토픽과 GUI 표시등 — **없으면 조용히 실패합니다**
 
@@ -400,7 +400,7 @@ discrete_open_at 이 너무 낮게 잡혀 있고, 방아쇠가 0.243에서 쉬�
 
 ⚠️ 임계값이 위 계약을 위반하면 브릿지는 **죽지 않고 연속 모드로 폴백**합니다(팔 텔레오퍼 전체를 그리퍼 파라미터 오타 하나로 내리지 않기 위한 선택입니다). 그때는 기동 로그에 오류가 크게 남고 `discrete_state`는 `DISABLED`가 됩니다 — **`discrete`로 띄웠는데 `DISABLED`가 보이면 임계값이 거부된 것입니다.**
 
-🔢 **임계값 0.3/0.7은 이제 세 군데에 있습니다** — 오프라인 데모 변환기(`recorded_demo.py`), HIL 개입 경로(`wrappers.py`), 그리고 이 브릿지. 앞의 둘은 코드 상수이고 브릿지만 런타임 파라미터입니다. 즉 **브릿지 파라미터를 옮기면 canonical 데모 세트를 만들어 낸 변환기와 값이 어긋납니다** — 조작자가 보는 이산화 경계와 학습 데이터의 이산화 경계가 달라지는 것이므로, 브릿지에서 임계값을 바꿀 일이 생기면 나머지 두 곳도 같이 봐야 합니다.
+🔢 **임계값 0.3/0.7은 세 군데에 있습니다** — 이 브릿지, 그리고 `research/hil-serl` 브랜치의 오프라인 데모 변환기(`recorded_demo.py`)와 HIL 개입 경로(`wrappers.py`). 뒤의 둘은 코드 상수이고 브릿지만 런타임 파라미터입니다. 즉 **브릿지 파라미터를 옮기면 canonical 데모 세트를 만들어 낸 변환기와 값이 어긋납니다** — 조작자가 보는 이산화 경계와 학습 데이터의 이산화 경계가 달라지는 것이므로, 브릿지에서 임계값을 바꿀 일이 생기면 나머지 두 곳도 같이 봐야 합니다.
 
 ### 8-5. 녹화에는 무엇이 남는가 — **명령만 바뀝니다** (가장 흔한 오해)
 

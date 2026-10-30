@@ -1,7 +1,7 @@
 """Headless tests for the EEF GUI's GO TO START POSE row.
 
 Same pattern as gello_recorder/test/test_task_recorder_gui.py (and
-test_hil_actor_status.py here): the window methods are called UNBOUND against
+test_hil_actor_status.py; both on the research/* branches): the window methods are called UNBOUND against
 plain duck-typed stand-ins, so there is no Qt event loop, no QApplication, no
 spinning rclpy node and no robot.  Only the operator-facing decision logic is
 under test -- which is exactly the part that must not be found wrong while the

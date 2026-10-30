@@ -1,285 +1,262 @@
-# GELLO for RWH
+# GELLO for UR7e (ROS 2 Jazzy)
 
-수동(passive) GELLO 리더 암을 손으로 움직여 **Franka Panda**와 **UR5e**를 원격 조종하는 RWH 랩용 GELLO 포크입니다. 조종 대상은 두 가지 경로로 동작합니다. (1) **MuJoCo 시뮬레이션** — Panda와 UR5e(+ Robotiq 2F-85 그리퍼)를 실시간 뷰어에서 1:1로 미러링, (2) **ROS2 / RViz2** — UR5e는 로컬 native Jazzy, Panda는 docker 이미지로 RViz에 표시. GELLO 자체는 **항상 읽기 전용**이며, 모터에 토크를 인가하지 않습니다.
+수동(passive) **GELLO 리더 암**을 손으로 움직여 **UR7e + Robotiq 2F-85**를 원격 조종하고, RealSense 카메라 2대와
+함께 데모 데이터를 녹화해 **LeRobot 데이터셋**으로 바꾸는 RWH 랩의 GELLO 포크입니다.
+원본은 [wuphilipp/gello_software](https://github.com/wuphilipp/gello_software)입니다.
 
-원본 프로젝트는 [wuphilipp/gello_software](https://github.com/wuphilipp/gello_software)이며, 이 문서는 RWH 랩에서 실제로 쓰는 **Panda + UR** 경로만 다룹니다.
+이 브랜치(`ur7e-jazzy`)는 **GELLO 필수 기능만** 담은 기본 브랜치입니다 — 조인트 텔레옵, EEF 텔레옵, 그리퍼,
+move-to-start 핸드셰이크, 카메라, 데이터 기록, LeRobot 변환, 작은 시뮬레이션 예제. 연구용 스택(HIL-SERL,
+정책 배포, 오프라인 RL, MuJoCo 데이터 수집)은 아래 브랜치로 옮겨졌습니다.
 
-> **브랜치 안내:** 이 문서는 **`feat/gello-ur7e-humble-22.04`** 브랜치(Ubuntu **22.04** / ROS2 **Humble**, UR7e 라인) 기준입니다. 이 라인은 Panda·UR5e sim 자료가 있는 24.04 / **Jazzy** 라인(`feat/gello-panda-sim-teleop`)에서 갈라져 나왔고, 두 경로 모두 이 문서에 함께 담겨 있습니다. 실제 UR7e 턴키 경로는 아래 [UR7e — ROS2 Humble 턴키](#ur7e--ros2-humble-2204-턴키) 섹션을 참고하세요.
+> **안전 불변식:** GELLO는 언제나 **읽기 전용**입니다. GELLO Dynamixel에 **절대 토크를 걸지 마세요.**
+> 드라이버는 토크를 OFF로 초기화하고 관절 각도만 읽습니다. 실기 UR7e는 실제로 움직입니다 — E-STOP을 손 닿는 곳에.
+
+---
+
+## 브랜치 지도
+
+| 브랜치 | 내용 |
+|---|---|
+| **`ur7e-jazzy`** (이 브랜치, 기본) | GELLO 필수 기능 — Ubuntu 24.04 / ROS 2 Jazzy |
+| `research/hil-serl` | HIL-SERL 온라인 RL (`serl_ur_infra/`, `run_hil_*.sh`, HIL 검증 런북 `docs/testing/`) |
+| `research/policy-deploy` | ACT / Diffusion / FM / IFQL / SVF / DSRL 정책 배포 + 실기 평가 (`gello_policy`) |
+| `research/offline-rl` | 오프라인 IFQL 학습 |
+| `research/sim-collect` | MuJoCo 데이터 수집 sim (`sim_collect/`), carrot 전용 변환 스크립트 |
+| `feat/gello-ur7e-jazzy-24.04` | 분리 전 전체 스냅샷(Jazzy). 아카이브 문서(EEF 설계 PLAN, UR ROS2 PLAN 등)도 여기 |
+| `feat/gello-ur7e-humble-22.04` | Ubuntu 22.04 / ROS 2 **Humble** 사용자용 |
+
+## 하드웨어
+
+| 구성 | 이 리그의 값 |
+|---|---|
+| 팔로워 | **UR7e** (e-Series, PolyScope 5), 기본 IP `192.168.10.11` (`ROBOT_IP=`로 변경) |
+| 리더 | GELLO UR형 — Dynamixel XL330 ×7 (팔 6 = XL330-M288, 트리거 1 = XL330-M077), U2D2(FTDI) USB 어댑터, baud 57600, **5 V 별도 전원** |
+| 그리퍼 | Robotiq 2F-85 — UR tool 포트 RS485, Modbus RTU over tool-communication(`:54321`) |
+| 카메라 | Intel RealSense D435 ×2 — cam1 = SCENE(삼각대), cam2 = WRIST(그리퍼 장착), USB3 |
+| 제어 PC | Ubuntu 24.04, ROS 2 Jazzy, 로봇 전용 이더넷 NIC(`192.168.10.100/24`) |
+
+다른 UR 리더 개체로 바꿔 끼우는 경우: [`docs/hardware/GELLO_UR_ARM_INTERCHANGE.md`](docs/hardware/GELLO_UR_ARM_INTERCHANGE.md).
+
+---
+
+## 설치
+
+정본은 [`docs/ros2/GELLO_UR7E_JAZZY_24.04_SETUP.md`](docs/ros2/GELLO_UR7E_JAZZY_24.04_SETUP.md)입니다. 요약:
+
+```bash
+git clone <this-repo> ~/gello_software && cd ~/gello_software
+git checkout ur7e-jazzy
+git submodule update --init --recursive                 # DynamixelSDK, mujoco_menagerie
+
+bash ros2_ur_ws/setup_jazzy/install_jazzy.sh            # sudo 1회: ROS 2 Jazzy desktop, UR 드라이버 3.8.0,
+                                                        # RealSense + udev 룰, dynamixel-sdk, rosdep
+cd ros2_ur_ws && ./build_ur7e.sh                        # ur_gello_bringup + gello_recorder
+```
+
+**시리얼 권한 (GELLO).** config는 `/dev/serial/by-id/usb-FTDI_...` 경로를 씁니다(재부팅해도 고정).
+
+```bash
+ls -l /dev/serial/by-id/
+sudo usermod -aG dialout $USER     # 영구 — 로그아웃/재로그인 필요
+sudo chmod 666 /dev/ttyUSB0        # 임시 — 재연결하면 풀림
+```
+
+**먼저 모터부터.** 소프트웨어 전에 [Dynamixel Wizard 2.0](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_wizard2/)
+또는 읽기 전용 프로브 `python3 scripts/gello_probe.py`로 모터 7개가 baud 57600에서 응답하는지 확인합니다
+([`docs/testing/02_GELLO_LEADER.md`](docs/testing/02_GELLO_LEADER.md)).
+
+**conda 주의.** conda `base`가 자동 활성화되는 PC에서는 `python3`가 3.12가 아니어서 rclpy/colcon이 깨집니다.
+`run_*.sh` 래퍼는 알아서 피하지만, `ros2`를 직접 칠 때는 PATH에서 miniconda를 빼세요(설치 문서 §2).
+
+실로봇 네트워크·URCap: [`ros2_ur_ws/setup_jazzy/network_and_urcap.md`](ros2_ur_ws/setup_jazzy/network_and_urcap.md) ·
+[`UR7e_Remote_Control_ROS2.md`](UR7e_Remote_Control_ROS2.md)(Remote 모드).
+
+---
+
+## 빠른 시작
+
+모든 명령은 `~/gello_software/ros2_ur_ws`에서 실행합니다. 래퍼가 ROS 환경과 `GELLO_REPO_ROOT`를 알아서 잡습니다.
+
+### 0. 로봇 없이 먼저 (mock)
+
+```bash
+./run_ur7e_gello_sim.sh                 # 물리 GELLO → mock UR7e (RViz)
+./run_ur7e_gello_mock.sh                # 실기와 같은 launch를 mock hardware로 — 핸드셰이크 리허설 (물리 GELLO 필요)
+ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake    # GELLO도 없이 (합성 리더)
+```
+
+### 1. 조인트 텔레옵 (실기)
+
+```bash
+HEADLESS=true ./run_ur7e_gello_real.sh  # Method B: 펜던트 Remote 모드, Play 불필요 (권장)
+./run_ur7e_gello_real.sh                # Method A: 펜던트에서 External Control 프로그램 Play
+```
+
+기동 후 로봇이 **살아 있는 GELLO 자세를 따라잡을 때까지** 보간 이동하고(수렴 게이트 move-to-start), 관절별
+오차가 `chase_tol` 이내로 유지될 때만 스트리밍으로 넘어갑니다. GELLO를 중립 근처에 잡고 시작하세요.
+리더를 계속 움직이면 핸드오버가 **지연될 뿐 스냅하지 않습니다.** 대시보드 헬퍼는 `source remote_helpers.sh && ur_help`.
+`START_MODE=init_align` + `./run_operator_console.sh`로 단계별 승인 기동도 가능합니다.
+
+→ [`GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md)(턴키·튜닝·프리플라이트) ·
+[`GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md)(핸드셰이크·캘리브레이션) ·
+[`GELLO_UR7E_JOINT_DELTA_MODE.md`](docs/ros2/GELLO_UR7E_JOINT_DELTA_MODE.md)(앵커 상대 조인트 모드)
+
+### 2. EEF 텔레옵 (Cartesian delta)
+
+```bash
+HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef    # 터미널 1 — 기동 시 팔은 움직이지 않음
+./run_eef_gui.sh                                            # 터미널 2 — ENGAGE(두 번 클릭/SPACE SPACE) 후에만 움직임
+```
+
+마우스처럼 ENGAGE → 이동 → DISENGAGE → 리더 재배치 → ENGAGE(새 앵커). 속도 상한 `v_max`/`w_max`는
+`ros2 param set /gello_ur_bridge v_max <값>`으로 라이브 조정. → [`GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md)
+
+### 3. 그리퍼
+
+실기 텔레옵(`run_ur7e_gello_real.sh`)은 그리퍼를 **함께** 띄웁니다. 그리퍼만 따로 시험할 때는 팔 드라이버를 내리고:
+
+```bash
+./run_ur7e_gripper.sh                   # 로봇 POWER ON 필요 (tool 전압)
+ros2 service call /robotiq_gripper/set_closed std_srvs/srv/SetBool "{data: true}"   # 닫기
+```
+
+`:54321`은 단일 클라이언트라 둘을 동시에 띄우면 안 됩니다. 트리거 → 그리퍼는 기본 연속(`gripper_mode:=continuous`),
+`gripper_mode:=discrete`면 0.3/0.7 히스테리시스로 열림/닫힘만. → [`GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md)
+
+### 4. 카메라
+
+```bash
+./launch_cameras.sh --check             # 연결된 시리얼이 설정값과 맞는지만 (스트림 안 염)
+./launch_cameras.sh                     # 2대 + 뷰어 (좌 = cam1 SCENE, 우 = cam2 WRIST)
+```
+
+기본 시리얼은 `ros2_ur_ws/camera_serials.env` 한 곳에 있습니다(셸 스크립트와 녹화 GUI가 같이 읽음).
+다른 리그에서는 그 파일을 고치거나 `CAM1_SERIAL`/`CAM2_SERIAL`(또는 `GELLO_CAMERA_SERIALS_FILE`)을 export하세요.
+설정된 두 시리얼이 모두 연결돼 있지 않으면 **기동 전에 실패**합니다(잘못된 시리얼은 조용히 프레임 0을 냄).
+뷰어에서 팔을 움직여 우측 창의 배경이 흐르는지로 손목 카메라를 확인하세요.
+→ [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md)
+
+### 5. 데이터 기록
+
+텔레옵을 띄운 뒤 두 번째 터미널에서 셋 중 하나:
+
+```bash
+CAMS=true ./run_recorder.sh                         # 헤드리스 (gello_ur_recorder)
+ros2 run gello_recorder gello_recorder_gui          # GUI — take 시작/정지·삭제·태그·GO HOME
+./run_eef_collection_gui.sh                         # EEF 수집 통합 GUI (R 녹화 / SPACE engage / G 그리퍼)
+```
+
+take마다 `vectors.h5`(관절·커맨드·그리퍼·F/T·TCP, 헤더 `stamp_s` 포함) + `cam1.mp4` / `cam2.mp4` + `metadata.json`이
+`ros2_ur_ws/gello_logs/` 아래에 생깁니다. depth는 기본 OFF(`ENABLE_DEPTH=1`).
+→ [`GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md) ·
+[`GELLO_EEF_COLLECTION_JAZZY.md`](docs/ros2/GELLO_EEF_COLLECTION_JAZZY.md) ·
+[`gello_recorder/README.md`](ros2_ur_ws/src/gello_recorder/README.md)
+
+### 6. LeRobot 변환
+
+[`scripts/dataset/`](scripts/dataset/)의 범용 도구 3개(현재 레코더로 찍은 RGB take용):
+
+| 스크립트 | 역할 |
+|---|---|
+| `make_raw_stats.py` | raw take 폴더 → `dataset_stats.json` (프레임 수·NaN·주기·`stamp_s` 검사) |
+| `convert_takes_to_lerobot.py` | take → LeRobot v3.0. `observation.state` = `ur_q1..6` + `grip_pos`, `action` = `cmd1..6` + `grip_cmd`, 마스터 클럭 = cam1 헤더 스탬프 |
+| `validate_takes_conversion.py` | 변환기를 import하지 않는 독립 검증 |
+
+lerobot은 **0.6.1(git 핀 `8a74e0a`, PyPI에 없음)** 을 별도 venv에 설치해 씁니다. 업로드 후 `v3.0` 태그를 따로 만들어야
+`LeRobotDataset(repo_id)`로 열립니다. 절차: [`GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md) 「허깅페이스 업로드」.
+
+### 7. 시뮬레이션 예제
+
+ROS mock + RViz(UR7e 기구학)와 upstream MuJoCo(UR5e + 2F-85) 두 가지 — **GELLO 없이도** 돌릴 수 있습니다.
+→ [`docs/sim/QUICKSTART_KO.md`](docs/sim/QUICKSTART_KO.md) · 상세: [`GELLO_UR_SIM_TELEOP.md`](docs/sim/GELLO_UR_SIM_TELEOP.md),
+[`GELLO_PANDA_SIM_TELEOP.md`](docs/sim/GELLO_PANDA_SIM_TELEOP.md)
+
+---
+
+## 안전과 규약
+
+- **E-STOP**을 항상 손 닿는 곳에. 실기 기동 전에 작업 공간을 비우고, 펜던트에서 Remote/Local과 Real Robot 모드를 확인.
+  프리플라이트 체크리스트: [`GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) §6.
+- **GELLO 토크는 절대 켜지 않는다.** XL330은 읽기에도 5 V 전원이 필요하지만 **전원 ≠ 토크**. 7 V 초과 금지.
+- **그리퍼 값 규약:** 토픽과 녹화 컬럼(`gello_grip`/`grip_cmd`/`grip_pos`, `/robotiq_gripper/*_percent`)은
+  **0.0 = 열림 / 1.0 = 닫힘**. 액션 API(`GripperCommand.position`)는 미터 단위라 **0.085 = 열림**으로 방향이 반대입니다.
+  RL 액션 `action[6]`의 **+1 = 열림 / −1 = 닫힘** 규약은 research 브랜치에만 있고, 레코더는 언제나 0/1 규약입니다.
+  전 계층 표: [`GELLO_UR7E_UNITS_REFERENCE.md`](docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md) §5.
+- **mock PASS는 필요조건일 뿐입니다.** mock hardware는 속도 제한도 protective stop도 강제하지 않습니다.
+
+## 문서 지도
+
+| 하려는 일 | 문서 |
+|---|---|
+| 설치·빌드·무동작 스모크 | [`docs/ros2/GELLO_UR7E_JAZZY_24.04_SETUP.md`](docs/ros2/GELLO_UR7E_JAZZY_24.04_SETUP.md) |
+| 실기 턴키 실행·튜닝·프리플라이트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
+| 핸드셰이크·URCap·캘리브레이션 | [`docs/ros2/GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
+| mock 브링업·브리지 설정 레퍼런스·일시정지/재개 | [`docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md) |
+| EEF 텔레옵 | [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](docs/ros2/GELLO_UR7E_EEF_MODE.md) |
+| 조인트 델타 모드 | [`docs/ros2/GELLO_UR7E_JOINT_DELTA_MODE.md`](docs/ros2/GELLO_UR7E_JOINT_DELTA_MODE.md) |
+| 그리퍼 | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
+| 데이터 기록·LeRobot 변환 | [`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md) · [`docs/ros2/GELLO_EEF_COLLECTION_JAZZY.md`](docs/ros2/GELLO_EEF_COLLECTION_JAZZY.md) |
+| 단위·그리퍼 규약 | [`docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md`](docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md) |
+| 하드웨어 검증 런북 (그리퍼·리더·EEF) | [`docs/testing/README.md`](docs/testing/README.md) |
+| 카메라 문제 | [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md) |
+| UR Remote 모드·대시보드 | [`UR7e_Remote_Control_ROS2.md`](UR7e_Remote_Control_ROS2.md) |
+| 드라이버 3.8.0 검토 | [`ros2_ur_ws/setup_jazzy/DRIVER_3_8_REVIEW.md`](ros2_ur_ws/setup_jazzy/DRIVER_3_8_REVIEW.md) |
+| 패키지 README | [`ur_gello_bringup`](ros2_ur_ws/src/ur_gello_bringup/README.md) · [`gello_recorder`](ros2_ur_ws/src/gello_recorder/README.md) |
+| UR5e RViz 경로(원본 launch) | [`docs/ros2/GELLO_UR_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR_ROS2_BRINGUP.md) |
+
+## 리포 구조
+
+```
+ros2_ur_ws/
+  src/ur_gello_bringup/     GELLO publisher, UR 브리지(조인트/EEF/조인트 델타), move-to-start, 그리퍼, GUI
+  src/gello_recorder/       레코더 (headless 노드 + GUI)
+  run_ur7e_gello_{real,sim,mock,joint_delta_mock}.sh, run_eef_gui.sh, run_eef_collection_gui.sh,
+  run_ur7e_gripper.sh, run_recorder.sh, launch_cameras.sh, run_operator_console.sh, remote_helpers.sh
+  setup_jazzy/              install_jazzy.sh, 이더넷 설정, ToolComm 진단, EEF mock 스모크
+gello/                      GELLO 코어 (Dynamixel 드라이버·에이전트·sim 로봇)
+scripts/                    gello_probe.py(읽기 전용 개체 확인), gello_get_offset.py(캘리브레이션), dataset/
+configs/, experiments/      upstream MuJoCo sim 설정과 실행 엔트리포인트
+docs/                       ros2/ · hardware/ · testing/ · sim/
+ros2/                       upstream Franka FR3 스택 (참고용)
+third_party/                DynamixelSDK, mujoco_menagerie (submodule)
+```
 
 ---
 
 ## 데이터셋 (Hugging Face)
 
-이 GELLO/UR7e 텔레오퍼레이션 스택으로 수집한 데이터셋을 공개했습니다. 아래 데이터셋은 UR7e + GELLO 리더 + Robotiq 2F-85 + RealSense 2대 리그를 사용합니다. 수집 날짜·조명·태스크와 recorder 버전별 변환 규칙을 구분하세요.
-
-**"put the right banana in the pot"** — 51 데모 / 21,524 프레임 / ~12분
-
-- [`Bigenlight/banana_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 51 데모 / 21,524 프레임 (기본)
-- [`Bigenlight/banana_in_pot_ee_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_ee_lerobot_v3) — 엔드이펙터(EE) 관측 버전
-- [`Bigenlight/banana_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/banana_in_pot_raw) — 원본 per-take h5 + mp4 (데이터셋 재생성용)
-
-**"put the cube in the cup"** — 23 데모 / 6,177 프레임 / ~3.4분 (2026-07-20 수집)
-
-- [`Bigenlight/cube_in_cup_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/cube_in_cup_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 23 에피소드
-- [`Bigenlight/cube_in_cup_raw`](https://huggingface.co/datasets/Bigenlight/cube_in_cup_raw) — 원본 per-take h5 + mp4 (24 테이크) + `DATA_DICTIONARY.md` + `dataset_stats.json`
-
-**"Put carrot in pot"** — 54 데모 / 18,557 프레임 / ~10.3분 (2026-09-14 수집, **EEF 텔레옵 모드**, **depth 포함**)
-
-- [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.0, 54 에피소드. RGB 2대 + **depth 2대**(`observation.images.cam1_depth`/`cam2_depth`, 848×480 uint16 mm, lerobot 네이티브 depth video: HEVC gray12le 무손실 + 12-bit **선형** 양자화 0~10 m → ±1.25 mm, 무효 픽셀 0 보존)
-- [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) — 원본 per-take `vectors.h5` + `cam1/2.mp4` + **`depth.h5`**(16-bit PNG, K/D/외부 파라미터 포함) + `DATA_DICTIONARY.md` + `dataset_stats.json`
-- [`Bigenlight/orange_bowl_in_purple_bowl_raw`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_raw) — 2026-09-15/16 "put the orange bowl into the purple bowl" 52 take, **RGB만**, 수정된 레코더(`stamp_s` 헤더 스탬프, 타임스탬프 아티팩트 없음)
-- [`Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3) — 위 raw의 LeRobot v3.0 변환(52 에피소드, 16,009 프레임, RGB 2대, `stamp_s` 정렬·보정 없음, 검증 43/43)
-- 이 태스크의 변환기·검증기·통계 생성기는 **이 리포 `scripts/dataset/`** 에 있습니다(아래). cam1 = 정면 scene D435, cam2 = 손목 D435로 매핑이 확정된 첫 릴리스입니다.
-
-> **규모 주의:** 위 `cube_in_cup`은 banana의 1/4 규모(~3.4분)인 **파일럿 데이터셋**입니다. raw 24 테이크 중 `take_23`은 녹화 오작동(1.64초, 팔 정지, 그리퍼 미작동)이라 raw에는 남기고 LeRobot 버전에서는 제외했습니다. 아래의 2026-09-19 `cube_stack`과는 다른 태스크·데이터셋입니다.
-
-### 최근 RGB 데이터셋 (2026-09-18/19)
-
-기존 무조명/depth 릴리스와 별도 데이터셋입니다. 모든 행 수는 LeRobot의 cam1 master frame 수이며, RL transition 수와 다릅니다.
-
-| 데이터셋 | 수집일 | episodes / frames | 공개 파일 |
-|---|---|---|---|
-| Carrot in pot, 추가 조명 | 2026-09-18 | 65 / 20,472 | [raw](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_lerobot_v3) |
-| Bowl stack, 추가 조명 | 2026-09-18 | 71 / 17,945 | [raw](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_lerobot_v3) |
-| Bowl stack triple | 2026-09-19 | 60 / 36,030 | [raw](https://huggingface.co/datasets/Bigenlight/bowl_stack_triple_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/bowl_stack_triple_lerobot_v3) |
-| Cube stack | 2026-09-19 | 60 / 20,177 | [raw](https://huggingface.co/datasets/Bigenlight/cube_stack_raw) · [LeRobot v3](https://huggingface.co/datasets/Bigenlight/cube_stack_lerobot_v3) |
-
-Triple task: `stack the orange bowls and place them into the purple bowl`.
-Cube task: `stack the red cube on the blue cube`.
-
-로컬 raw는 `ros2_ur_ws/gello_logs/{carrot_in_pot,bowl_stack,bowl_stack_triple,cube_stack}/take_*/`에 있습니다. HF raw는 `raw/<원본 take 이름>/{vectors.h5,cam1.mp4,cam2.mp4}` 구조이고, LeRobot에는 `meta/source_takes.json`으로 episode와 원본 이름을 연결합니다. 폴더 태그는 해당 sidecar에 보존되며, triple/cube는 `folder_tag`, `folder_labels`, `recovery_label`로 복구 변형을 선택할 수 있습니다. 태그 자체는 성공/실패 라벨이 아닙니다. 기본 LeRobot `train` 범위는 전체 코퍼스를 뜻하며 논문용 평가 split은 별도로 고정해야 합니다.
-
-Cube 릴리스의 상세 변환·검증·태그 계약은 [Cube stack release](docs/ros2/CUBE_STACK_DATASET_2026-09-19.md)를 참고하세요. Triple 카드에는 조작자가 제공한 전경 사진, cube 카드에는 녹화에서 추출한 preview가 포함됩니다.
-
-**"put the carrot in the pot"** — 65 데모 / 20,472 프레임 / ~11.4분 (2026-09-18 수집, **추가 조명 설치**)
-
-- [`Bigenlight/carrot_in_pot_lighting_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.1, 65 에피소드 / 20,472 프레임
-- [`Bigenlight/carrot_in_pot_lighting_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_raw) — 원본 per-take h5 + mp4, 수집 전경 사진 포함
-- `recover` / `recover_twice` 폴더 라벨은 수집 중 실패 뒤 재시도한 테이크를 구분하기 위해 원본과 LeRobot 메타데이터에 그대로 보존했습니다.
-
-**"Stack the orange bowl on the purple bowl."** — 71 데모 / 17,945 프레임 / ~10.0분 (2026-09-18 수집, **추가 조명 설치**)
-
-- [`Bigenlight/bowl_stack_lighting_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_lerobot_v3) — JOINT 액션(7-D) LeRobot v3.1, 71 에피소드 / 17,945 프레임
-- [`Bigenlight/bowl_stack_lighting_raw`](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_raw) — 원본 per-take h5 + mp4, 수집 전경 사진 포함
-- 폴더 라벨 `other_side`, `recover`, `recover_other_side`는 원본과 LeRobot 메타데이터에 보존했습니다. `recover`는 실패 후 재시도한 테이크이고, `other_side`는 다른 쪽에서 수집한 테이크입니다.
-
-### 데이터셋 만드는 법 (h5 → LeRobot)
-
-banana/cube 변환기는 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)의 `convert_to_lerobot.py`입니다. **carrot(2026-09-14, depth 포함)부터는 이 리포 [`scripts/dataset/`](scripts/dataset/)에 있습니다** — `convert_carrot_to_lerobot.py`(변환), `validate_carrot_conversion.py`(변환기를 import하지 않는 독립 검증, depth 왕복 오차까지), `make_carrot_raw_stats.py`(raw `dataset_stats.json`). 절차 전체는 [`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md)의 「허깅페이스 업로드」절. 요점:
-
-- 수정된 recorder의 RGB 데이터는 `convert_takes_to_lerobot.py` → `validate_takes_conversion.py`를 사용합니다. 마스터 클럭은 cam1의 `stamp_s − t0_off`, `t0_off = median(ur.stamp_s − ur.t_rel_s)`입니다. 관절·cam2는 헤더 stamp, command·gripper는 callback `t_rel_s`로 최근접 정렬합니다. 서보 지연을 빼거나 cam1 프레임을 삭제하지 않습니다. 과거 depth carrot의 지연 보정 규칙과 혼용하지 마세요. 샘플링이 균일하지 않으므로 인덱스 산술로 정렬하면 안 됩니다.
-- `observation.state`(7) = `ur_q1..6` + `grip_pos`, `action`(7) = `cmd1..6` + `grip_cmd`. `gello_*` 리더 스트림은 추론 시 관측 불가라 제외합니다.
-- `lerobot 0.6.1`이 필요한데 PyPI에 없습니다 (최신 0.6.0). 커밋 `8a74e0a` 핀으로 설치하세요. **`ros2_ur_ws/act_venv`에는 설치하지 마세요** — 실기 배포가 검증된 환경이므로 별도 venv를 쓰십시오.
-- `hf upload`는 `LeRobotDataset(repo_id)` 로딩에 필요한 `v3.0` 태그를 만들지 않습니다. 업로드 후 `HfApi().create_tag(repo_id, tag="v3.0", repo_type="dataset")`를 별도로 실행해야 합니다.
-
----
-
-## Step 0 — 먼저 모터부터 확인 ⚠️
-
-소프트웨어를 건드리기 전에, **모든 Dynamixel 서보가 정상 응답하는지 먼저 확인**하세요. [Dynamixel Wizard 2.0](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_wizard2/)으로 스캔해서 각 모터의 **ID가 올바른지**, **baud가 57600인지** 확인합니다. 여기서 모터가 안 잡히면 이후 어떤 단계도 진행되지 않습니다.
-
-- Wizard 사용법 자체는 이 문서에서 다루지 않습니다 (위 공식 링크 참고).
-- **안전 불변식: GELLO는 passive read-only입니다. GELLO Dynamixel에 절대 토크를 인가하지 마세요.** 드라이버는 토크를 OFF로 초기화하며, 관절 각도를 읽기만 합니다.
-
----
-
-## USB / Serial 세팅
-
-GELLO는 U2D2(FTDI) USB-시리얼 어댑터로 연결됩니다. 포트를 찾는 방법:
-
-```bash
-ls -l /dev/serial/by-id/     # 안정적인 by-id 경로 (권장)
-ls /dev/ttyUSB*              # enumeration 순서대로 잡히는 임시 경로
-dmesg | grep -i tty          # 방금 꽂은 장치 확인
-```
-
-config는 `/dev/serial/by-id/usb-FTDI...` 형태의 **by-id 경로**를 사용합니다. `/dev/ttyUSBn`은 재부팅·재연결 시 번호가 바뀌지만 by-id 경로는 장치에 고정되어 있어 안정적입니다. 다른 어댑터를 쓰는 경우 yaml의 `agent.port`만 자신의 by-id 경로로 바꾸면 됩니다.
-
-시리얼 접근 권한이 없으면(permission denied), 사용자를 `dialout` 그룹에 추가한 뒤 **로그아웃/로그인**하세요.
-
-```bash
-sudo usermod -aG dialout $USER   # 이후 로그아웃 후 다시 로그인 (또는 재부팅) — 영구 해결
-
-# 로그아웃 없이 지금 당장 쓰고 싶으면 임시로 권한 부여 (재부팅/재연결 시 초기화됨):
-sudo chmod 666 /dev/ttyUSB0      # 자신의 장치 노드로 (ls /dev/ttyUSB* 로 확인)
-```
-
-> `dialout` 그룹 추가가 영구적인 권장 방법이고, `chmod 666`은 재부팅하면 풀리는 임시 방편입니다.
-
-> 물리적 Dynamixel 배선/조립은 이 문서 범위가 아닙니다 (하드웨어 문서 별도).
-
----
-
-## 시뮬레이션 (메인)
-
-Sim은 **docker를 쓰지 않습니다.** native `uv` venv(python 3.11)로 실행합니다. 이유: MuJoCo 인터랙티브 GLFW 뷰어(X11/GL) + 실시간 Dynamixel USB 조합은 docker 패스스루가 가장 취약한 케이스입니다. `uv`는 호스트 Ubuntu와 무관하게 py3.11을 제공하고, mujoco는 manylinux wheel로 배포되므로 native가 더 안정적입니다.
-
-### One-time setup
-
-bare 머신이라면 먼저 GL/뷰어 관련 apt 패키지를 설치합니다.
-
-```bash
-sudo apt install libgl1 libglfw3 libosmesa6
-```
-
-그다음 리포를 준비합니다.
-
-```bash
-git clone <repo> && cd gello_software
-git submodule update --init --recursive    # mujoco_menagerie(로봇 XML) + DynamixelSDK
-
-curl -LsSf https://astral.sh/uv/install.sh | sh   # uv가 없다면
-uv venv --python 3.11 && source .venv/bin/activate
-
-uv pip install -r requirements.txt
-uv pip install -e .
-uv pip install -e third_party/DynamixelSDK/python  # 필수 — dynamixel_sdk는 여기서만 설치됨
-```
-
-> 검증된 조합은 **numpy 2.3.5 + mujoco 3.10.0 + python 3.11**입니다. `numpy<2`로 핀하지 마세요 (known-good 환경을 깨뜨립니다).
-
-### 실행
-
-한 프로세스가 MuJoCo 서버 스레드와 GELLO 클라이언트 루프를 함께 돌립니다. `<your-display>`는 자신의 세션 X 디스플레이입니다 (일반 모니터라면 보통 `:0`; 이 headless 빌드 PC 예시에서는 `:1`).
-
-```bash
-# Panda
-DISPLAY=<your-display> python experiments/launch_yaml.py --left-config-path configs/rwh_panda.yaml
-
-# UR5e (+ Robotiq 2F-85)
-DISPLAY=<your-display> python experiments/launch_yaml.py --left-config-path configs/rwh_ur.yaml
-```
-
-> `MUJOCO_GL`은 **설정하지 마세요** (인터랙티브 GLFW 뷰어를 씀). `MUJOCO_GL=glx`는 크래시합니다.
-
-**무엇이 보여야 하는가:** MuJoCo 뷰어 창이 뜨고, GELLO를 손으로 움직이면 sim 로봇 팔이 1:1로 따라 움직입니다. GELLO 그리퍼 레버를 여닫으면 sim 그리퍼도 여닫힙니다.
-
-### 상세 문서 (config 필드 표 · 캘리브레이션 · 트러블슈팅)
-
-README에는 실행 one-liner만 두었습니다. 전체 config 필드, `joint_offsets` 캘리브레이션(`scripts/gello_get_offset.py`), 트러블슈팅은 아래 딥 문서를 참고하세요.
-
-| 대상 | 문서 |
-|------|------|
-| Panda (MuJoCo sim) | [`docs/sim/GELLO_PANDA_SIM_TELEOP.md`](docs/sim/GELLO_PANDA_SIM_TELEOP.md) |
-| UR5e + 2F-85 (MuJoCo sim) | [`docs/sim/GELLO_UR_SIM_TELEOP.md`](docs/sim/GELLO_UR_SIM_TELEOP.md) |
-
----
-
-## UR7e — ROS2 Humble (22.04) 턴키
-
-실제 **UR7e**(e-Series, PolyScope 5)를 수동 GELLO로 **관절 원격 조종**하는 턴키 경로입니다. 모든 진입점이 `ros2_ur_ws/` 아래 스크립트 하나로 감싸져 있으며, Ubuntu **22.04 + ROS2 Humble** 전용입니다(위 브랜치 안내 참고). 패키지는 `ur_gello_bringup`(기본 `ur_type=ur7e`)이고, sim과 real이 동일한 노드·캘리브레이션을 공유합니다.
-
-> ### 안전 — 시작 전에 반드시 ⚠️
-> - **GELLO는 항상 passive read-only** — 드라이버가 Dynamixel 토크를 OFF로 초기화하고 관절만 읽습니다. GELLO에 절대 토크를 인가하지 마세요.
-> - **실제 UR7e는 물리적으로 움직입니다** — 기동(약 t≈8s) 후 로봇이 **살아있는 GELLO 자세를 뒤쫓아(chase)** 수렴할 때까지 여러 번 보간 이동합니다. E-STOP을 손 닿는 곳에 두고 작업공간을 비운 뒤, GELLO를 중립 근처로 잡고 시작하세요.
-> - **핸드셰이크는 필수** — 부팅 시 `scaled_joint_trajectory_controller`가 활성 상태로 뜨고, `gello_move_to_start`가 **수렴 게이트(convergence-gated) 추격 루프**를 돕니다: 매 반복마다 살아있는 GELLO 자세 + 로봇 실제 `/joint_states`를 다시 읽어 gap 크기에 맞춘 catch-up 궤적으로 뒤쫓고, 관절별 `|GELLO − 실제| ≤ chase_tol`(0.025 rad ≈ 1.4°)이 `chase_dwell_s`(0.4s) 동안 유지될 때만 `forward_position_controller`로 STRICT 전환한 뒤 브리지 스트리밍을 시작합니다. 즉 **리더≈팔로워가 된 뒤에만 스트리밍이 시작**되며, 조작자가 계속 움직이면 핸드오버가 **지연될 뿐, 스냅(급발진)하지 않습니다**. 남는 미세 오차는 soft-start된 rate-limit slew(`≤ max_step_rad×rate`)로 흡수됩니다 — "제로 스냅"이 아니라 바운드된 ease-in 보장입니다. 게이트가 끝내 수렴하지 못하면(리더가 안 멈춤 / 스트림 사망) 타임아웃 후 전환 없이 fail-safe 종료합니다. 이 과정을 건너뛰면 속도 리밋 protective stop이 납니다. 상세·튜닝·실기 캘리브레이션은 [실제 로봇 런북](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) 참고.
-
-### 0. 사전 준비 (한 번)
-
-```bash
-pip install --user dynamixel-sdk                       # v4.0.5, sudo/apt 불필요
-# 시리얼 접근 권한은 위 USB/Serial 섹션 참고 (dialout 그룹). 리더 = /dev/ttyUSB0 (FTBEO6QK)
-export GELLO_REPO_ROOT=/home/laptop3/gello_software    # publisher가 gello 드라이버를 import (필수)
-```
-
-### 1. 빌드
-
-```bash
-cd ros2_ur_ws
-./build_ur7e.sh        # colcon build --packages-select ur_gello_bringup + source install/setup.bash
-```
-
-### 2. 시뮬 (mock UR7e, RViz2 — 실제 로봇 없음)
-
-```bash
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
-cd ros2_ur_ws
-./run_ur7e_gello_sim.sh        # source:=gello — 실제 물리 GELLO가 mock UR7e를 구동 (use_fake_hardware)
-# 자가 테스트(사인파, GELLO 불필요)는 내부 source:=fake 경로를 사용합니다.
-```
-
-### 3. 실제 로봇 (UR7e 물리 이동)
-
-```bash
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
-cd ros2_ur_ws
-./run_ur7e_gello_real.sh                  # Method A: 펜던트 External Control에서 Play를 누름
-HEADLESS=true ./run_ur7e_gello_real.sh    # Method B: 펜던트 REMOTE 모드, Play 불필요 (권장, 핸즈프리)
-# 환경변수: ROBOT_IP=192.168.10.11(기본), CALIB=/path/ur7e_calibration.yaml
-```
-
-- 대시보드 helper(load/play/stop/powerup/resend 등)가 필요하면 `source ros2_ur_ws/remote_helpers.sh` 후 `ur_help`.
-- **Method A와 B를 한 실행에서 섞지 마세요.** 헤드리스 드롭 복구는 `ur_resend`, Method A 드롭은 `ur_play`.
-
-> **드라이버 안전성 노트:** `gello_ur_bridge`는 명령을 GELLO 자세가 아닌 로봇의 **실제 `/joint_states`**로 시드하고, 모든 (재)시드마다(startup·resume·staleness 복구) **soft-start 램프**(`soft_start_s`)로 slew clamp를 서서히 열어 기동 스냅(과거 "External Control speed limit" protective stop의 원인)을 없앱니다. 이후 one-euro/EMA smoothing · step limiting · **deadband 노이즈 게이트**(정지 시 Dynamixel 떨림 억제) · staleness guard를 적용한 뒤 `/forward_position_controller/commands`로 퍼블리시합니다. 통합 실기 런치에서는 브리지가 `start_paused:=true`로 미리 떠 대기하다가, 핸드셰이크의 STRICT 전환 성공 후 `~/resume`(정렬 게이트) 호출로 스트리밍을 시작합니다.
-
-> **ros-humble-ur 2.8.1 부분 지원:** `ur_type:=ur7e`로 **joint-space teleop은 완전히 정확**합니다(ur5e/ur7e 관절 리밋 동일). 다만 RViz visuals가 아직 ur5e mesh로 렌더되고(`config/ur7e` visual_parameters 미갱신), `ur7e_update_rate.yaml` 누락 경고(무해)가 있습니다. 정확한 ur7e visuals/kinematics가 필요하면 `ros-humble-ur >=2.13.2`로 업그레이드하세요.
-
-### 런북 & 상세 문서
-
-| 대상 | 문서 |
-|------|------|
-| UR7e — 턴키 셋업 CLI + 프리플라이트 체크리스트 | [`docs/ros2/GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) |
-| UR7e — sim/mock 브링업 (검증됨) | [`docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md) |
-| UR7e — 2F-85 그리퍼 (Modbus over tool-comm, 검증됨) | [`docs/ros2/GELLO_UR7E_GRIPPER.md`](docs/ros2/GELLO_UR7E_GRIPPER.md) |
-| UR7e — 진단 레코더 (GELLO/UR 관절·속도·토크·F/T CSV 로깅) | [`docs/ros2/GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md) |
-| UR7e — 실제 로봇 런북 (코드 완료·실기 미검증) | [`docs/ros2/GELLO_UR7E_REAL_ROBOT.md`](docs/ros2/GELLO_UR7E_REAL_ROBOT.md) |
-| UR7e — Remote Control 모드 (헤드리스/대시보드) 레퍼런스 | [`UR7e_Remote_Control_ROS2.md`](UR7e_Remote_Control_ROS2.md) |
-
----
-
-## ROS2 / RViz2
-
-**UR5e**는 **로컬 native ROS2 Jazzy**(Ubuntu 24.04)로 실행합니다 — docker 없음. UR 드라이버가 최신 Ubuntu에서 잘 동작하기 때문입니다. `ur_gello_bringup` 패키지가 `use_mock_hardware`로 RViz2에 UR5e를 띄우며, `source:=fake`(로봇/GELLO 없이 sine sweep)와 `source:=gello`(실제 GELLO 연결, mock UR) 두 모드가 있습니다. 실제 UR5e는 별도 PC에 있고, 이 빌드 PC는 mock hardware로 RViz만 검증합니다. 빌드/실행 절차와 함정(orphan publisher, 포트, 전원)은 딥 문서에 있습니다.
-
-**UR7e**는 같은 `ur_gello_bringup` 패키지로 **ROS2 Humble**(Ubuntu 22.04)에서 실행하며, sim/mock부터 실제 로봇까지 턴키 스크립트로 감싸져 있습니다 — 전용 절차·런북은 위 [UR7e — ROS2 Humble 턴키](#ur7e--ros2-humble-2204-턴키) 섹션을 참고하세요.
-
-**Franka**는 "어느 Franka인가"를 반드시 구분해야 합니다. 랩의 실제 Panda를 RViz로 보려면 조민제님의 **minje227 docker 이미지**로 `multipanda_ros2` 기반 launch를 실행하는 것이 현재의 turnkey 경로입니다 — docker를 쓰는 이유는 franka_ros2 v2.1.0 / libfranka 0.18.2가 ROS2 Humble / Ubuntu 22.04에 하드락되어 있기 때문입니다. **이 이미지는 이후 수정 + 재빌드/재배포가 필요한 "현재 경로"일 뿐 최종본이 아닙니다.** 또한 이 경로는 private docker 이미지와 물리 GELLO가 모두 있어야 동작합니다(오프라인·완전 로컬이 아님). 반면 리포의 `ros2/` 폴더는 upstream Franka 스택으로 **FR3 전용**(관절명 `fr3_joint1..7` 하드코딩, FR3 impedance gain)이며 RViz에 뜨는 것은 **랩의 Panda와 다른 로봇(FR3)**입니다 — 참고용 reference로만 봅니다.
-
-### 어느 Franka인가 (용어 구분)
-
-- **Panda (sim)** — MuJoCo 시뮬레이션의 Panda (위 시뮬레이션 섹션).
-- **Panda (minje227 docker, RViz)** — 랩의 실제 Panda 모델을 RViz로 보는 현재 경로 (재빌드 예정).
-- **FR3 (repo `ros2/`, upstream reference)** — upstream 스택이 띄우는 다른 로봇, 참고용.
-
-| 경로 | 문서 |
-|------|------|
-| UR5e — 로컬 native Jazzy `ur_gello_bringup` (검증됨) | [`docs/ros2/GELLO_UR_ROS2_BRINGUP.md`](docs/ros2/GELLO_UR_ROS2_BRINGUP.md) |
-| UR5e — 실제 로봇 계획 (아직 미구현) | [`docs/ros2/GELLO_UR_ROS2_PLAN.md`](docs/ros2/GELLO_UR_ROS2_PLAN.md) |
-| UR7e (Humble, sim/mock·실제 로봇 턴키) | 위 [UR7e — ROS2 Humble 턴키](#ur7e--ros2-humble-2204-턴키) 섹션 참고 |
-| Franka — Panda를 RViz로 (minje227 docker, 현재 경로) | [`docs/ros2/GELLO_FRANKA_RVIZ.md`](docs/ros2/GELLO_FRANKA_RVIZ.md) |
-| FR3-vs-Panda 비교 reference | [`docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md`](docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md) |
-
----
-
-## Repo Layout
-
-```
-README.md                                   # 이 문서 (front door)
-configs/rwh_panda.yaml                       # Panda sim config
-configs/rwh_ur.yaml                          # UR5e sim config
-experiments/launch_yaml.py                   # sim 실행 엔트리포인트
-scripts/gello_get_offset.py                  # joint_offsets 캘리브레이션
-gello/                                        # GELLO 코어 패키지 (드라이버·로봇·에이전트)
-ros2_ur_ws/                                   # UR5e/UR7e ROS2 워크스페이스 (ur_gello_bringup; 기본 ur_type=ur7e)
-  build_ur7e.sh / run_ur7e_gello_sim.sh       #   UR7e 턴키 스크립트 (빌드 · sim/mock)
-  run_ur7e_gello_real.sh / remote_helpers.sh  #   UR7e 실제 로봇 · 대시보드 헬퍼
-ros2/                                         # upstream Franka 스택 (FR3 전용, 참고용)
-UR7e_Remote_Control_ROS2.md                   # UR7e Remote Control(헤드리스/대시보드) 레퍼런스
-docs/sim/                                     # 시뮬레이션 딥 문서
-docs/ros2/                                    # ROS2 딥 문서 (UR7e 셋업 CLI·브링업·실제 로봇 런북 포함)
-docs/reference/                              # 동료 셋업 가이드 등
-```
-
-> **안전 불변식 (재강조): GELLO는 언제나 passive read-only입니다. GELLO Dynamixel에 절대 토크를 인가하지 마세요.** 드라이버는 토크 OFF로 초기화하고 관절만 읽습니다.
+이 리그(UR7e + GELLO + Robotiq 2F-85 + RealSense 2대)로 수집해 공개한 데이터셋입니다. 수집 날짜·조명·텔레옵 모드와
+레코더 버전에 따라 변환 규칙이 다릅니다. LeRobot 행 수는 cam1 마스터 프레임 수입니다.
+
+| 태스크 | 수집 | 규모 | raw | LeRobot v3 |
+|---|---|---|---|---|
+| put the right banana in the pot | 2026-07 (joint) | 51 / 21,524 | [raw](https://huggingface.co/datasets/Bigenlight/banana_in_pot_raw) | [joint](https://huggingface.co/datasets/Bigenlight/banana_in_pot_lerobot_v3) · [EE 관측](https://huggingface.co/datasets/Bigenlight/banana_in_pot_ee_lerobot_v3) |
+| put the cube in the cup (파일럿) | 2026-07-20 (joint) | 23 / 6,177 | [raw](https://huggingface.co/datasets/Bigenlight/cube_in_cup_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/cube_in_cup_lerobot_v3) |
+| put carrot in pot (**depth 포함**) | 2026-09-14 (EEF) | 54 / 18,557 | [raw](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3) |
+| put the orange bowl into the purple bowl | 2026-09-15/16 (EEF) | 52 / 16,009 | [raw](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3) |
+| put the carrot in the pot, 추가 조명 | 2026-09-18 | 65 / 20,472 | [raw](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lighting_lerobot_v3) |
+| stack the orange bowl on the purple bowl, 추가 조명 | 2026-09-18 | 71 / 17,945 | [raw](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/bowl_stack_lighting_lerobot_v3) |
+| stack the orange bowls and place them into the purple bowl | 2026-09-19 | 60 / 36,030 | [raw](https://huggingface.co/datasets/Bigenlight/bowl_stack_triple_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/bowl_stack_triple_lerobot_v3) |
+| stack the red cube on the blue cube | 2026-09-19 | 60 / 20,177 | [raw](https://huggingface.co/datasets/Bigenlight/cube_stack_raw) | [LeRobot](https://huggingface.co/datasets/Bigenlight/cube_stack_lerobot_v3) |
+
+- 규모 = episodes / frames. raw는 take별 `vectors.h5` + `cam1.mp4` / `cam2.mp4`(+ carrot은 `depth.h5`)와 `DATA_DICTIONARY.md`·`dataset_stats.json`.
+- **carrot(2026-09-14)** 은 옛 레코더로 찍혀 `ur_joint_states`가 0.9 s 늦게 기록됐고, LeRobot판은 그 지연을 보정했습니다
+  (`meta/source_takes.json`의 `ur_joint_states_lag_s`). depth는 HEVC gray12le 무손실, 12-bit 선형(±1.25 mm), 무효 0 보존.
+  상세: [`GELLO_UR7E_RECORDING.md`](docs/ros2/GELLO_UR7E_RECORDING.md) 「타임스탬프 아티팩트」.
+- **orange bowl부터는 수정된 레코더**(`stamp_s`)라 보정 없이 `convert_takes_to_lerobot.py`로 변환했습니다.
+- `cube_in_cup` raw 24 take 중 `take_23`은 녹화 오작동(1.64 s)이라 LeRobot판에서 제외했습니다.
+- `recover`, `recover_twice`, `other_side` 등 폴더 태그는 raw와 LeRobot 메타데이터(`folder_tag`, `folder_labels`,
+  `recovery_label`)에 보존됩니다. 태그는 성공/실패 라벨이 **아닙니다.** 기본 `train` 범위는 전체 코퍼스이므로
+  평가 split은 별도로 고정하세요.
+- banana/cube 변환기는 별도 리포 [`Bigenlight/banana-in-pot-experiments`](https://github.com/Bigenlight/banana-in-pot-experiments)에 있습니다.
 
 ---
 
 ## Credits & License
 
-원본 GELLO 프로젝트: [wuphilipp/gello_software](https://github.com/wuphilipp/gello_software) ([Project Website](https://wuphilipp.github.io/gello_site/), [Hardware Repository](https://github.com/wuphilipp/gello_mechanical)).
-
-> 이 RWH 문서는 **Panda + UR만** 다룹니다. upstream의 YAM / xArm 관련 내용은 제거했으며, 필요하면 [upstream README](https://github.com/wuphilipp/gello_software)를 참고하세요.
+원본 GELLO 프로젝트: [wuphilipp/gello_software](https://github.com/wuphilipp/gello_software)
+([Project Website](https://wuphilipp.github.io/gello_site/), [Hardware Repository](https://github.com/wuphilipp/gello_mechanical)).
+upstream의 YAM / xArm / Franka 사용법은 [upstream README](https://github.com/wuphilipp/gello_software)를 참고하세요.
 
 ### Citation
 
@@ -295,4 +272,5 @@ docs/reference/                              # 동료 셋업 가이드 등
 
 This project is licensed under the MIT License (see `LICENSE` file).
 
-이 프로젝트는 'FACTR Teleop: Low-Cost Force-Feedback Teleoperation' (Apache-2.0)의 컴포넌트를 사용합니다. https://github.com/RaindragonD/factr_teleop/ 참고.
+이 프로젝트는 'FACTR Teleop: Low-Cost Force-Feedback Teleoperation' (Apache-2.0)의 컴포넌트를 사용합니다.
+https://github.com/RaindragonD/factr_teleop/ 참고.

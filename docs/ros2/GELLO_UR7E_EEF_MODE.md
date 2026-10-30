@@ -4,10 +4,10 @@
 > EEF 3D-펜 텔레오퍼가 **실기 UR7e에서 동작 확인**되었다(사용자 확인). 이 세션에서 바뀐 것(전부 아직 **미커밋**):
 > - **워치독**: `tick_budget` 초과가 성능 신호로 재분류됨 — 1틱 HOLD + leaky-bucket, 지속 ~1초만 disengage. "갈 수 있는데 갑자기 멈추던" 증상 해소 → **§4 하단 표**.
 > - **`run_ur7e_gello_real.sh`**: `start_mode`를 더는 `gello`로 강제하지 않는다(비우면 `control_mode:=eef → switch_only` 자동 유도가 살아남). 배너가 실효값을 출력 → **§3.1**.
-> - **`v_max`/`w_max` 기본값 2배**(0.16 / 1.0)로 상향, **`pos_scale`/`v_max`/`w_max` 라이브 튜닝** 가능(`ros2 param set`) → **§1.3**.
+> - **`v_max`/`w_max` 기본값 상향**(2026-07-24 0.16 / 1.0, 이후 `v_max` 0.20), **`pos_scale`/`v_max`/`w_max` 라이브 튜닝** 가능(`ros2 param set`) → **§1.3**.
 > - **EEF 마우스 GUI 신설**(`run_eef_gui.sh`) — 큰 토글 하나로 끄기/켜기, 감도 슬라이더, 그리퍼 → **§3.4.1**.
 >
-> **문서 상태 (2026-07-22 원본)**: 코드는 구현·mock 검증 완료(커밋 `2905925` + 이후 3D-펜 기동 경로 작업). 이 문서가 조작자용 **정본**이며, 설계·근거는 [`GELLO_UR7E_EEF_TELEOP_PLAN.md`](GELLO_UR7E_EEF_TELEOP_PLAN.md)를 본다. 두 문서가 어긋나면 **이 문서가 우선**이다(PLAN의 대체된 부분에는 `⛔ SUPERSEDED` 표시를 붙여 두었다).
+> **문서 상태 (2026-07-22 원본)**: 코드는 구현·mock 검증 완료(커밋 `2905925` + 이후 3D-펜 기동 경로 작업). 이 문서가 조작자용 **정본**이며, 설계·근거는 `GELLO_UR7E_EEF_TELEOP_PLAN.md`(114 KB 아카이브 — 이 slim 브랜치에서는 빠졌고 `feat/gello-ur7e-jazzy-24.04` 스냅샷 브랜치에 있다)를 본다. 이 문서의 "PLAN"은 그 문서를 가리킨다. 두 문서가 어긋나면 **이 문서가 우선**이다(PLAN의 대체된 부분에는 `⛔ SUPERSEDED` 표시를 붙여 두었다).
 >
 > **안전 불변**: GELLO는 항상 passive read-only. Dynamixel에 절대 토크 X.
 >
@@ -181,7 +181,7 @@ tool 오프셋은 **회전 중심에만** 영향을 준다. **P6(TCP 위치 고�
 
 | 파라미터 | 기본값 | 뜻 |
 |---|---|---|
-| `v_max` | **0.16 m/s** (구 0.08) | 로봇 EEF **직선 속도 상한** |
+| `v_max` | **0.20 m/s** (구 0.08 → 0.16 → 0.20) | 로봇 EEF **직선 속도 상한** |
 | `w_max` | **1.0 rad/s** (구 0.5) | 로봇 EEF **회전 속도 상한** |
 
 "따라오는 게 느리다"의 1순위 조절값이다. `pos_scale`(감도, 거리)과 달리 이건 **속도**다 — GELLO를 빨리 움직이면 로봇이 `v_max` 상한에 걸려 뒤처졌다 따라잡는데, `v_max`를 올리면 그 랙이 준다. 2026-07-24 사용자 요청으로 플랜의 보수적 `0.08/0.5`에서 **2배**로 올렸다.
@@ -297,8 +297,8 @@ cd <repo>/ros2_ur_ws
 source install/setup.bash
 ```
 
-- 이 PC/실기 PC는 **ROS 2 Humble / Python 3.10**이다(`/opt/ros/humble`; `build_ur7e.sh`와 `run_ur7e_gello_real.sh`가 그걸 소스한다). PLAN 문서의 "Jazzy/24.04/py3.12" 서술은 **설계 당시의 개발 PC** 기준이므로 그대로 믿지 말 것.
-- **`build_ur7e.sh`가 이 환경에서 실패하면**(`AMENT_TRACE_SETUP_FILES: unbound variable` — `set -euo pipefail` + `/opt/ros/humble/setup.bash` 상호작용) colcon을 직접 부른다: `source /opt/ros/humble/setup.bash && colcon build --packages-select ur_gello_bringup`. (소스 트리에 `act_venv/`가 있으면 colcon이 numpy 테스트 디렉터리에서 `package identification` ERROR를 찍는데, `Finished <<< ur_gello_bringup`가 뜨면 무시해도 된다.)
+- 이 브랜치는 **ROS 2 Jazzy / 시스템 Python 3.12**다(`build_ur7e.sh`와 `run_*.sh`가 `/opt/ros/${GELLO_ROS_DISTRO:-jazzy}`를 소스한다). 이 문서의 실기 실측은 원래 Humble / Python 3.10 리그에서 했다. conda `python3`가 PATH 앞에 있으면 rclpy가 깨진다 — [`GELLO_UR7E_JAZZY_24.04_SETUP.md`](./GELLO_UR7E_JAZZY_24.04_SETUP.md) §2.
+- **`build_ur7e.sh`가 실패하면**(예: `AMENT_TRACE_SETUP_FILES: unbound variable` — `set -u`와 ROS setup 스크립트 상호작용. 현재 스크립트는 이를 피하도록 고쳐져 있다) colcon을 직접 부른다: `source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --packages-select ur_gello_bringup`.
 
 **실행 스크립트 (모두 `ros2_ur_ws/`):**
 
@@ -520,10 +520,10 @@ cd <repo>/ros2_ur_ws && ./run_eef_gui.sh        # = ros2 run ur_gello_bringup ge
 
 **전제:** `scaled_joint_trajectory_controller`가 **로드**되어 있고 펜던트 External Control이 **PLAYING**일 것(아니면 STJC가 inactive라 goal이 거부되고 FAILED로 끝난다). `~/eef/state`가 살아 있어야 버튼이 켜진다(브리지가 없으면 ①의 pause 서비스도 없다).
 
-**`START_POSE_CONFIG`:** `run_eef_gui.sh`가 기본으로 `src/gello_policy/config/ifql_deploy.yaml`(carrot)을 export한다. 다른 태스크는 그 태스크의 deploy yaml을 가리키면 된다:
+**`START_POSE_CONFIG`:** `run_eef_gui.sh`/`run_eef_collection_gui.sh`가 기본으로 `src/ur_gello_bringup/config/start_pose.yaml`(carrot_in_pot 시작 자세, 정책 deploy yaml에서 그대로 복사)을 export한다. 다른 태스크는 같은 키 경로(`policy_leader_node.ros__parameters.start_pose`/`start_gripper`)를 가진 yaml을 가리키면 된다 — 정책 deploy yaml(`research/policy-deploy` 브랜치)을 그대로 줘도 된다:
 
 ```bash
-START_POSE_CONFIG=/abs/path/ros2_ur_ws/src/gello_policy/config/act_deploy.yaml ./run_eef_gui.sh   # banana
+START_POSE_CONFIG=/abs/path/to/my_task_start_pose.yaml ./run_eef_gui.sh
 ```
 
 읽는 키는 `policy_leader_node.ros__parameters.start_pose`(+ 선택 `start_gripper`). 코드에 **기본 자세는 없다** — banana/carrot이 비슷하게 생겨서(`pan` +3.106 vs −3.164, 나머지 최대 0.33 rad 차이) 잘못된 기본값은 에러 없이 엉뚱한 자세에 세운다. 변수가 없거나 파일이 없거나 형식이 틀리면 **버튼은 비활성**이고 상태줄에 `UNAVAILABLE: <이유>`(예: `START_POSE_CONFIG is not set -- export it to a deploy yaml`, `…/x.yaml: file does not exist`)가 뜬다. 그때 home-move I/O(구독·클라이언트·타이머)는 **아예 만들지 않으며** 나머지 GUI 동작은 그대로다. `start_gripper ≠ 0`은 경고만 하고 무시한다(시퀀스는 항상 OPEN).

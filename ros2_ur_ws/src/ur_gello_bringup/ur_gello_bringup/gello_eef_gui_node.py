@@ -96,7 +96,7 @@ from rclpy.node import Node
 # back on ur_gello_bringup, so there is no cycle). home_move is pure Python (no
 # ROS, no Qt, no cv2) and carries the state names this GUI paints and the
 # controller names its messages quote; home_move_ros is the rclpy half. The
-# recorder's own Qt window (task_recorder_gui) is deliberately NOT imported --
+# recorder's own Qt window (gello_recorder_gui) is deliberately NOT imported --
 # it drags in cv2 -- so the two small status helpers are re-implemented below.
 from gello_recorder.home_move import ACTIVE_STATES, FPC, STJC, HomeMoveState
 from gello_recorder.home_move_ros import HomeMoveIoMixin

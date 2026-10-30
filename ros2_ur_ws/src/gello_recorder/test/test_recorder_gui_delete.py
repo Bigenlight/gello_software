@@ -1,7 +1,8 @@
 """Headless tests for the "Delete last take" button in the recorder GUI.
 
 Same pattern as ``test_task_recorder_gui.py`` (itself borrowed from
-``ur_gello_bringup/test/test_hil_actor_status.py``): the window methods are
+``ur_gello_bringup/test/test_hil_actor_status.py``; both live on the
+research/* branches, not here): the window methods are
 called UNBOUND against a plain duck-typed stand-in, so there is no Qt event
 loop, no QApplication, no rclpy node and no robot -- only the operator-facing
 decision logic (when is the button live, does Yes delete exactly once, does a
@@ -45,9 +46,17 @@ class _FakeWidget:
         self.style = ""
         self.enabled = None
         self.tooltip = None
+        self.properties = {}
 
     def setText(self, text):
         self.text = text
+
+    def property(self, name):
+        # QObject.property() returns None for an unset dynamic property.
+        return self.properties.get(name)
+
+    def setProperty(self, name, value):
+        self.properties[name] = value
 
     def setStyleSheet(self, style):
         self.style = style
@@ -268,6 +277,11 @@ class _DeleteWindow:
         self._take_label = _FakeWidget("Take: 0")
         self._elapsed_label = _FakeWidget()
         self._status_label = _FakeWidget()
+        # Recording banner/panel and the tag combo are touched by
+        # _refresh_controls on every tick, so they must be modelled here.
+        self._recording_banner = _FakeWidget()
+        self._recording_panel = _FakeWidget()
+        self._tag_combo = _FakeWidget()
         self._record_start_wall = None
         self._teleop_resume_armed = False
         self._teleop_last_shown_msg = None

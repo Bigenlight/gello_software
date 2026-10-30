@@ -91,21 +91,52 @@ timeout and the operator is told teleop is broken when FPC is in fact fine.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Sequence
 
 # --------------------------------------------------------------------------- #
 # Robot constants
 # --------------------------------------------------------------------------- #
 
-# Manually-synced copy of CubeInCupConfig.RESET_JOINTS
-# (serl_ur_infra/ur_experiments/cube_in_cup.py) and of RESET_JOINTS_CSV in
-# ros2_ur_ws/run_hil_preposition.sh.  ALL THREE MUST STAY IDENTICAL: recorded
-# demonstrations, the HIL preposition step and this button all have to put the
-# arm in the same pose, or the data and the policy disagree about where an
-# episode begins.  gello_recorder deliberately has no import dependency on
-# serl_ur_infra or ur_gello_bringup, so this is a copy and not an import --
-# test_home_move.py pins the literal so a drift shows up as a test failure.
-HOME_JOINTS = (3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331)
+# Default GO-HOME target in UR_JOINT_ORDER (rad).  This is the lab's task
+# start pose; recorded demonstrations should all begin from the same pose, so
+# change it deliberately and for a whole dataset, not per take.
+#
+# Override without editing code:
+#   * per process:   GELLO_HOME_JOINTS="j0,j1,j2,j3,j4,j5"   (six radians)
+#   * per caller:    HomeMoveController(..., target_joints=...) /
+#                    install_home_move_io(target_joints=...)
+#
+# Note that two joints sit right next to +/-pi; wrapped_nearest() is what makes
+# such a target safe to command (never send the raw literal).
+DEFAULT_HOME_JOINTS = (3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331)
+HOME_JOINTS_ENV_VAR = "GELLO_HOME_JOINTS"
+
+
+def home_joints_from_env(raw: Optional[str] = None) -> tuple:
+    """Return the GO-HOME target: ``$GELLO_HOME_JOINTS`` or the default.
+
+    ``raw`` defaults to the environment variable.  A value that is set but is
+    not exactly six finite comma-separated numbers raises ValueError instead of
+    silently falling back -- a typo in a motion target must be loud.
+    """
+    if raw is None:
+        raw = os.environ.get(HOME_JOINTS_ENV_VAR)
+    if raw is None or not raw.strip():
+        return DEFAULT_HOME_JOINTS
+    try:
+        values = tuple(float(v) for v in raw.replace(" ", "").split(","))
+    except ValueError:
+        values = ()
+    if len(values) != 6 or not all(math.isfinite(v) for v in values):
+        raise ValueError(
+            "{} must be six finite comma-separated radians in UR joint order, "
+            "got {!r}".format(HOME_JOINTS_ENV_VAR, raw)
+        )
+    return values
+
+
+HOME_JOINTS = home_joints_from_env()
 
 # The order the UR driver's controllers expect.  /joint_states does NOT publish
 # in this order (it is roughly alphabetical), which is why reorder_joint_positions()
@@ -125,9 +156,9 @@ STJC = "scaled_joint_trajectory_controller"
 # Scale contract of robotiq_gripper_modbus_node on
 # /robotiq_gripper/command_percent: 0.0 = OPEN .. 1.0 = CLOSED.
 GRIPPER_OPEN_VALUE = 0.0
-# /robotiq_gripper/position_percent at or below this counts as open.  Same
-# 0.15 the HIL preposition script uses -- the Robotiq never settles at exactly
-# 0.0 and the fingers are unambiguously open well before that.
+# /robotiq_gripper/position_percent at or below this counts as open.  The
+# Robotiq never settles at exactly 0.0, and the fingers are unambiguously open
+# well before 0.15.
 GRIPPER_OPEN_CONFIRM = 0.15
 
 # --------------------------------------------------------------------------- #
@@ -148,13 +179,11 @@ GRIPPER_OPEN_TIMEOUT_S = 3.0
 # WHY A FLOOR AT ALL, when the step already republishes every tick: the confirm
 # can be true on the FIRST tick -- the gripper was already open, or it happens
 # to be sitting just inside GRIPPER_OPEN_CONFIRM -- and then exactly ONE message
-# ever reaches the wire.  One message is the failure mode this window exists to
-# rule out (2026-08-06, diag_gripper_halfopen_20260806_173307): a single publish
-# can be dropped by DDS discovery, and robotiq_gripper_modbus_node additionally
-# rate-limits command_percent, so the sample that says "fully open" is lost
-# roughly half the time.  Re-asserting the final setpoint for ~1 s was measured
-# 0-of-6 failures against 7-of-14 without it, so 1.0 s is the validated number
-# and not a guess.
+# ever reaches the wire.  A single publish can be dropped by DDS discovery, and
+# robotiq_gripper_modbus_node additionally rate-limits command_percent, so the
+# sample that says "fully open" was lost roughly half the time on the real
+# gripper.  Re-asserting the final setpoint for ~1 s fixed it in every trial
+# (0 of 6 vs 7 of 14 half-open without it), so 1.0 s is a measured value.
 #
 # BOUNDED BY GRIPPER_OPEN_TIMEOUT_S: the deadline always wins, so raising this
 # above the timeout cannot make GO HOME sit here longer (see
@@ -227,9 +256,9 @@ def wrapped_nearest(
     equivalent NEAREST to ``reference`` (|result - reference| <= pi).
 
     LOAD-BEARING, not a nicety.  scaled_joint_trajectory_controller interpolates
-    LINEARLY in raw joint space with no 2*pi awareness, and HOME_JOINTS sits
-    right on the branch cut: shoulder_pan is +3.1382 (~0.003 rad inside +pi) and
-    wrist_3 is -3.1331 (~0.008 rad inside -pi).  If the arm arrives wound the
+    LINEARLY in raw joint space with no 2*pi awareness, and the default
+    HOME_JOINTS sits right on the branch cut: shoulder_pan is +3.1382 (~0.003
+    rad inside +pi) and wrist_3 is -3.1331 (~0.008 rad inside -pi).  If the arm arrives wound the
     other way -- shoulder_pan reading -3.140, physically ~0.005 rad from HOME --
     then commanding the raw literal +3.1382 asks the controller to sweep ~6.28
     rad the LONG way around, at full speed, through whatever is in the workspace.
@@ -252,8 +281,7 @@ def compute_home_duration(
 ) -> float:
     """Trajectory duration (s) = worst-joint |wrapped gap| / speed_budget, clamped.
 
-    Distance-proportional ON PURPOSE.  A fixed duration (what the HIL
-    preposition path uses) means the implied joint velocity is whatever the
+    Distance-proportional ON PURPOSE.  A fixed duration means the implied joint velocity is whatever the
     starting distance happens to divide out to -- start far away and the arm is
     commanded to move fast, with no upper bound anywhere in the pipeline.  Here
     the speed budget is the invariant and the clock stretches instead.
@@ -435,7 +463,7 @@ class HomeMoveController:
           as "unknown" and falls back to MIN_ASSUMED_SPEED_SCALE.
 
     ``target_joints`` is the pose the MOVING step drives to, in UR_JOINT_ORDER.
-    It defaults to HOME_JOINTS (the task recorder's GO HOME) and is what the
+    It defaults to HOME_JOINTS (the recorder's GO HOME) and is what the
     EEF GUI's GO TO START POSE passes its own start pose through.  Validated
     ONCE, here, as exactly six finite numbers and frozen into a tuple: a target
     that is the wrong length or carries a NaN would otherwise only be found out
@@ -811,8 +839,8 @@ class HomeMoveController:
             self._fail("controller_manager query failed: {}".format(msg))
             return
         if stjc_active:
-            # Nothing to switch -- somebody (a previous GO HOME, the HIL
-            # preposition script) already left the joints with STJC.
+            # Nothing to switch -- somebody (a previous GO HOME, another
+            # tool) already left the joints with STJC.
             self._enter_moving()
             return
         if fpc_active:
@@ -1015,8 +1043,7 @@ class HomeMoveController:
             if self._gripper_confirmed:
                 self._start_restore()
                 return
-            # WARN-ONLY, deliberately -- mirrors run_hil_preposition.sh step
-            # [5b/6]. The gripper may be absent entirely (arm-only bring-up) or
+            # WARN-ONLY, deliberately. The gripper may be absent entirely (arm-only bring-up) or
             # merely slow to report, and neither is a reason to strand the arm
             # on STJC with teleop unusable. Carry the warning into the DONE
             # message so the operator checks it visually.

@@ -5,7 +5,7 @@ Why a separate file, and why not MP4
 ------------------------------------
 Each RealSense camera can publish depth as ``sensor_msgs/msg/CompressedImage`` on
 ``/<cam>/<cam>/depth/image_rect_raw/compressedDepth`` (``format == '16UC1;
-compressedDepth'``, measured 2026-09-14 on realsense-ros 4.58.2: ~29 Hz, 80-130 KB per
+compressedDepth'``, measured on realsense-ros 4.58.2: ~29 Hz, 80-130 KB per
 message at 848x480; with ``align_depth.enable:=true`` the aligned topic is 1280x720 and
 ~200 KB). Depth is ``uint16`` millimetres (``depth_scale`` 0.001 m). An MP4 cannot
 carry 16-bit single-channel data losslessly, and re-encoding on the hot path would

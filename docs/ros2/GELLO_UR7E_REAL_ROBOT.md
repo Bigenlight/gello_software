@@ -1,12 +1,12 @@
 # GELLO → 실제 UR7e + Robotiq 2F-85 ROS2 텔레오퍼레이션 — 실기 런북 (REAL)
 
-> ⚠️ **이 문서는 실제 UR7e 하드웨어를 ROS2 Humble로 구동하기 위한 실기(real-robot) 런북입니다.**
+> ⚠️ **이 문서는 실제 UR7e 하드웨어를 ROS 2로 구동하기 위한 실기(real-robot) 런북입니다.** 원래 Humble(`ros-humble-ur` 2.8.1) 리그에서 작성됐고, 이 브랜치(Jazzy, `ur_robot_driver` 3.8.0)에 맞게 명령을 고쳤습니다. 3.8.0 전환 검토(STRICT 전환·재시딩·캘리브레이션 인자 전달)는 [`DRIVER_3_8_REVIEW.md`](../../ros2_ur_ws/setup_jazzy/DRIVER_3_8_REVIEW.md), 네트워크/URCap은 [`network_and_urcap.md`](../../ros2_ur_ws/setup_jazzy/network_and_urcap.md).
 > 실 UR7e는 이 빌드-검증 PC가 아니라 **별도의 로봇 PC**에 연결되어 있으며, 이 문서의 **실 로봇 전용 절차**(External Control/URCapX 페어링, 기구학 캘리브레이션, 실 그리퍼 24V/Modbus 소켓)는 **여기(mock) 환경에서는 검증할 수 없습니다.** 단, **move-to-start 수렴 게이트 핸드셰이크 + 브리지**는 실물 GELLO 리더를 이 PC에 붙인 채 `use_fake_hardware:=true`로 **이제 여기서(mock) 검증할 수 있습니다**(아래 §"실기 전 mock 검증" 참고). 로봇에 붙기 전 반드시 mock 경로로 파이프라인을 먼저 확인하세요.
 >
 > - **검증 완료된 mock 경로 (여기서 실행 가능)**: [`GELLO_UR7E_ROS2_BRINGUP.md`](./GELLO_UR7E_ROS2_BRINGUP.md) — `source:=fake` + `use_fake_hardware`, RViz2 시각화, 실 UR/GELLO 미접속.
-> - **설계·근거 문서**: [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md) (아키텍처·안전 handshake·리스크 결정), [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md) (mock UR 브링업 상세), [`GELLO_ROS2_CONTROL_REFERENCE.md`](./GELLO_ROS2_CONTROL_REFERENCE.md).
+> - **설계·근거 문서**: [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md) (mock UR 브링업 상세). 옛 설계 계획(`GELLO_UR_ROS2_PLAN.md`)과 ros2_control 레퍼런스(`GELLO_ROS2_CONTROL_REFERENCE.md`)는 `feat/gello-ur7e-jazzy-24.04` 스냅샷 브랜치에만 남아 있습니다.
 
-물리 **GELLO**(6-DOF UR 리더 암, U2D2 `FTBEO6QK`)로 **실제 UR7e + Robotiq 2F-85**를 **ROS2 Humble** 위에서 1:1(radian) 텔레오퍼레이션한다. UR7e는 `ros-humble-ur` **2.8.1**에서 정식 지원되며(`config/ur7e` 존재), 관절 리밋이 UR5e와 동일하므로 노드 코드는 **변경 없이** 그대로 쓴다. 브리지는 로봇 실제 `/joint_states`에서 seed해 시작 스냅을 없애고, 실기 속도 안전을 위해 `max_step_rad=0.0025` + `publish_rate_hz=250`으로 스트리밍한다(스냅 원인·근거는 §2 참고).
+물리 **GELLO**(6-DOF UR 리더 암, U2D2 `FTBEO6QK`)로 **실제 UR7e + Robotiq 2F-85**를 **ROS 2** 위에서 1:1(radian) 텔레오퍼레이션한다. UR7e는 `ur_description`에 `config/ur7e`가 있어 `ur_type:=ur7e`로 로드되며, 관절 리밋이 UR5e와 동일하므로 노드 코드는 **변경 없이** 그대로 쓴다. 브리지는 로봇 실제 `/joint_states`에서 seed해 시작 스냅을 없애고, 실기 속도 안전을 위해 `max_step_rad=0.0025` + `publish_rate_hz=250`으로 스트리밍한다(스냅 원인·근거는 §2 참고).
 
 > **⭐ 이 버전의 핵심 변경 — 수렴 게이트(convergence-gated) 핸드셰이크.** `gello_move_to_start`의 `gello` 시작 모드는 더 이상 "고정된 첫 GELLO 자세로 **한 번** 이동"하지 않는다. 대신 매 반복마다 **살아있는(live) GELLO 자세 + 로봇 실측 `/joint_states`를 다시 읽어** 따라가는(chase) 궤적을 쏘고, per-joint `|live GELLO − actual| <= chase_tol`가 `chase_dwell_s` 동안 유지될 때에만 핸드오버한다. 동시에 브리지는 `start_paused:=true`로 **미리(paused) 스폰**되어 있다가, STRICT 전환 성공 직후 `gello_move_to_start`가 브리지 `~/resume`를 호출해야 비로소 스트리밍을 시작한다. **정직한 보장(이건 "zero snap" 주장이 아님):** 핸드오버는 팔로워가 **살아있는 리더를 chase_tol 이내로 따라잡아 유지**했을 때만 일어나며, 남는 잔차는 soft-start된 rate-limited slew(`<= max_step_rad*rate`)로 닫힌다. 운영자가 계속 움직이거나 리더가 안 멈추면 **스냅이 아니라 핸드오버가 지연**될 뿐이다. 자세한 로그·복구·캘리브레이션은 §2 참고.
 >
@@ -18,7 +18,7 @@
 
 | 항목 | 결정 / 값 |
 |---|---|
-| 로봇 | **UR7e** (`ur_type:=ur7e`), `ros-humble-ur` **2.8.1** 유지(업그레이드 금지) |
+| 로봇 | **UR7e** (`ur_type:=ur7e`). 이 브랜치: Jazzy `ur_robot_driver` **3.8.0**(apt) — Humble 브랜치는 `ros-humble-ur` 2.8.1 |
 | launch | `ur7e_gello_real.launch.py` — `robot_ip` **필수**(기본값 없음), `use_fake_hardware:=false` |
 | 부팅 컨트롤러 | `scaled_joint_trajectory_controller` **active** + `forward_position_controller` **inactive** 로드 |
 | **필수 시퀀스** | 드라이버 기동 → `gello_ur_bridge` **pre-spawn PAUSED** → `gello_move_to_start` **수렴 게이트 chase** → STRICT 전환 → `gello_move_to_start`가 브리지 `~/resume` 호출 → 스트리밍 (**§2, 건너뛰면 protective stop**) |
@@ -59,7 +59,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 
 ### 왜 필요한가 — protective stop의 원인
 
-`forward_position_controller`(fpc)는 **보간(interpolation)을 하지 않고, 받은 관절 위치를 즉시 로봇에 명령**합니다. 그래서 fpc가 활성화되는 **바로 그 순간** 로봇의 현재 자세와 GELLO가 지시하는 자세가 다르면, 로봇은 그 큰 각도 차이를 **한 제어 주기 안에 점프(snap)**하려 시도합니다. 이 점프는 순간 관절 속도가 UR7e의 관절 속도 한계(전 관절 180 deg/s)를 초과하게 만들어 UR 컨트롤러의 **joint-velocity-limit protective stop(보호 정지)**을 유발합니다. (이는 계획 문서 §6에서 확인된 실버그입니다 — [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md) 참고.)
+`forward_position_controller`(fpc)는 **보간(interpolation)을 하지 않고, 받은 관절 위치를 즉시 로봇에 명령**합니다. 그래서 fpc가 활성화되는 **바로 그 순간** 로봇의 현재 자세와 GELLO가 지시하는 자세가 다르면, 로봇은 그 큰 각도 차이를 **한 제어 주기 안에 점프(snap)**하려 시도합니다. 이 점프는 순간 관절 속도가 UR7e의 관절 속도 한계(전 관절 180 deg/s)를 초과하게 만들어 UR 컨트롤러의 **joint-velocity-limit protective stop(보호 정지)**을 유발합니다. (이는 옛 설계 계획 문서 `GELLO_UR_ROS2_PLAN.md` §6에서 확인된 실버그입니다 — 그 문서는 `feat/gello-ur7e-jazzy-24.04` 스냅샷 브랜치에 있습니다.)
 
 해결책은 **fpc를 켜기 전에 로봇을 GELLO의 현재 자세로 부드럽게(보간되는 궤적으로) 먼저 데려다 놓는 것**입니다. 그 역할을 `scaled_joint_trajectory_controller`(궤적 보간 컨트롤러)와 `gello_move_to_start` 노드가 담당합니다.
 
@@ -108,7 +108,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
    # 이 랩 실기 예시 IP: 192.168.10.11 (펜던트에서 실제 값 확인)
    ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
      robot_ip:=192.168.10.11 \
-     kinematics_params_file:="/home/laptop3/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_calibration.yaml"
+     kinematics_params_file:="$HOME/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_calibration.yaml"
    ```
 
 2. **컨트롤러 상태 확인(sanity).**
@@ -131,7 +131,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
    # 목표는 start_joints가 아니라 "매 반복 다시 읽는 live GELLO 자세"입니다.
    # 단독 실행 시 resume_bridge는 기본 False라 브리지를 건드리지 않습니다(런치가 True로 override).
    ros2 run ur_gello_bringup gello_move_to_start --ros-args \
-     --params-file /home/laptop3/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
+     --params-file $HOME/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
    ```
 
    > 관절 순서는 UR 표준 `[shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint]`.
@@ -301,7 +301,7 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 
 ```bash
 cd ros2_ur_ws
-GELLO_REPO_ROOT=/home/laptop3/gello_software ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
+GELLO_REPO_ROOT=$HOME/gello_software ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
   robot_ip:=127.0.0.1 use_fake_hardware:=true
 ```
 
@@ -480,14 +480,14 @@ teleop 중 위험을 감지하면 아래 순서로 즉시 중단한다.
 
 ### 4.1 캘리브레이션 추출 (최초 1회, 로봇당 1회)
 
-UR7e 컨트롤러가 켜져 있고 네트워크로 접근 가능한 상태에서 실행합니다. (`ur_calibration`은 `ros-humble-ur` 메타패키지에 포함되어 있으므로 추가 설치가 필요 없습니다.)
+UR7e 컨트롤러가 켜져 있고 네트워크로 접근 가능한 상태에서 실행합니다. (`ur_calibration`은 `install_jazzy.sh`가 `ros-jazzy-ur-calibration`으로 설치합니다.)
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 
 ros2 launch ur_calibration calibration_correction.launch.py \
   robot_ip:=192.168.10.11 \
-  target_filename:="/home/laptop3/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_calibration.yaml"
+  target_filename:="$HOME/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_calibration.yaml"
 ```
 
 - `robot_ip`는 실제 UR7e 컨트롤러(펜던트)의 IP로 교체합니다. **이 랩 실기 예시: `192.168.10.11`** (2026-07-03 연결 확인됨).
@@ -501,7 +501,7 @@ ros2 launch ur_calibration calibration_correction.launch.py \
 ```bash
 ros2 launch ur_gello_bringup ur7e_gello_real.launch.py \
   robot_ip:=<UR7e_IP> \
-  kinematics_params_file:="/home/laptop3/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_calibration.yaml"
+  kinematics_params_file:="$HOME/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_calibration.yaml"
 ```
 
 `kinematics_params_file`을 생략하면 UR 드라이버는 공장 기본 DH 파라미터를 사용합니다 — 텔레옵 자체는 동작하지만, TCP 절대 위치 정밀도가 그 UR7e 실기체의 실제 치수와 어긋날 수 있습니다. 실기체 정밀 작업(그리퍼 접근, 파지 등) 전에는 반드시 4.1을 먼저 수행해 두는 것을 권장합니다.
@@ -564,8 +564,8 @@ ros2 topic echo /robotiq_gripper/position_percent
 
 - [ ] **PolyScope 버전 확정 (5 vs X).** 펜던트 `Settings > About` 확인. PolyScope 5면 classic `externalcontrol-*.urcap`, PolyScope X(>=10.8.0)면 `externalcontrol-x-*.urcapx` — 경로가 완전히 갈립니다(§3). PolyScope 버전과 무관하게 그리퍼는 RS485 tool-comm(Modbus) 경로를 쓰므로, 로봇에 **RS485 / tool communication URCap**이 설치·활성인지와 socat 브리지 `/tmp/ttyUR` 생성 여부(§5)를 함께 확인.
 - [ ] **`robot_ip` 확정.** `ur7e_gello_real.launch.py`의 **필수** 인자, 기본값 없음. UR7e 컨트롤러 본체 IP. External Control 노드에 넣는 IP는 이것이 아니라 **ROS2 PC IP**임에 유의(§3.3).
-- [ ] **`dynamixel_sdk` 설치 확인.** 실 GELLO(`source:=gello`, `gello_publisher`) 경로는 `dynamixel_sdk`가 필요합니다. 실기 GELLO 연결 전 `pip install --user dynamixel-sdk` (v4.0.5, sudo/apt 불필요)로 설치하고 `python3 -c "import dynamixel_sdk"`로 확인합니다. (mock `source:=fake` 경로는 불필요.)
-- [ ] **`GELLO_REPO_ROOT` export.** `gello_publisher`에는 잘못된 하드코딩 fallback 경로(`/home/theo_lab/gello_software`)가 있으므로, `source:=gello` 실행 전 반드시 `export GELLO_REPO_ROOT=/home/laptop3/gello_software`를 설정합니다. (노드는 FROZEN — 수정 금지, docs로 우회.)
+- [ ] **`dynamixel_sdk` 설치 확인.** 실 GELLO(`source:=gello`, `gello_publisher`) 경로는 `dynamixel_sdk`가 필요합니다. `install_jazzy.sh`가 pip `--user --break-system-packages`로 설치하며, `python3 -c "import dynamixel_sdk"`로 확인합니다. (mock `source:=fake` 경로는 불필요.)
+- [ ] **`GELLO_REPO_ROOT`.** `run_ur7e_gello_real.sh`는 리포 루트로 자동 설정합니다. `ros2 launch`를 직접 칠 때는 `export GELLO_REPO_ROOT=$HOME/gello_software`(`gello_publisher`의 마지막 fallback은 다른 PC의 하드코딩 경로라 믿지 말 것).
 - [ ] **`max_step_rad = 0.0025` (250 Hz) 유지.** 드라이버는 각 명령을 `delta/0.002s`로 속도 한계(3.14 rad/s)와 비교하므로, 안전 예산은 `0.00628 rad`(250 Hz에서 coalescing 대비 절반 `0.00314`)입니다. `0.0025`면 단발 1.25 / 최악 2.5 rad/s로 안전합니다. **더 빠른 텔레오퍼가 필요하면 먼저 `publish_rate_hz`를 500으로 올린 뒤** `max_step_rad`를 키우세요(250 Hz에서 `0.003` 초과 금지). 시작 스냅은 브리지가 실제 `/joint_states`에서 seed하므로 이미 제거됨.
 - [ ] **(권장) UR7e 기구학 캘리브레이션 추출.** 정밀 작업 전 `ur7e_calibration.yaml`을 뽑아 `kinematics_params_file`로 전달(§4).
 - [ ] **부팅 컨트롤러 상태 확인.** 기동 직후 `ros2 control list_controllers`로 `scaled_joint_trajectory_controller` active + `forward_position_controller` inactive를 확인한 뒤에만 §2 handshake를 진행.
@@ -577,9 +577,8 @@ ros2 topic echo /robotiq_gripper/position_percent
 ### 관련 문서
 
 - mock/검증 경로(여기서 실행 가능): [`GELLO_UR7E_ROS2_BRINGUP.md`](./GELLO_UR7E_ROS2_BRINGUP.md)
-- 설계·아키텍처·리스크: [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md)
+- 설치(정본): [`GELLO_UR7E_JAZZY_24.04_SETUP.md`](./GELLO_UR7E_JAZZY_24.04_SETUP.md) · 턴키 실행/프리플라이트: [`GELLO_UR7E_SETUP_CLI.md`](./GELLO_UR7E_SETUP_CLI.md)
 - mock UR 브링업 상세: [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md)
-- ros2_control 레퍼런스: [`GELLO_ROS2_CONTROL_REFERENCE.md`](./GELLO_ROS2_CONTROL_REFERENCE.md)
 
 ---
 
