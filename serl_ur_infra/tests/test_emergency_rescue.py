@@ -26,8 +26,10 @@ from ur_env.learner.checkpoint import (  # noqa: E402
 )
 from ur_env.learner.config import FROZEN_TRUNK_FEATURE_SHAPE  # noqa: E402
 from ur_env.learner.emergency import (  # noqa: E402
+    ReplaySnapshotError,
     read_replay_snapshot_manifest,
     rescue_learner_state,
+    restore_replay_snapshot,
     save_replay_snapshot,
 )
 from ur_env.learner.feature_replay import (  # noqa: E402
@@ -368,3 +370,153 @@ def test_event_fields_drop_unset_entries_so_logs_stay_readable(tmp_path):
     assert "checkpoint_error" not in fields
     assert fields["learner_step"] == 317
     assert json.dumps(fields)
+
+
+# --------------------------------------------------------------------------- #
+# restore                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+class _RestoreIngress:
+    """Two real rings, so restore runs through the real insert contract."""
+
+    observation_representation = "resnet10_frozen_trunk_map_f32_v1"
+    augmentation = "none"
+
+    def __init__(self, *, capacity: int = 64) -> None:
+        self.replay_store = FeatureTransitionRing(capacity, seed=11)
+        self.intervention_store = FeatureTransitionRing(capacity, seed=12)
+
+
+def _written_snapshot(tmp_path, *, replay_rows=5, intervention_rows=2,
+                      fingerprint="b" * 64, name="replay.npz"):
+    source = _StubIngress(replay_rows, intervention_rows)
+    return save_replay_snapshot(
+        tmp_path / name,
+        replay=source.replay_store.snapshot(),
+        intervention=source.intervention_store.snapshot(),
+        provenance={
+            "fingerprint_sha256": fingerprint,
+            "observation_representation": _StubIngress.observation_representation,
+            "augmentation": _StubIngress.augmentation,
+        },
+    )
+
+
+def test_restore_refills_both_rings_with_identical_rows(tmp_path):
+    path = _written_snapshot(tmp_path, replay_rows=5, intervention_rows=2)
+    ingress = _RestoreIngress()
+
+    result = restore_replay_snapshot(
+        path, ingress=ingress, expected_fingerprint_sha256="b" * 64
+    )
+
+    assert result["replay_rows"] == 5
+    assert result["intervention_rows"] == 2
+    assert len(ingress.replay_store) == 5
+    assert len(ingress.intervention_store) == 2
+
+    # Round-tripped rows must be bit-identical, in order.
+    restored = ingress.replay_store.snapshot()
+    expected = _ring(5, capacity=64).snapshot()
+    np.testing.assert_array_equal(restored["actions"], expected["actions"])
+    for key in FEATURE_KEYS:
+        np.testing.assert_array_equal(
+            restored["observations"][key], expected["observations"][key]
+        )
+
+
+def test_restore_refuses_a_snapshot_from_another_lineage(tmp_path):
+    path = _written_snapshot(tmp_path, fingerprint="c" * 64)
+    ingress = _RestoreIngress()
+
+    with pytest.raises(ReplaySnapshotError, match="different learner lineage"):
+        restore_replay_snapshot(
+            path, ingress=ingress, expected_fingerprint_sha256="b" * 64
+        )
+
+    assert len(ingress.replay_store) == 0
+
+
+def test_restore_refuses_when_the_representation_disagrees(tmp_path):
+    path = _written_snapshot(tmp_path)
+    ingress = _RestoreIngress()
+    ingress.observation_representation = "some_other_encoding_v9"
+
+    with pytest.raises(ReplaySnapshotError, match="observation_representation"):
+        restore_replay_snapshot(path, ingress=ingress)
+
+
+def test_restore_refuses_rather_than_wrapping_a_too_small_ring(tmp_path):
+    """A ring that wraps mid-restore silently loses its oldest rows."""
+
+    path = _written_snapshot(tmp_path, replay_rows=10, intervention_rows=1)
+    ingress = _RestoreIngress(capacity=4)
+
+    with pytest.raises(ReplaySnapshotError, match="silently drop"):
+        restore_replay_snapshot(path, ingress=ingress)
+
+
+def test_restore_rejects_an_unsupported_format_version(tmp_path):
+    path = _written_snapshot(tmp_path)
+    with np.load(path) as archive:
+        payload = {key: archive[key] for key in archive.files}
+    manifest = json.loads(bytes(payload["manifest.json"]).decode("utf-8"))
+    manifest["format_version"] = 99
+    payload["manifest.json"] = np.frombuffer(
+        json.dumps(manifest).encode("utf-8"), dtype=np.uint8
+    )
+    bumped = tmp_path / "bumped.npz"
+    np.savez(bumped, **payload)
+
+    with pytest.raises(ReplaySnapshotError, match="format version"):
+        restore_replay_snapshot(bumped, ingress=_RestoreIngress())
+
+
+def test_restored_rows_do_not_earn_a_second_utd_budget():
+    """A restart must not open with a burst of updates over old data."""
+
+    from ur_env.learner.composition import LearnerWorker
+
+    class _Learner:
+        learner_step = 0
+        gradient_step = 0
+        policy_version = 0
+
+        class config:
+            training_starts = 100
+            utd_ratio = 10
+
+    inserts = {"count": 600}
+    worker = LearnerWorker.__new__(LearnerWorker)
+    worker.learner = _Learner()
+    worker.replay_insert_count = lambda: inserts["count"]
+    worker._last_replay_insert_count = None
+    worker._restored_replay_rows = 500
+
+    # 600 inserted, 500 of them restored -> only 101 fresh transitions count.
+    assert worker._update_budget() == (600 - 100 + 1 - 500) * 10
+
+    # Without the restore baseline the same buffer would authorise 5010 steps.
+    worker._restored_replay_rows = 0
+    worker._last_replay_insert_count = None
+    assert worker._update_budget() == (600 - 100 + 1) * 10
+
+
+def test_budget_is_zero_while_only_restored_rows_are_present():
+    from ur_env.learner.composition import LearnerWorker
+
+    class _Learner:
+        learner_step = 0
+
+        class config:
+            training_starts = 100
+            utd_ratio = 10
+
+    worker = LearnerWorker.__new__(LearnerWorker)
+    worker.learner = _Learner()
+    worker.replay_insert_count = lambda: 500
+    worker._last_replay_insert_count = None
+    worker._restored_replay_rows = 500
+
+    assert worker._update_budget() == 0

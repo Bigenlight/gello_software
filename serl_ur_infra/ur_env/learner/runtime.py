@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import math
 import threading
@@ -110,6 +111,7 @@ class HILSERLLearner:
         parameter_validator: Callable[[Any], None] | None = None,
         candidate_postprocessor: Callable[[Any], Any] | None = None,
         params_exporter: Any | None = None,
+        update_context: Callable[[], Any] | None = None,
     ) -> None:
         self.agent = agent
         self.sampler = sampler
@@ -141,6 +143,9 @@ class HILSERLLearner:
             raise TypeError("candidate_postprocessor must be callable")
         self._candidate_postprocessor = candidate_postprocessor
         self._params_exporter = self._checked_exporter(params_exporter)
+        if update_context is not None and not callable(update_context):
+            raise TypeError("update_context must be callable")
+        self._update_context = update_context or nullcontext
         self._fault: LearnerFault | None = None
         self._lock = threading.Lock()
         validate_tree_finite(agent.state, name="initial agent state")
@@ -258,16 +263,21 @@ class HILSERLLearner:
     def _update_agent(
         self, agent: Any, batch: Any, networks: frozenset[str]
     ) -> tuple[Any, Any]:
-        candidate, info = agent.update(
-            batch,
-            networks_to_update=networks,
-        )
-        if self._candidate_postprocessor is not None:
-            candidate = self._candidate_postprocessor(candidate)
-        _block_tree((candidate, info))
-        validate_tree_finite(candidate.state, name="updated agent state")
-        self._validate_parameter_invariant(candidate.state.params)
-        _flatten_scalars(info)
+        # The context spans every GPU-touching part of one optimizer call,
+        # including synchronous validation.  ActorInferenceGate can therefore
+        # bound an RPC's learner-induced queue wait to the update already in
+        # flight; critic-only and full-network updates release it in between.
+        with self._update_context():
+            candidate, info = agent.update(
+                batch,
+                networks_to_update=networks,
+            )
+            if self._candidate_postprocessor is not None:
+                candidate = self._candidate_postprocessor(candidate)
+            _block_tree((candidate, info))
+            validate_tree_finite(candidate.state, name="updated agent state")
+            self._validate_parameter_invariant(candidate.state.params)
+            _flatten_scalars(info)
         return candidate, info
 
     def _update(self, batch: Any, networks: frozenset[str]) -> tuple[Any, Any]:
@@ -392,9 +402,13 @@ class HILSERLLearner:
 
             published = False
             if self.learner_step % self.config.publish_period == 0:
-                self.policy_version = self.publisher.publish(
-                    self.agent.state.params, self.learner_step
-                )
+                # Publication validates the tree and runs two smoke policy
+                # inferences before the atomic snapshot swap.  Treat those as
+                # learner-side GPU work too, so a waiting actor can run first.
+                with self._update_context():
+                    self.policy_version = self.publisher.publish(
+                        self.agent.state.params, self.learner_step
+                    )
                 published = True
                 # Same params, same version, one file: the local-inference peer
                 # reads what in-process inference just started serving.

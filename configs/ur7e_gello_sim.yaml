@@ -1,0 +1,24 @@
+# GELLO -> MuJoCo UR5e sim with the REAL-ROBOT calibration (ur7e_gello.yaml).
+# Used to compare two GELLO arms side by side (docs/hardware/GELLO_UR_ARM_INTERCHANGE.md).
+# Differs from rwh_ur.yaml only in joint_offsets[0] (pan): 0.0 here vs 3.142 there.
+robot:
+  _target_: gello.robots.sim_robot.MujocoRobotServer
+  xml_path: "third_party/mujoco_menagerie/universal_robots_ur5e/ur5e.xml"
+  gripper_xml_path: "third_party/mujoco_menagerie/robotiq_2f85/2f85.xml"
+  add_scene: true
+  add_red_cube: true
+  host: "127.0.0.1"
+  port: 6001
+
+agent:
+  _target_: gello.agents.gello_agent.GelloAgent
+  port: "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0"
+  dynamixel_config:
+    _target_: gello.agents.gello_agent.DynamixelRobotConfig
+    joint_ids: [1, 2, 3, 4, 5, 6]
+    joint_offsets: [0.0, 1.571, 4.712, 4.712, 4.712, 3.142]
+    joint_signs: [1, 1, -1, 1, 1, 1]
+    gripper_config: [7, 210.649609375, 168.849609375]
+  start_joints: [0.0, -1.57, 1.57, -1.57, -1.57, 0.0, 0.0]
+
+hz: 30

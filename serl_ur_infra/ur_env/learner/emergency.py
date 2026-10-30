@@ -47,6 +47,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from ur_env.learner.checkpoint import CheckpointManager, LearnerFingerprint
+from ur_env.learner.feature_replay import FEATURE_KEYS
 
 
 REPLAY_SNAPSHOT_FORMAT_VERSION = 1
@@ -162,6 +163,132 @@ def read_replay_snapshot_manifest(
     with np.load(Path(path).expanduser().resolve()) as archive:
         raw = bytes(archive["manifest.json"])
     return json.loads(raw.decode("utf-8"))
+
+
+class ReplaySnapshotError(RuntimeError):
+    """A snapshot is malformed, or does not belong to this learner."""
+
+
+def _snapshot_rows(archive: Any, name: str, count: int) -> list[dict[str, Any]]:
+    """Rebuild per-row transitions in the shape ``insert`` already validates."""
+
+    observations = {}
+    next_observations = {}
+    for key in ("state", *FEATURE_KEYS):
+        observations[key] = archive[f"{name}/observations/{key}"]
+        next_observations[key] = archive[f"{name}/next_observations/{key}"]
+    actions = archive[f"{name}/actions"]
+    rewards = archive[f"{name}/rewards"]
+    masks = archive[f"{name}/masks"]
+    grasp_penalty = archive[f"{name}/grasp_penalty"]
+
+    for array, label in (
+        (actions, "actions"),
+        (rewards, "rewards"),
+        (masks, "masks"),
+        (grasp_penalty, "grasp_penalty"),
+    ):
+        if array.shape[0] != count:
+            raise ReplaySnapshotError(
+                f"{name}/{label} holds {array.shape[0]} rows but the manifest "
+                f"declares {count}"
+            )
+
+    rows: list[dict[str, Any]] = []
+    for index in range(count):
+        rows.append(
+            {
+                "observations": {
+                    key: value[index] for key, value in observations.items()
+                },
+                "next_observations": {
+                    key: value[index]
+                    for key, value in next_observations.items()
+                },
+                "actions": actions[index],
+                "rewards": rewards[index],
+                "masks": masks[index],
+                "grasp_penalty": grasp_penalty[index],
+            }
+        )
+    return rows
+
+
+def restore_replay_snapshot(
+    path: os.PathLike[str] | str,
+    *,
+    ingress: Any,
+    expected_fingerprint_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Refill both feature rings from a snapshot and report what was restored.
+
+    Rows go back in through ``FeatureTransitionRing.insert``, not by assigning
+    the arrays.  Assignment would be faster and would also skip every contract
+    the ring enforces -- action bounds, the gripper's discrete set, binary
+    rewards, the configured grasp penalty -- on data that has been through a
+    file on disk since it was last checked.  A snapshot is exactly the place
+    where silent corruption can enter, so it is the last place to trust.
+
+    Restoring is refused rather than truncated when a ring is too small for
+    its rows: a ring that wraps during restore silently drops the oldest
+    transitions, and a buffer that quietly lost its beginning is worse than
+    one that was never restored.
+    """
+
+    snapshot_path = Path(path).expanduser().resolve()
+    manifest = read_replay_snapshot_manifest(snapshot_path)
+    version = manifest.get("format_version")
+    if version != REPLAY_SNAPSHOT_FORMAT_VERSION:
+        raise ReplaySnapshotError(
+            f"unsupported replay snapshot format version: {version!r}"
+        )
+
+    provenance = manifest.get("provenance") or {}
+    if expected_fingerprint_sha256 is not None:
+        recorded = provenance.get("fingerprint_sha256")
+        if recorded != expected_fingerprint_sha256:
+            raise ReplaySnapshotError(
+                "replay snapshot belongs to a different learner lineage: "
+                f"snapshot={recorded!r} expected={expected_fingerprint_sha256!r}"
+            )
+
+    for attribute in ("observation_representation", "augmentation"):
+        recorded = provenance.get(attribute)
+        current = getattr(ingress, attribute, None)
+        if recorded is not None and current is not None and recorded != current:
+            raise ReplaySnapshotError(
+                f"replay snapshot {attribute} {recorded!r} does not match the "
+                f"live ingress {current!r}"
+            )
+
+    stores = {
+        "replay": getattr(ingress, "replay_store", None),
+        "intervention": getattr(ingress, "intervention_store", None),
+    }
+    for name, store in stores.items():
+        if store is None:
+            raise ReplaySnapshotError(f"ingress exposes no {name}_store")
+
+    rings = manifest.get("rings") or {}
+    restored: dict[str, Any] = {"snapshot_path": str(snapshot_path)}
+    with np.load(snapshot_path) as archive:
+        for name in SNAPSHOT_RINGS:
+            ring_manifest = rings.get(name)
+            if not isinstance(ring_manifest, dict):
+                raise ReplaySnapshotError(f"manifest has no {name} ring")
+            count = int(ring_manifest["size"])
+            store = stores[name]
+            if count > store.capacity:
+                raise ReplaySnapshotError(
+                    f"{name} snapshot holds {count} rows but the live ring "
+                    f"capacity is {store.capacity}; restoring would silently "
+                    "drop the oldest transitions"
+                )
+            for row in _snapshot_rows(archive, name, count):
+                store.insert(row)
+            restored[f"{name}_rows"] = count
+
+    return restored
 
 
 @dataclass

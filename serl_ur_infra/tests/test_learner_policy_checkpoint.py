@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import json
 import os
@@ -250,6 +251,41 @@ def test_learner_fault_keeps_last_published_policy():
     action, version = runtime(_observation(0), deterministic=True)
     assert version == 1
     assert np.isfinite(action).all()
+
+
+def test_learner_gpu_context_covers_updates_and_policy_publication():
+    events = []
+
+    @contextmanager
+    def gpu_context():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    config = LearnerConfig(
+        batch_size=4,
+        training_starts=4,
+        publish_period=1,
+        checkpoint_period=100,
+    )
+    agent = _agent()
+    runtime = VersionedPolicyRuntime(agent, sample_action=_sample_action)
+    learner = HILSERLLearner(
+        agent=agent,
+        sampler=_sampler(),
+        publisher=runtime,
+        config=config,
+        update_context=gpu_context,
+    )
+
+    learner.train_once()
+
+    # One critic update, one full-network update, then publication's policy
+    # smoke validation.  The context is released at each actor preemption
+    # boundary instead of covering the whole outer learner step.
+    assert events == ["enter", "exit"] * 3
 
 
 def _fingerprint(config: LearnerConfig) -> LearnerFingerprint:

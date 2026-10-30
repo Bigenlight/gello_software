@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -28,11 +29,22 @@ from ur_env.remote_actor import build_data  # noqa: E402
 
 def test_real_loopback_smoke_sends_normal_and_intervention_terminal_data():
     lines = []
+    priority_events = []
+
+    @contextmanager
+    def priority_context():
+        priority_events.append("enter")
+        try:
+            yield
+        finally:
+            priority_events.append("exit")
+
     sink = SummaryDataSink(capacity=4, emit=lines.append)
     service = ActorSessionService(
         lambda observation, deterministic: (np.zeros(7, np.float32), 0),
         model_id="mock-zero-policy",
         accept_data=sink,
+        priority_context=priority_context,
     )
     server, port = create_grpc_server(service)
     server.start()
@@ -61,6 +73,9 @@ def test_real_loopback_smoke_sends_normal_and_intervention_terminal_data():
     assert service.intervention_items == []
     assert service.observation_accept_count == 3
     assert service.inference_count == 2
+    # Health and GetServerInfo are monitoring calls and must not starve the
+    # learner.  Only BeginEpisode and the two Step RPCs enter actor priority.
+    assert priority_events == ["enter", "exit"] * 3
     assert len(lines) == 2
 
     records = [json.loads(line) for line in lines]
