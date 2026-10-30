@@ -5,7 +5,7 @@ Its contract is fail-closed: every malformed / missing / implausible input must
 be REJECTED with a message naming the file, and ``resolve_start_pose`` must
 never raise and never fall back to a hard-coded pose. These tests pin every
 error branch, the boolean trap (YAML ``true`` is an ``int`` subclass), the env
-resolution, and that the REAL deploy yamls in this workspace parse.
+resolution, and that the shipped config/start_pose.yaml parses.
 """
 
 import importlib.util
@@ -48,10 +48,10 @@ START_POSE_CONFIG_ENV = sp.START_POSE_CONFIG_ENV
 BANANA = [3.106, -1.817, 1.653, -1.618, -1.628, -3.195]
 CARROT = [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
 
-# ros2_ur_ws/src/gello_policy/config -- resolved relative to this test file so it
-# works from any cwd and from the installed-overlay or src-path import alike.
+# ros2_ur_ws/src/ur_gello_bringup/config -- resolved relative to this test file
+# so it works from any cwd and from the installed-overlay or src-path import alike.
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_CONFIG_DIR = os.path.join(os.path.dirname(_PKG_DIR), "gello_policy", "config")
+_CONFIG_DIR = os.path.join(_PKG_DIR, "config")
 
 
 # --------------------------------------------------------------------------
@@ -388,7 +388,7 @@ def test_resolve_unset():
     assert pose is None
     assert reason == (
         "START_POSE_CONFIG is not set -- export it to a deploy yaml "
-        "(e.g. src/gello_policy/config/ifql_deploy.yaml)"
+        "(e.g. src/ur_gello_bringup/config/start_pose.yaml)"
     )
 
 
@@ -452,39 +452,26 @@ def test_resolve_never_raises_on_unexpected_error(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# the REAL deploy yamls in this workspace
+# the shipped config/start_pose.yaml (default START_POSE_CONFIG of
+# run_eef_gui.sh / run_eef_collection_gui.sh)
 # --------------------------------------------------------------------------
-@pytest.mark.parametrize("name", ["act_deploy.yaml", "fm_deploy.yaml", "diffusion_deploy.yaml"])
-def test_real_banana_deploy_yamls_parse(name):
-    path = os.path.join(_CONFIG_DIR, name)
+def test_shipped_start_pose_yaml_parses_to_carrot():
+    path = os.path.join(_CONFIG_DIR, "start_pose.yaml")
     assert os.path.isfile(path), f"expected tracked config at {path}"
-    pose = load_start_pose(path)
-    assert pose.joints == pytest.approx(tuple(BANANA))
-    assert pose.gripper == 0.0
-    assert pose.source == os.path.abspath(path)
-    assert pose.describe().startswith(f"start_pose from {name}:")
-
-
-def test_real_ifql_deploy_yaml_parses_when_present():
-    # Untracked / in-progress in another session: test it when it is there,
-    # skip (do not fail) when it is not.
-    path = os.path.join(_CONFIG_DIR, "ifql_deploy.yaml")
-    if not os.path.isfile(path):
-        pytest.skip(f"{path} not present (untracked carrot deploy config)")
     pose = load_start_pose(path)
     assert pose.joints == pytest.approx(tuple(CARROT))
     assert pose.gripper == 0.0
+    assert pose.source == os.path.abspath(path)
+    assert pose.describe().startswith("start_pose from start_pose.yaml:")
     # The banana/carrot trap this module exists for: pan differs by ~2*pi in
     # VALUE (nearly the same angle) while lift differs by ~0.33 rad.
-    banana = load_start_pose(os.path.join(_CONFIG_DIR, "act_deploy.yaml"))
-    assert abs(abs(pose.joints[0] - banana.joints[0]) - 2 * math.pi) < 0.02
-    assert abs(pose.joints[1] - banana.joints[1]) > 0.3
+    assert abs(abs(pose.joints[0] - BANANA[0]) - 2 * math.pi) < 0.02
+    assert abs(pose.joints[1] - BANANA[1]) > 0.3
 
 
-def test_real_yaml_copied_to_tmp_still_parses(tmp_path):
-    # The shape test above uses a synthetic doc; this proves the real file's
-    # full contents (all sibling nodes, comments, anchors if any) go through.
-    src = os.path.join(_CONFIG_DIR, "act_deploy.yaml")
-    dst = tmp_path / "copy_of_act.yaml"
+def test_shipped_yaml_copied_to_tmp_still_parses(tmp_path):
+    # Proves the real file's full contents (comments etc.) go through.
+    src = os.path.join(_CONFIG_DIR, "start_pose.yaml")
+    dst = tmp_path / "copy_of_start_pose.yaml"
     shutil.copyfile(src, dst)
-    assert load_start_pose(str(dst)).joints == pytest.approx(tuple(BANANA))
+    assert load_start_pose(str(dst)).joints == pytest.approx(tuple(CARROT))

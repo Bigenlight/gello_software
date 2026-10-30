@@ -23,6 +23,6 @@ source "$ROS_SETUP"
 source "$WORKSPACE_SETUP"
 export PATH="/opt/ros/${GELLO_ROS_DISTRO}/bin:/usr/bin:/bin:${PATH}"
 
-export START_POSE_CONFIG="${START_POSE_CONFIG:-$SCRIPT_DIR/src/gello_policy/config/ifql_deploy.yaml}"
+export START_POSE_CONFIG="${START_POSE_CONFIG:-$SCRIPT_DIR/src/ur_gello_bringup/config/start_pose.yaml}"
 
 exec ros2 run ur_gello_bringup eef_recorder_gui

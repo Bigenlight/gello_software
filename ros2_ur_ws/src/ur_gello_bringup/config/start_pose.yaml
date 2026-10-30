@@ -1,0 +1,22 @@
+# Start pose for the EEF teleop GUI's "GO TO START POSE" button
+# (run_eef_gui.sh / run_eef_collection_gui.sh default START_POSE_CONFIG).
+#
+# Read by ur_gello_bringup/start_pose.py, which looks up exactly this key path:
+#   policy_leader_node.ros__parameters.start_pose     6 rad, UR joint order
+#                                                     (pan, lift, elbow, w1, w2, w3)
+#   policy_leader_node.ros__parameters.start_gripper  0.0 = OPEN .. 1.0 = CLOSED
+# The `policy_leader_node` key is kept so a policy deploy yaml (which carries the
+# same block) can be passed via START_POSE_CONFIG unchanged. Nothing else in this
+# file is read, and no launch file loads it.
+#
+# VALUES: copied verbatim from the carrot_in_pot deploy config
+# (src/gello_policy/config/ifql_deploy.yaml, research/policy-deploy branch):
+# the mean de-staled frame-0 pose over 54 real carrot_in_pot takes (2026-09-14).
+# For another task, point START_POSE_CONFIG at a yaml with that task's pose; do
+# NOT edit these numbers to "something close" -- see start_pose.py
+# ("the banana vs carrot trap"): a wrong pose here parks the arm at a
+# plausible-looking wrong pose with no error.
+policy_leader_node:
+  ros__parameters:
+    start_pose: [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
+    start_gripper: 0.0

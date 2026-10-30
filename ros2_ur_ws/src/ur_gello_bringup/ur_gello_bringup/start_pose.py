@@ -93,7 +93,7 @@ MAX_ABS_RAD = 2.0 * math.pi + 0.5
 
 _UNSET_REASON = (
     f"{START_POSE_CONFIG_ENV} is not set -- export it to a deploy yaml "
-    "(e.g. src/gello_policy/config/ifql_deploy.yaml)"
+    "(e.g. src/ur_gello_bringup/config/start_pose.yaml)"
 )
 
 

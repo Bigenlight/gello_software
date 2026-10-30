@@ -62,25 +62,24 @@ source "$ROS_SETUP"
 source "$WORKSPACE_SETUP"
 export PATH="/opt/ros/${GELLO_ROS_DISTRO}/bin:/usr/bin:/bin:${PATH}"
 
-# START_POSE_CONFIG -- the deploy yaml the GO TO START POSE button reads its
-# target from: `policy_leader_node.ros__parameters.start_pose` (6 rad, UR joint
-# order) + `start_gripper` (0=open..1=closed). It is the SAME file the inference
-# launch feeds policy_leader_node, so data collection starts from exactly the
-# pose the policy will later be started from (the resume-align gate requires the
-# live arm within ~0.1 rad of it). There is deliberately NO pose hard-coded in
+# START_POSE_CONFIG -- the yaml the GO TO START POSE button reads its target
+# from: `policy_leader_node.ros__parameters.start_pose` (6 rad, UR joint order)
+# + `start_gripper` (0=open..1=closed). That key path is the one a policy deploy
+# yaml carries, so a deploy yaml can be passed as-is and data collection then
+# starts from exactly the pose the policy will later be started from. There is
+# deliberately NO pose hard-coded in
 # the GUI: banana and carrot start poses look alike (pan +3.106 vs -3.164 is
 # ~2*pi apart in value) but differ by up to 0.33 rad on other joints, so a wrong
 # default would park the arm at a plausible-looking wrong pose with no error.
 #
-# Default = the carrot_in_pot deploy config. It may be ABSENT on a fresh
-# checkout (it is untracked while that work is in progress) -- then the button
-# is simply DISABLED with the reason shown on screen; nothing else changes.
-# To collect data for another task, point this at that task's deploy yaml:
-#     START_POSE_CONFIG=src/gello_policy/config/act_deploy.yaml ./run_eef_gui.sh
-# (banana: act/fm/diffusion_deploy.yaml all carry the same pose). A relative
-# path is resolved against the cwd you ran this script from (`exec ros2 run`
-# keeps it), so the example above assumes `cd ros2_ur_ws` first; an absolute
-# path is safer.
-export START_POSE_CONFIG="${START_POSE_CONFIG:-$SCRIPT_DIR/src/gello_policy/config/ifql_deploy.yaml}"
+# Default = src/ur_gello_bringup/config/start_pose.yaml, which carries the
+# carrot_in_pot start pose (copied from that task's deploy config). If the file
+# is missing or malformed the button is simply DISABLED with the reason shown
+# on screen; nothing else changes. To collect data for another task, point this
+# at a yaml with that task's pose (same key path), e.g.:
+#     START_POSE_CONFIG=/abs/path/to/my_task_start_pose.yaml ./run_eef_gui.sh
+# A relative path is resolved against the cwd you ran this script from
+# (`exec ros2 run` keeps it); an absolute path is safer.
+export START_POSE_CONFIG="${START_POSE_CONFIG:-$SCRIPT_DIR/src/ur_gello_bringup/config/start_pose.yaml}"
 
 exec ros2 run ur_gello_bringup gello_eef_gui
