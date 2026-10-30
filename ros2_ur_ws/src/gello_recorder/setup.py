@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'gello_ur_recorder = gello_recorder.gello_ur_recorder_node:main',
             'gello_recorder_gui = gello_recorder.gello_recorder_gui:main',
+            'policy_run_gui = gello_recorder.policy_run_gui:main',
         ],
     },
 )

@@ -146,7 +146,7 @@ mkdir -p "${TMPDIR_RUN}"
 # compressed plugin installed, it natively provides the policy's JPEG endpoints.
 CAM1_TOPIC="/${CAM1_NAME}/${CAM1_NAME}/color/image_raw/compressed"
 CAM2_TOPIC="/${CAM2_NAME}/${CAM2_NAME}/color/image_raw/compressed"
-TOPIC_CHECKER="${SCRIPT_DIR}/_hil_topic_rate_check.py"
+TOPIC_CHECKER="${SCRIPT_DIR}/_topic_rate_check.py"
 if [ ! -f "${TOPIC_CHECKER}" ]; then
     echo "FATAL: topic probe helper missing: ${TOPIC_CHECKER}" >&2
     exit 1

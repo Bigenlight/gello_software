@@ -475,3 +475,33 @@ def test_shipped_yaml_copied_to_tmp_still_parses(tmp_path):
     dst = tmp_path / "copy_of_start_pose.yaml"
     shutil.copyfile(src, dst)
     assert load_start_pose(str(dst)).joints == pytest.approx(tuple(CARROT))
+
+
+# --------------------------------------------------------------------------
+# research/policy-deploy only: the REAL gello_policy deploy yamls. Here
+# run_eef_gui.sh / run_eef_collection_gui.sh default START_POSE_CONFIG to
+# gello_policy/config/ifql_deploy.yaml, so data collection starts from exactly
+# the pose the policy is started from. The slim base ships a verbatim copy in
+# config/start_pose.yaml -- pin that the two never drift apart.
+# --------------------------------------------------------------------------
+_POLICY_CONFIG_DIR = os.path.join(os.path.dirname(_PKG_DIR), "gello_policy", "config")
+
+
+@pytest.mark.parametrize("name", ["act_deploy.yaml", "fm_deploy.yaml", "diffusion_deploy.yaml"])
+def test_real_banana_deploy_yamls_parse(name):
+    path = os.path.join(_POLICY_CONFIG_DIR, name)
+    assert os.path.isfile(path), f"expected tracked config at {path}"
+    pose = load_start_pose(path)
+    assert pose.joints == pytest.approx(tuple(BANANA))
+    assert pose.gripper == 0.0
+    assert pose.describe().startswith(f"start_pose from {name}:")
+
+
+def test_ifql_deploy_yaml_matches_shipped_start_pose():
+    path = os.path.join(_POLICY_CONFIG_DIR, "ifql_deploy.yaml")
+    assert os.path.isfile(path), f"expected tracked config at {path}"
+    deploy = load_start_pose(path)
+    shipped = load_start_pose(os.path.join(_CONFIG_DIR, "start_pose.yaml"))
+    assert deploy.joints == pytest.approx(tuple(CARROT))
+    assert deploy.joints == shipped.joints
+    assert deploy.gripper == shipped.gripper == 0.0
