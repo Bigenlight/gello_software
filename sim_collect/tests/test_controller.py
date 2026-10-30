@@ -22,7 +22,7 @@ LEADER_HZ = 30.0
 @pytest.fixture(scope="module")
 def params():
     p = load_bridge_params([BASE, EEF])
-    assert p["control_mode"] == "eef" and p["max_step_rad"] == 0.0025 and p["v_max"] == 0.16
+    assert p["control_mode"] == "eef" and p["max_step_rad"] == 0.0025 and p["v_max"] == 0.20
     return p
 
 
