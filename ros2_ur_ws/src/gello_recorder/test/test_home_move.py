@@ -67,6 +67,7 @@ class FakeOps:
         self.joints = None if joints is None else list(joints)
         self.calls: list[str] = []          # ordered log of every op invoked
         self.pause_cb = None
+        self.pause_gripper: list[bool] = []
         self.states_cb = None
         self.switch_cb = None
         self.switch_args: list[tuple] = []  # (activate, deactivate)
@@ -84,8 +85,9 @@ class FakeOps:
         return None if self.joints is None else list(self.joints)
 
     # --- bridges --------------------------------------------------------- #
-    def pause_bridges(self, done_cb) -> None:
+    def pause_bridges(self, done_cb, *, pause_gripper=True) -> None:
         self.calls.append("pause")
+        self.pause_gripper.append(bool(pause_gripper))
         self.pause_cb = done_cb
 
     def resume_bridges(self, done_cb) -> None:
@@ -347,6 +349,26 @@ def test_happy_path_full_sequence_and_state_trace():
     assert ctrl.status()["active"] is False
     # NEVER auto-resumed: the follower would chase wherever the human happens to
     # be holding the leader, which after a HOME move is somewhere else entirely.
+    assert "resume" not in ops.calls
+
+
+def test_arm_only_start_pose_keeps_gello_gripper_live():
+    """EEF data collection must not require a gripper resume after re-homing."""
+    _, ops, ctrl = make(manage_gripper=False)
+
+    drive_to_moving(ctrl, ops)
+    assert ops.pause_gripper == [False]
+
+    ops.traj_cb(True, "succeeded")
+    ctrl.tick()
+    assert ctrl.status()["state"] == HomeMoveState.RESTORING_FPC
+    assert ops.gripper_cmds == []
+
+    ops.switch_cb(True, "restored")
+    ctrl.tick()
+    done = ctrl.status()
+    assert done["state"] == HomeMoveState.DONE
+    assert "gripper remained under GELLO control" in done["message"]
     assert "resume" not in ops.calls
 
 

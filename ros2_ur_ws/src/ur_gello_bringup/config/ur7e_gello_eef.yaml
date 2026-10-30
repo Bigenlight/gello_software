@@ -226,7 +226,7 @@ gello_ur_bridge:
     tool_r_xyz_rpy: [0.0, 0.0, 0.174, 0.0, 0.0, 0.0]
 
     # Max commanded EEF linear speed (m/s). Raised 2026-07-24 from the plan's
-    # conservative 0.08 to 0.16 (2x) for snappier follow-through on rough teleop
+    # conservative 0.08 to 0.20 (2.5x) for snappier follow-through on rough teleop
     # (user request — EEF felt laggy vs joint mode). Live-retunable at runtime:
     #   ros2 param set /gello_ur_bridge v_max <value>
     # NOTE: param name MUST be v_max (maps 1:1 to EefDeltaController cfg key and
@@ -235,7 +235,7 @@ gello_ur_bridge:
     # far enough the per-joint slew cap max_step_rad (0.0025 rad/tick @250Hz =
     # 0.625 rad/s/joint, in the base params) becomes the binding limit -> more
     # STEP_FLOOR HOLDs. Collision gate is OFF (H1): faster = clear the space.
-    v_max: 0.16
+    v_max: 0.20
     # Max commanded EEF angular speed (rad/s). Raised 2026-07-24 from 0.5 to 1.0
     # (2x), same rationale as v_max. Live-retunable: ros2 param set .../w_max.
     w_max: 1.0
@@ -253,7 +253,7 @@ gello_ur_bridge:
     #     gamma_thr = clamp(gamma_thr, gamma_min, 1.0)
     # So sigma_min below sigma_stop does NOT stop the arm — gamma just floors
     # at gamma_min, and the arm keeps moving at gamma_min * v_max
-    #   = 0.05 * 0.08 m/s = 0.004 m/s = 4 mm/s.
+    #   = 0.05 * 0.20 m/s = 0.010 m/s = 10 mm/s.
     # On top of that, an increment that INCREASES sigma_min (escapes the
     # singularity) is passed unthrottled at gamma = 1.0 (asymmetric-gamma block, same function).
     # Both behaviours are DELIBERATE ANTI-LOCKUP design (plan §6.3), not bugs;

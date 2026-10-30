@@ -460,6 +460,7 @@ class HomeMoveController:
         *,
         target_joints: Sequence[float] = HOME_JOINTS,
         target_label: str = "HOME",
+        manage_gripper: bool = True,
         speed_budget_rad_s: float = SPEED_BUDGET_RAD_S,
         min_duration_s: float = MIN_DURATION_S,
         max_duration_s: float = MAX_DURATION_S,
@@ -472,6 +473,7 @@ class HomeMoveController:
         self._target_label = str(target_label).strip()
         if not self._target_label:
             raise ValueError("target_label must be a non-empty string")
+        self._manage_gripper = bool(manage_gripper)
         self._speed_budget_rad_s = float(speed_budget_rad_s)
         self._min_duration_s = float(min_duration_s)
         self._max_duration_s = float(max_duration_s)
@@ -568,7 +570,11 @@ class HomeMoveController:
         # fresh one: clear the flag on the way in.
         self._abort_requested = False
         self._state = HomeMoveState.PAUSING
-        self._message = "pausing GELLO teleop bridges"
+        self._message = (
+            "pausing GELLO teleop bridges"
+            if self._manage_gripper
+            else "pausing GELLO arm teleop; gripper remains active"
+        )
         self._start_pause()
         return True
 
@@ -748,7 +754,11 @@ class HomeMoveController:
 
     def _finish_done(self) -> None:
         self._state = HomeMoveState.DONE
-        gripper_note = self._gripper_warning or "gripper open"
+        gripper_note = (
+            self._gripper_warning or "gripper open"
+            if self._manage_gripper
+            else "gripper remained under GELLO control"
+        )
         self._message = "{} reached; {}; {}".format(
             self._target_label, gripper_note, _DONE_TAIL
         )
@@ -760,7 +770,8 @@ class HomeMoveController:
     def _start_pause(self) -> None:
         step_id = self._begin_step(_STEP_PAUSE, self._step_timeout_s)
         self._ops.pause_bridges(
-            lambda ok, msg: self._record(step_id, (bool(ok), str(msg)))
+            lambda ok, msg: self._record(step_id, (bool(ok), str(msg))),
+            pause_gripper=self._manage_gripper,
         )
 
     def _start_query(self) -> None:
@@ -786,7 +797,11 @@ class HomeMoveController:
                 # unknown bridge state.
                 self._fail("teleop pause failed: {}".format(msg))
                 return
-            self._message = "bridges paused; reading controller states"
+            self._message = (
+                "bridges paused; reading controller states"
+                if self._manage_gripper
+                else "arm bridge paused; gripper active; reading controller states"
+            )
             self._start_query()
             return
 
@@ -954,7 +969,10 @@ class HomeMoveController:
         if not ok:
             self._fail("home trajectory failed: {}".format(msg))
             return
-        self._enter_opening_gripper()
+        if self._manage_gripper:
+            self._enter_opening_gripper()
+        else:
+            self._start_restore()
 
     # ------------------------------------------------------------------ #
     # OPENING_GRIPPER

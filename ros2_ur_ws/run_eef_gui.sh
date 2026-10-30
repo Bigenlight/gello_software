@@ -10,6 +10,9 @@
 #   * click in HOLD/DISENGAGED  -> ENGAGE (two-click confirm). From DISENGAGED it
 #     chains eef_resume -> pos_scale commit -> eef_engage automatically.
 #   * click in ENGAGED          -> DISENGAGE (single click; the arm holds).
+#   * SPACE mirrors that toggle: SPACE SPACE engages, the next SPACE disengages.
+#     G toggles Gripper PAUSE/Resume; resume keeps its two-press confirmation
+#     (G G). The GUI window must have keyboard focus.
 #   Every ENGAGE re-anchors at the current pose, so "off -> move GELLO -> on" is
 #   the whole workflow -- there are NO reclutch/re-arm/to-joint buttons.
 #   The sensitivity slider is pos_scale (DPI); it commits only at an engage/
@@ -40,11 +43,12 @@
 # gripper bridge (to learn the thresholds it flags against — if that read fails
 # the trigger value is still shown, only the automatic flag goes away). It never
 # commands the robot or GELLO directly -- with ONE exception, the GO TO START
-# POSE button (two-click confirm). That button pauses BOTH bridges, hands the
+# POSE button (two-click confirm). That button pauses only the ARM bridge, hands
 # joints to scaled_joint_trajectory_controller, runs ONE FollowJointTrajectory
-# to the start pose, opens the gripper, hands back to forward_position_controller,
-# and NEVER auto-resumes teleop: the arm holds there until the operator
-# re-ENGAGEs from the GUI. Its target pose comes from START_POSE_CONFIG below.
+# to the start pose, and hands back to forward_position_controller. The GELLO
+# gripper bridge remains active throughout; arm teleop never auto-resumes, so the
+# arm holds there until the operator re-ENGAGEs it from the GUI. Its target pose
+# comes from START_POSE_CONFIG below.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

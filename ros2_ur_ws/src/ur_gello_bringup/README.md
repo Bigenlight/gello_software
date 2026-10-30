@@ -118,6 +118,32 @@ its Dynamixel torque is never enabled, and it never receives commands.
 See `../../../docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md` for the full pipeline
 diagram, node-role/topic-contract tables, and troubleshooting.
 
+## Integrated EEF data-collection GUI (Jazzy)
+
+For EEF demonstration collection, keep the hardware/teleop process separate
+from the GUI so a collision recovery can restart control without restarting
+the cameras or recorder:
+
+```bash
+# Terminal 1 -- this process may be stopped and restarted
+HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef
+
+# Terminal 2 -- leave this process open across teleop restarts
+./run_eef_collection_gui.sh
+```
+
+The integrated window combines the dual-camera recorder and the complete EEF
+operator panel. Its shortcuts are global within that window: `R` toggles
+recording, `SPACE` toggles EEF engage/disengage, `G` toggles gripper
+pause/resume, and `H` returns the arm to the configured start pose. The
+existing two-press confirmations still apply when `SPACE`, `G`, or `H`
+would engage the arm, resume the gripper, or move to the start pose.
+
+The recorder and EEF controls are separate ROS nodes with separate executors. If
+`run_ur7e_gello_real.sh` exits, camera preview and recording remain alive while
+the EEF controls show `no signal` and disable motion actions. After the teleop
+process is launched again, ROS discovery reconnects the same GUI automatically.
+
 ## Pause / Resume (scene reset with both hands free)
 
 ### The problem

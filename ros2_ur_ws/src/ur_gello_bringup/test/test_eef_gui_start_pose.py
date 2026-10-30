@@ -115,6 +115,9 @@ class _FakeWidget:
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
 
+    def isEnabled(self):
+        return bool(self.enabled)
+
     def setToolTip(self, text):
         self.tooltip = text
 
@@ -124,7 +127,7 @@ class _FakeNode:
     methods + the state-name getter the window reads)."""
 
     def __init__(self, *, state=IDLE, active=False, message="",
-                 eef_state="DISENGAGED", accept=True):
+                 eef_state="DISENGAGED", grip_state="FOLLOWING", accept=True):
         self._status = {
             "state": state,
             "active": active,
@@ -132,6 +135,7 @@ class _FakeNode:
             "duration_s": None,
         }
         self._eef_state = eef_state
+        self._grip_state = grip_state
         self._accept = accept
         self.go_calls = 0
         self.stop_calls = 0
@@ -150,6 +154,9 @@ class _FakeNode:
 
     def current_state_name(self):
         return self._eef_state
+
+    def current_grip_state_name(self):
+        return self._grip_state
 
 
 class _Window:
@@ -291,6 +298,71 @@ def test_a_stale_eef_state_disables_go(monkeypatch):
     node._eef_state = "DISENGAGED"
     _refresh(w)
     assert w._start_pose_btn.enabled is True
+
+
+# --------------------------------------------------------------------------- #
+# Keyboard shortcuts
+# --------------------------------------------------------------------------- #
+def test_space_shortcut_uses_the_primary_button_gate():
+    w = _Window(_FakeNode())
+    calls = []
+    w._on_primary = lambda: calls.append("primary")
+
+    w._primary.setEnabled(False)
+    gui.MainWindow._on_primary_shortcut(w)
+    assert calls == []
+    assert "ignored" in w.messages[-1]
+
+    w._primary.setEnabled(True)
+    gui.MainWindow._on_primary_shortcut(w)
+    assert calls == ["primary"]
+
+
+def test_h_shortcut_uses_the_start_pose_button_gate():
+    w = _Window(_FakeNode())
+    calls = []
+    w._on_start_pose = lambda: calls.append("start_pose")
+
+    w._start_pose_btn.setEnabled(False)
+    gui.MainWindow._on_start_pose_shortcut(w)
+    assert calls == []
+    assert "ignored" in w.messages[-1]
+
+    w._start_pose_btn.setEnabled(True)
+    gui.MainWindow._on_start_pose_shortcut(w)
+    assert calls == ["start_pose"]
+
+
+@pytest.mark.parametrize(
+    "state, expected",
+    [("PAUSED", "resume"), ("WAITING", "pause"),
+     ("RAMPING", "pause"), ("FOLLOWING", "pause")],
+)
+def test_g_shortcut_selects_pause_or_resume_from_live_gripper_state(
+    state, expected
+):
+    w = _Window(_FakeNode(grip_state=state))
+    w._grip_pause_btn.setEnabled(True)
+    w._grip_resume_btn.setEnabled(True)
+    calls = []
+    w._on_grip_pause = lambda: calls.append("pause")
+    w._on_grip_resume = lambda: calls.append("resume")
+
+    gui.MainWindow._on_grip_toggle_shortcut(w)
+
+    assert calls == [expected]
+
+
+def test_g_shortcut_refuses_stale_gripper_state():
+    w = _Window(_FakeNode(grip_state=None))
+    w._grip_pause_btn.setEnabled(True)
+    w._grip_resume_btn.setEnabled(True)
+    w._on_grip_pause = lambda: pytest.fail("must not pause without state")
+    w._on_grip_resume = lambda: pytest.fail("must not resume without state")
+
+    gui.MainWindow._on_grip_toggle_shortcut(w)
+
+    assert "stale or absent" in w.messages[-1]
 
 
 # --------------------------------------------------------------------------- #
@@ -575,6 +647,10 @@ def test_with_a_pose_the_mixin_is_installed_towards_it(
     ctrl = node._home_controller
     assert ctrl.target_joints == pytest.approx(CARROT)
     assert ctrl.target_label == gui.START_POSE_LABEL       # "START POSE"
+    assert ctrl._manage_gripper is False
+    assert ctrl._speed_budget_rad_s == pytest.approx(1.6)
+    assert ctrl._min_duration_s == pytest.approx(1.0)
+    assert ctrl._max_duration_s == pytest.approx(5.0)
     # The gripper pause entry is an ALIAS of the GUI's own client on the same
     # service; the arm pause client is the mixin's own.
     assert node._svc_home["grip_pause"] is node._svc["grip_pause"]
@@ -584,6 +660,7 @@ def test_with_a_pose_the_mixin_is_installed_towards_it(
     # The 10 Hz sequencer tick exists, and the joint-state subscription too.
     assert any(abs(p - 0.1) < 1e-9 for p, _cb in node.created["timers"])
     assert "/joint_states" in node.created["subs"]
+    assert "/gello_gripper_bridge/state" in node.created["subs"]
     pose, _ = node.start_pose_info()
     assert pose is not None and pose.joints == pytest.approx(CARROT)
     assert any(level == "info" and "GO TO START POSE ready" in msg
@@ -609,12 +686,13 @@ def test_without_a_pose_no_home_move_io_is_created(stubbed_rclpy, monkeypatch):
                for level, msg in node._logger.lines)
 
 
-def test_a_nonzero_start_gripper_warns_but_does_not_disable(
+def test_a_nonzero_start_gripper_does_not_change_arm_only_home(
     stubbed_rclpy, monkeypatch, tmp_path
 ):
     monkeypatch.setenv("START_POSE_CONFIG", _write_yaml(tmp_path, CARROT, 0.5))
     node = stubbed_rclpy()
 
     assert node._start_pose_io_installed is True
-    assert any(level == "warn" and "start_gripper" in msg
-               for level, msg in node._logger.lines)
+    assert node._home_controller._manage_gripper is False
+    assert not any(level == "warn" and "start_gripper" in msg
+                   for level, msg in node._logger.lines)

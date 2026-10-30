@@ -14,6 +14,11 @@ The whole window behaves like a computer MOUSE for the leader arm:
                           or RE-ARM -> ENGAGE after a release),
     DPI slider          = pos_scale (sensitivity / gain k), 0.1 fine .. 1.0 1:1.
 
+Keyboard shortcuts mirror the same guarded button paths while this window has
+focus: SPACE toggles EEF control, G toggles gripper pause/resume, and H requests
+the start pose. Existing confirmations remain in force (SPACE SPACE to engage,
+G G to resume, H H to go to the start pose), and key auto-repeat is disabled.
+
 The gripper row additionally carries a LIVE DISCRETE-LATCH INDICATOR fed by
 /gello_gripper_bridge/discrete_state (DISABLED / UNKNOWN / OPEN / CLOSED /
 RAMPING) and /gello_gripper_bridge/discrete_trigger (the raw clamped trigger).
@@ -60,12 +65,14 @@ there is deliberately NO pose hard-coded here), and the motion is the task
 recorder's hardware-verified GO HOME machinery reused verbatim:
 ``gello_recorder.home_move`` (the state machine) + ``home_move_ros``
 (:class:`HomeMoveIoMixin`, the rclpy adapter), pointed at ``start_pose`` instead
-of HOME_JOINTS. The sequence -- pause BOTH bridges, forward_position_controller
--> scaled_joint_trajectory_controller, ONE FollowJointTrajectory to
-``wrapped_nearest(start_pose, live /joint_states)``, open the gripper, restore
-forward_position_controller -- NEVER auto-resumes teleop. It leaves the arm
-bridge PAUSED/DISENGAGED, which is exactly the state this window's big toggle
-already knows how to leave (it chains eef_resume -> pos_scale -> eef_engage).
+of HOME_JOINTS. The sequence pauses only the arm bridge, switches
+forward_position_controller -> scaled_joint_trajectory_controller, runs ONE
+FollowJointTrajectory to ``wrapped_nearest(start_pose, live /joint_states)``,
+then restores forward_position_controller. It NEVER auto-resumes arm teleop,
+but it deliberately leaves the gripper bridge active and sends no forced-open
+command, so GELLO gripper control continues throughout the arm move. The arm
+bridge remains PAUSED/DISENGAGED, which is exactly the state this window's big
+toggle already knows how to leave (eef_resume -> pos_scale -> eef_engage).
 FAIL-CLOSED: no usable START_POSE_CONFIG -> the row is disabled with the reason
 on screen and NONE of the home-move I/O (subscriptions, clients, timer) is
 created; every other behaviour of the GUI is unchanged.
@@ -103,6 +110,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QGridLayout,
@@ -111,6 +119,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QShortcut,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -222,6 +231,13 @@ _START_POSE_STOP = _btn_css("#cc3333", "#a02020")              # red STOP (start
 # install_home_move_io so the status line never says "HOME" for a move that
 # went somewhere else.
 START_POSE_LABEL = "START POSE"
+# This motion is operator-confirmed (H H / double click) and has a dedicated
+# speed profile: exactly half the default HomeMoveController duration at every
+# distance, including both clamps. The recorder's separate GO HOME keeps its
+# established 0.8 rad/s, 2--10 s profile.
+START_POSE_SPEED_BUDGET_RAD_S = 1.6
+START_POSE_MIN_DURATION_S = 1.0
+START_POSE_MAX_DURATION_S = 5.0
 # The status ``state`` this node reports when the button cannot exist at all
 # (no START_POSE_CONFIG, or the file it names is unusable). Not one of
 # HomeMoveState's values on purpose: it is a CONFIG condition, not a sequencer
@@ -231,11 +247,14 @@ START_POSE_UNAVAILABLE = "UNAVAILABLE"
 # Resting / armed labels for the two-click confirm, same shape as the task
 # recorder's GO HOME: the resting label says "click twice" up front so a
 # first-time operator is never surprised that one click does nothing.
-_START_POSE_BUTTON_TEXT = "GO TO START POSE (click twice)"
-_START_POSE_BUTTON_ARMED_TEXT = "Click AGAIN to GO TO START POSE (robot WILL move)"
+_START_POSE_BUTTON_TEXT = "GO TO START POSE (click twice or press H twice)"
+_START_POSE_BUTTON_ARMED_TEXT = (
+    "Click or press H AGAIN to GO TO START POSE (robot WILL move)"
+)
 # Fed to _armed_click's status-bar line ("Click AGAIN within 3 s -- {warn}.").
 _START_POSE_WARN = (
-    "teleop will be PAUSED and the robot WILL move to the start pose. Keep clear")
+    "arm teleop will be PAUSED and the robot WILL move to the start pose; "
+    "gripper control stays live. Keep clear")
 # STOP is a SINGLE-click control on purpose -- the inverse of the two-click GO.
 # Two clicks exist to stop an accidental START; a stop has no such failure
 # mode, and every extra click is time the arm spends still driving.
@@ -247,21 +266,23 @@ _START_POSE_STOP_TOOLTIP = (
     "schedule, so the arm keeps moving briefly after the click and stops "
     "partway between where it was and the start pose.\n\n"
     "The sequence still routes through the fail-closed " + FPC + " restore "
-    "before it lands in FAILED, so teleop is usable again afterwards. Bridges "
-    "are NOT resumed -- re-ENGAGE with the big button.\n\n"
+    "before it lands in FAILED, so arm teleop is usable again afterwards. The "
+    "arm bridge is NOT resumed -- re-ENGAGE with the big button; the gripper "
+    "bridge remains live throughout.\n\n"
     "For a real emergency stop use the pendant."
 )
 _START_POSE_TOOLTIP = (
     "Drives the arm to the SAME start pose the inference stack starts the "
     "policy from, so every demo starts on-distribution.\n\n"
-    "Sequence (the task recorder's hardware-verified GO HOME path):\n"
-    "  1. pause BOTH teleop bridges (arm bridge -> DISENGAGED, publishes nothing)\n"
+    "Sequence (arm-only variant of the recorder's verified GO HOME path):\n"
+    "  1. pause the arm bridge only (DISENGAGED, publishes nothing); keep the\n"
+    "     GELLO gripper bridge active\n"
     "  2. " + FPC + " -> " + STJC + "\n"
     "  3. ONE FollowJointTrajectory to the start pose, wrapped onto the arm's\n"
     "     current 2*pi winding (never the raw literal)\n"
-    "  4. open the gripper\n"
-    "  5. " + STJC + " -> " + FPC + "\n\n"
-    "Teleop stays PAUSED afterwards: re-ENGAGE with the big button (it chains "
+    "  4. " + STJC + " -> " + FPC + "\n\n"
+    "Arm teleop stays PAUSED afterwards while gripper control stays live. "
+    "Re-ENGAGE the arm with the big button (it chains "
     "eef_resume -> pos_scale -> eef_engage and re-anchors at the pose the arm "
     "is now at).\n\n"
     "Requires " + STJC + " to be loaded and the External Control program "
@@ -385,6 +406,11 @@ class EefGuiNode(HomeMoveIoMixin, Node):
         self._grip_discrete: Optional[str] = None
         self._grip_discrete_t: Optional[float] = None
 
+        # Latest /gello_gripper_bridge/state token (PAUSED / WAITING / RAMPING /
+        # FOLLOWING). This is the authority used by the G-key toggle.
+        self._grip_state: Optional[str] = None
+        self._grip_state_t: Optional[float] = None
+
         # Latest /gello_gripper_bridge/discrete_trigger value + receipt time.
         # Float32, same 5 Hz, the RAW CLAMPED trigger (0=open..1=closed) the
         # latch is thresholding -- i.e. the evidence the latch is a conclusion
@@ -447,6 +473,8 @@ class EefGuiNode(HomeMoveIoMixin, Node):
             GetParameters, f"{GRIPPER}/get_parameters")
 
         self.create_subscription(String, f"{BRIDGE}/eef/state", self._on_state, 10)
+        self.create_subscription(
+            String, f"{GRIPPER}/state", self._on_grip_state, 10)
         # Read-only observers of the gripper bridge's discrete latch AND of the
         # raw trigger the latch is derived from. Either being absent (in an
         # older bridge, or simply never published) is a supported state: the
@@ -458,8 +486,8 @@ class EefGuiNode(HomeMoveIoMixin, Node):
 
         self.get_logger().info(
             "gello_eef_gui_node up; listening on %s/eef/state + "
-            "%s/discrete_state + %s/discrete_trigger"
-            % (BRIDGE, GRIPPER, GRIPPER))
+            "%s/state + %s/discrete_state + %s/discrete_trigger"
+            % (BRIDGE, GRIPPER, GRIPPER, GRIPPER))
 
         # --- GO TO START POSE: resolve the pose, then (only then) the I/O ---
         # resolve_start_pose() never raises: (pose, describe()) on success,
@@ -480,35 +508,33 @@ class EefGuiNode(HomeMoveIoMixin, Node):
             # the mixin would otherwise create a second client for -- identical
             # service, identical semantics, so a second client would only add
             # graph entities (the task recorder aliases its base's clients the
-            # same way). Two call_async() calls in flight on one rclpy client
-            # are fine (it tracks them by sequence number), and the GUI's
-            # _grip_pending guard is not involved: the sequencer's pause is its
-            # own request. The ARM pause is different: this node has clients
+            # same way). The EEF start-pose sequence is configured below with
+            # manage_gripper=False, so it never calls this client; it remains
+            # available solely to the GUI's manual Gripper PAUSE/G shortcut.
+            # The ARM pause is different: this node has clients
             # for the bridge's eef_* services and eef_resume only, NOT for
             # /gello_ur_bridge/pause, so the mixin creates that one itself.
             self.install_home_move_io(
                 target_joints=self._start_pose.joints,
                 target_label=START_POSE_LABEL,
                 gripper_pause_client=self._svc["grip_pause"],
+                manage_gripper=False,
+                speed_budget_rad_s=START_POSE_SPEED_BUDGET_RAD_S,
+                min_duration_s=START_POSE_MIN_DURATION_S,
+                max_duration_s=START_POSE_MAX_DURATION_S,
             )
             self._start_pose_io_installed = True
             self.get_logger().info(
-                "GO TO START POSE ready: %s (source: %s). Sequence pauses both "
-                "bridges, %s -> %s, one trajectory, gripper OPEN, %s -> %s; "
-                "teleop stays PAUSED afterwards (re-ENGAGE from the GUI)."
+                "GO TO START POSE ready: %s (source: %s). Sequence pauses the "
+                "arm bridge only, %s -> %s, one trajectory, %s -> %s; arm "
+                "teleop stays PAUSED while GELLO gripper control remains "
+                "active (re-ENGAGE the arm from the GUI). Start-pose motion "
+                "profile: %.1f rad/s, %.0f--%.0f s."
                 % (self._start_pose.describe(), self._start_pose.source,
-                   FPC, STJC, STJC, FPC))
-            if self._start_pose.gripper != 0.0:
-                # The sequence ALWAYS opens the gripper (OPENING_GRIPPER
-                # publishes 0.0); a non-zero start_gripper cannot be honoured
-                # by this button. Warn once, do not fail -- the ARM pose is
-                # the load-bearing half and the operator can set the gripper
-                # by hand before ENGAGE.
-                self.get_logger().warn(
-                    "start_gripper=%.2f in %s is NOT supported by GO TO START "
-                    "POSE: the sequence always OPENS the gripper (0.0). The "
-                    "arm pose is honoured; set the gripper by hand afterwards."
-                    % (self._start_pose.gripper, self._start_pose.source))
+                   FPC, STJC, STJC, FPC,
+                   START_POSE_SPEED_BUDGET_RAD_S,
+                   START_POSE_MIN_DURATION_S,
+                   START_POSE_MAX_DURATION_S))
 
     # ---------------------------------------------- GO TO START POSE (Qt) ---
     # The three mixin methods the Qt thread is allowed to call, wrapped so a
@@ -556,6 +582,11 @@ class EefGuiNode(HomeMoveIoMixin, Node):
         with self._lock:
             self._grip_discrete = word
             self._grip_discrete_t = time.monotonic()
+
+    def _on_grip_state(self, msg: String) -> None:
+        with self._lock:
+            self._grip_state = str(msg.data).strip().upper()
+            self._grip_state_t = time.monotonic()
 
     def _on_grip_trigger(self, msg: Float32) -> None:
         try:
@@ -606,6 +637,8 @@ class EefGuiNode(HomeMoveIoMixin, Node):
             state = dict(self._state) if self._state is not None else None
             grip_age = (None if self._grip_discrete_t is None
                         else now - self._grip_discrete_t)
+            grip_state_age = (None if self._grip_state_t is None
+                              else now - self._grip_state_t)
             trig_age = (None if self._grip_trigger_t is None
                         else now - self._grip_trigger_t)
             in_band_s = (None if self._grip_in_band_since is None
@@ -621,6 +654,8 @@ class EefGuiNode(HomeMoveIoMixin, Node):
                 "w_max": self._w_max,
                 "grip_discrete": self._grip_discrete,
                 "grip_discrete_age_s": grip_age,
+                "grip_state": self._grip_state,
+                "grip_state_age_s": grip_state_age,
                 "grip_trigger": self._grip_trigger,
                 "grip_trigger_age_s": trig_age,
                 "grip_in_band_s": in_band_s,
@@ -634,6 +669,15 @@ class EefGuiNode(HomeMoveIoMixin, Node):
                     or now - self._state_t > _STATE_STALE_S):
                 return None
             return self._state.get("state")
+
+    def current_grip_state_name(self) -> Optional[str]:
+        """The gripper bridge state token, or None if stale/absent."""
+        now = time.monotonic()
+        with self._lock:
+            if (self._grip_state_t is None
+                    or now - self._grip_state_t > _STATE_STALE_S):
+                return None
+            return self._grip_state
 
     # Test hook: inject a fake ~/eef/state dict (no ROS traffic needed).
     def set_state_for_test(self, d: dict) -> None:
@@ -1076,6 +1120,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("GELLO -> UR7e  EEF mouse")
         self._build_ui()
+        self._install_shortcuts()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_eef)
@@ -1086,6 +1131,20 @@ class MainWindow(QMainWindow):
         self._vw_timer.start(3000)  # best-effort v_max/w_max + threshold poll
 
         self._refresh_eef()
+
+    def _install_shortcuts(self):
+        self._space_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self._space_shortcut.setAutoRepeat(False)
+        self._space_shortcut.activated.connect(self._on_primary_shortcut)
+
+        self._grip_shortcut = QShortcut(QKeySequence(Qt.Key_G), self)
+        self._grip_shortcut.setAutoRepeat(False)
+        self._grip_shortcut.activated.connect(self._on_grip_toggle_shortcut)
+
+        self._start_pose_shortcut = QShortcut(QKeySequence(Qt.Key_H), self)
+        self._start_pose_shortcut.setAutoRepeat(False)
+        self._start_pose_shortcut.activated.connect(
+            self._on_start_pose_shortcut)
 
     def _poll_node_params(self):
         """Timer slot: ask the node to (re)fetch its best-effort parameters.
@@ -1129,7 +1188,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_start_pose_box())
 
         # --- primary mouse-button toggle -----------------------------------
-        self._primary = QPushButton("ENGAGE")
+        self._primary = QPushButton("ENGAGE  [SPACE]")
         self._primary.setStyleSheet(_PRIMARY_ENGAGE)
         self._primary.clicked.connect(self._on_primary)
         root.addWidget(self._primary)
@@ -1148,10 +1207,10 @@ class MainWindow(QMainWindow):
         grow = QHBoxLayout()
         self._grip_hint = QLabel("Gripper:")
         self._grip_hint.setStyleSheet("font-weight: bold;")
-        self._grip_pause_btn = QPushButton("Gripper PAUSE")
+        self._grip_pause_btn = QPushButton("Gripper PAUSE  [G]")
         self._grip_pause_btn.setStyleSheet(_BTN)
         self._grip_pause_btn.clicked.connect(self._on_grip_pause)
-        self._grip_resume_btn = QPushButton("Gripper Resume")
+        self._grip_resume_btn = QPushButton("Gripper Resume  [G]")
         self._grip_resume_btn.setStyleSheet(_BTN)
         self._grip_resume_btn.clicked.connect(self._on_grip_resume)
         # DISCRETE LATCH indicator: a READOUT, not a control. Styled FLAT and
@@ -1172,7 +1231,8 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_slider_box())
 
         # --- live readout + freshness lamps --------------------------------
-        root.addWidget(self._build_readout_box(), stretch=1)
+        self._readout_box = self._build_readout_box()
+        root.addWidget(self._readout_box, stretch=1)
 
         # --- H5 static note + read-only v_max/w_max ------------------------
         self._h5 = QLabel(
@@ -1315,7 +1375,7 @@ class MainWindow(QMainWindow):
             return
         self._armed[key] = True
         self.statusBar().showMessage(
-            f"Click AGAIN within 3 s — {warn}.", 3000)
+            f"Press/click AGAIN within 3 s — {warn}.", 3000)
         QTimer.singleShot(3000, lambda: self._disarm(key))
         self._refresh_eef()
 
@@ -1325,6 +1385,13 @@ class MainWindow(QMainWindow):
             self._refresh_eef()
 
     # ------------------------------------------------------------- actions --
+    def _on_primary_shortcut(self):
+        if self._primary.isEnabled():
+            self._on_primary()
+        else:
+            self.statusBar().showMessage(
+                "SPACE ignored — EEF toggle is currently unavailable.", 3000)
+
     def _on_primary(self):
         st = self._node.current_state_name()
         if st == "ENGAGED":
@@ -1370,6 +1437,14 @@ class MainWindow(QMainWindow):
             self._busy_msg()
 
     # -- GO TO START POSE ---------------------------------------------------
+    def _on_start_pose_shortcut(self):
+        if self._start_pose_btn.isEnabled():
+            self._on_start_pose()
+        else:
+            self.statusBar().showMessage(
+                "H ignored — GO TO START POSE is currently unavailable.",
+                3000)
+
     def _on_start_pose(self):
         """Two-click confirm through the window's existing _armed_click gate:
         first click arms (orange, 3 s auto-disarm, warning in the status bar),
@@ -1394,9 +1469,10 @@ class MainWindow(QMainWindow):
             return
         if self._node.request_go_home():
             self.statusBar().showMessage(
-                "GO TO START POSE started: pausing teleop, driving to the start "
-                "pose, opening the gripper. Teleop stays PAUSED afterwards — "
-                "re-ENGAGE with the big button.", 8000)
+                "GO TO START POSE started: pausing arm teleop and driving to "
+                "the start pose. GELLO gripper control remains live. Arm "
+                "teleop stays PAUSED afterwards — re-ENGAGE with the big "
+                "button.", 8000)
         else:
             # request() refuses when a sequence is already running, when the
             # arm's pose is unknown, or when no pose is configured; the reason
@@ -1441,6 +1517,26 @@ class MainWindow(QMainWindow):
             lambda: self._fire_and_report(
                 self._node.request_grip_resume, "Gripper resume requested."),
             warn="GRIPPER RESUME — the gripper will seed/ramp to the leader")
+
+    def _on_grip_toggle_shortcut(self):
+        state = self._node.current_grip_state_name()
+        if state == "PAUSED":
+            if self._grip_resume_btn.isEnabled():
+                self._on_grip_resume()
+            else:
+                self.statusBar().showMessage(
+                    "G ignored — gripper resume is currently unavailable.",
+                    3000)
+        elif state in ("WAITING", "RAMPING", "FOLLOWING"):
+            if self._grip_pause_btn.isEnabled():
+                self._on_grip_pause()
+            else:
+                self.statusBar().showMessage(
+                    "G ignored — a gripper request is already in flight.", 3000)
+        else:
+            self.statusBar().showMessage(
+                "G ignored — /gello_gripper_bridge/state is stale or absent.",
+                4000)
 
     def _fire_and_report(self, fn, ok_msg):
         if fn():
@@ -1526,8 +1622,8 @@ class MainWindow(QMainWindow):
             self._style_confirmable(
                 self._grip_resume_btn, "grip_resume",
                 enabled=False,
-                resting="Gripper Resume (locked: start-pose move)",
-                armed="Click AGAIN to resume gripper")
+                resting="Gripper Resume [G] (locked: start-pose move)",
+                armed="Press G AGAIN to resume gripper")
             return
 
         # The big toggle is the WHOLE mouse button: click = off/on, and every
@@ -1556,7 +1652,8 @@ class MainWindow(QMainWindow):
         # while the state still permits engaging; otherwise clear the arm and
         # fall back to the state-based colour/label set above.
         if self._armed.get("primary") and can_engage:
-            self._primary.setText("Click AGAIN to ENGAGE (robot WILL move)")
+            self._primary.setText(
+                "Press SPACE or click AGAIN to ENGAGE (robot WILL move)")
             self._primary.setStyleSheet(_PRIMARY_ARMED)
             self._primary.setEnabled(True)
         else:
@@ -1570,7 +1667,8 @@ class MainWindow(QMainWindow):
         self._style_confirmable(
             self._grip_resume_btn, "grip_resume",
             enabled=not grip_pending,
-            resting="Gripper Resume", armed="Click AGAIN to resume gripper")
+            resting="Gripper Resume  [G]",
+            armed="Press G AGAIN to resume gripper")
 
     def _apply_start_pose(self, status, live):
         """Drive the GO / STOP buttons and the status label from one status dict.

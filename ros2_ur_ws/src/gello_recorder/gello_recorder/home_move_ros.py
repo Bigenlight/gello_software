@@ -140,6 +140,9 @@ from gello_recorder.home_move import (
     FPC,
     GRIPPER_OPEN_VALUE,
     HOME_JOINTS,
+    MAX_DURATION_S,
+    MIN_DURATION_S,
+    SPEED_BUDGET_RAD_S,
     STJC,
     UR_JOINT_ORDER,
     HomeMoveController,
@@ -400,23 +403,32 @@ class HomeMoveOps:
         return self._node.latest_speed_scale()
 
     # ---- step 1: pause both teleop bridges ------------------------------- #
-    def pause_bridges(self, done_cb: Callable[[bool, str], None]) -> None:
-        """Fire BOTH bridge pause Triggers; aggregate into one ``done_cb``.
+    def pause_bridges(
+        self,
+        done_cb: Callable[[bool, str], None],
+        *,
+        pause_gripper: bool = True,
+    ) -> None:
+        """Pause the arm bridge and optionally the gripper bridge.
 
         Both services are unconditional and idempotent per the bridge contract,
         so firing them is always safe -- in EEF mode the arm bridge additionally
         disengages, and while paused it publishes NOTHING (which is what makes
         deactivating forward_position_controller underneath it safe).
 
-        BOTH are required. An absent service fails fast rather than homing with
-        one bridge still live: a running gripper bridge would keep tracking the
-        human's GELLO trigger and immediately undo the gripper open, and a
-        running arm bridge would fight the trajectory controller.
+        When ``pause_gripper`` is true, BOTH are required. An absent service
+        fails fast rather than homing with one bridge still live: a running
+        gripper bridge would keep tracking the human's GELLO trigger and
+        immediately undo the sequencer's gripper-open command, and a running
+        arm bridge would fight the trajectory controller. The EEF collection
+        GUI passes false and skips the gripper-open step as a matched pair, so
+        GELLO gripper control remains live during arm-only start-pose moves.
         """
-        clients = [
-            ("arm bridge", self._node._svc_home["arm_pause"]),
-            ("gripper bridge", self._node._svc_home["grip_pause"]),
-        ]
+        clients = [("arm bridge", self._node._svc_home["arm_pause"])]
+        if pause_gripper:
+            clients.append(
+                ("gripper bridge", self._node._svc_home["grip_pause"])
+            )
         missing = [name for name, client in clients if not _service_ready(client)]
         if missing:
             done_cb(
@@ -748,6 +760,10 @@ class HomeMoveIoMixin:
         *,
         target_joints: Sequence[float] = HOME_JOINTS,
         target_label: str = "HOME",
+        manage_gripper: bool = True,
+        speed_budget_rad_s: float = SPEED_BUDGET_RAD_S,
+        min_duration_s: float = MIN_DURATION_S,
+        max_duration_s: float = MAX_DURATION_S,
         arm_pause_client=None,
         gripper_pause_client=None,
         arm_pause_service: str = ARM_PAUSE_SERVICE,
@@ -768,6 +784,12 @@ class HomeMoveIoMixin:
         six finite floats in UR_JOINT_ORDER; HOME_JOINTS by default), and so
         does ``target_label`` -- the name of that pose in the operator-facing
         status messages ("HOME" by default; the EEF GUI passes "START POSE").
+        ``speed_budget_rad_s`` and the duration clamps are forwarded unchanged
+        to HomeMoveController. Their defaults preserve the recorder's existing
+        HOME motion; callers may override them for a distinct named motion.
+        ``manage_gripper=False`` makes the sequence pause and move only the arm:
+        it neither pauses the gripper bridge nor publishes a gripper-open
+        command, so GELLO gripper control remains uninterrupted.
 
         ``arm_pause_client`` / ``gripper_pause_client``: pass EXISTING
         std_srvs/Trigger clients for the bridge pause services when the node
@@ -885,7 +907,13 @@ class HomeMoveIoMixin:
         # No tuning overrides: HomeMoveController's own defaults are the single
         # source of truth for the speed budget and the timeouts.
         self._home_controller = HomeMoveController(
-            self._home_ops, target_joints=target_joints, target_label=target_label
+            self._home_ops,
+            target_joints=target_joints,
+            target_label=target_label,
+            manage_gripper=manage_gripper,
+            speed_budget_rad_s=speed_budget_rad_s,
+            min_duration_s=min_duration_s,
+            max_duration_s=max_duration_s,
         )
         # Created LAST: its callback reads everything above, and an rclpy timer
         # can fire as soon as it exists once something spins us.
