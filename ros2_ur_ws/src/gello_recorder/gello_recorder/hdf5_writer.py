@@ -116,8 +116,8 @@ class Hdf5TableWriter:
 
         This is called once at close, when no further writes are possible, and
         it costs nothing when the table is already rectangular (the common
-        case). Observed live on 2026-09-14: one take's ur_joint_states had
-        t_rel_s/q1/q2 at 4474 rows and its other 17 columns at 4473.
+        case). This has been observed on real takes (first three columns one
+        row longer than the rest).
         """
         lengths = [d.shape[0] for d in self._datasets]
         if not lengths:

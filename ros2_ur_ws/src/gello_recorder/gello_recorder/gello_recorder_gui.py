@@ -44,11 +44,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# The node CLASS lives in the companion module in this same package and is
-# imported lazily inside main() (historical: so this file could be tooled while
-# gello_gui_node.py was still being written). The pure depth-topic helper is
-# re-exported here at module level because run_recorder.sh's headless node and
-# the tests need the SAME single definition without going through main().
+# The node CLASS lives in the companion module gello_gui_node and is imported
+# inside main(). The pure depth-topic helper is re-exported here at module
+# level because the headless node and the tests need the SAME single
+# definition without going through main().
 from gello_recorder.gello_gui_node import depth_topics_for  # noqa: F401 (re-export)
 from gello_recorder.camera_defaults import load_default_serials
 from gello_recorder import take_tag
@@ -364,7 +363,7 @@ def _fmt_scalar(v):
 
 
 # --------------------------------------------------------------------------- #
-# Teleop control panel (added) -- state -> colour map
+# Teleop control panel -- state -> colour map
 # --------------------------------------------------------------------------- #
 # Covers both arm (PAUSED|WAITING|STALE|CHASING|FOLLOWING) and gripper
 # (PAUSED|WAITING|RAMPING|FOLLOWING) vocabularies. Anything unknown/None -> gray.
@@ -459,7 +458,7 @@ class MainWindow(QMainWindow):
         # _on_delete_last_take_clicked / _on_start_clicked / closeEvent.
         self._delete_box = None
 
-        # --- Teleop control panel state (added block) --------------------- #
+        # --- Teleop control panel state ----------------------------------- #
         # Two-click resume confirm gate + last statusBar-shown teleop message.
         self._teleop_resume_armed = False
         self._teleop_last_shown_msg = None
@@ -514,7 +513,7 @@ class MainWindow(QMainWindow):
 
         top.addWidget(self._build_state_panel(), stretch=1)
 
-        # --- Teleop control bar (added) -- directly above record controls -- #
+        # --- Teleop control bar -- directly above record controls --------- #
         root.addLayout(self._build_teleop_bar())
 
         # --- Bottom: record control bar ----------------------------------- #
@@ -566,9 +565,9 @@ class MainWindow(QMainWindow):
         self._cam1_status = QLabel("cam1: --")
         self._cam2_status = QLabel("cam2: --")
         self._depth_status = QLabel("depth: --")
-        # ros_lag = now - /joint_states header stamp. It is on screen because
-        # the 2026-09-14 carrot_in_pot corpus was recorded 0.900 s stale with
-        # nothing visible anywhere; this is that number, live.
+        # ros_lag = now - /joint_states header stamp. On screen because a
+        # starved recorder once wrote robot rows ~0.9 s stale with nothing
+        # visible anywhere; this is that number, live.
         self._ros_lag_status = QLabel("ros lag: --")
         layout.addWidget(self._cam1_status)
         layout.addWidget(self._cam2_status)
@@ -599,7 +598,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_teleop_bar(self):
-        """Teleop pause/resume bar (added block).
+        """Teleop pause/resume bar.
 
         Lets a solo operator pause the leader->robot signal path (single click)
         and resume it (two-click confirm, because resume initiates physical
@@ -935,10 +934,10 @@ class MainWindow(QMainWindow):
         self._tag_combo.setEnabled(can_tag)
         self._tag_last_take_button.setEnabled(can_tag)
 
-        # Teleop panel shares this ~5 Hz timer (added block).
+        # Teleop panel shares this ~5 Hz timer.
         self._refresh_teleop()
 
-    # ---------------------------------------------------- teleop (added) --
+    # ------------------------------------------------------------ teleop --
     def _refresh_teleop(self):
         """~5 Hz: drive teleop state labels + pause/resume button enablement."""
         st = self._node.get_teleop_status()
@@ -1286,7 +1285,7 @@ class MainWindow(QMainWindow):
 def _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth):
     """Node ctor kwargs for depth recording: ``{}`` when depth is off.
 
-    Shared by ``main()`` here and ``task_recorder_gui.main()`` so both GUIs wire
+    Shared by ``main()`` here and by GUIs built on this module so they all wire
     the node from the same :func:`depth_topics_for` names the cameras will
     actually publish under (aligned or not).
     """
