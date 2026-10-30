@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Side-by-side live viewer for the two ACT-deploy RealSense cameras.
+"""Side-by-side live viewer for the two GELLO RealSense cameras (cam1 scene, cam2 wrist).
 
 Standalone rclpy script (NOT part of the colcon build) -- run it directly with
 ROS2 Jazzy sourced:
@@ -7,8 +7,12 @@ ROS2 Jazzy sourced:
     python3 camera_viewer.py \
         --cam1-topic /cam1/cam1/color/image_raw/compressed \
         --cam2-topic /cam2/cam2/color/image_raw/compressed \
-        --cam1-label "cam1 - SCENE - 143322071682" \
-        --cam2-label "cam2 - WRIST - 143322072540"
+        --cam1-label "cam1 - SCENE - $CAM1_SERIAL" \
+        --cam2-label "cam2 - WRIST - $CAM2_SERIAL"
+
+Normally launch_cameras.sh runs this for you and fills the labels from the
+serials it resolved (defaults: ros2_ur_ws/camera_serials.env). This script
+itself holds no serials -- it only subscribes to topics.
 
 Purpose: BEFORE trusting an autonomous real-robot policy deploy, a human needs to
 eyeball both camera feeds at once and confirm which physical camera is which --
@@ -22,9 +26,6 @@ pixels. cam1 is the fixed third-person tripod view. Earlier docs called cam2 a
 "close-up"/"workspace" camera; that was wrong and was corrected 2026-07-28 from
 pixel measurements on the recorded dataset. Jogging the arm is the one-command
 way to confirm.
-
-Serials were updated 2026-07-28: the pair this file used to name
-(147122072740 / 243222072700) is hardware this machine has never enumerated.
 
 Decoding matches the rest of this codebase (see gello_recorder/video_writer.py):
 the CompressedImage ``.data`` bytes are a complete JPEG file, decoded straight
@@ -170,8 +171,8 @@ class CameraViewer(Node):
         super().__init__("camera_viewer")
         self.cam1 = _CameraFeed(args.cam1_label)
         self.cam2 = _CameraFeed(args.cam2_label)
-        # Plain integer queue depth of 10 -- same pattern gello_recorder and
-        # gello_policy use for these exact CompressedImage topics.
+        # Plain integer queue depth of 10 -- same pattern gello_recorder uses
+        # for these exact CompressedImage topics.
         self.create_subscription(
             CompressedImage, args.cam1_topic, self._on_cam1, 10)
         self.create_subscription(
@@ -186,7 +187,7 @@ class CameraViewer(Node):
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Side-by-side live viewer for the two ACT-deploy RealSense "
+        description="Side-by-side live viewer for the two GELLO RealSense "
                     "cameras (cam1 LEFT, cam2 RIGHT).")
     p.add_argument("--cam1-topic", required=True,
                    help="CompressedImage topic for camera 1 (shown LEFT)")

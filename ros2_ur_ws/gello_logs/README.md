@@ -12,9 +12,9 @@ so far is archived here instead:
 
 https://drive.google.com/drive/folders/1Qn03uv1cMv3jbu4S_B-SS_koVjO876sn?usp=sharing
 
-`.gitignore` ignores everything under `gello_logs/` except this README (and
-the pre-existing `experiments/`/`replays/` reports+scripts, which are small
-and still tracked normally). New recordings will accumulate here locally as
+`.gitignore` ignores everything under `gello_logs/` except this README. (The
+old `experiments/`/`replays/` investigation reports are not part of the slim
+`ur7e-jazzy` branch; they remain on `feat/gello-ur7e-jazzy-24.04`.) New recordings will accumulate here locally as
 before; upload them to the Drive folder above and clean up locally whenever
 disk space matters — nothing under `take_*/`/`session_*/` needs to be
 committed to git going forward.

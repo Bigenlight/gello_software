@@ -1,7 +1,19 @@
-"""Safe, atomic folder-name tags for completed recorder takes."""
+"""Safe, atomic folder-name tags for completed recorder takes.
+
+A tag is appended to a finished take's folder name
+(``take_03_20260101_120000`` -> ``take_03_20260101_120000_failed``), so takes
+can be filtered later without opening them. The GUI's "Tag last take" combo
+offers the preset list from :func:`preset_tags` and also accepts free text.
+"""
 
 import os
 import re
+from typing import List, Optional
+
+#: Comma-separated preset tags for the GUI combo, e.g. ``failed,review``.
+TAG_PRESETS_ENV_VAR = "RECORDER_TAG_PRESETS"
+#: Neutral presets used when ``RECORDER_TAG_PRESETS`` is unset.
+DEFAULT_TAG_PRESETS = ("failed", "review")
 
 
 class TakeTagError(RuntimeError):
@@ -27,6 +39,31 @@ def normalize_tag(raw_tag: str) -> str:
             "tag may contain only letters, numbers, spaces, '-' and '_'"
         )
     return tag
+
+
+def preset_tags(raw: Optional[str] = None) -> List[str]:
+    """Return the normalized, de-duplicated preset tags for the GUI combo.
+
+    ``raw`` defaults to ``$RECORDER_TAG_PRESETS``; when that is unset the
+    :data:`DEFAULT_TAG_PRESETS` are used. Invalid entries are skipped (the
+    operator can still type any valid tag by hand), and an explicitly empty
+    value yields no presets.
+    """
+    if raw is None:
+        raw = os.environ.get(TAG_PRESETS_ENV_VAR)
+    if raw is None:
+        candidates = list(DEFAULT_TAG_PRESETS)
+    else:
+        candidates = str(raw).split(",")
+    tags = []
+    for candidate in candidates:
+        try:
+            tag = normalize_tag(candidate)
+        except TakeTagError:
+            continue
+        if tag not in tags:
+            tags.append(tag)
+    return tags
 
 
 def tag_take_dir(take_dir: str, output_root: str, raw_tag: str) -> dict:

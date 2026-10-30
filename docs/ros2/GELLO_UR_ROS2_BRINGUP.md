@@ -2,9 +2,9 @@
 
 이 문서는 **native ROS2 Jazzy(도커 없음)** 환경에서 GELLO 리더 암으로 UR5e를 텔레오퍼레이션하고, 그 결과를 **RViz2**에서 시각화하는 검증된 경로를 다룹니다. 사용하는 패키지는 `ros2_ur_ws/src/ur_gello_bringup` 입니다.
 
-> **왜 도커가 아닌가**: UR 드라이버(`ur_robot_driver`)는 최신 Ubuntu 24.04 / ROS2 Jazzy에서 안정적으로 동작합니다. 도커로 감쌀 이유가 없어 native가 더 단순하고 신뢰성이 높습니다. (반대로 Franka 계열은 버전 락 때문에 도커가 필요합니다 — 별도 문서 참고.)
+> **왜 도커가 아닌가**: UR 드라이버(`ur_robot_driver`)는 최신 Ubuntu 24.04 / ROS2 Jazzy에서 안정적으로 동작합니다. 도커로 감쌀 이유가 없어 native가 더 단순하고 신뢰성이 높습니다. (반대로 Franka 계열은 버전 락 때문에 도커가 필요합니다.)
 
-> **이 경로가 검증하는 것**: 이 PC에서는 **mock hardware(가짜 UR)** 로 RViz2 시각화만 확인합니다. 실제 UR5e는 **별도의 PC**에 연결되어 있으며, 실로봇 구동 절차는 [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md)에 정리되어 있습니다.
+> **이 경로가 검증하는 것**: 이 PC에서는 **mock hardware(가짜 UR)** 로 RViz2 시각화만 확인합니다. 이 리포의 실로봇 경로는 **UR7e** 전용입니다 — [`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md). 이 문서는 UR5e 원본 launch/config(`ur_gello_rviz.launch.py`, `config/ur_gello.yaml`)의 레퍼런스로 남겨 둡니다.
 
 ---
 
@@ -84,7 +84,7 @@ sudo apt install ros-jazzy-ur ros-jazzy-dynamixel-sdk
 **방법 A — 환경변수 (portable, 권장)**
 
 ```bash
-export GELLO_REPO_ROOT=/home/theo_lab/gello_software
+export GELLO_REPO_ROOT=~/gello_software
 ```
 
 노드는 `gello`를 못 찾으면 `GELLO_REPO_ROOT`를 `sys.path`에 추가합니다. 셸 프로파일(`~/.bashrc` 등)에 넣어두면 편합니다.
@@ -93,10 +93,10 @@ export GELLO_REPO_ROOT=/home/theo_lab/gello_software
 
 ```bash
 # sim용 uv venv가 아니라, 시스템 python3.12로 설치해야 합니다.
-pip3 install -e /home/theo_lab/gello_software
+pip3 install -e ~/gello_software
 ```
 
-> **주의**: 노드에는 `/home/theo_lab/gello_software`라는 하드코딩 fallback 경로가 있습니다. 동료의 다른 머신에서는 이 경로가 존재하지 않으므로, **반드시 `GELLO_REPO_ROOT`를 본인 체크아웃 경로로 지정하거나 방법 B로 설치**하세요. 하드코딩 fallback에 의존하지 마세요.
+> **주의**: 노드의 마지막 fallback은 다른 PC의 하드코딩 경로(`/home/theo_lab/gello_software`)입니다. `--symlink-install`로 빌드했다면 소스 트리 상대 경로로 찾지만, 그 외에는 **`GELLO_REPO_ROOT`를 본인 체크아웃 경로로 지정하거나 방법 B로 설치**하세요.
 
 ---
 
@@ -104,7 +104,7 @@ pip3 install -e /home/theo_lab/gello_software
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/theo_lab/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 colcon build --packages-select ur_gello_bringup
 source install/setup.bash
 ```
@@ -238,7 +238,7 @@ sudo usermod -aG dialout $USER
 
 이 문서의 경로는 **mock hardware로 RViz2 시각화만** 검증합니다. 실제 UR5e는 **별도 PC**에 연결되어 있습니다.
 
-실로봇 구동은 [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md)를 따르세요. 핵심 차이는:
+실로봇 구동 절차는 UR7e용 [`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md)가 같은 노드로 구현돼 있습니다(`ur_type`만 다름). 핵심 차이는:
 
 - `use_fake_hardware:=false` + 실제 `robot_ip` 지정,
 - UR 티치펜던트의 **External Control URCap** 프로그램 실행,

@@ -89,7 +89,7 @@ the entire purpose of this feature.
 
 The thresholds 0.3 / 0.7 and the hysteresis rule are NOT new: they are the
 canonical constants already used by the offline RL demo converter
-(``serl_ur_infra/ur_env/learner/recorded_demo.py``) and are specified in
+(``serl_ur_infra/ur_env/learner/recorded_demo.py``, research/* branches) and are specified in
 ``docs/ros2/GELLO_UR7E_UNITS_REFERENCE.md`` §5.1 together with the evidence
 table above. This implementation mirrors that latch bit-for-bit::
 

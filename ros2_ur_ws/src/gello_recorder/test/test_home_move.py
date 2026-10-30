@@ -159,9 +159,8 @@ def drive_to_done(ctrl, ops):
 # ===================================================================== #
 # Drift guards -- constants that are coupled across files and cannot be imported
 #
-# (The HOME_JOINTS == run_hil_preposition.sh / cube_in_cup.py RESET_JOINTS
-# guards live on research/hil-serl together with those files; this branch
-# does not carry them.)
+# (Branches that copy HOME_JOINTS into other files keep their own drift guards
+# next to those files.)
 # ===================================================================== #
 def _repo_file(*parts):
     here = os.path.dirname(os.path.abspath(__file__))          # .../test
@@ -844,3 +843,31 @@ def test_the_target_label_names_the_pose_in_the_moving_and_done_messages():
     # A blank label is a construction-time programming error, like a bad pose.
     with pytest.raises(ValueError):
         HomeMoveController(FakeOps(FakeClock(), AT_HOME), target_label="  ")
+
+
+# ===================================================================== #
+# GELLO_HOME_JOINTS override
+# ===================================================================== #
+def test_home_joints_default_when_unset():
+    from gello_recorder import home_move
+
+    assert home_move.home_joints_from_env("") == home_move.DEFAULT_HOME_JOINTS
+    # The import-time constant is the default unless the env var was set.
+    if not os.environ.get(home_move.HOME_JOINTS_ENV_VAR):
+        assert home_move.HOME_JOINTS == home_move.DEFAULT_HOME_JOINTS
+
+
+def test_home_joints_from_env_parses_six_floats():
+    from gello_recorder import home_move
+
+    assert home_move.home_joints_from_env("0, -1.5, 1.5, -1.5, -1.5, 0") == (
+        0.0, -1.5, 1.5, -1.5, -1.5, 0.0)
+
+
+@pytest.mark.parametrize("raw", ["1,2,3", "1,2,3,4,5,6,7", "a,b,c,d,e,f",
+                                 "0,0,0,0,0,nan"])
+def test_home_joints_from_env_rejects_bad_values_loudly(raw):
+    from gello_recorder import home_move
+
+    with pytest.raises(ValueError):
+        home_move.home_joints_from_env(raw)

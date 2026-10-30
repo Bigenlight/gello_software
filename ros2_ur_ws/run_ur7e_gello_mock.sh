@@ -50,7 +50,7 @@
 #
 # RVIZ
 #   The official ur_control.launch.py HARDCODES ur_description's view_robot.rviz
-#   with no override argument (same reason ./run_mock_rviz.sh exists), so the
+#   with no override argument (same reason the old run_mock_rviz.sh existed), so the
 #   launch always gets launch_rviz:=false and we start rviz2 ourselves with the
 #   operator-oriented rviz/hil_operator_view.rviz, tied to this script's life.
 #   Pass launch_rviz:=false to skip it. NOTE the mesh you see is the UR5e one:
