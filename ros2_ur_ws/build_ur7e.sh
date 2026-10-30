@@ -5,12 +5,10 @@
 #   chmod +x build_ur7e.sh   # (one-time)
 #   ./build_ur7e.sh
 #
-# Builds all three workspace packages by default: ur_gello_bringup (UR7e GELLO
-# teleop), gello_policy (ACT/diffusion/FM/IFQL remote-policy deploy launch —
-# needed by run_ur7e_ifql_real.sh), and gello_recorder (HDF5 + camera
-# recorder). Override to build a subset, e.g.:
+# Builds both workspace packages by default: ur_gello_bringup (UR7e GELLO
+# teleop) and gello_recorder (HDF5 + camera recorder). Override to build a
+# subset, e.g.:
 #   GELLO_BUILD_PACKAGES=ur_gello_bringup ./build_ur7e.sh
-#   GELLO_BUILD_PACKAGES="ur_gello_bringup gello_policy" ./build_ur7e.sh
 #
 # NOTE: dynamixel_sdk is NOT installed via apt/rosdep here — it is provided by
 # `pip install --user dynamixel-sdk` (v4.0.5; no sudo/apt needed). It is only
@@ -34,7 +32,7 @@ cd "$SCRIPT_DIR"
 GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
 
 # Packages to build. Space-separated; passed straight to --packages-select.
-GELLO_BUILD_PACKAGES="${GELLO_BUILD_PACKAGES:-ur_gello_bringup gello_policy gello_recorder}"
+GELLO_BUILD_PACKAGES="${GELLO_BUILD_PACKAGES:-ur_gello_bringup gello_recorder}"
 
 # --- conda guard --------------------------------------------------------------
 # This machine auto-activates miniconda `base`, whose python3 is 3.13. Jazzy's
