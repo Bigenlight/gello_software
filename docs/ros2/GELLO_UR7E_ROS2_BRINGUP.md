@@ -1,12 +1,14 @@
-# GELLO → UR7e ROS2 텔레오퍼레이션 (로컬 · Humble · mock/fake · 검증됨)
+# GELLO → UR7e ROS2 텔레오퍼레이션 (로컬 · mock/fake · 검증됨)
 
-이 문서는 **ROS2 Humble + `ros-humble-ur` 2.8.1**(도커 없음) 환경에서 GELLO 리더 암으로 UR7e를 텔레오퍼레이션하는 파이프라인을, **이 PC에서 mock hardware(`source:=fake`)로 검증하는** 경로를 다룹니다. 사용하는 패키지는 `ros2_ur_ws/src/ur_gello_bringup` 입니다.
+이 문서는 GELLO 리더 암으로 UR7e를 텔레오퍼레이션하는 파이프라인을 **mock hardware(`source:=fake`)로 검증하는** 경로와, 브리지 설정 레퍼런스·일시정지/재개 기능을 다룹니다(도커 없음).
+
+> **배포판:** 원래 ROS 2 Humble + `ros-humble-ur` 2.8.1 리그에서 작성·실측(2026-07)했고 이 브랜치(ROS 2 Jazzy, `ur_robot_driver` 3.8.0)에 맞게 명령을 고쳤습니다. launch는 `use_fake_hardware`와 `use_mock_hardware`(Jazzy 이름)를 둘 다 넘기므로 두 배포판에서 같은 명령이 동작합니다. 설치는 [`GELLO_UR7E_JAZZY_24.04_SETUP.md`](./GELLO_UR7E_JAZZY_24.04_SETUP.md). 사용하는 패키지는 `ros2_ur_ws/src/ur_gello_bringup` 입니다.
 
 > **이 문서가 검증하는 것**: 이 PC에는 물리 GELLO가 **연결되어 있지 않으므로**, `ur7e_gello_rviz.launch.py`를 **mock UR7e(`use_fake_hardware:=true`)** 위에서 `source:=fake`로 띄워 브릿지 · 컨트롤러 · 토픽 · RViz2까지의 파이프라인 전체를 검증합니다. 여기가 **로컬에서 실제로 검증된(verified-here) 경로**입니다.
 
 > **실물 UR7e로 가려면**: 실제 GELLO 리더 암 + 실 UR7e 구동 절차는 [`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md)를 따르세요. 그 경로는 이 PC에서는 검증할 수 없습니다.
 
-> **UR5e 원본과의 관계**: UR5e용 원본 경로(`ur_gello_rviz.launch.py`, `config/ur_gello.yaml`)와 노드 코드는 그대로 두고, ur7e 전용 launch/config만 새로 추가한 것입니다. 설계 배경은 [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md) 및 [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md)를 참고하세요.
+> **UR5e 원본과의 관계**: UR5e용 원본 경로(`ur_gello_rviz.launch.py`, `config/ur_gello.yaml`)와 노드 코드는 그대로 두고, ur7e 전용 launch/config만 새로 추가한 것입니다. 설계 배경은 [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md)를 참고하세요(옛 설계 계획 문서 `GELLO_UR_ROS2_PLAN.md`는 `feat/gello-ur7e-jazzy-24.04` 스냅샷 브랜치에만 남아 있습니다).
 
 ---
 
@@ -15,13 +17,12 @@
 이 PC(GELLO 미연결)에서 GELLO → UR7e 파이프라인을 mock으로 검증하는 최소 절차:
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-source /opt/ros/humble/setup.bash
-colcon build --packages-select ur_gello_bringup && source install/setup.bash
+cd ~/gello_software/ros2_ur_ws
+./build_ur7e.sh && source /opt/ros/jazzy/setup.bash && source install/setup.bash
 ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake launch_rviz:=false
 ```
 
-별도 터미널에서 검증(각 터미널마다 `source /opt/ros/humble/setup.bash && source install/setup.bash` 먼저):
+별도 터미널에서 검증(각 터미널마다 `source /opt/ros/jazzy/setup.bash && source install/setup.bash` 먼저):
 
 ```bash
 ros2 control list_controllers          # joint_state_broadcaster, forward_position_controller 둘 다 active
@@ -38,8 +39,8 @@ ros2 param get /robot_state_publisher robot_description | grep -o ur7e   # ur7e
 ## 목차
 
 - [안전 — GELLO는 항상 passive read-only](#안전--gello는-항상-passive-read-only)
-- [1. Overview — 무엇이 실행되는가 (ur7e, ROS2 Humble)](#1-overview--무엇이-실행되는가-ur7e-ros2-humble)
-- [2. 사전 준비 (Prerequisites, ROS2 Humble)](#2-사전-준비-prerequisites-ros2-humble)
+- [1. Overview — 무엇이 실행되는가](#1-overview--무엇이-실행되는가)
+- [2. 사전 준비 (Prerequisites)](#2-사전-준비-prerequisites)
 - [3. 빌드 & 실행 (이 PC — fake/mock 경로, 검증됨)](#3-빌드--실행-이-pc--fakemock-경로-검증됨)
 - [4. 설정 파일 레퍼런스 — `config/ur7e_gello.yaml`](#4-설정-파일-레퍼런스--configur7e_gelloyaml)
 - [5. 트러블슈팅](#5-트러블슈팅)
@@ -59,9 +60,9 @@ GELLO는 **수동(passive) 모션캡처 리더 암**입니다. Dynamixel 모터�
 
 ---
 
-## 1. Overview — 무엇이 실행되는가 (ur7e, ROS2 Humble)
+## 1. Overview — 무엇이 실행되는가
 
-이 런북은 **ROS2 Humble + `ros-humble-ur` 2.8.1** 환경에서, `ur7e_gello_rviz.launch.py`로 GELLO → UR7e 텔레오퍼레이션을 mock hardware(`source:=fake` 또는 `source:=gello`) 위에서 검증하는 경로를 다룹니다. UR5e용 원본 경로(`ur_gello_rviz.launch.py`, `config/ur_gello.yaml`)는 그대로 두고, ur7e 전용 launch/config만 새로 추가합니다. 노드 코드 자체(`gello_publisher_node.py`, `gello_ur_bridge_node.py`, `fake_gello_node.py`, `robotiq_urcap_node.py`)는 UR5e와 UR7e의 joint_limits가 동일하므로 **변경 없이 그대로 재사용**됩니다.
+이 런북은 `ur7e_gello_rviz.launch.py`로 GELLO → UR7e 텔레오퍼레이션을 mock hardware(`source:=fake` 또는 `source:=gello`) 위에서 검증하는 경로를 다룹니다. UR5e용 원본 경로(`ur_gello_rviz.launch.py`, `config/ur_gello.yaml`)는 그대로 두고, ur7e 전용 launch/config만 새로 추가합니다. 노드 코드 자체(`gello_publisher_node.py`, `gello_ur_bridge_node.py`, `fake_gello_node.py`, `robotiq_urcap_node.py`)는 UR5e와 UR7e의 joint_limits가 동일하므로 **변경 없이 그대로 재사용**됩니다.
 
 ```
 [GELLO source]                   [bridge]                          [mock UR7e]                    [RViz2]
@@ -105,79 +106,27 @@ UR 관절 순서(UR5e/UR7e 동일):
 
 ---
 
-## 2. 사전 준비 (Prerequisites, ROS2 Humble)
+## 2. 사전 준비 (Prerequisites)
 
-이 패키지를 빌드/실행하기 전에 아래 항목을 먼저 확인·설치한다.
+설치는 [`GELLO_UR7E_JAZZY_24.04_SETUP.md`](./GELLO_UR7E_JAZZY_24.04_SETUP.md)가 정본이다
+(`install_jazzy.sh`: ROS 2 Jazzy desktop, UR 드라이버, RealSense, pip `dynamixel-sdk`). 이 문서에
+필요한 요점만:
 
-### 2-1. 시스템 / ROS2 배포판
+- **시스템 python3(3.12)** 로 실행한다. conda `python3`가 PATH 앞에 있으면 rclpy가 깨진다(설치 문서 §2).
+- 매 터미널: `source /opt/ros/jazzy/setup.bash && source ~/gello_software/ros2_ur_ws/install/setup.bash`.
+- `source:=fake` 경로는 `dynamixel-sdk`·GELLO 시리얼·`GELLO_REPO_ROOT`가 **필요 없다.**
+- `source:=gello`(실물 리더) 경로:
+  - `dynamixel-sdk` pip 모듈(설치 스크립트가 깖), 사용자 `dialout` 그룹 소속(재로그인 필요,
+    임시로는 `sudo chmod 666 /dev/ttyUSB0`).
+  - 시리얼 포트는 `config/ur7e_gello.yaml`의 `port`(by-id 경로).
+  - `gello_publisher`는 리포 루트의 `gello` 패키지를 import한다. `$GELLO_REPO_ROOT` → 소스 트리
+    상대 경로(`--symlink-install` 빌드에서 유효, `build_ur7e.sh`가 그렇게 빌드한다) 순으로 찾는다.
+    `run_*.sh` 래퍼는 `GELLO_REPO_ROOT`를 자동 설정하므로 `ros2 launch`를 직접 칠 때만
+    `export GELLO_REPO_ROOT=~/gello_software`를 준다.
 
-- OS: Ubuntu 22.04
-- ROS2: Humble (다른 배포판에서는 검증되지 않음)
-- Python: **시스템 python3.10** 사용 (venv/conda 등 별도 가상환경 금지 — `rclpy` 및 ROS2 Humble 파이썬 바인딩은 시스템 python3.10과 함께 설치되어 있어야 정상 동작한다.)
-
-### 2-2. 필수 apt 패키지 설치
-
-```bash
-sudo apt update
-sudo apt install ros-humble-ur
-pip install --user dynamixel-sdk   # source:=gello 경로에서만 필요 (v4.0.5, sudo/apt 불필요)
-```
-
-- `ros-humble-ur`: UR 드라이버/설명(description) 패키지. 설치된 2.8.1 버전에 `ur7e` 구성(`config/ur7e`)이 이미 포함되어 있으므로 **버전을 임의로 올리지 않는다.**
-- `dynamixel-sdk`: GELLO 리더암(Dynamixel 서보)과 통신하기 위한 SDK. `pip install --user dynamixel-sdk`로 설치(v4.0.5, **sudo/apt 불필요**). **`source:=fake` 경로(이 머신에서 검증하는 경로)에서는 필요 없다.** 실제 GELLO 하드웨어를 연결해 `source:=gello`로 실행할 때만 필요하다.
-
-### 2-3. ROS2 환경 소싱
-
-매 새 터미널에서 워크스페이스 빌드/실행 전에 반드시 실행:
-
-```bash
-source /opt/ros/humble/setup.bash
-```
-
-패키지 빌드 후에는 오버레이도 함께 소싱한다:
-
-```bash
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
-```
-
-### 2-4. `source:=gello` (실제 GELLO 리더암) 사용 시 필수 환경 변수
-
-`gello_publisher_node.py`에는 리포지토리 루트를 찾지 못했을 때 사용하는 하드코딩된 폴백 경로 `/home/theo_lab/gello_software`가 들어 있다. **이 머신의 실제 경로와 다르므로**, GELLO 실물 하드웨어를 사용하는 모든 실행(`source:=gello`) 전에 반드시 아래 환경 변수를 설정한다:
-
-```bash
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
-```
-
-- 이 변수를 설정하지 않으면 노드가 잘못된 경로(`/home/theo_lab/...`)를 참조하여 캘리브레이션/설정 파일을 찾지 못하고 실패할 수 있다.
-- `source:=fake` 경로는 실제 GELLO 장치를 읽지 않으므로 이 환경 변수가 필요 없다.
-- 노드 코드 자체(`gello_publisher_node.py`)는 FROZEN 상태이므로 수정하지 않는다 — 반드시 환경 변수로 우회한다.
-
-### 2-5. GELLO 시리얼 포트 권한 (dialout / chmod 666)
-
-GELLO 리더암은 아래 시리얼 포트로 연결된다 (물리 리더암 FTBEO6QK 기준, `config/ur_gello.yaml`과 동일):
-
-```
-/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0
-```
-
-리눅스에서 일반 사용자 계정이 이 시리얼 장치에 접근하려면 `dialout` 그룹 권한이 필요하다:
-
-```bash
-sudo usermod -aG dialout $USER
-# 이후 로그아웃/재로그인 (또는 재부팅) 필요
-```
-
-그룹 적용이 번거롭거나 즉시 테스트가 필요한 경우, 임시방편으로 장치 파일 권한을 직접 여는 방법도 있다 (재부팅/재연결 시마다 초기화되므로 매번 재실행 필요, 운영 환경에는 `dialout` 그룹 방식을 권장):
-
-```bash
-sudo chmod 666 /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0
-```
-
-이 항목 역시 `source:=gello`(실제 GELLO 하드웨어) 경로에만 해당하며, `source:=fake` 검증 경로에서는 불필요하다.
-
-### 2-6. 안전 불변식 (모든 문서 공통 — 필독)
-
-**GELLO 리더암은 항상 수동(passive) 읽기 전용 장치다. GELLO의 Dynamixel 서보에는 어떤 경우에도 토크를 인가하지 않는다.** 드라이버는 기동 시 토크를 OFF로 초기화하며 오직 조인트 값을 읽기만 한다. 이 불변식은 fake/real 어떤 실행 경로에서도 예외 없이 유지된다.
+**안전 불변식 (모든 문서 공통):** GELLO 리더암은 항상 수동(passive) 읽기 전용 장치다. Dynamixel
+서보에는 어떤 경우에도 토크를 인가하지 않는다. 드라이버는 기동 시 토크를 OFF로 초기화하며 오직
+조인트 값을 읽기만 한다.
 
 ---
 
@@ -188,9 +137,9 @@ sudo chmod 666 /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00
 ### 3-1. 빌드
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-source /opt/ros/humble/setup.bash
-colcon build --packages-select ur_gello_bringup
+cd ~/gello_software/ros2_ur_ws
+./build_ur7e.sh            # colcon build --symlink-install (ur_gello_bringup + gello_recorder)
+source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ```
 
@@ -215,8 +164,7 @@ ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake launch_rviz:
 > 주의: 이 PC 검증 시나리오는 원칙적으로 GELLO가 없다고 가정합니다. 만약 실물 GELLO(FTBEO6QK)를 이 PC에 임시로 연결해 시험한다면:
 
 ```bash
-pip install --user dynamixel-sdk   # dynamixel_sdk 미설치 상태이므로 gello 소스 사용 시 필요 (sudo/apt 불필요)
-export GELLO_REPO_ROOT=/home/laptop3/gello_software   # gello_publisher_node의 하드코딩 fallback 경로(/home/theo_lab/gello_software) 우회
+export GELLO_REPO_ROOT=~/gello_software   # 또는 ./run_ur7e_gello_sim.sh (자동 설정)
 ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=gello
 ```
 
@@ -225,7 +173,7 @@ ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=gello
 
 ### 3-5. 검증 체크리스트
 
-launch 후 별도 터미널에서(각 터미널마다 `source /opt/ros/humble/setup.bash && source install/setup.bash` 먼저 실행):
+launch 후 별도 터미널에서(각 터미널마다 `source /opt/ros/jazzy/setup.bash && source install/setup.bash` 먼저 실행):
 
 ```bash
 # (1) 컨트롤러 상태 — joint_state_broadcaster, forward_position_controller 둘 다 active
@@ -246,7 +194,7 @@ ros2 topic hz /forward_position_controller/commands
 
 ```bash
 # (3) 로드된 로봇 모델이 ur7e인지 확인 — 드라이버 로그가 가장 확실하다.
-#     (robot_description grep은 부정확: 2.8.1의 ur7e 서술이 ur5e 메시를 참조하므로
+#     (robot_description grep은 부정확: ur7e 서술이 ur5e 메시를 참조하므로
 #      grep ur5e도 매칭됨 — 아래 §5 "알려진 제약" 참고. 하드웨어 로드 로그로 판정할 것.)
 grep -m1 "Loading hardware" ~/.ros/log/latest/ros2_control_node*.log 2>/dev/null || \
   echo "launch 콘솔에서 \"Loading hardware 'ur7e'\" 라인을 확인"
@@ -255,16 +203,16 @@ grep -m1 "Loading hardware" ~/.ros/log/latest/ros2_control_node*.log 2>/dev/null
 
 세 가지 모두 통과하면 이 PC에서의 fake/mock 경로 검증이 완료된 것입니다.
 
-> **실측 검증(2026-07-03, 이 PC).** `source:=fake launch_rviz:=false`로 실행 시: 드라이버가 `Loading hardware 'ur7e'` → `joint_state_broadcaster` **active** + `forward_position_controller` **active** + `scaled_joint_trajectory_controller` inactive, `/forward_position_controller/commands` **~250 Hz**(현재 config `publish_rate_hz=250.0`), fake 소스 `/gello/joint_states` **29.99 Hz**. 파이프라인 정상 확인됨.
+> **실측 검증(2026-07-03, Humble 리그).** `source:=fake launch_rviz:=false`로 실행 시: 드라이버가 `Loading hardware 'ur7e'` → `joint_state_broadcaster` **active** + `forward_position_controller` **active** + `scaled_joint_trajectory_controller` inactive, `/forward_position_controller/commands` **~250 Hz**(현재 config `publish_rate_hz=250.0`), fake 소스 `/gello/joint_states` **29.99 Hz**. 파이프라인 정상 확인됨.
 
 ### 3-6. 명령 요약
 
 | 시나리오 | 명령 |
 | --- | --- |
-| 빌드 | `colcon build --packages-select ur_gello_bringup` |
+| 빌드 | `./build_ur7e.sh` |
 | RViz2 포함(fake) | `ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake` |
 | 헤드리스(fake) | `ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake launch_rviz:=false` |
-| 실물 GELLO 소스 | `GELLO_REPO_ROOT=/home/laptop3/gello_software ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=gello` |
+| 실물 GELLO 소스 | `GELLO_REPO_ROOT=~/gello_software ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=gello` (또는 `./run_ur7e_gello_sim.sh`) |
 | 컨트롤러 확인 | `ros2 control list_controllers` |
 | 발행 주기 확인 | `ros2 topic hz /forward_position_controller/commands` |
 | 로봇 모델 확인 | `ros2 param get /robot_state_publisher robot_description \| grep -o ur7e` |
@@ -389,24 +337,22 @@ mock 경로(`ur7e_gello_rviz.launch.py`)는 이 노드를 **쓰지 않습니다*
 
 | 증상 | 원인 | 해결 |
 | --- | --- | --- |
-| `gello_publisher` 실행 시 시리얼 포트 `Permission denied` | 현재 사용자가 `dialout` 그룹에 없거나, `/dev/serial/by-id/...` 심볼릭 링크가 가리키는 `/dev/ttyUSB*`에 그룹 rw 권한이 없음 | `sudo usermod -aG dialout $USER` 후 **재로그인**(또는 `newgrp dialout`). 즉시 임시로 풀려면 `sudo chmod 666 /dev/ttyUSB0`(재부팅/재연결 시 초기화되는 임시방편 — README의 "임시 chmod 666 워크어라운드" 참고). |
+| `gello_publisher` 실행 시 시리얼 포트 `Permission denied` | 현재 사용자가 `dialout` 그룹에 없거나, `/dev/serial/by-id/...` 심볼릭 링크가 가리키는 `/dev/ttyUSB*`에 그룹 rw 권한이 없음 | `sudo usermod -aG dialout $USER` 후 **재로그인**(또는 `newgrp dialout`). 즉시 임시로 풀려면 `sudo chmod 666 /dev/ttyUSB0`(재부팅/재연결 시 초기화되는 임시방편 — 임시방편). |
 | 런치를 여러 번 실행/중단하다 보니 이전 노드가 남아 두 개의 `gello_publisher` 또는 `gello_ur_bridge`가 동시에 시리얼/토픽을 잡음(고스트/오번 노드) | `Ctrl+C`로 launch를 종료해도 자식 프로세스가 완전히 죽지 않고 남는 경우가 있음(특히 시리얼 I/O 중 블로킹) | `ros2 node list`로 중복 노드 확인 → `pkill -f gello_publisher`, `pkill -f gello_ur_bridge`, `pkill -f fake_gello` 로 정리 후 재실행. 재실행 전 `ros2 topic hz /gello/joint_states`로 발행자가 하나뿐인지 확인. |
-| `gello_publisher` / `robotiq_urcap` 실행 시 `ModuleNotFoundError: No module named 'gello'` | 노드가 리포 루트의 python `gello` 패키지를 import하는데, 하드코드된 폴백 경로가 `/home/theo_lab/gello_software`로 되어 있어 **이 머신 경로와 다름** | 노드 코드는 수정하지 않는다. 대신 셸에 `export GELLO_REPO_ROOT=/home/laptop3/gello_software`를 설정한 뒤(예: `~/.bashrc`에 추가하거나 launch 실행 전 매번 export) 노드를 실행한다. |
+| `gello_publisher` / `robotiq_urcap` 실행 시 `ModuleNotFoundError: No module named 'gello'` | 노드가 리포 루트의 python `gello` 패키지를 찾지 못함(`$GELLO_REPO_ROOT` 미설정 + `--symlink-install`이 아닌 빌드) | `export GELLO_REPO_ROOT=~/gello_software` 후 실행하거나 `run_*.sh` 래퍼를 쓴다. `./build_ur7e.sh`(symlink-install)로 다시 빌드해도 된다. |
 | `ros2 control list_controllers`에서 `forward_position_controller`가 `inactive`이거나, `/forward_position_controller/commands`에 아무것도 발행되지 않음 | launch 내에서 bridge/GELLO source 노드가 컨트롤러 스포너보다 먼저 뜨는 레이스 컨디션 — `ur7e_gello_rviz.launch.py`는 컨트롤러가 spawn될 시간을 벌기 위해 bridge/source 노드를 **~5초 `TimerAction`으로 지연 기동**한다 | 5초를 기다린 뒤 다시 확인. 그래도 `inactive`라면 `ros2 control list_controllers`로 실제 상태를 먼저 확인하고, `ros2 control switch_controllers`로 수동 재시도하거나 launch를 재시작한다. 5초보다 컨트롤러 스폰이 오래 걸리는 저사양 환경이면 launch의 `TimerAction` 지연 값을 늘리는 것을 고려(단, `ur7e_gello_rviz.launch.py`는 FROZEN이 아니므로 수정 가능하나 이 작업 범위 밖). |
 | RViz2 창이 뜨지 않거나 `qt.qpa.xcb: could not connect to display` 등 DISPLAY 관련 에러로 launch 자체가 실패 | 헤드리스 환경(SSH, 컨테이너 등)에서 DISPLAY가 없는데 RViz2를 강제로 띄우려 함 | `launch_rviz:=false`로 실행: `ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake launch_rviz:=false`. 파이프라인(컨트롤러/브리지/토픽)만 검증하고 싶을 때 표준적으로 쓰는 방법이며, VERIFY-HERE 절차도 이 옵션을 기본으로 사용한다. |
 
-### 5-1. 알려진 제약 — `ros-humble-ur` 2.8.1의 ur7e는 "부분 지원" (⚠️ 중요)
+### 5-1. 알려진 제약 — RViz에 ur5e 메시가 보인다
 
-실측 결과, 설치된 `ros-humble-ur` **2.8.1**에서 `ur_type:=ur7e`는 **로드·구동되지만 서술(description)이 완전하지 않다**:
+`ur_description`의 `config/ur7e/visual_parameters.yaml`은 메시를 `meshes/ur5e/...`로 참조한다
+(Humble 2.8.1과 Jazzy 3.8.0 설치본 모두). 그래서 `robot_description`에 `ur5e` 문자열이 등장하고
+RViz에는 ur5e 메시로 렌더링된다.
 
-- `ur_description`의 `config/ur7e/`(joint_limits·kinematics·physical·visual_parameters)는 존재하나, **`visual_parameters.yaml`이 메시를 `meshes/ur5e/...`로 참조**한다 (ur7e 전용 메시 디렉토리가 없음). 그래서 `robot_description`에 `ur5e` 문자열이 14회 등장하고 RViz에는 **ur5e 메시로 렌더링**된다.
-- 드라이버 config에 **`ur7e_update_rate.yaml`이 없어** launch 시 `Parameter file path is not a file: .../ur7e_update_rate.yaml` **경고**가 뜬다(제어는 기본 rate로 정상 동작 — RTDE 500Hz, bridge 명령 250Hz 확인됨).
-
-**영향 범위 판단:**
-- ✅ **joint-space GELLO 텔레오퍼에는 문제 없음.** 관절명(`shoulder_pan_joint`…`wrist_3_joint`)과 관절 리밋은 ur5e/ur7e가 동일하고, 우리는 관절 각도를 명령하므로 메시/DH 차이는 **RViz 겉모습과 TCP/Cartesian 정확도에만** 영향을 준다. (이것이 실기에서 `ur_type:=ur5e`로 잘못 실행해도 관절 추종이 정상 동작하는 이유다.)
-- ⚙️ **정확한 ur7e 비주얼/기구학이 필요하면** `ros-humble-ur`를 **2.13.2로 업그레이드**한다(apt 후보 존재: `sudo apt install ros-humble-ur=2.13.2-*` 후 재빌드 불필요, 드라이버만 갱신). 업그레이드 시 컨트롤러 이름이 바뀔 수 있으니 이 문서의 `list_controllers` 기대값을 재확인할 것.
-
-> 요약: **관절 텔레오퍼 목적이면 2.8.1로 충분(검증 완료)**, 정밀 ur7e 모델이 필요하면 2.13.2.
+- ✅ **joint-space GELLO 텔레옵에는 문제 없음.** 관절명과 관절 리밋은 ur5e/ur7e가 동일하고, 우리는
+  관절 각도를 명령한다.
+- Humble 2.8.1에서는 `ur7e_update_rate.yaml` missing 경고도 났지만(무해) Jazzy 설치본에는 그 파일이 있다.
+- 드라이버 3.8.0 전환 검토: [`DRIVER_3_8_REVIEW.md`](../../ros2_ur_ws/setup_jazzy/DRIVER_3_8_REVIEW.md).
 
 ---
 
@@ -499,7 +445,7 @@ ros2 topic echo /gello_gripper_bridge/state
 로봇 없이 pause/거부/글라이드 전체를 mock에서 리허설할 수 있습니다. 한 터미널에서 fake 스택을 띄우고(`ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py source:=fake` 또는 `./run_ur7e_gello_sim.sh`), 다른 터미널에서:
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./check_pause_resume_sim.sh
 ```
 
@@ -513,4 +459,4 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 
 - [`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md) — 실물 UR7e + 실 GELLO 구동 런북(이 PC에서는 검증 불가).
 - [`GELLO_UR_ROS2_BRINGUP.md`](./GELLO_UR_ROS2_BRINGUP.md) — UR5e 원본 브링업(설계 기준 문서).
-- [`GELLO_UR_ROS2_PLAN.md`](./GELLO_UR_ROS2_PLAN.md) — GELLO ↔ UR ROS2 통합 설계/계획 문서.
+- [`GELLO_UR7E_SETUP_CLI.md`](./GELLO_UR7E_SETUP_CLI.md) — 실로봇 턴키 실행·튜닝·프리플라이트.

@@ -3,7 +3,8 @@
 > **목적:** teleop(조인트/EEF) · 녹화(HDF5) · 제어(UR7e 인터페이스) 전 경로에서 각 물리량이 **어떤 단위**로 표현/전달/저장되는지 코드 근거로 전수 정리한 문서.
 > 데이터셋 변환, 정책 학습 입력 정규화, 디버깅 시 "이 값이 rad냐 deg냐 / m냐 mm냐"를 확정하기 위한 단일 참조점.
 >
-> 조사 기준 브랜치: `feat/gello-ur7e-humble-22.04`. 모든 경로/라인은 조사 시점 기준이며, 리팩터 시 라인 번호는 이동할 수 있음(심볼명으로 재확인 권장).
+> 조사 기준 브랜치: `feat/gello-ur7e-humble-22.04`(텔레옵·레코더 코드는 이 브랜치와 같다). 모든 경로/라인은 조사 시점 기준이며, 리팩터 시 라인 번호는 이동할 수 있음(심볼명으로 재확인 권장).
+> `recorded_demo.py`·`ur7e_env.py`(RL 액션 변환)는 이 slim 브랜치에 없고 `research/hil-serl` 브랜치(`serl_ur_infra/`)에 있다.
 
 ---
 
@@ -132,7 +133,7 @@
 | ROS `GripperCommand` 액션 `.position` | **미터(m)** | 0.0=CLOSED, **0.085=OPEN** (mm 아님) | `robotiq_gripper_modbus_node.py:18-19,74` |
 | ROS `GripperCommand` `.max_effort` | **뉴턴(N)** | max_force_n=235.0 | `robotiq_gripper_modbus_node.py:75,226-229` |
 | JointState 발행 (knuckle) | **rad** | 0~0.8 rad | `robotiq_gripper_modbus_node.py:76,395` |
-| **RL 액션** `action[6]` (HIL-SERL) | **−1 / 0 / +1** | 🔴 **+1=OPEN, −1=CLOSED — 위 전부와 반대** (0=유지) | `recorded_demo.py:559-570`, `ur7e_env.py:1843-1867` |
+| **RL 액션** `action[6]` (HIL-SERL, `research/hil-serl`) | **−1 / 0 / +1** | 🔴 **+1=OPEN, −1=CLOSED — 위 전부와 반대** (0=유지) | `recorded_demo.py:559-570`, `ur7e_env.py:1843-1867` |
 
 > 🔴 **규약이 두 개고 서로 반대다.** 토픽·녹화 컬럼(`gello_grip`/`grip_cmd`/`grip_pos`)은 **0=열림, 1=닫힘**인데,
 > RL 액션 `action[6]`은 **+1=열림, −1=닫힘**이다. 변환기가 뒤집는다:

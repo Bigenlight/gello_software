@@ -1,49 +1,63 @@
-# GELLO → UR7e 진단 레코더 (데이터 로깅)
+# GELLO → UR7e 데이터 기록 (레코더 · LeRobot 변환)
 
-GELLO 리더에서 뽑히는 값과 UR7e의 **실제 관절(위치·속도·토크)**, 브리지 커맨드, 그리퍼, TCP 힘/토크·포즈까지 한 번의 실행에서 CSV로 저장하는 도구입니다. 트래킹 오차·지연·진동을 오프라인으로 분석할 때 씁니다. **읽기 전용**(구독만) — 로봇/GELLO에 명령을 내리지 않습니다.
+텔레옵 중에 GELLO 리더 값, 브리지 커맨드, UR7e **실제 관절(위치·속도·토크)**, 그리퍼, TCP 힘/토크·포즈,
+RealSense 2대 영상을 take 단위로 저장하는 도구와, 그 take를 LeRobot 데이터셋으로 바꾸는 절차입니다.
+레코더는 **읽기 전용**(구독만) — 로봇/GELLO에 명령을 내리지 않습니다(GUI의 GO HOME 버튼만 예외로 팔을 움직임).
 
-## 실행
+패키지 상세(출력 스키마·상태 필드·GUI 키·트러블슈팅)는
+[`ros2_ur_ws/src/gello_recorder/README.md`](../../ros2_ur_ws/src/gello_recorder/README.md)가 정본입니다. 이 문서는
+진입점 요약, depth/타임스탬프 사건 기록, 데이터셋 릴리스 절차를 다룹니다.
 
-텔레오퍼(sim 또는 실기)를 **먼저** 띄운 뒤, **두 번째 터미널**에서:
+## 진입점 3개
+
+텔레옵(sim 또는 실기)을 **먼저** 띄운 뒤 **두 번째 터미널**에서 하나를 고릅니다.
+
+| 진입점 | 용도 |
+|---|---|
+| `./run_recorder.sh` | 헤드리스 기록기(`gello_ur_recorder`). `CAMS=true`면 카메라 2대도 띄우고 영상까지 기록 |
+| `ros2 run gello_recorder gello_recorder_gui` | 인터랙티브 GUI — take 시작/정지·삭제·태그·GO HOME |
+| `./run_eef_collection_gui.sh` | EEF 텔레옵 수집용 통합 GUI(녹화 R / ENGAGE SPACE / 그리퍼 G). 절차는 [`GELLO_EEF_COLLECTION_JAZZY.md`](./GELLO_EEF_COLLECTION_JAZZY.md) |
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-./run_recorder.sh                 # CSV만
-BAG=true ./run_recorder.sh        # + 전체 토픽을 ros2 bag으로도 캡처
-RATE=200 ./run_recorder.sh        # synchronized.csv 샘플레이트(Hz), 기본 100
+cd ~/gello_software/ros2_ur_ws
+./run_recorder.sh                     # 로봇/GELLO 벡터 신호만
+CAMS=true ./run_recorder.sh           # + cam1.mp4 / cam2.mp4
+BAG=true ./run_recorder.sh            # + 전체 토픽 ros2 bag
+RATE=200 ./run_recorder.sh            # synchronized 테이블 샘플레이트(Hz), 기본 100
 ```
 
-> **`HEADLESS=true`는 레코더에 필요 없습니다.** 그 플래그는 텔레오퍼 실행(`run_ur7e_gello_real.sh`)이 Remote 모드로 드라이버를 띄우게 하는 것이고, 레코더는 읽기 전용(구독만)이라 드라이버를 시작하지 않습니다. 실기에서는 터미널 1에서 `HEADLESS=true ./run_ur7e_gello_real.sh`, 터미널 2에서 `./run_recorder.sh` — 같은 PC/같은 ROS 그래프(기본 `ROS_DOMAIN_ID=0`)라 그대로 토픽을 봅니다.
+> **`HEADLESS=true`는 레코더에 필요 없습니다.** 그 플래그는 텔레옵(`run_ur7e_gello_real.sh`)이 Remote 모드로
+> 드라이버를 띄우게 하는 것이고, 레코더는 드라이버를 시작하지 않습니다. 실기에서는 터미널 1에서
+> `HEADLESS=true ./run_ur7e_gello_real.sh`, 터미널 2에서 `./run_recorder.sh` — 같은 ROS 그래프
+> (기본 `ROS_DOMAIN_ID=0`)라 그대로 토픽을 봅니다.
 
-`Ctrl-C`로 종료 → flush + `metadata.json` 마무리(그리고 bag 정리). 직접 실행도 가능:
+`Ctrl-C`로 종료 → flush + `metadata.json` 마무리(그리고 bag·카메라 정리). 직접 실행도 가능:
 
 ```bash
-ros2 run ur_gello_bringup gello_ur_recorder --ros-args -p sample_rate_hz:=100.0
+ros2 run gello_recorder gello_ur_recorder --ros-args -p sample_rate_hz:=100.0
 ```
 
-## 저장 위치 (하위 폴더)
+## 저장 위치
 
 ```
-ros2_ur_ws/gello_logs/session_<YYYYmmdd_HHMMSS>/
-├─ synchronized.csv        ← 핵심: 모든 신호를 100 Hz로 시간 정렬한 wide 테이블
-├─ gello_joint_states.csv  ← GELLO 관절 위치 + 유한차분 속도 (native ~30 Hz)
-├─ ur_joint_states.csv     ← UR7e 실제 위치/속도/토크 (native ~500 Hz)
-├─ command.csv             ← 브리지가 보낸 커맨드 (/forward_position_controller/commands)
-├─ gripper.csv             ← GELLO 그리퍼 / 그리퍼 커맨드 / 그리퍼 실제 위치
-├─ wrench.csv              ← TCP 힘·토크 (force_torque_sensor_broadcaster)
-├─ tcp_pose.csv            ← TCP 데카르트 포즈 (tcp_pose_broadcaster, 로드된 경우)
-├─ metadata.json           ← 파라미터·시작시각·토픽별 수신 개수
-└─ rosbag/                 ← BAG=true일 때만: 전체 토픽 원본
+ros2_ur_ws/gello_logs/session_<YYYYmmdd_HHMMSS>/     (GUI는 take_<NN>_<stamp>/)
+├─ vectors.h5      ← 모든 벡터 신호 테이블(그룹 하나 = 테이블, 열 하나 = 1-D float64 dataset):
+│                     synchronized, gello_joint_states, ur_joint_states, command, gripper,
+│                     wrench, tcp_pose, cam1_frames, cam2_frames
+├─ cam1.mp4 cam2.mp4  ← 카메라 켰을 때만 (cam1 = SCENE, cam2 = WRIST)
+├─ depth.h5        ← ENABLE_DEPTH=1일 때만 (아래)
+├─ metadata.json   ← 파라미터·시작시각·토픽별 수신 개수·record_depth·굶음 진단
+└─ rosbag/         ← BAG=true일 때만
 ```
 
-> `gello_logs/`는 `.gitignore` 처리되어 있습니다(데이터는 커밋 안 함, 코드만 커밋).
+예전 레코더는 같은 테이블을 CSV 여러 개로 썼다(`synchronized.csv` 등). 열 이름은 그대로다.
+`gello_logs/`는 `.gitignore` 처리되어 있다(데이터는 커밋하지 않는다).
 
 ### 깊이(depth) 녹화 — **기본 OFF (RGB만), `ENABLE_DEPTH=1` 로 켠다**
 
 ```bash
 CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh                     # 헤드리스
 ENABLE_DEPTH=1 ros2 run gello_recorder gello_recorder_gui      # GUI
-ENABLE_DEPTH=1 ros2 run gello_recorder task_recorder_gui       # 태스크 GUI
 ```
 
 기본 캡처는 **RGB만**이다. depth 는 세션마다 명시적으로 요청하는 opt-in 이고, 켜면
@@ -71,7 +85,7 @@ depth ON: ~6 MB/s disk, +2 subscriptions/cam, recorder CPU +~35 %; watch ros_lag
   오프라인에서 정렬하는 편이 싸다.
 - 카메라 자체는 문제가 아니었다(자체 전원 Genesys USB3 허브, 2대 동시): 색상 30 Hz 유지,
   depth ~29 Hz, 프레임당 80–130 KB, 노드 CPU ~9 %, USB 오류 0. 병목은 **레코더 쪽**이었다.
-  `launch_cameras.sh`(HIL 경로)는 원래부터 **기본 0**이다 — depth 를 읽는 소비자가 없다.
+  `launch_cameras.sh`도 **기본 0**이다(`ENABLE_DEPTH=1`로 켬).
 - `metadata.json` / GUI 정지 요약에는 **항상** `record_depth` 가 적힌다. RGB-only take 도
   "depth 가 꺼져 있었다"를 스스로 증언하므로, depth 파일이 없는 것과 구별된다.
 - 읽기:
@@ -148,7 +162,7 @@ MP4 writer 가 또 한 번 디코드하고 있었다 — 실측 1280x720 JPEG �
    WARN 으로 찍고 `metadata.json` / GUI 정지 요약에 `spin_starvation_suspected` ·
    `ros_lag_s_max` · `native_rates_hz` · `dropped_frames` · `record_depth` 를 남긴다.
 
-**수정 후 실측** (2026-09-14, laptop3, 카메라 1대 + 합성 퍼블리셔 `/joint_states` 500 Hz ·
+**수정 후 실측** (2026-09-14, Humble 수집 PC, 카메라 1대 + 합성 퍼블리셔 `/joint_states` 500 Hz ·
 tcp/wrench/commands 각 100 Hz, 28.5 s):
 
 | | RGB만 (기본) | `ENABLE_DEPTH=1` |
@@ -168,7 +182,7 @@ tcp/wrench/commands 각 100 Hz, 28.5 s):
 [`ros2_ur_ws/src/gello_recorder/README.md`](../../ros2_ur_ws/src/gello_recorder/README.md)
 §5·5-1·5-2.
 
-## `synchronized.csv` 열 (분석용 메인 파일)
+## `synchronized` 테이블 열 (분석용 메인 테이블)
 
 | 열 | 의미 |
 |---|---|
@@ -189,8 +203,10 @@ tcp/wrench/commands 각 100 Hz, 28.5 s):
 ## 빠른 분석 예 (pandas)
 
 ```python
-import pandas as pd
-df = pd.read_csv("gello_logs/session_XXXX/synchronized.csv")
+import h5py, pandas as pd
+with h5py.File("gello_logs/session_XXXX/vectors.h5") as f:
+    g = f["synchronized"]
+    df = pd.DataFrame({k: g[k][()] for k in g.keys()})
 # 트래킹 오차: 브리지 커맨드 vs 로봇 실제
 err = (df[[f"cmd{i}" for i in range(1,7)]].values
        - df[[f"ur_q{i}" for i in range(1,7)]].values)
@@ -199,20 +215,45 @@ print(df[[f"ur_qd{i}" for i in range(1,7)]].std())
 # 지연: gello_q 대비 ur_q의 상호상관 피크로 lag 추정
 ```
 
-## 허깅페이스 업로드 (raw + LeRobot, depth 포함) — 2026-09-14 carrot 릴리스 절차
+## 허깅페이스 업로드 (raw + LeRobot)
+
+**현재 레코더(헤더 `stamp_s` 저장)로 찍은 RGB take**는 이 브랜치의 범용 도구 3개로 처리한다
+([`scripts/dataset/`](../../scripts/dataset/)):
+
+```bash
+# LR_PY = lerobot 0.6.1(git 핀 8a74e0a)을 설치한 별도 venv의 python. 시스템/ROS python에 깔지 말 것.
+S=/path/to/staging/<Task>            # 한 태스크의 take 폴더만 하드링크로 모은 곳 (아래 1번)
+T="<task string>"
+/usr/bin/python3 scripts/dataset/make_raw_stats.py --data $S --dataset Bigenlight/<repo>_raw --task "$T"   # → dataset_stats.json
+$LR_PY scripts/dataset/convert_takes_to_lerobot.py --data $S --out <out_dir> \
+    --repo-id Bigenlight/<repo>_lerobot_v3 --task "$T"            # depth.h5나 stamp_s 없는 코퍼스는 거부
+$LR_PY scripts/dataset/validate_takes_conversion.py --raw $S --lerobot <out_dir> \
+    --task "$T" --repo-id Bigenlight/<repo>_lerobot_v3 --json validation.json   # 변환기를 import하지 않는 독립 검증
+```
+
+레시피(마스터 클럭 `cam1_frames.stamp_s − t0_off`, 관절·cam2는 헤더 스탬프, command·gripper는 콜백 시각으로
+최근접 정렬, 지연 보정·프레임 삭제 없음)는 `convert_takes_to_lerobot.py` 머리말이 정본이다. 아래 2026-09-16 orange bowl
+릴리스가 이 경로의 첫 사례다.
+
+### 2026-09-14 carrot 릴리스 절차 (depth 포함, 옛 레코더) — 기록
+
+> 이 절의 carrot 전용 스크립트(`convert_carrot_to_lerobot.py`, `validate_carrot_conversion.py`,
+> `make_carrot_raw_stats.py`)는 slim 브랜치에서 빠졌고 `research/sim-collect` 브랜치의 `scripts/dataset/`에 있다.
+> 옛 레코더의 0.9 s 지연 보정이 필요한 코퍼스 재현용이다. 절차의 일반 원칙(하드링크 스테이징, 업로드 후 `v3.0` 태그)은
+> 위 범용 경로에도 그대로 적용된다.
 
 이 절차로 [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw)와
 [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3)를 올렸다
-(54 take, 18,557 프레임, 619 s). 스크립트는 전부 [`scripts/dataset/`](../../scripts/dataset/)에 있다.
+(54 take, 18,557 프레임, 619 s).
 
-**환경.** LeRobot 변환·검증은 `/home/laptop3/youngwoong_ws/lr_env/bin/python`(lerobot 0.6.1, git 핀 `8a74e0a`)로만 돈다.
-`ros2_ur_ws/act_venv`에는 설치하지 말 것(실기 배포 검증 환경). 이 lerobot에는 depth가 정식으로 들어 있다 —
+**환경.** LeRobot 변환·검증은 별도 venv(`lr_env`, lerobot 0.6.1, git 핀 `8a74e0a` — PyPI 최신은 0.6.0)로만 돈다.
+정책 배포용 venv에는 설치하지 말 것(실기 배포 검증 환경을 깬다). 이 lerobot에는 depth가 정식으로 들어 있다 —
 feature `info: {"is_depth_map": true}` + `DepthEncoderConfig`. 데이터셋 양식은 여전히 **v3.0**(2026-09 기준 최신, v3.1/v4 없음).
 HF 계정 `Bigenlight`, 토큰은 `hf auth whoami`로 확인.
 
 1. **스테이징(하드링크).** `gello_logs/`는 모든 세션의 take가 섞인 풀이므로 한 태스크만 골라 묶는다. 복사가 아니라 하드링크라 디스크를 안 먹는다.
    ```bash
-   S=/home/laptop3/youngwoong_ws/Put_carrot_in_pot; mkdir -p $S
+   S=$WORK/Put_carrot_in_pot; mkdir -p $S
    cd ros2_ur_ws/gello_logs; for d in take_*_20260914_*; do mkdir -p $S/$d; for f in vectors.h5 cam1.mp4 cam2.mp4 depth.h5; do ln -f $d/$f $S/$d/$f; done; done
    ```
    raw 릴리스는 이 폴더 그대로다: take 폴더들 + `README.md`(데이터셋 카드) + `DATA_DICTIONARY.md` + `dataset_stats.json` + `assets/`(세팅 사진, 첫 프레임, depth 샘플).
@@ -220,7 +261,7 @@ HF 계정 `Bigenlight`, 토큰은 `hf auth whoami`로 확인.
    📌 2026-09-16부터는 태스크 무관 판 `scripts/dataset/make_raw_stats.py --data $S --dataset Bigenlight/<repo> --task "<task string>"`를 쓴다(`--no-depth` 자동 감지, `stamp_s` 블록과 `timestamp_lag.recorder_artefact_expected` 추가). carrot 스크립트는 그 릴리스 재현용으로 남겨 둔다.
 3. **LeRobot 변환.**
    ```bash
-   cd /home/laptop3/youngwoong_ws && lr_env/bin/python /home/laptop3/gello_software/scripts/dataset/convert_carrot_to_lerobot.py \
+   cd $WORK && lr_env/bin/python ~/gello_software/scripts/dataset/convert_carrot_to_lerobot.py \
      --data Put_carrot_in_pot --out carrot_in_pot_lerobot --procs 4 --threads 2   # [--exclude take_NN_...]
    ```
    레시피는 cube와 같다(마스터 클럭 `cam1_frames/t_rel_s` 30 fps, 나머지 스트림은 각자의 `t_rel_s`로 nearest-timestamp 리샘플, cam2는 카메라 타임스탬프로 정렬, `gello_*` 제외, `grip_cmd` ffill/bfill). 추가된 것:
@@ -248,7 +289,7 @@ HF 계정 `Bigenlight`, 토큰은 `hf auth whoami`로 확인.
 ### 2026-09-16 — `Bigenlight/orange_bowl_in_purple_bowl_raw` (수정된 레코더로 찍은 첫 릴리스)
 
 태스크 "put the orange bowl into the purple bowl", **52 take**(take_01~54, 22·40은 조작자가 삭제), 2026-09-15 23:09~09-16 00:01,
-EEF 모드, **RGB만**(depth OFF 기본값), 16,009 프레임 / 534 s / 343 MB. 스테이징 `/home/laptop3/youngwoong_ws/Orange_bowl_in_purple_bowl/`.
+EEF 모드, **RGB만**(depth OFF 기본값), 16,009 프레임 / 534 s / 343 MB. 스테이징 `$WORK/Orange_bowl_in_purple_bowl/`.
 LeRobot 변환은 [`Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3)
 (52 에피소드 / 16,009 프레임 / 155 MB, 태그 `v3.0`, 변환 12분). **수정된 레코더용 새 레시피**: `scripts/dataset/convert_takes_to_lerobot.py`
 (태스크 무관, RGB 전용, depth.h5나 `stamp_s` 부재 시 거부) — 마스터 클럭 = `cam1_frames.stamp_s − t0_off`
@@ -261,6 +302,8 @@ command 대비 `ur_joint_states` 지연이 52 take 전부 0.140~0.150 s(= 실제
 
 ## 관련 문서
 
+- [`ros2_ur_ws/src/gello_recorder/README.md`](../../ros2_ur_ws/src/gello_recorder/README.md) — 레코더 패키지 정본
+- [`GELLO_UR7E_UNITS_REFERENCE.md`](./GELLO_UR7E_UNITS_REFERENCE.md) — 컬럼 단위·그리퍼 규약
 - [`GELLO_UR7E_SETUP_CLI.md`](./GELLO_UR7E_SETUP_CLI.md) — 턴키 셋업 + 튜닝(§5, One-Euro 진동 필터)
 - [`GELLO_UR7E_REAL_ROBOT.md`](./GELLO_UR7E_REAL_ROBOT.md) — 실기 런북
 - [`GELLO_UR7E_GRIPPER.md`](./GELLO_UR7E_GRIPPER.md) — 2F-85 그리퍼

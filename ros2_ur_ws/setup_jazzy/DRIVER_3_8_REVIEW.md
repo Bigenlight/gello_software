@@ -1,5 +1,9 @@
 # UR driver 3.8.0 — Jazzy 포팅 검토 (2026-09-16)
 
+> 이 검토는 slim 분리 전 전체 브랜치(`feat/gello-ur7e-jazzy-24.04`)에서 했다. 아래에서 언급하는
+> `gello_policy` 패키지·`run_mock_rviz.sh`·`ur_control_fake_safe.launch.py`는 이제 `research/policy-deploy`
+> 브랜치에 있다. GELLO 텔레옵 경로(`gello_move_to_start`, `ur7e_gello_*.launch.py`)에 대한 결론은 그대로 유효하다.
+
 대상은 이 PC에 설치된 `ur_robot_driver` / `ur_controllers` 3.8.0,
 `forward_command_controller` / `position_controllers` 4.42.1이다.
 실물 로봇의 운용 검증과 소스 검토·mock 검증은 구분한다.
