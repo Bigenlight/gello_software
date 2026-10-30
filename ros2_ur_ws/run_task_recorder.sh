@@ -41,8 +41,16 @@
 #
 # Environment variables are exactly the ones gello_recorder_gui uses:
 #   CAM1_SERIAL / CAM2_SERIAL   RealSense DEVICE serials (auto-verified on the
-#                               USB bus at startup -- do not hand-edit; see
-#                               src/gello_recorder/README.md)
+#                               USB bus at startup). Defaults come from
+#                               camera_serials.env (GELLO_CAMERA_SERIALS_FILE to
+#                               point elsewhere); an exported value wins.
+#   RECORDER_TAG_PRESETS        comma-separated "Tag last take" presets
+#                               (default "failed,review"; free text still works)
+#   GELLO_HOME_JOINTS           six radians overriding the GO HOME target.
+#                               Leave it UNSET for HIL data: the default
+#                               (home_move.DEFAULT_HOME_JOINTS) is drift-guarded
+#                               equal to cube_in_cup RESET_JOINTS and
+#                               run_hil_preposition.sh RESET_JOINTS_CSV.
 #   COLOR_PROFILE               colour stream WxHxFPS, default 1280x720x30
 #   CAMERA_WARMUP_S             seconds after each camera's first frame before
 #                               Start un-greys, default 4.0

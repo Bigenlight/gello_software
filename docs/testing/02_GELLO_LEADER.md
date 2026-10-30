@@ -2,8 +2,11 @@
 
 **상태: 실기 검증 완료.** 모터 응답, 발행 주기, 드롭, 트리거 스팬 전부 통과.
 
+실측값은 2026-07-27 세션(Humble 리그) 기록이다. 리더 경로(`gello/dynamixel` 드라이버 +
+`gello_publisher`)는 배포판과 무관하므로 Jazzy에서도 같은 판정 기준을 쓴다.
+
 ```bash
-export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
+export WT=~/gello_software     # 이 리포를 clone한 위치
 ```
 
 ---
@@ -13,7 +16,7 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 | 항목 | 값 | 근거 |
 |---|---|---|
 | 포트 | `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO6QK-if00-port0` | `config/ur7e_gello.yaml:10` |
-| Baud | **57600** | `gello/dynamixel/driver.py:166` (기본값), `docs/ros2/GELLO_ROS2_CONTROL_REFERENCE.md:46` |
+| Baud | **57600** | `gello/dynamixel/driver.py:166` (기본값) |
 | 프로토콜 | Dynamixel **2.0** | `driver.py:251` |
 | 팔 모터 ID | 1, 2, 3, 4, 5, 6 | `ur7e_gello.yaml:11` |
 | 그리퍼(트리거) ID | **7** | `ur7e_gello.yaml:24` (`gripper_config[0]`) |
@@ -23,9 +26,9 @@ export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 �
 > ### 🔒 불변식: GELLO에 토크/파워를 인가하지 않는다
 > 드라이버는 초기화 시 모든 서보의 토크를 **비활성화**하고(`driver.py:288-289`),
 > 발행 노드는 읽기만 한다 (`gello_publisher_node.py:165` — `# Read-only: never enables torque`).
-> XL330은 5 V 서보다. **7 V 초과 금지** (`docs/sim/GELLO_UR_SIM_TELEOP.md:50`).
+> XL330은 5 V 서보다. **7 V 초과 금지** ([`GELLO_UR_SIM_TELEOP.md`](../sim/GELLO_UR_SIM_TELEOP.md)).
 > XL330은 읽기조차 별도 5 V 전원이 필요하다 — **전원 ≠ 토크**
-> (`docs/sim/GELLO_UR_SIM_TELEOP.md:274`).
+> ([`GELLO_UR_SIM_TELEOP.md`](../sim/GELLO_UR_SIM_TELEOP.md) 트러블슈팅).
 
 ---
 
@@ -135,7 +138,7 @@ ID 7: model=1190 err=0 pos=...  torque_enable=0
 ### 4.1 리더만 띄우기 (로봇 브리지 없음, 팔 미동작)
 
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source $WT/ros2_ur_ws/install/setup.bash
 
 GELLO_REPO_ROOT=$WT \
@@ -143,7 +146,8 @@ ros2 run ur_gello_bringup gello_publisher --ros-args --params-file \
   $WT/ros2_ur_ws/install/ur_gello_bringup/share/ur_gello_bringup/config/ur7e_gello.yaml
 ```
 
-> `GELLO_REPO_ROOT` 없이는 `No module named 'gello'`로 죽는다 → `00_SETUP_AND_SAFETY.md` §3.1.
+> `GELLO_REPO_ROOT`가 리포 루트를 가리키지 않으면 `No module named 'gello'`로 죽을 수 있다
+> (노드는 `$GELLO_REPO_ROOT` → 소스 트리 상대 경로 순으로 찾는다).
 > **params-file은 `src/`가 아니라 `install/` 아래 것을 쓴다** — yaml을 고쳤으면 재빌드해야
 > `install/`에 반영된다.
 
@@ -189,6 +193,15 @@ self._gripper_pub.publish(gripper_msg)
 |---|---|---|
 | 팔 6축 | `/gello/joint_states` | `sensor_msgs/JointState`, `position` 길이 **6** |
 | 트리거 | `/gripper/gripper_client/target_gripper_width_percent` | `std_msgs/Float32` |
+
+**리더 트리거를 쓰는 소비자는 두 토픽을 모두 구독해야 한다.** `/gello/joint_states`만 보면
+트리거 값이 없다(publisher가 버리는 것이 아니라 다른 토픽으로 나간다). 이 계약(`position` 길이 6)은
+기존 소비자(`gello_ur_bridge`, `gello_gripper_bridge`, 레코더, GUI)를 위해 **일부러 그대로 둔다** —
+바꾸지 말 것.
+
+> 이 계약을 놓쳐 생긴 실제 결함(RL 백엔드가 트리거를 못 읽던 문제)과 그 수정은 아래 HIL 절이다.
+
+### 5.0 HIL(RL) 백엔드 — `research/hil-serl` 전용 (slim 정리에서 빠졌던 절 복원)
 
 **이것이 HIL 개입의 그리퍼 데드코드 원인이었다.** RL 백엔드가 `/gello/joint_states`만 구독해서
 `GelloExpert.get_leader()`의 `grip = float(arr[6]) if len(arr) > 6 else None`이
@@ -245,7 +258,6 @@ env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
 
 > **중요:** 위 두 skip 경로 모두 **노드를 죽이지 않는다.** 토픽이 조용히 멈출 뿐이다.
 > 그래서 "GELLO가 끊겼다"는 프로세스 존재 여부가 아니라 **`ros2 topic hz`로** 확인해야 한다.
-> 장애 주입 시나리오 E1 참조 (`07_FAILURE_INJECTION.md`).
 
 ---
 
@@ -267,7 +279,7 @@ env -u PYTHONPATH /home/laptop3/venvs/gello-hil-actor/bin/python \
 `DynamixelDriver`도 쓰지 않는다(그 드라이버는 포트 점유 프로세스를 `fuser -k`로 죽인다).
 
 ```bash
-cd /home/laptop3/gello_software
+cd $WT
 python3 scripts/gello_probe.py                 # 포트 · 모터 인벤토리 · 현재 자세 · config 비교
 python3 scripts/gello_probe.py --reference     # + 기준 자세 대조 (아래)
 python3 scripts/gello_probe.py --watch         # 2 Hz 스트리밍, 관절을 하나씩 움직여 J번호/방향 확인. Ctrl-C
@@ -309,4 +321,4 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q -p no:cacheprovider gello/
 ```
 
 (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`이 없으면 시스템 pytest 6.2.5가 `~/.local`의 anyio 플러그인에
-걸려 collection에서 죽는다 — `CLAUDE.md`의 `ur_gello_bringup` 함정과 같은 것.)
+걸려 collection에서 죽는다 — [`CLAUDE.md`](../../CLAUDE.md)의 테스트 함정과 같은 것.)

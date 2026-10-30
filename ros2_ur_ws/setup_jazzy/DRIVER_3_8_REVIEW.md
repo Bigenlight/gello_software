@@ -1,5 +1,9 @@
 # UR driver 3.8.0 — Jazzy 포팅 검토 (2026-09-16)
 
+> 이 검토는 slim 분리 전 전체 브랜치(`feat/gello-ur7e-jazzy-24.04`)에서 했다. 아래에서 언급하는
+> `gello_policy` 패키지·`run_mock_rviz.sh`·`ur_control_fake_safe.launch.py`는 이제 `research/policy-deploy`
+> 브랜치에 있다. GELLO 텔레옵 경로(`gello_move_to_start`, `ur7e_gello_*.launch.py`)에 대한 결론은 그대로 유효하다.
+
 대상은 이 PC에 설치된 `ur_robot_driver` / `ur_controllers` 3.8.0,
 `forward_command_controller` / `position_controllers` 4.42.1이다.
 실물 로봇의 운용 검증과 소스 검토·mock 검증은 구분한다.
@@ -12,7 +16,7 @@
 상속하고, `DeclareLaunchArgument`의 기본값은 이미 설정된 값을 덮어쓰지 않는다.
 따라서 별도 description 래퍼는 필요하지 않다.
 
-`gello_policy/test/test_jazzy_description_contract.py`는 실제 설치된 launch를
+`gello_policy/test/test_jazzy_description_contract.py`(`research/*` 브랜치. 이 브랜치에는 없다)는 실제 설치된 launch를
 로드하고, 별도 calibration YAML의 고유 hash가 xacro로 생성한 최종 URDF에
 남는지 검사한다. policy 런치와 GELLO 런치 모두 통과했다.
 노드나 로봇 프로세스는 실행하지 않는 테스트다.
@@ -66,7 +70,7 @@ mock 전환 성공도 이 실기 재시딩의 직접 측정으로 간주하지 �
 후속 목록은 FPC active / SJTC inactive / friction controller active였다.
 실험 프로세스는 종료했고 로그는 `ros2_ur_ws/log/jazzy_port_20260916/mock_switch.log`에 보존했다.
 
-`run_mock_rviz.sh`는 Jazzy에서 `use_mock_hardware`, Humble opt-in에서
+`run_mock_rviz.sh`(이 slim 브랜치에서는 빠졌다)는 Jazzy에서 `use_mock_hardware`, Humble opt-in에서
 `use_fake_hardware`를 선택한다. `ur_control_fake_safe.launch.py`의 기존
 URScript 필터는 Humble 호환을 위해 유지했다. Jazzy upstream은 이미
 `UnlessCondition(use_mock_hardware)`로 URScript 노드를 비활성화한다.

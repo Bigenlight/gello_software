@@ -1,11 +1,19 @@
-# GELLO -> UR7e (ROS2 Humble / Ubuntu 22.04) — 턴키 세팅 CLI & 체크리스트
+# GELLO -> UR7e (ROS 2 Jazzy / Ubuntu 24.04) — 턴키 실행 CLI & 체크리스트
 
-이 문서는 **UR7e + GELLO**를 Ubuntu 22.04 / ROS2 Humble 환경에서 처음부터 끝까지 "턴키(turnkey)"로 세팅하기 위한 실전 CLI 가이드입니다. 사전 요구사항 점검 → 의존성 설치/빌드 → 시뮬레이션 검증 → 실로봇 실행(Method A/B) → 튜닝 → 프리플라이트 체크리스트 → 트러블슈팅 순서로, 각 단계를 복사-붙여넣기 가능한 명령과 함께 정리했습니다. 실제 UR7e 로봇 팔을 물리 GELLO leader로 조인트 공간(joint-space) 텔레옵으로 구동하는 것이 목표이며, 시뮬레이션(RViz2 mock robot) 경로와 실로봇 경로를 모두 다룹니다.
+이 문서는 **UR7e + GELLO** 조인트 공간(joint-space) 텔레옵을 설치가 끝난 PC에서 시뮬레이션 검증 →
+실로봇 실행(Method A/B) → 튜닝 → 프리플라이트 체크리스트 → 트러블슈팅 순서로 돌리는 실전 CLI
+가이드입니다. 설치·빌드·무동작 스모크는
+[`GELLO_UR7E_JAZZY_24.04_SETUP.md`](./GELLO_UR7E_JAZZY_24.04_SETUP.md)가 정본입니다.
+
+> 이 문서는 원래 Ubuntu 22.04 / ROS 2 Humble(`ros-humble-ur` 2.8.1) 리그에서 작성·검증됐고 Jazzy
+> 브랜치에 맞게 경로·배포판을 고쳤습니다. 노드·launch·캘리브레이션·handshake 로직은 두 배포판이
+> 같습니다. 22.04 / Humble 사용자는 `feat/gello-ur7e-humble-22.04` 브랜치를 쓰세요.
+> 경로는 리포를 `~/gello_software`에 clone했다고 가정합니다.
 
 ## 목차 (Table of Contents)
 
-- [0) 개요 + 사전 요구사항(하드웨어/OS/네트워크/권한)](#0-개요--사전-요구사항하드웨어os네트워크권한)
-- [1) 의존성 설치 + 빌드](#1-의존성-설치--빌드)
+- [0) 개요 + 사전 요구사항](#0-개요--사전-요구사항)
+- [1) 설치 + 빌드 (요약)](#1-설치--빌드-요약)
 - [2) 시뮬레이션 먼저 검증 (실로봇 없이)](#2-시뮬레이션-먼저-검증-실로봇-없이)
 - [3) 실로봇 — Method A (펜던트 Play)](#3-실로봇--method-a-펜던트-play)
 - [4) 실로봇 — Method B (Remote 헤드리스, Play 불필요)](#4-실로봇--method-b-remote-헤드리스-play-불필요)
@@ -15,158 +23,68 @@
 
 ---
 
-## 0) 개요 + 사전 요구사항(하드웨어/OS/네트워크/권한)
+## 0) 개요 + 사전 요구사항
 
-### 0.1 이 문서는 무엇인가
+- 워크스페이스: `ros2_ur_ws` (colcon), 패키지 `ur_gello_bringup` (ament_python, 기본 `ur_type=ur7e`)
+- 같은 노드·캘리브레이션을 sim(mock)과 real이 공유합니다.
 
-이 문서는 **UR7e + GELLO**를 Ubuntu 22.04 / ROS2 Humble 환경에서 처음부터 끝까지 "턴키(turnkey)"로 세팅하기 위한 실전 가이드입니다. 실제 UR7e 로봇 팔을 물리 GELLO leader로 조인트 공간(joint-space) 텔레옵으로 구동하는 것이 목표이며, 시뮬레이션(RViz2 mock robot) 경로와 실로봇 경로를 모두 다룹니다.
-
-- 작업 브랜치: `feat/gello-ur7e-humble-22.04` (`feat/gello-panda-sim-teleop`에서 분기; 그쪽은 24.04/Jazzy 라인이므로 혼동하지 말 것)
-- 저장소 경로: `/home/laptop3/gello_software`
-- 워크스페이스: `ros2_ur_ws` (colcon), 패키지 `ur_gello_bringup` (ament_python, ur5e용을 재사용, 기본 `ur_type=ur7e`)
-
-먼저 브랜치를 확인/체크아웃합니다:
-
-```bash
-cd /home/laptop3/gello_software
-git checkout feat/gello-ur7e-humble-22.04
-```
-
-### 0.2 하드웨어 체크리스트
+### 0.1 하드웨어 체크리스트
 
 | 항목 | 값 / 확인 방법 |
 |---|---|
-| 팔(follower) | UR7e (e-Series), PolyScope 5.24.1, `robot_ip = 192.168.10.11` |
-| GELLO leader | Dynamixel 기반 leader arm, 시리얼 ID `FTBEO6QK` |
-| GELLO 시리얼 포트 | `/dev/ttyUSB0` (== `/dev/serial/by-id/...FTBEO6QK...if00-port0`) |
-| 네트워크 | 제어 PC와 UR7e 펜던트가 같은 서브넷에서 `192.168.10.11`로 ping 가능해야 함 |
+| 팔(follower) | UR7e (e-Series), PolyScope 5.x, 기본 `robot_ip = 192.168.10.11` (`ROBOT_IP=`로 변경) |
+| GELLO leader | Dynamixel XL330 ×7 (팔 6 + 트리거 1), U2D2(FTDI) 어댑터 |
+| GELLO 시리얼 포트 | `/dev/serial/by-id/usb-FTDI_..._<시리얼>-if00-port0` (`config/ur7e_gello.yaml`의 `port`) |
+| 네트워크 | 제어 PC가 로봇 전용 NIC로 `192.168.10.11`에 ping 가능 ([`network_and_urcap.md`](../../ros2_ur_ws/setup_jazzy/network_and_urcap.md)) |
 | E-STOP | 항상 손이 닿는 위치에 두고 작업 (실로봇은 실제로 움직입니다) |
-
-네트워크 연결 확인:
 
 ```bash
 ping -c 3 192.168.10.11
+ls -l /dev/serial/by-id/ | grep -i FTDI
+groups $USER | grep dialout || sudo usermod -aG dialout $USER   # 추가했다면 재로그인
 ```
 
-GELLO leader 포트 확인:
+### 0.2 ur7e 지원 범위
 
-```bash
-ls -l /dev/serial/by-id/ | grep -i FTBEO6QK
-# 보통 /dev/ttyUSB0 로 심볼릭 링크됨
-```
-
-### 0.3 OS / ROS 가정
-
-- OS: Ubuntu 22.04 LTS
-- ROS2 배포판: Humble
-- `ros-humble-ur` 패키지: 버전 2.8.1 기준으로 이 문서를 검증함 (자세한 verified/partial 구분은 0.5절 참고)
-
-Humble이 설치·소싱되어 있는지 확인:
-
-```bash
-source /opt/ros/humble/setup.bash
-ros2 --version
-```
-
-### 0.4 권한: dialout 그룹 + 시리얼 퍼미션
-
-GELLO leader는 USB 시리얼(`/dev/ttyUSB0`)로 연결됩니다. 이 장치에 접근하려면 사용자가 `dialout` 그룹에 속해 있어야 합니다.
-
-```bash
-groups $USER | grep dialout || sudo usermod -aG dialout $USER
-# 그룹에 새로 추가했다면 로그아웃/로그인(또는 재부팅) 필요
-```
-
-정상적으로 `dialout` 그룹에 속해 있다면 별도 `chmod` 없이 `/dev/ttyUSB0`에 접근할 수 있어야 합니다. 다만 환경에 따라(udev 규칙 미적용 등) 권한 문제가 발생할 수 있으며, 이런 경우를 위해 저장소 루트 `README.md`에 **임시방편으로 `chmod 666 /dev/ttyUSB0` 워크어라운드**가 문서화되어 있습니다. 이는 임시 조치이며 재부팅/재연결 시마다 다시 적용해야 하므로, 가능하면 `dialout` 그룹 가입 쪽을 우선 시도하세요.
-
-```bash
-# 워크어라운드 (임시, 매 재연결 시 재실행 필요) — 루트 README.md 참고
-sudo chmod 666 /dev/ttyUSB0
-```
-
-### 0.5 "Verified" vs "Partial" 지원 범위 (ur7e on ros-humble-ur 2.8.1)
-
-`ros-humble-ur` 2.8.1에서 `ur_type:=ur7e`를 사용할 때의 지원 범위를 명확히 구분합니다:
-
-- **Verified (완전 검증됨) — 조인트 공간 텔레옵**: `ur_type:=ur7e`가 정상적으로 로드/구동되며, joint-space GELLO 텔레옵은 완전히 정확합니다. 이는 ur5e와 ur7e의 `joint_limits`가 동일하기 때문입니다 (모든 조인트 180 deg/s = 3.14159 rad/s). 이 문서의 핵심 시나리오(GELLO로 조인트를 따라 움직이는 것)는 이 범위에 있습니다.
-- **Partial (부분 지원) — 시각화/기구학**: `config/ur7e`의 visual_parameters가 실제로는 `meshes/ur5e`를 가리키고 있어 RViz에서 ur5e 모델이 표시됩니다. 또한 `ur7e_update_rate.yaml` 파일이 없어 무해한 경고(warning)가 출력됩니다.
-- 정확한 ur7e 비주얼/기구학이 필요한 경우에만 `ros-humble-ur` 2.13.2로 업그레이드하세요. 조인트 텔레옵 목적이라면 ur5e/ur7e는 상호 교환 가능(interchangeable)합니다.
-
-다음 절부터는 의존성 설치, 빌드, 시뮬레이션/실로봇 실행 순서로 이어집니다.
+Jazzy apt 설치본(`ur_description`/`ur_robot_driver` 3.8.0)에는 `ur7e_update_rate.yaml`이 있어
+Humble `ros-humble-ur` 2.8.1 시절의 missing 경고는 나지 않습니다. 단 `config/ur7e/visual_parameters.yaml`은
+3.8.0에서도 `meshes/ur5e`를 가리킵니다(2026-10 설치본 확인) — RViz에 ur5e 외형이 보여도 정상입니다.
+조인트 텔레옵은 ur5e/ur7e의 `joint_limits`가 같아(전 조인트 180 deg/s) 어느 쪽이든 정확합니다.
+3.8.0 전환 검토는 [`DRIVER_3_8_REVIEW.md`](../../ros2_ur_ws/setup_jazzy/DRIVER_3_8_REVIEW.md).
 
 ---
 
-## 1) 의존성 설치 + 빌드
+## 1) 설치 + 빌드 (요약)
 
-### 1-1. ROS2 UR 드라이버 (apt)
-
-```bash
-sudo apt update
-sudo apt install -y \
-  ros-humble-ur \
-  ros-humble-ur-robot-driver \
-  ros-humble-ur-controllers
-```
-
-- `ros-humble-ur` 2.8.1 기준으로 `ur_type:=ur7e`가 로드/구동은 되지만, 일부 리소스(비주얼 메시, `ur7e_update_rate.yaml`)가 아직 ur5e를 재사용하는 부분 지원 상태입니다. 조인트 텔레옵(GELLO)은 ur5e/ur7e의 `joint_limits`가 동일(전 조인트 180 deg/s = 3.14159 rad/s)하므로 문제 없이 정확합니다. RViz에서 ur5e 메시가 보이는 것과 `ur7e_update_rate.yaml` missing 경고는 무시해도 됩니다.
-- 정확한 ur7e 비주얼/기구학이 필요하면 `ros-humble-ur` 2.13.2로 업그레이드하세요 (조인트 텔레옵만 할 거면 불필요).
-
-### 1-2. dynamixel_sdk (GELLO 리더암 SDK, pip — sudo 불필요)
+설치는 [`GELLO_UR7E_JAZZY_24.04_SETUP.md`](./GELLO_UR7E_JAZZY_24.04_SETUP.md) §1
+(`ros2_ur_ws/setup_jazzy/install_jazzy.sh`)이 전부 합니다 — UR 드라이버, RealSense, pip
+`dynamixel-sdk`, rosdep까지.
 
 ```bash
-pip install --user dynamixel-sdk
+cd ~/gello_software/ros2_ur_ws
+./build_ur7e.sh          # ur_gello_bringup + gello_recorder
+source /opt/ros/jazzy/setup.bash
+source ~/gello_software/ros2_ur_ws/install/setup.bash
 ```
 
-- apt 패키지가 아니라 pip으로 설치합니다 (검증된 버전: 4.0.5). `sudo`가 필요 없고, 시스템 파이썬을 건드리지 않습니다.
-- 리더암 시리얼: `/dev/ttyUSB0` (== `/dev/serial/by-id/...FTBEO6QK...if00-port0`). 사용자 계정이 `dialout` 그룹에 속해 있어야 합니다.
-
-### 1-3. GELLO_REPO_ROOT 환경변수
-
-`ur_gello_bringup`의 `gello_publisher` 노드가 `source:=gello`로 실행될 때 이 저장소의 GELLO 드라이버를 import합니다. 셸 프로필(`~/.bashrc`)에 추가해 두세요.
+`gello_publisher`는 리포의 `gello` 드라이버를 import합니다. `run_*.sh` 래퍼는
+`GELLO_REPO_ROOT`를 리포 루트로 자동 설정하므로, `ros2 launch`/`ros2 run`을 직접 칠 때만 필요합니다:
 
 ```bash
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
-echo 'export GELLO_REPO_ROOT=/home/laptop3/gello_software' >> ~/.bashrc
+export GELLO_REPO_ROOT=~/gello_software
 ```
 
-### 1-4. colcon 빌드
-
-`ros2_ur_ws/` 안에 있는 스크립트로 한 번에 빌드합니다.
-
-```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-./build_ur7e.sh
-```
-
-`build_ur7e.sh`는 내부적으로 아래와 동일합니다 (수동으로 하려면):
-
-```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-source /opt/ros/humble/setup.bash
-colcon build --packages-select ur_gello_bringup
-source install/setup.bash
-```
-
-빌드 후에는 항상 `install/setup.bash`를 source해야 새 터미널/스크립트에서 `ur_gello_bringup` 패키지가 보입니다.
-
-```bash
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
-```
-
-### 1-5. 패키지 인식 확인 (verify)
+패키지·launch 인자 확인:
 
 ```bash
 ros2 pkg list | grep ur_gello_bringup
-```
-
-정상이면 `ur_gello_bringup` 한 줄이 출력됩니다. 런치 파일의 인자까지 확인하려면:
-
-```bash
 ros2 launch ur_gello_bringup ur7e_gello_rviz.launch.py --show-args
 ros2 launch ur_gello_bringup ur7e_gello_real.launch.py --show-args
 ```
 
-`--show-args`가 `robot_ip`, `use_fake_hardware`, `kinematics_params_file` 등 인자 목록을 에러 없이 출력하면 빌드/소스 설정이 정상입니다. `Package 'ur_gello_bringup' not found` 에러가 나면 `install/setup.bash`를 source하지 않았거나 빌드가 실패한 것이니 1-4를 다시 확인하세요.
+`Package 'ur_gello_bringup' not found`면 `install/setup.bash`를 source하지 않았거나 빌드가 실패한
+것입니다. ROS 명령이 `rclpy` import에서 깨지면 conda `python3`가 PATH 앞에 있는 것입니다 — 설치
+문서 §2.
 
 ---
 
@@ -179,7 +97,7 @@ ros2 launch ur_gello_bringup ur7e_gello_real.launch.py --show-args
 GELLO 리더 없이 소프트웨어 스택만 확인하는 자체 테스트입니다.
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./run_ur7e_gello_sim.sh source:=fake
 ```
 
@@ -191,8 +109,8 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 물리적인 GELLO 리더 암을 실제로 손으로 움직여 RViz의 UR7e가 따라오는지 확인하는, 실로봇 투입 전 필수 드라이런입니다.
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
-export GELLO_REPO_ROOT=/home/laptop3/gello_software   # gello 드라이버 import 에 필요
+cd ~/gello_software/ros2_ur_ws
+export GELLO_REPO_ROOT=~/gello_software   # gello 드라이버 import 에 필요
 ./run_ur7e_gello_sim.sh source:=gello
 ```
 
@@ -206,7 +124,7 @@ RViz만으로 판단하지 말고, 아래 명령으로 컨트롤러와 토픽이
 
 ```bash
 # 새 터미널에서 (같은 workspace source 필요)
-source /home/laptop3/gello_software/ros2_ur_ws/install/setup.bash
+source ~/gello_software/ros2_ur_ws/install/setup.bash
 
 # 컨트롤러 상태 확인: forward_position_controller가 active 여야 함
 ros2 control list_controllers
@@ -290,7 +208,7 @@ Method A는 UR 펜던트에서 **External Control** 프로그램을 사람이 �
 ### 3-3. 실행
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./run_ur7e_gello_real.sh
 ```
 
@@ -365,7 +283,7 @@ reverse interface가 자동 연결되어 `scaled_joint_trajectory_controller`가
 ### 4.2 헤드리스 실행
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 HEADLESS=true ./run_ur7e_gello_real.sh
 ```
 
@@ -533,13 +451,13 @@ UR 드라이버는 매 커맨드를 `delta / 0.002s` (500 Hz 서보 주기) 로 
 1. YAML 편집:
 
 ```bash
-nano /home/laptop3/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
+nano ~/gello_software/ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
 ```
 
 2. 리빌드 (colcon 캐시 덕분에 ~0.7초):
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./build_ur7e.sh
 ```
 
@@ -581,7 +499,7 @@ cd /home/laptop3/gello_software/ros2_ur_ws
   ```
 - [ ] **시뮬레이션(mock) 드라이런 통과**: 실기 실행 전, 아래로 RViz mock 경로에서 GELLO 추종이 정상임을 먼저 확인했다.
   ```bash
-  cd /home/laptop3/gello_software/ros2_ur_ws
+  cd ~/gello_software/ros2_ur_ws
   ./run_ur7e_gello_sim.sh
   ```
 - [ ] **전체 스윕 경로가 장애물 없음(handshake move 대비)**: `move_to_start`는 로봇 현재 포즈 → 라이브 GELLO 포즈로 조인트 공간을 보간(interpolated) 캐치업 트래젝토리로 이동하며(리더가 계속 움직이면 여러 번), **장애물/충돌 인식이 전혀 없다**. 현재 포즈에서의 클리어런스만이 아니라, 두 포즈를 잇는 **전체 조인트 스윕 경로 전 구간**이 사람·장애물·케이블 없이 비어 있는지 확인했다.
@@ -685,8 +603,8 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 - 원인: `GELLO_REPO_ROOT` 환경변수 미설정 (gello 드라이버 임포트 경로 필요) 또는 `dynamixel-sdk` 패키지 미설치.
 - 해결:
   ```bash
-  export GELLO_REPO_ROOT=/home/laptop3/gello_software
-  pip install --user dynamixel-sdk
+  export GELLO_REPO_ROOT=~/gello_software
+  python3 -m pip install --user --break-system-packages dynamixel-sdk   # install_jazzy.sh가 이미 함
   ```
 - sudo/apt 불필요, `--user` pip 설치로 충분 (검증된 버전 v4.0.5).
 
@@ -703,9 +621,10 @@ cd /home/laptop3/gello_software/ros2_ur_ws
   CALIB=${HOME}/ur7e_calibration.yaml ./run_ur7e_gello_real.sh
   ```
 
-**UR7e 메시(mesh) 경고 (RViz에 ur5e 모델 표시)**
-- 원인: `ros-humble-ur` 2.8.1은 ur7e를 **부분 지원**만 함 — `ur_type:=ur7e`는 정상 로드/구동되고 조인트 텔레옵은 완전히 정확(ur5e/ur7e의 joint_limits 동일: 전 조인트 180 deg/s = 3.14159 rad/s)하지만, `config/ur7e` 의 visual_parameters가 `meshes/ur5e`를 가리키고 `ur7e_update_rate.yaml`이 없어서 경고가 뜸.
-- **무해** — 시각적 표현(RViz 외형)에만 영향, 조인트 제어에는 영향 없음. 정확한 ur7e 외형/기구학이 필요하면 `ros-humble-ur` 2.13.2로 업그레이드.
+**RViz에 ur5e 모델이 보임**
+- 원인: `ur_description`의 `config/ur7e/visual_parameters.yaml`이 `meshes/ur5e`를 가리킨다(Jazzy 3.8.0
+  설치본도 동일). **무해** — 외형만의 문제이고 조인트 제어에는 영향이 없다. (Humble 2.8.1에서는
+  `ur7e_update_rate.yaml` missing 경고도 함께 났지만 Jazzy 설치본에는 그 파일이 있다.)
 
 ---
 
@@ -713,7 +632,7 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 
 ```bash
 # ---- 빌드 ----
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./build_ur7e.sh
 
 # ---- 시뮬레이션 (실물 로봇 없이, RViz2 mock) ----
@@ -726,7 +645,7 @@ cd /home/laptop3/gello_software/ros2_ur_ws
 HEADLESS=true ./run_ur7e_gello_real.sh
 
 # ---- IP / 캘리브레이션 오버라이드 ----
-ROBOT_IP=192.168.10.11 CALIB=/home/laptop3/ur7e_calibration.yaml ./run_ur7e_gello_real.sh
+ROBOT_IP=192.168.10.11 CALIB=${HOME}/ur7e_calibration.yaml ./run_ur7e_gello_real.sh
 
 # ---- 대시보드 헬퍼 (source 해서 함수로 사용) ----
 source remote_helpers.sh
@@ -746,8 +665,8 @@ sudo usermod -aG dialout $USER      # 영구 (재로그인 필요)
 sudo chmod 666 /dev/ttyUSB0         # 임시 우회
 
 # ---- dynamixel_sdk / GELLO 임포트 ----
-export GELLO_REPO_ROOT=/home/laptop3/gello_software
-pip install --user dynamixel-sdk
+export GELLO_REPO_ROOT=~/gello_software
+python3 -m pip install --user --break-system-packages dynamixel-sdk   # install_jazzy.sh가 이미 함
 
 # ---- 캘리브레이션 재생성 ----
 ros2 launch ur_calibration calibration_correction.launch.py \
@@ -772,4 +691,5 @@ source remote_helpers.sh && ur_play
 - [GELLO_UR7E_ROS2_BRINGUP.md](./GELLO_UR7E_ROS2_BRINGUP.md) — 시뮬레이션/mock 경로 브링업 (검증됨)
 - [GELLO_UR7E_REAL_ROBOT.md](./GELLO_UR7E_REAL_ROBOT.md) — 실로봇 런북(runbook)
 - [UR7e_Remote_Control_ROS2.md](../../UR7e_Remote_Control_ROS2.md) — Remote 모드 레퍼런스
-- [README.md](../../README.md) — 저장소 개요 및 시리얼 권한 워크어라운드
+- [GELLO_UR7E_JAZZY_24.04_SETUP.md](./GELLO_UR7E_JAZZY_24.04_SETUP.md) — 설치·빌드·무동작 스모크 (정본)
+- [README.md](../../README.md) — 저장소 개요

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Launch the RealSense camera PAIR used by the GELLO -> UR7e ACT-deploy workflow,
+# Launch the RealSense camera PAIR used by GELLO -> UR7e recording / policy deploy,
 # with a clean single-Ctrl-C shutdown and (by default) a live dual-camera viewer.
 #
-# Run this in its OWN terminal BEFORE starting an ACT deploy. It brings up both
+# Run this in its OWN terminal BEFORE recording or a policy deploy. It brings up both
 # RealSense cameras via realsense2_camera rs_launch.py, waits until BOTH color
 # streams are actually flowing (~30 Hz), and then opens a side-by-side viewer so
 # you can VISUALLY CONFIRM the camera mapping:
@@ -10,10 +10,12 @@
 #     cam1 = SCENE   (tripod, 3rd person)  -> left pane
 #     cam2 = WRIST (gripper-mounted)       -> right pane
 #
-# A swapped mapping silently degrades the trained ACT policy (the model was
-# trained with a fixed cam1=scene / cam2=close-up convention), so the viewer is
-# ON BY DEFAULT here — this is a documented safety-relevant check, see
-# docs/ros2/GELLO_UR7E_ACT_DEPLOY.md §2. Set VIEW=false to skip the window.
+# A swapped mapping silently corrupts recorded data and any policy trained on it
+# (fixed cam1=scene / cam2=wrist convention), so the viewer is ON BY DEFAULT
+# here — a documented safety-relevant check, see
+# docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md ("cam1 / cam2 역할 계약과 손목 확인").
+# (The policy-deploy docs, e.g. ACT_DEPLOY, live on the research/* branches.)
+# Set VIEW=false to skip the window.
 #
 # Camera launch logs land under /tmp/launch_cameras_<timestamp>/.
 #
@@ -23,8 +25,9 @@
 #     ./launch_cameras.sh --check         # enumerate and validate serial mapping only
 #
 # ENV (same names/defaults as run_recorder.sh's camera section):
-#     CAM1_SERIAL    RealSense #1 serial (auto-resolved; default 143322071682, plain D435, SCENE)
-#     CAM2_SERIAL    RealSense #2 serial (auto-resolved; default 143322072540, plain D435, WRIST)
+#     CAM1_SERIAL    RealSense #1 DEVICE serial (SCENE). Default: camera_serials.env
+#     CAM2_SERIAL    RealSense #2 DEVICE serial (WRIST). Default: camera_serials.env
+#     GELLO_CAMERA_SERIALS_FILE  read the defaults from this file instead
 #     CAM1_NAME      camera_name/namespace for #1 (default cam1)
 #     CAM2_NAME      camera_name/namespace for #2 (default cam2)
 #     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
@@ -72,10 +75,13 @@ fi
 #   4-4.3   143322071682      143623022572         D435     5.17.3.10  -> cam1 SCENE
 #   4-4.4   143322072540      143523020769         D435     5.17.0.10  -> cam2 WRIST
 #
-# Keep the defaults equal to this table. A mismatched pair fails before launch;
-# CAMERA_ALLOW_SERIAL_FALLBACK=1 is only for an explicitly temporary rig.
-CAM1_SERIAL="${CAM1_SERIAL:-143322071682}"   # ASIC 143623022572
-CAM2_SERIAL="${CAM2_SERIAL:-143322072540}"   # ASIC 143523020769
+# The defaults live in ONE place, camera_serials.env (shared with run_recorder.sh
+# and the Python GUIs via gello_recorder.camera_defaults); keep that file equal
+# to this table. An exported CAM1_SERIAL / CAM2_SERIAL wins. A mismatched pair
+# fails before launch; CAMERA_ALLOW_SERIAL_FALLBACK=1 is only for an explicitly
+# temporary rig.
+source "$SCRIPT_DIR/_resolve_camera_serials.sh"
+load_camera_serial_defaults
 CAM1_NAME="${CAM1_NAME:-cam1}"
 CAM2_NAME="${CAM2_NAME:-cam2}"
 COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
@@ -96,15 +102,14 @@ if [ "${DEPTH_ARG}" = "enable_depth:=true" ]; then
     DEPTH_LAUNCH_EXTRA=("align_depth.enable:=${ALIGN_ON}")
 fi
 # Viewer is ON by default (opt-OUT, unlike run_recorder.sh's opt-IN CAMS): for
-# ACT deploy, eyeballing cam1=scene / cam2=close-up is a safety-relevant check.
+# recording / policy deploy, eyeballing cam1=scene / cam2=wrist is a safety-relevant check.
 VIEW="${VIEW:-true}"
 
 # --- Resolve serials against what is actually on the USB bus ------------------
 # resolve_serials() is shared with run_recorder.sh. It validates the expected
 # serial pair before launch; see _resolve_camera_serials.sh for the optional
 # legacy fallback. Enumeration does NOT open a streaming lock, so this is safe
-# even while another process holds the cameras.
-source "$SCRIPT_DIR/_resolve_camera_serials.sh"
+# even while another process holds the cameras. (Helper sourced above.)
 if ! resolve_serials; then
     exit 1
 fi
@@ -266,7 +271,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "### launch_cameras.sh — RealSense pair for ACT deploy"
+echo "### launch_cameras.sh — RealSense pair (cam1 scene, cam2 wrist)"
 echo "###   cam1 = SCENE (tripod, 3rd person)  D435    serial ${CAM1_SERIAL}"
 echo "###   cam2 = WRIST (gripper-mounted)     D435    serial ${CAM2_SERIAL}"
 echo "###   profile ${COLOR_PROFILE} | depth ${DEPTH_ARG#enable_depth:=} | aligned ${ALIGN_ON} | logs -> ${TMPDIR_RUN}/cam1_launch.log, cam2_launch.log"

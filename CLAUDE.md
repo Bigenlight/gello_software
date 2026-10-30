@@ -1,5 +1,15 @@
 # CLAUDE.md
 
+> ## 🧭 이 checkout은 `research/hil-serl` 브랜치다 (slim 기본 브랜치 `ur7e-jazzy` 위에 얹힘)
+>
+> - 이 파일은 **HIL-SERL(온라인 RL) 작업 색인**이다. 아래 본문은 HIL 브랜치 시절 그대로 보존했다.
+> - **GELLO 코어**(텔레옵·그리퍼·레코더·카메라·빌드·테스트)의 문서·규칙 정본은 slim 색인
+>   [`docs/CLAUDE_CORE.md`](docs/CLAUDE_CORE.md)다 — 겹치는 규칙은 그쪽이 최신이다.
+> - ⚠️ 본문의 호스트(`laptop3`/`kanu`/`junhyeong_ai`), 절대 경로, 브랜치명(`feat/gello-ur7e-humble-22.04`),
+>   ROS 배포판(Humble), 테스트 passed 수는 **낡았을 수 있다.** 실행 전 현재 환경에서 다시 확인할 것.
+> - 레코더 take 태그는 `RECORDER_TAG_PRESETS`(기본 `failed, review`), 카메라 시리얼 기본값은
+>   `ros2_ur_ws/camera_serials.env`에서 온다(slim 기본 브랜치 변경).
+
 문서 색인이다. 상태 보고서가 아니다 — 숫자와 근거는 링크된 문서에 있다.
 
 > # 🔴 2026-07-31 — **GPU 서버가 `kanu`에서 `junhyeong_ai`로 옮겨졌다**

@@ -27,6 +27,7 @@ from gello_recorder.home_move import (
     FPC,
     GRIPPER_OPEN_REASSERT_S,
     GRIPPER_OPEN_VALUE,
+    DEFAULT_HOME_JOINTS,
     HOME_JOINTS,
     MIN_ASSUMED_SPEED_SCALE,
     MOVE_RESULT_MARGIN_S,
@@ -159,8 +160,11 @@ def drive_to_done(ctrl, ops):
 # ===================================================================== #
 # Drift guards -- constants that are coupled across files and cannot be imported
 #
-# (research/hil-serl: the HOME_JOINTS == run_hil_preposition.sh / cube_in_cup.py
-# RESET_JOINTS guards below live only on this branch, next to those files.)
+# (research/hil-serl: the DEFAULT_HOME_JOINTS == run_hil_preposition.sh /
+# cube_in_cup.py RESET_JOINTS guards below live only on this branch, next to
+# those files.  They compare DEFAULT_HOME_JOINTS, not HOME_JOINTS: the latter
+# honours $GELLO_HOME_JOINTS at import time, and an operator override must not
+# be able to make the guard pass or fail -- the shipped constants must agree.)
 # ===================================================================== #
 def _repo_file(*parts):
     here = os.path.dirname(os.path.abspath(__file__))          # .../test
@@ -174,14 +178,14 @@ def _repo_file(*parts):
 
 
 def test_home_joints_match_hil_preposition_script():
-    """The three copies of this pose must stay identical (see HOME_JOINTS comment)."""
+    """The three copies of this pose must stay identical (see DEFAULT_HOME_JOINTS comment)."""
     text = open(
         _repo_file("ros2_ur_ws", "run_hil_preposition.sh"), encoding="utf-8"
     ).read()
     match = re.search(r'RESET_JOINTS_CSV="([^"]+)"', text)
     assert match, "RESET_JOINTS_CSV not found in run_hil_preposition.sh"
     csv = tuple(float(v) for v in match.group(1).split(","))
-    assert csv == HOME_JOINTS
+    assert csv == DEFAULT_HOME_JOINTS
 
 
 def test_the_node_ticks_fast_enough_for_the_settle_window_to_be_a_stream():
@@ -248,7 +252,7 @@ def test_home_joints_match_cube_in_cup_config():
     match = re.search(r"RESET_JOINTS:[^=]*=\s*np\.array\(\s*\[([^\]]+)\]", text)
     assert match, "RESET_JOINTS not found in cube_in_cup.py"
     values = tuple(float(v) for v in match.group(1).replace("\n", "").split(","))
-    assert values == HOME_JOINTS
+    assert values == DEFAULT_HOME_JOINTS
 
 
 # ===================================================================== #
@@ -896,3 +900,31 @@ def test_the_target_label_names_the_pose_in_the_moving_and_done_messages():
     # A blank label is a construction-time programming error, like a bad pose.
     with pytest.raises(ValueError):
         HomeMoveController(FakeOps(FakeClock(), AT_HOME), target_label="  ")
+
+
+# ===================================================================== #
+# GELLO_HOME_JOINTS override
+# ===================================================================== #
+def test_home_joints_default_when_unset():
+    from gello_recorder import home_move
+
+    assert home_move.home_joints_from_env("") == home_move.DEFAULT_HOME_JOINTS
+    # The import-time constant is the default unless the env var was set.
+    if not os.environ.get(home_move.HOME_JOINTS_ENV_VAR):
+        assert home_move.HOME_JOINTS == home_move.DEFAULT_HOME_JOINTS
+
+
+def test_home_joints_from_env_parses_six_floats():
+    from gello_recorder import home_move
+
+    assert home_move.home_joints_from_env("0, -1.5, 1.5, -1.5, -1.5, 0") == (
+        0.0, -1.5, 1.5, -1.5, -1.5, 0.0)
+
+
+@pytest.mark.parametrize("raw", ["1,2,3", "1,2,3,4,5,6,7", "a,b,c,d,e,f",
+                                 "0,0,0,0,0,nan"])
+def test_home_joints_from_env_rejects_bad_values_loudly(raw):
+    from gello_recorder import home_move
+
+    with pytest.raises(ValueError):
+        home_move.home_joints_from_env(raw)

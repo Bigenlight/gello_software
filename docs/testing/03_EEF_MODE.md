@@ -3,14 +3,11 @@
 **상태: 사용자가 실기에서 EEF 텔레옵을 이미 검증했다.**
 이 문서는 그 단계 상승을 **재현/재검증**할 때의 절차와 판정 기준이다.
 
-정본: `docs/ros2/GELLO_UR7E_EEF_MODE.md`. 여기서는 테스트 관점의 요약 + 이 브랜치의 실행 명령만 담는다.
+정본: [`docs/ros2/GELLO_UR7E_EEF_MODE.md`](../ros2/GELLO_UR7E_EEF_MODE.md). 여기서는 테스트 관점의
+요약 + 실행 명령만 담는다. 줄 번호 인용(`:NN`)은 작성 시점(2026-07) 기준이라 밀렸을 수 있다 —
+심볼명으로 다시 찾을 것.
 
-> ### 2026-07-27 · 2026-07-29(머지) 실기/코드 변경의 영향: **없음 (의도적으로)**
-> 진전된 것은 RL/HIL 쪽(`04`~`09`)이고 EEF 텔레옵 경로는 건드리지 않았다.
-> 머지 `3f199d4` 이후에도 `config/ur7e_gello_eef.yaml`과 `gello_ur_bridge_node.py`는
-> 그대로다. 이 문서의 판정은 유효하다.
->
-> 다만 **RL 경로와 혼동하지 말 것**: EEF 텔레옵의 `keepout`/`sigma_min` 감속/branch-lock IK는
+> **RL 경로와 혼동하지 말 것**: EEF 텔레옵의 `keepout`/`sigma_min` 감속/branch-lock IK는
 > `PolicyDeltaController`(RL)에는 **없다** (`08_OPEN_GAPS.md` G2). 새로 생긴
 > `clip_safety_box`는 **RL 경로 전용**이고 EEF 텔레옵에는 적용되지 않는다.
 >
@@ -18,9 +15,13 @@
 > **이 문서의 검증된 텔레옵 값에 맞춰 고정**돼 있다 (`config.py`의 `ACTION_SCALE` /
 > `GOVERNOR` / `UPSAMPLER` 세 블록 + 각 상단 주석, 현재 :65-116 — 심볼로 찾을 것). 여기 §2.1의
 > yaml 값이 RL 쪽 상한의 근거이므로, 이 값을 바꾸면 RL 쪽도 같이 재검토해야 한다.
+>
+> 📌 (`research/hil-serl` 머지 메모) slim 기본 브랜치에서 텔레옵 `v_max`는 0.16 → **0.20**으로 올랐다(§2.1).
+> RL `GOVERNOR.v_max`는 여전히 **0.15**이고 `config.py` 주석은 옛 0.16을 근거로 든다 — 0.15 ≤ 0.20이라
+> 안전 방향 불일치는 없지만, RL 상한을 올리려면 이 재상향을 근거로 삼기 전에 실기 재검증이 필요하다.
 
 ```bash
-export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
+export WT=~/gello_software     # 이 리포를 clone한 위치
 cd $WT/ros2_ur_ws
 ```
 
@@ -28,7 +29,7 @@ cd $WT/ros2_ur_ws
 
 ## 0. 시작 전 (매 단계 공통)
 
-- `00_SETUP_AND_SAFETY.md` §5 체크리스트 전부 통과.
+- [`GELLO_UR7E_SETUP_CLI.md`](../ros2/GELLO_UR7E_SETUP_CLI.md) §6 프리플라이트 체크리스트 전부 통과.
 - **`keepout_json`은 `"{}"`다 — 충돌 인지가 전무하다.** 모든 EEF 단계는 사람이 지켜본다.
 - **손을 E-STOP 위에 둔다.** EEF 모드에서도 물리 E-STOP은 동일하게 작동한다
   (`GELLO_UR7E_EEF_MODE.md:356`).
@@ -36,7 +37,7 @@ cd $WT/ros2_ur_ws
 
 ```bash
 # 판정용 라이브 모니터 (별도 터미널)
-source /opt/ros/humble/setup.bash && source $WT/ros2_ur_ws/install/setup.bash
+source /opt/ros/jazzy/setup.bash && source $WT/ros2_ur_ws/install/setup.bash
 ros2 topic echo /gello_ur_bridge/eef/state
 ```
 
@@ -47,13 +48,13 @@ cd $WT/ros2_ur_ws && ./run_eef_gui.sh
 ```
 
 > **시작 시 팔은 움직이지 않는다.** `control_mode:=eef`면 launch 파일이 `start_mode`를
-> 자동으로 `switch_only`로 유도한다 (`run_ur7e_gello_real.sh:86-88`이 그 규칙을 적어 두고,
-> `:121-136`이 배너로 다시 확인시킨다). 컨트롤러 스위치는 제자리에서 일어나고 브리지가
+> 자동으로 `switch_only`로 유도한다 (`run_ur7e_gello_real.sh`의 `START_MODE` 주석이 그 규칙을 적어 두고,
+> 기동 배너가 다시 확인시킨다). 컨트롤러 스위치는 제자리에서 일어나고 브리지가
 > 팔을 그 자리에 홀드한다. 팔은 **`eef_engage`(GUI 큰 토글) 이후에만** 움직인다.
 >
-> 🛑 `START_MODE`를 손으로 넘겨 덮어쓸 수 있다 (`:105`). `control_mode=eef`에
+> 🛑 `START_MODE`를 손으로 넘겨 덮어쓸 수 있다. `control_mode=eef`에
 > `start_mode=gello`를 주면 **기동하자마자 팔이 GELLO 자세로 스윕한다** — 스크립트가
-> 그 조합에 대해 경고를 찍는다 (`:149`). 기동 배너를 읽고 시작할 것.
+> 그 조합에 대해 경고를 찍는다. 기동 배너를 읽고 시작할 것.
 
 ---
 
@@ -96,18 +97,18 @@ PLAN 문서의 P7 `rot_freeze:=true` / P8 `pos_freeze:=true`는 **리포 어디�
 
 ## 2. 파라미터 — yaml 기본값과 오버라이드
 
-### 2.1 yaml 기본값 (2026-07-24에 2배로 상향됨)
+### 2.1 yaml 기본값 (2026-07-24에 2배 상향, 이후 `v_max` 0.20으로 재상향)
 
 | 파라미터 | yaml 기본 | 근거 |
 |---|---|---|
 | `pos_scale` | **1.0** (결정 완료, 재논의 금지) | `config/ur7e_gello_eef.yaml:74` |
-| `v_max` | **0.16 m/s** (플랜의 0.08에서 2배) | `:238` |
+| `v_max` | **0.20 m/s** (플랜 0.08 → 2026-07-24 0.16 → 현재 0.20) | `:238` |
 | `w_max` | **1.0 rad/s** (플랜의 0.5에서 2배) | `:241` |
 | `max_excursion_m` | 0.5 | `gello_ur_bridge_node.py:305-306` |
 
 > ⚠️ **정본 문서의 단계표(`GELLO_UR7E_EEF_MODE.md:380`)는 아직 "P9 … yaml 기본 `v_max=0.08`"이라고
-> 적혀 있다. 그 줄은 낡았다.** 같은 문서 머리말(`:7`)과 실제 yaml(`:238`)이 0.16이다.
-> P9는 **0.16 m/s / 1.0 rad/s**에서 도는 것이 현재 기본이다 — 플랜 문서 숫자보다 2배 빠르다.
+> 적혀 있다. 그 줄은 낡았다.** 실제 yaml(`:238`)은 **0.20**이다.
+> P9는 **0.20 m/s / 1.0 rad/s**에서 도는 것이 현재 기본이다 — 플랜 문서 숫자보다 2.5배 빠르다.
 > 처음 재현할 때는 이 점을 반드시 의식하고 들어갈 것.
 
 ### 2.2 launch 인자로 오버라이드 (재빌드 불필요)
@@ -164,7 +165,7 @@ ros2 topic echo --once /gello_ur_bridge/eef/state   # v_max/w_max가 읽기전�
 | **P7** | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef v_max:=0.02` → `v_max:=0.05` | 병진 위주. `R_align` 검증 | §5 |
 | **P8** | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef v_max:=0.05` | 회전 위주. tool 오프셋 검증 | §6 |
 | **P9a** | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef v_max:=0.08 w_max:=0.5` | 6-DoF 자유 조작 (**플랜의 옛 기본 속도**) | §7 |
-| **P9b** | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef` (yaml 기본 0.16 / 1.0) | 6-DoF + 재클러치 워크플로, **현재 기본 속도** | §7 |
+| **P9b** | `HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef` (yaml 기본 0.20 / 1.0) | 6-DoF + 재클러치 워크플로, **현재 기본 속도** | §7 |
 
 > ⚠️ **P6 → P7로 넘어갈 때 `pos_scale:=0.0`을 빼는 것을 잊지 말 것.**
 > 안 빼면 로봇이 계속 안 움직이는데 "고장난 줄" 알게 된다.
@@ -241,8 +242,7 @@ HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef v_max:=0.05
 
 > **부호가 반대로 보인다고 코드에서 뒤집지 말 것.** 오프라인 실측에서 리더 base +X/+Y/+Z →
 > 로봇 base +X/+Y/+Z (identity)로 확인되어 있다. 반대로 보이는 원인은 대개 **카메라 시점**이다
-> (`serl_ur_infra/RVIZ_HIL_TEST_CLI.md`의 "방향/좌표 주의", 그리고 사용자 메모
-> "HIL X/Y flip is camera, not code").
+> (X/Y가 뒤집혀 보이는 것은 코드가 아니라 카메라 시점 때문인 경우가 대부분이었다).
 
 ---
 
@@ -274,7 +274,7 @@ HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef v_max:=0.05
 # P9a — 플랜의 옛 기본 속도로 먼저
 HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef v_max:=0.08 w_max:=0.5
 
-# P9b — 현재 yaml 기본 (0.16 / 1.0)
+# P9b — 현재 yaml 기본 (0.20 / 1.0)
 HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef
 ```
 

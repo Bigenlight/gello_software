@@ -18,7 +18,7 @@ active RecordingSession reference (swapped by start/stop, read+written-through b
 every subscription callback), and `_state_lock` around the live preview frames /
 latest-value vector fields read by the GUI's polling getters.
 
-Depth (2026-09-14): when BOTH ``cam1_depth_topic`` and ``cam2_depth_topic`` are
+Depth: when BOTH ``cam1_depth_topic`` and ``cam2_depth_topic`` are
 given, the node also subscribes to the realsense ``compressedDepth`` streams
 (sensor_msgs/CompressedImage, ``16UC1; compressedDepth`` = PNG-in-a-header) plus
 each camera's depth CameraInfo and depth->color Extrinsics, and hands the raw
@@ -28,11 +28,11 @@ are gated by exactly the same rule as color frames (a session is only ever open
 once ``cameras_ready()`` is true, so every frame written is post-warm-up) --
 there is deliberately no second warm-up clock for depth.
 
-SPIN-THREAD BUDGET + HEADER STAMPS (2026-09-14, the timestamp-artifact fix).
+SPIN-THREAD BUDGET + HEADER STAMPS (the timestamp-artifact fix).
 Read :mod:`gello_recorder.spin_health` for the full diagnosis; the three things
 this node does about it are:
 
-1. **Stamps.** Every callback whose message has a ``header`` now passes
+1. **Stamps.** Every callback whose message has a ``header`` passes
    ``stamp_s`` (float64 seconds, NaN when absent) into ``RecordingSession``,
    which appends it as a trailing column. ``/joint_states``,
    ``/gello/joint_states``, ``tcp_pose``, ``wrench`` and both colour
@@ -40,17 +40,15 @@ this node does about it are:
    commands`` (``Float64MultiArray``) and the three gripper ``Float32`` topics
    are NOT -- those message types have no header, so for them ``t_rel_s``
    (arrival) remains the only timestamp that exists.
-2. **Shallow queues.** The high-rate robot subscriptions dropped from
-   depth 100/50 to ``QOS_DEPTH_ROBOT_STATE`` (5). Worst-case staleness is
-   ``depth / publish rate``, so 5/100 Hz = 50 ms instead of 1.00 s / 0.50 s.
+2. **Shallow queues.** The high-rate robot subscriptions use
+   ``QOS_DEPTH_ROBOT_STATE`` (5). Worst-case staleness is
+   ``depth / publish rate``, so 5/100 Hz = 50 ms.
    This recorder writes whatever arrives, so a deeper queue buys nothing: it
    converts "a row was skipped" into "a row is old", and a skipped row is
    strictly better than a silently mis-stamped one.
-3. **No frame I/O on the spin thread.** ``_on_cam`` used to do a 1280x720
-   ``cv2.imdecode`` for the preview (measured 9.3 ms) and then hand the same
-   JPEG to the MP4 writer, which decoded it AGAIN and encoded it (9.3 + 6.9 ms),
-   plus ~1.4 ms per depth frame into HDF5 -- about 1.6 s of work per wall-clock
-   second with both cameras and depth on. Now the callback only copies bytes:
+3. **No frame I/O on the spin thread.** Decoding for the preview, MP4
+   encoding and depth HDF5 appends together cost ~1.6 s of work per wall-clock
+   second with both cameras and depth on, so the callback only copies bytes:
    recording goes through ``RecordingSession.submit_cam*`` (one background
    writer thread) and the preview through :class:`PreviewDecoder` (a separate
    latest-wins thread, so the preview can never build a backlog and never
@@ -101,8 +99,8 @@ from gello_recorder.spin_health import (
     native_rate_table,
 )
 
-# QoS realsense-ros 4.58.2 publishes the ONE-SHOT extrinsics with (measured
-# 2026-09-14 with `ros2 topic info -v`): RELIABLE + TRANSIENT_LOCAL. It is
+# QoS realsense-ros 4.58.2 publishes the ONE-SHOT extrinsics with (checked
+# with `ros2 topic info -v`): RELIABLE + TRANSIENT_LOCAL. It is
 # published once at stream start and never again, so a late-joining VOLATILE
 # subscriber (rclpy's default depth-10 profile) silently receives nothing --
 # the durability MUST match to get the latched sample. The compressedDepth
@@ -269,9 +267,8 @@ class GelloRecorderGuiNode(Node):
         self._tcp = [None] * 7
 
         # --- spin-thread health (under _state_lock) -----------------------
-        # ros_lag_s = ROS-clock now - latest /joint_states header stamp. This is
-        # the LIVE form of the 0.900 s artifact: had it been on screen on
-        # 2026-09-14, the whole corpus would have been caught while recording.
+        # ros_lag_s = ROS-clock now - latest /joint_states header stamp: the
+        # live alarm for robot rows being read out of a stale queue.
         # Computed on the spin thread (where get_clock() is already in use) so
         # the Qt poller never touches rcl.
         self._ros_lag_s = None
@@ -351,7 +348,7 @@ class GelloRecorderGuiNode(Node):
                         self._on_cam2_extrinsics, EXTRINSICS_QOS)
 
         # ================================================================== #
-        # TELEOP CONTROL PANEL (added block) -- the FIRST control-path code in
+        # TELEOP CONTROL PANEL -- the only control-path code in
         # this otherwise 100% read-only package. Everything below is guarded by
         # the existing _state_lock and follows the same threading contract as
         # the rest of the node: callbacks fire on the spin thread, the GUI polls
@@ -399,7 +396,7 @@ class GelloRecorderGuiNode(Node):
         self.create_subscription(
             String, "/gello_gripper_bridge/state", self._on_grip_state,
             QOS_DEPTH_STATUS)
-        # ============ end TELEOP CONTROL PANEL (added block) =============== #
+        # ==================== end TELEOP CONTROL PANEL ==================== #
 
         if self.record_depth:
             depth_desc = (
@@ -508,8 +505,7 @@ class GelloRecorderGuiNode(Node):
     def _health_summary(self, session, stats: dict) -> dict:
         """Per-take spin-health verdict, merged into the stop summary.
 
-        Three independent numbers, none of which existed before 2026-09-14:
-        what the writer queue had to throw away, how far behind the robot
+        Three independent numbers: what the writer queue had to throw away, how far behind the robot
         state stamps ran, and whether the native tables collapsed onto one
         shared rate (the fingerprint of a starved executor)."""
         rates = native_rate_table(
@@ -520,8 +516,7 @@ class GelloRecorderGuiNode(Node):
         return {
             # PROVENANCE: a take must say for itself whether depth was on and
             # whether the spin thread was starved while it was written -- those
-            # two facts together are what the 2026-09-14 corpus could not
-            # answer after the fact.
+            # two facts cannot be reconstructed after the fact.
             "record_depth": bool(self.record_depth),
             "dropped_frames": session.dropped_frames(),
             "native_rates_hz": report["rates_hz"],
@@ -689,7 +684,7 @@ class GelloRecorderGuiNode(Node):
             }
 
     # ================================================================== #
-    # TELEOP CONTROL PANEL -- public API (thread-safe) + callbacks (added).
+    # TELEOP CONTROL PANEL -- public API (thread-safe) + callbacks.
     # ================================================================== #
     def _on_arm_state(self, msg: String):
         with self._state_lock:

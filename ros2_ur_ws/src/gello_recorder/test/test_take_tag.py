@@ -77,3 +77,25 @@ def test_existing_destination_is_never_overwritten(tmp_path):
 
     assert os.path.isdir(take)
     assert os.path.isdir(destination)
+
+
+def test_preset_tags_default_when_env_unset(monkeypatch):
+    from gello_recorder import take_tag
+
+    monkeypatch.delenv(take_tag.TAG_PRESETS_ENV_VAR, raising=False)
+    assert take_tag.preset_tags() == list(take_tag.DEFAULT_TAG_PRESETS)
+
+
+def test_preset_tags_from_env_normalized_deduped_and_invalid_skipped(monkeypatch):
+    from gello_recorder import take_tag
+
+    monkeypatch.setenv(
+        take_tag.TAG_PRESETS_ENV_VAR, " Recover , other side,recover,,bad/tag"
+    )
+    assert take_tag.preset_tags() == ["recover", "other_side"]
+
+
+def test_preset_tags_explicit_empty_means_none():
+    from gello_recorder import take_tag
+
+    assert take_tag.preset_tags("") == []

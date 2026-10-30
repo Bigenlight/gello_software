@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Keeping the single rclpy spin thread free -- and noticing when it wasn't.
 
-Everything in this module exists because of ONE defect, diagnosed on the
-carrot_in_pot corpus recorded 2026-09-14 (54 takes) and written up in
-``docs/ros2/GELLO_UR7E_RECORDING.md``:
+Everything in this module exists because of ONE defect, found in a real
+recorded corpus (see ``docs/ros2/GELLO_UR7E_RECORDING.md``):
 
     Every recorder subscription callback runs on the SAME background rclpy spin
     thread, and every row's ``t_rel_s`` is the time that callback RAN. A
     ``SingleThreadedExecutor`` services at most ONE message per subscription per
     round, so a subscription's service rate equals the round rate. Once depth
-    recording (commit ``c694d2c``) put ~1.6 s of decode/encode/HDF5 work per
+    recording put ~1.6 s of decode/encode/HDF5 work per
     wall-clock second onto that thread, the round rate fell from ~100 Hz to
     60-69 Hz. Every topic publishing FASTER than that then kept its KEEP_LAST
     history permanently full, and since KEEP_LAST hands the reader the OLDEST
@@ -77,13 +76,12 @@ ROS_LAG_WARN_PERIOD_S = 5.0
 
 #: One line printed/logged at startup whenever depth recording is ON, so the
 #: operator sees the bill BEFORE the take rather than in the analysis six
-#: months later. Depth is opt-in (``ENABLE_DEPTH=1``) exactly because of this
-#: cost: on 2026-09-14 it was on by default for one day and silently back-dated
-#: every robot row of a 54-take corpus (module docstring above). The defect is
-#: fixed; the cost is not.
+#: months later. Depth is opt-in (``ENABLE_DEPTH=1``) because of this cost: its
+#: load once silently back-dated every robot row of a corpus (module docstring
+#: above). The defect is fixed; the cost is not.
 DEPTH_ON_BANNER = (
     "depth ON: ~3 MB/s disk and +2 subscriptions per camera, recorder CPU "
-    "+3-7 pp, robot-row stamp age median ~10 -> ~25 ms (measured 2026-09-14); "
+    "+3-7 pp, robot-row stamp age median ~10 -> ~25 ms (measured); "
     "watch ros_lag_s"
 )
 

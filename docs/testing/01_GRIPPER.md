@@ -2,10 +2,12 @@
 
 **상태: 실기 검증 완료.** 방향 육안 확인까지 끝나 crush 게이트가 해소되었다.
 
-정본 문서: `docs/ros2/GELLO_UR7E_GRIPPER.md`. 이 문서는 HIL 관점의 검증 절차/판정 기준만 다룬다.
+정본 문서: [`docs/ros2/GELLO_UR7E_GRIPPER.md`](../ros2/GELLO_UR7E_GRIPPER.md). 이 문서는 그리퍼 단독
+하드웨어 검증 절차와 판정 기준만 다룬다. 실측값은 2026-07-27 세션(Humble 리그) 기록이며 그리퍼 경로
+(Modbus over tool-comm)는 Jazzy에서도 동일하다.
 
 ```bash
-export WT=/home/laptop3/gello_software     # 2026-07-29 머지(3f199d4) 이후 통합 checkout이 정본
+export WT=~/gello_software     # 이 리포를 clone한 위치
 ```
 
 ---
@@ -58,7 +60,7 @@ robotiq_gripper up (tcp:192.168.10.11:54321). action=/robotiq_gripper_controller
 
 ```bash
 # 다른 터미널
-source /opt/ros/humble/setup.bash && source $WT/ros2_ur_ws/install/setup.bash
+source /opt/ros/jazzy/setup.bash && source $WT/ros2_ur_ws/install/setup.bash
 
 ros2 service call /robotiq_gripper/set_closed std_srvs/srv/SetBool "{data: false}"  # 열기
 ros2 service call /robotiq_gripper/set_closed std_srvs/srv/SetBool "{data: true}"   # 닫기
@@ -106,38 +108,7 @@ ros2 topic hz   /robotiq_gripper/position_percent
 
 ---
 
-## 4. HIL(RL) 통합 시 배선
-
-RL env는 그리퍼를 **percent 토픽**으로 붙는다:
-
-| env 설정 키 | 값 | 상대편 |
-|---|---|---|
-| `gripper_command_topic` | `/robotiq_gripper/command_percent` | 모드버스 노드의 `~/command_percent` sub |
-| `gripper_state_topic` | `/robotiq_gripper/position_percent` | 모드버스 노드의 `~/position_percent` pub |
-
-근거: `serl_ur_infra/ur_env/envs/config.py:116-117`(`ROS` dict), `ros_backend.py:91`, `:117`.
-노드 이름이 `robotiq_gripper`(`ur7e_gripper_only.launch.py`의 `name=`)이므로 `~/`가 그대로 맞는다.
-
-### 4.1 RL의 그리퍼 액션은 3-state 이산이다
-
-`action[6] * ACTION_SCALE[2]` 값이
-
-- `<= -0.5` → 닫기 (`send_gripper_percent(1.0)`), 단 현재 위치 `< 0.85`일 때만
-- `>= +0.5` → 열기 (`send_gripper_percent(0.0)`), 단 현재 위치 `> 0.15`일 때만
-- 그 사이 → **홀드(아무것도 안 함)**
-
-그리고 `GRIPPER_SLEEP = 0.6 s` 디바운스가 걸린다
-(`ur7e_env.py:709-741`, 임계는 `:728`/`:731`; `config.py:146`).
-`ACTION_SCALE[2]`의 기본값은 **1.0**이다 (`config.py:73` = `[0.0125, 0.0625, 1.0]`).
-
-> 텔레옵(연속 스트리밍)과 달리 RL은 **이산**이다. 이유: hil-serl의 하이브리드 에이전트가
-> grasp를 별도 이산 critic으로 학습하고, `GripperPenaltyWrapper`가 open/close **이벤트**를
-> 가정하며, 2F-85가 물리적으로 1회 작동에 ~0.5 s 걸리기 때문 (`ur7e_env.py:714-722`).
->
-> ⚠️ 단, 실기 러너 `run_real_hil.py`는 기본적으로 `ACTION_SCALE[2] = 0.0`으로 그리퍼를
-> **끈다**. `--gripper`를 줘야 켜진다 → `04_HIL_INTERVENTION.md` §6.3.
-
-### 4.2 스트리밍 보호 장치
+## 4. 스트리밍 보호 장치
 
 `~/command_percent`는 단일 클라이언트 버스를 보호하려고 rate limit + deadband가 걸려 있다:
 
@@ -158,7 +129,7 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 | 이전 세션이 Ctrl-C로 안 죽고 남음 | 새 세션이 못 붙음 | `pgrep -af robotiq_gripper_modbus` 후 정리. 노드는 `destroy_node()`에서 `close()`로 포트를 놓는다 (`:401-411`) — SIGKILL로 죽이면 로봇이 포트를 늦게 회수한다 |
 | **팔 드라이버(`ur_robot_driver`)와 그리퍼 노드를 동시에** | 드라이버가 `use_tool_communication:=true`로 `:54321`을 이미 점유 | 그리퍼를 **TCP가 아니라 시리얼**로 붙인다: `serial_port:=/tmp/ttyUR` (`ur7e_gripper_only.launch.py:41-42`, `:57`; 노드 쪽 파라미터는 `robotiq_gripper_modbus_node.py:69` — 비어 있지 않으면 TCP 대신 serial) |
 
-> **HIL 세션에서 반드시 기억할 것:** `run_ur7e_gello_real.sh`는 팔 드라이버 + 그리퍼를
+> **텔레옵 세션에서 반드시 기억할 것:** `run_ur7e_gello_real.sh`는 팔 드라이버 + 그리퍼를
 > **함께** 띄우고, 그리퍼는 드라이버가 만든 공유 `/tmp/ttyUR` 브리지를 쓴다
 > (`run_ur7e_gello_real.sh:24-27`). 그 상태에서 `run_ur7e_gripper.sh`를 **추가로**
 > 띄우면 안 된다. 그리퍼 단독 테스트는 팔 드라이버를 내린 상태에서만 한다.
@@ -169,7 +140,7 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 |---|---|---|
 | `no/invalid status response` | ① 로봇 POWER_OFF (가장 흔함), ② RS485 URCap 미설치, ③ `:54321` 타 클라이언트 점유 | `echo -e 'robotmode\n' \| nc 192.168.10.11 29999` → RUNNING 확인. `pgrep -af "robotiq\|tool_communication"` |
 | 붙었다 끊겼다 반복 | 중간에 I/O 실패 → `_drop_connection()` → 재연결 루프 (`:203-215`, `:155-164`) | 노드 로그의 `gripper move failed:` 확인 |
-| 액션은 되는데 스트리밍이 씹힘 | deadband/rate limit | §4.2. 액션 실행 후 `_last_cmd_pct`를 동기화하는 코드가 있다 (`:255-261`) — 없으면 스트리밍이 재개 안 되는 버그였음 |
+| 액션은 되는데 스트리밍이 씹힘 | deadband/rate limit | §4. 액션 실행 후 `_last_cmd_pct`를 동기화하는 코드가 있다 (`:255-261`) — 없으면 스트리밍이 재개 안 되는 버그였음 |
 
 ---
 
@@ -184,15 +155,49 @@ RL env는 그리퍼를 **percent 토픽**으로 붙는다:
 
 ---
 
-## 7. 남은 것 (이 문서 범위에서 미검증)
+## 7. 남은 것
 
-> 🔧 **2026-07-27 재확인:** §3의 실측치(열림 0.0118 / 빈손닫힘 0.8980 = 229/255 /
-> 피드백 5.000 Hz)는 이번 실기 세션에서도 그대로 재현됐다. **§6의 완료 판정은 유효하다.**
-> 아래 미검증 항목은 여전히 미검증이다 — §6과 섞지 말 것.
+- 물체를 쥔 상태에서 `gOBJ`(stalled) 판정이 `reached_goal`로 이어지는지 — 빈손 실측만 있다.
+- 셋포인트가 rate limit 창에 씹혀 **덜 열린 채 멈추는** 문제(2026-08-06 실기, 14회 중 7회)는
+  [`GELLO_UR7E_GRIPPER.md`](../ros2/GELLO_UR7E_GRIPPER.md) §9를 볼 것. `trig`가 0.00인데 덜 열렸으면
+  이 문제고, `trig`가 0.2대면 리더 방아쇠 쪽 문제다.
+- RL 액션 경로(`action[6]`, ±1 이산)와 HIL 개입 그리퍼 검증 → 아래 §8.2.
+
+## 8. HIL(RL) 통합 시 배선 — `research/hil-serl` 전용
+
+RL env는 그리퍼를 **percent 토픽**으로 붙는다:
+
+| env 설정 키 | 값 | 상대편 |
+|---|---|---|
+| `gripper_command_topic` | `/robotiq_gripper/command_percent` | 모드버스 노드의 `~/command_percent` sub |
+| `gripper_state_topic` | `/robotiq_gripper/position_percent` | 모드버스 노드의 `~/position_percent` pub |
+
+근거: `serl_ur_infra/ur_env/envs/config.py:116-117`(`ROS` dict), `ros_backend.py:91`, `:117`.
+노드 이름이 `robotiq_gripper`(`ur7e_gripper_only.launch.py`의 `name=`)이므로 `~/`가 그대로 맞는다.
+
+### 8.1 RL의 그리퍼 액션은 3-state 이산이다
+
+`action[6] * ACTION_SCALE[2]` 값이
+
+- `<= -0.5` → 닫기 (`send_gripper_percent(1.0)`), 단 현재 위치 `< 0.85`일 때만
+- `>= +0.5` → 열기 (`send_gripper_percent(0.0)`), 단 현재 위치 `> 0.15`일 때만
+- 그 사이 → **홀드(아무것도 안 함)**
+
+그리고 `GRIPPER_SLEEP = 0.6 s` 디바운스가 걸린다
+(`ur7e_env.py:709-741`, 임계는 `:728`/`:731`; `config.py:146`).
+`ACTION_SCALE[2]`의 기본값은 **1.0**이다 (`config.py:73` = `[0.0125, 0.0625, 1.0]`).
+
+> 텔레옵(연속 스트리밍)과 달리 RL은 **이산**이다. 이유: hil-serl의 하이브리드 에이전트가
+> grasp를 별도 이산 critic으로 학습하고, `GripperPenaltyWrapper`가 open/close **이벤트**를
+> 가정하며, 2F-85가 물리적으로 1회 작동에 ~0.5 s 걸리기 때문 (`ur7e_env.py:714-722`).
 >
-> 🔧 **2026-07-29 머지 반영:** 머지(`3f199d4`)는 그리퍼 경로를 바꾸지 않았다.
-> 2026-07-28 실기 세션이 팔을 구동했지만 `run_real_hil.py`의 기본은 그리퍼 **비활성**
-> (`ACTION_SCALE[2]=0.0`)이므로 아래 미검증 항목은 **하나도 해소되지 않았다.**
+> ⚠️ 단, 실기 러너 `run_real_hil.py`는 기본적으로 `ACTION_SCALE[2] = 0.0`으로 그리퍼를
+> **끈다**. `--gripper`를 줘야 켜진다 → `04_HIL_INTERVENTION.md` §6.3.
+
+### 8.2 HIL 쪽 미검증 항목
+
+> slim 기본 브랜치(`ur7e-jazzy`)가 이 문서를 정리할 때 뺀 HIL 전용 절(§4·§7)을 `research/hil-serl` 머지에서
+> 되살린 것이다. 줄 번호(`:NN`)는 2026-07 기준이라 밀렸을 수 있다 — 심볼명으로 찾을 것.
 
 - [ ] **RL 경로**(`/robotiq_gripper/command_percent`)로 그리퍼가 실제로 움직이는지 —
       env에서 액션 `[0,0,0,0,0,0,-1]` / `[0,...,+1]`을 쏴서 확인. `07_FAILURE_INJECTION.md` E12.

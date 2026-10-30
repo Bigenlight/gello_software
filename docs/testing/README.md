@@ -1,5 +1,9 @@
 # HIL-SERL 실기 투입 — 통신·하드웨어 검증 런북 (인덱스)
 
+> 🧭 **`research/hil-serl` = slim 기본 브랜치 `ur7e-jazzy` + HIL.** 01/02/03(그리퍼·리더·EEF)은 slim이 정리한
+> Jazzy 판을 쓰고, 정리 때 빠졌던 HIL 전용 절만 되살렸다(01 §8, 02 §5.0, 03 머리말·§5 G7 항목).
+> 00·04~11은 이 브랜치 전용이다. 아래 `/home/laptop3`·Humble·`kanu` 표기는 낡았을 수 있다.
+
 > 🚩 **새 세션이라면 루트 [`CLAUDE.md`](../../CLAUDE.md) → [`serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md`](../../serl_ur_infra/HIL_SERL_REAL_ROBOT_STATUS_AND_NEXT_KO.md) 순서로 읽어라.** 현재 상태·다음 할 일·안전 규칙이 거기 모여 있다. 이 디렉터리는 개별 검증 절차다.
 > *(이전 판(보존)은 `HANDOFF_NEXT_SESSION_KO.md`를 진입점으로 지목했다. 그 문서는 **첫 실물 E2E 이전**의 리그 조사 기록이라 최신 상태 지침이 아니다 — 다만 §"테스트 — 이 명령 그대로"(`:254-264`)는 여전히 pytest 재현 명령의 정본이다.)*
 

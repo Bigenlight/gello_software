@@ -1,7 +1,8 @@
 # UR7e 전용 이더넷 — Ubuntu 24.04 / ROS 2 Jazzy
 
-이 PC에서 UR7e 제어망은 **USB Ethernet NIC `enx00e04c3600bd` 하나와 NetworkManager
-프로파일 `Wired connection 2`만** 쓴다. 현재 확인된 계약은 다음과 같다.
+랩 리그(2026-09, Jazzy 수집 PC)에서 UR7e 제어망은 **USB Ethernet NIC `enx00e04c3600bd` 하나와 NetworkManager
+프로파일 `Wired connection 2`만** 쓴다. 아래 NIC 이름·MAC·프로파일 이름은 **그 PC의 값**이다 — 다른 PC에서는
+`--check`로 자기 NIC를 찾고 `--device`로 명시한다. 주소 계약(`192.168.10.100/24` ↔ `192.168.10.11`)은 리그 공통이다.
 
 | 항목 | 값 |
 | --- | --- |
@@ -19,7 +20,7 @@
 ## 상태 확인 (기본, read-only)
 
 ```bash
-cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 ./setup_jazzy/setup_ur7e_ethernet.sh --check
 ```
 
@@ -39,7 +40,7 @@ Dashboard (`29999`), Primary (`30001`), RTDE (`30004`) TCP 포트를 확인한�
 실행 중인 로봇 NIC를 끊지 않는다. 프로파일이 이미 위 계약과 같으면 idempotent다.
 
 ```bash
-cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 sudo ./setup_jazzy/setup_ur7e_ethernet.sh --apply --yes \
   --device enx00e04c3600bd
 ```
@@ -64,7 +65,7 @@ sudo ./setup_jazzy/setup_ur7e_ethernet.sh --apply --yes \
 
 `HEADLESS=true`로 실행할 때는 펜던트가 Remote Control 모드여야 한다. 그 외의 로봇
 handshake·캘리브레이션 절차는
-[`GELLO_UR7E_REAL_ROBOT.md`](../../../docs/ros2/GELLO_UR7E_REAL_ROBOT.md)를 따른다.
+[`GELLO_UR7E_REAL_ROBOT.md`](../../docs/ros2/GELLO_UR7E_REAL_ROBOT.md)를 따른다.
 
 ## 빠른 장애 구분
 
