@@ -105,8 +105,12 @@ two identifier namespaces.**
 | `CAMERA_ALLOW_SERIAL_FALLBACK=1` | 옛 모델 클래스/정렬 순서 fallback을 켠다(임시 리그용, 항상 WARN) |
 
 기본값은 **module serial**이다(2026-10 기준 cam1 `143322071682`, cam2 `143322072540`, 둘 다 plain D435 —
-위 표의 2026-07-29 값은 그 이전 카메라 쌍의 기록이다). 기본값의 위치는 `launch_cameras.sh`/`run_recorder.sh`
-머리말을 볼 것. 카메라를 바꾸면 기본값을 고치거나 환경변수로 덮어쓴다:
+위 표의 2026-07-29 값은 그 이전 카메라 쌍의 기록이다). 기본값은 **한 곳**,
+`ros2_ur_ws/camera_serials.env`에 있다. 셸 쪽(`launch_cameras.sh`, `run_recorder.sh`,
+`run_eef_collection_gui.sh`)은 `_resolve_camera_serials.sh`의 `load_camera_serial_defaults`로,
+Python GUI(`gello_recorder_gui`, EEF 수집 GUI)는 `gello_recorder.camera_defaults`로 같은 파일을 읽는다.
+우선순위는 export된 `CAM1_SERIAL`/`CAM2_SERIAL` → `GELLO_CAMERA_SERIALS_FILE=<경로>`가 가리키는 파일 →
+`camera_serials.env`다. 카메라를 바꾸면 그 파일을 고치거나 환경변수로 덮어쓴다:
 
 ```bash
 CAM1_SERIAL=<module-serial> CAM2_SERIAL=<module-serial> ./launch_cameras.sh
@@ -133,9 +137,6 @@ CAM1_SERIAL=<module-serial> CAM2_SERIAL=<module-serial> ./launch_cameras.sh
 - **우측 창(cam2)**: 팔을 움직이면 **화면 전체가 흐르고**, 그리퍼 손가락은 **같은 픽셀에 남는다.**
   "화면에 물체가 안 보인다"는 조준 문제가 아니라 팔이 다른 곳을 보고 있을 뿐일 수 있다.
 
-> `launch_cameras.sh` 머리말 주석의 `cam2 = CLOSE-UP (workspace)` 류 문구는 낡은 표현이다 —
-> cam2는 손목 카메라다.
-
 손으로 한 대만 띄울 때는 시리얼을 **따옴표로 감싼다**. `ros2 launch`는 전부 숫자인 인자를 정수로
 바꾸고, `serial_no`는 STRING 파라미터라 노드가 즉사한다:
 
@@ -160,6 +161,7 @@ ros2 launch realsense2_camera rs_launch.py \
 
 ## Related
 
-- `ros2_ur_ws/_resolve_camera_serials.sh` — 시리얼 해석 헬퍼. 전체 동작은 파일 머리말에 있다.
+- `ros2_ur_ws/camera_serials.env` — cam1/cam2 기본 시리얼(셸·Python 공통 단일 출처).
+- `ros2_ur_ws/_resolve_camera_serials.sh` — 시리얼 해석 헬퍼(`load_camera_serial_defaults`, `resolve_serials`). 전체 동작은 파일 머리말에 있다.
 - `ros2_ur_ws/launch_cameras.sh` — 카메라 2대 + 뷰어. `ENABLE_DEPTH`/`ALIGN_DEPTH` 등 옵션은 머리말.
 - `ros2_ur_ws/camera_viewer.py` — 단독 2-카메라 뷰어.

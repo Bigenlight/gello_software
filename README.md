@@ -130,6 +130,8 @@ ros2 service call /robotiq_gripper/set_closed std_srvs/srv/SetBool "{data: true}
 ./launch_cameras.sh                     # 2대 + 뷰어 (좌 = cam1 SCENE, 우 = cam2 WRIST)
 ```
 
+기본 시리얼은 `ros2_ur_ws/camera_serials.env` 한 곳에 있습니다(셸 스크립트와 녹화 GUI가 같이 읽음).
+다른 리그에서는 그 파일을 고치거나 `CAM1_SERIAL`/`CAM2_SERIAL`(또는 `GELLO_CAMERA_SERIALS_FILE`)을 export하세요.
 설정된 두 시리얼이 모두 연결돼 있지 않으면 **기동 전에 실패**합니다(잘못된 시리얼은 조용히 프레임 0을 냄).
 뷰어에서 팔을 움직여 우측 창의 배경이 흐르는지로 손목 카메라를 확인하세요.
 → [`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md)

@@ -147,6 +147,8 @@ print(len(ur["q1"]), len(cam1_stamp))
 
 **다른 리그에서:** `rs-enumerate-devices -s`의 "Serial Number"를
 `ros2_ur_ws/camera_serials.env`에 적거나 환경변수로 넘깁니다(cam1 = 장면, cam2 = 손목).
+역할 판정법(팔을 움직여 손목 카메라 확인)은
+[`docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md`](../../../docs/hardware/REALSENSE_D435_TROUBLESHOOTING.md#cam1--cam2-역할-계약과-손목-확인)를 보세요.
 
 ## 문제 해결
 
