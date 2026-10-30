@@ -31,8 +31,8 @@
 ## 주의
 
 - **모델 가중치는 git에 없다** — `ros2_ur_ws/setup_jazzy/staged_models/`는 gitignore 대상이다.
-- `run_bc_server*.sh`, `run_fm_server*.sh`, `fetch_policy_artifacts.sh`, `setup_local_policy_venv.sh`,
-  `run_bc_rollout_recorder.sh`, `_bc_rollout_status_logger.py`는 HIL actor와
-  `serl_ur_infra/`(BC/FM policy server)를 쓴다 → **research/hil-serl 필요.** 이 브랜치 단독으로는 안 돈다.
+- `ros2_ur_ws/run_{bc,fm}_server*.sh`, `fetch_policy_artifacts.sh`, `setup_local_policy_venv.sh`,
+  `run_bc_rollout_recorder.sh`, `_bc_rollout_status_logger.py`(serl_ur_infra BC/FM 서버 + HIL actor 경로)는
+  **research/hil-serl 브랜치**에 있다. 이 브랜치의 FM 서버는 `src/gello_policy/scripts/run_fm_server.sh`다.
 - `run_ur7e_ifql_real.sh`의 `REAL_EVAL_RECORDING=1` 기본 renderer hook
   (`sim_collect/eval/render_eval_video.py`)은 **research/sim-collect**에 있다.
