@@ -1,675 +1,169 @@
 # gello_recorder
 
-GELLO 리더암 + UR7e 로봇암 teleop 파이프라인의 진단 신호(HDF5)와 듀얼 RealSense 카메라 영상(MP4)을 기록하는 ROS2 (Jazzy, ament_python) 패키지. **실제 물리 로봇 하드웨어**(real UR7e + real GELLO + 2x real Intel RealSense)를 대상으로 하며, 완전히 read-only(구독만, 로봇/GELLO에 명령을 내리지 않음)이다. `ur_gello_bringup`(UR 전용 브링업 패키지)과 의도적으로 분리되어 있어 UR-specific 의존성이 전혀 없다.
+GELLO 리더팔로 UR7e를 텔레옵하는 동안 **로봇·GELLO·그리퍼 신호와 RealSense 2대의
+영상**을 take 단위 폴더로 기록하는 ROS 2 (Jazzy) 패키지입니다. 기록 경로는 구독만
+하는 **읽기 전용**이고, GUI에는 텔레옵 일시정지/재개 버튼과 "Delete last take" /
+"Tag last take" 버튼이 함께 있습니다.
 
-두 가지 실행 방법이 있다:
-- **헤드리스 CLI** (`gello_ur_recorder`, `run_recorder.sh`): launch부터 Ctrl-C까지 연속 기록.
-- **인터랙티브 GUI** (`gello_recorder_gui`): 카메라를 한 번만 켜두고 Start/Stop 버튼으로 여러 번 "take"를 찍는 방식.
+## 진입점 3개 — 언제 무엇을 쓰나
 
-목차: [Requirements & Quick Start](#requirements--quick-start) · [Architecture & Code Walkthrough](#architecture--code-walkthrough) · [Troubleshooting / Debugging History](#troubleshooting--debugging-history)
+| 진입점 | 실행 | 언제 쓰나 |
+| --- | --- | --- |
+| 헤드리스 기록기 `gello_ur_recorder` | `./run_recorder.sh` | 화면 없이 한 세션을 통째로 기록(진단·로그). Ctrl-C로 종료 = 세션 1개 |
+| 조인트 텔레옵 GUI `gello_recorder_gui` | `ros2 run gello_recorder gello_recorder_gui` | 조인트 모드 텔레옵으로 데모를 **take 여러 개**로 수집. 카메라 미리보기 + Start/Stop |
+| EEF 수집 GUI `eef_recorder_gui` (ur_gello_bringup) | `./run_eef_collection_gui.sh` | EEF 모드 텔레옵 수집. 위 GUI의 기록 창과 EEF ENGAGE/START POSE 창을 한 창에 합친 것. 브링업을 재시작해도 카메라·기록 창이 살아 있음 |
 
----
+세 진입점 모두 같은 `RecordingSession`으로 쓰므로 **파일 형식이 같습니다**(차이는
+아래 표의 *헤드리스 전용* 표시뿐).
 
-## Requirements & Quick Start
-
-> ⚠️ **Important — 실제 로봇 하드웨어입니다 (시뮬레이션 아님)**
->
-> - 이 패키지는 **실제 UR7e + 실제 GELLO 리더암 + 실제 Intel RealSense 카메라 2대**를 대상으로 합니다. 시뮬레이션 도구가 아닙니다.
-> - 기록기는 **완전히 read-only** 입니다. ROS 토픽을 *구독(subscribe)만* 하며, 로봇이나 GELLO에 명령을 내리지 않습니다. 켜고 끄는 것이 로봇 동작에 영향을 주지 않습니다.
-> - 카메라 2대는 **둘 다 USB로 물리적으로 연결**되어 있어야 하고, 다른 `realsense2_camera_node` 프로세스가 **이미 점유하고 있으면 안 됩니다.** 이전 실행이 비정상 종료되면 좀비 프로세스가 USB 장치를 잠근 채 남아 카메라가 안 켜질 수 있습니다. 그럴 때는 우선 `pkill -9 -f realsense2_camera_node` 로 정리하세요. (자세한 디버깅은 [Troubleshooting](#troubleshooting--debugging-history) 섹션 참고.)
-> - `ros2 launch` 의 CLI 인자 중 **숫자처럼 보이는 값**(예: 카메라 시리얼 번호)은 작은따옴표로 감싸지 않으면 조용히 정수로 형변환되어 노드가 즉시 죽습니다. 이 패키지는 내부적으로 `serial_no:='147122072740'` 처럼 값에 따옴표를 박아 처리하고 있으니, **launch 명령을 직접 수정할 때는 이 따옴표를 반드시 유지**하세요.
-
-### 1. Prerequisites
-
-- **ROS2 Jazzy** on **Ubuntu 24.04** (this branch; `feat/gello-ur7e-humble-22.04` targets ROS2 Humble on Ubuntu 22.04 instead).
-- 빌드된 워크스페이스 (`ros2_ur_ws/` 에서 `colcon build --symlink-install`, 아래 2번 참고).
-- Python 런타임 의존성 (package.xml 의 `exec_depend`):
-  - `python3-h5py` (HDF5 벡터 로그)
-  - `python3-opencv` (MP4 인코딩 / 프레임 디코딩)
-  - `python3-pyqt5` (GUI)
-- **카메라를 쓰려면** `realsense2_camera` ROS2 패키지 + librealsense2 SDK 가 설치되어 있어야 합니다. (헤드리스 기록기를 `CAMS` 없이 신호만 기록할 때는 카메라 스택이 필요 없습니다.)
-- 실제 하드웨어(UR7e / GELLO / RealSense 2대)가 연결·전원 인가된 상태.
-
-### 2. Build
+## 빠른 시작
 
 ```bash
+cd ros2_ur_ws
 source /opt/ros/jazzy/setup.bash
-cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
-colcon build --symlink-install
+colcon build --packages-select gello_recorder ur_gello_bringup
 source install/setup.bash
+
+# 터미널 1: 텔레옵
+./run_ur7e_gello_real.sh                                   # 조인트 모드
+HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef   # EEF 모드
+
+# 터미널 2: 기록기 하나를 고른다
+ros2 run gello_recorder gello_recorder_gui   # 조인트 모드 수집
+./run_eef_collection_gui.sh                  # EEF 모드 수집 (단축키 R/SPACE/G/H)
+CAMS=true ./run_recorder.sh                  # 헤드리스, 카메라 포함
 ```
 
-> `--symlink-install` 을 쓰면 Python 소스를 고칠 때마다 다시 빌드하지 않아도 됩니다. 단, `package.xml` / `setup.py` / entry point 를 바꾸면 다시 `colcon build` 해야 합니다.
+GUI는 카메라 노드 2개를 직접 띄우고, 두 카메라가 워밍업(`CAMERA_WARMUP_S`, 기본
+4 s)을 마쳐야 **Start Recording**이 켜집니다. 헤드리스는 `CAMS=true`일 때만 카메라를
+띄웁니다.
 
-### 3. Quick Start — 헤드리스 기록기 (`run_recorder.sh`)
-
-`run_recorder.sh` 는 실행 시점부터 Ctrl-C 까지 **연속으로** 기록하는 CLI 방식입니다. **teleop 이 이미 돌고 있는 상태에서, 두 번째 터미널**에서 실행해야 합니다.
-
-```bash
-# 첫 번째 터미널: teleop 구동 (기록기와 같은 ros2_ur_ws/ 에 있는 스크립트)
-cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
-HEADLESS=true ./run_ur7e_gello_real.sh
-```
-
-```bash
-# 두 번째 터미널: 기록기
-cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
-
-./run_recorder.sh                 # 신호만 기록 (vectors.h5)
-BAG=true ./run_recorder.sh        # 위 + 전체 토픽을 `ros2 bag -a` 로 캡처
-CAMS=true ./run_recorder.sh       # 위 + RealSense 카메라 2대 실행 (-> cam1.mp4 / cam2.mp4)
-RATE=200 ./run_recorder.sh        # synchronized 테이블 샘플링 레이트(Hz), 기본 100
-```
-
-환경변수는 조합할 수 있습니다 (예: `CAMS=true RATE=200 ./run_recorder.sh`). Ctrl-C 로 멈추면 버퍼를 flush 하고 `metadata.json` 을 마무리하며, bag 과 카메라도 함께 정리합니다. 세션은 `ros2_ur_ws/gello_logs/session_<YYYYmmdd_HHMMSS>/` 아래에 저장됩니다.
-
-`CAMS=true` 일 때만 쓰이는 카메라 환경변수(기본값은 아래 GUI 섹션과 동일): `CAM1_SERIAL`, `CAM2_SERIAL`, `CAM1_NAME`, `CAM2_NAME`, `COLOR_PROFILE`.
-
-### 4. Quick Start — 인터랙티브 GUI (`gello_recorder_gui`)
-
-GUI 는 카메라 스택을 매번 재실행하지 않고 Start/Stop 버튼으로 여러 "take" 를 찍는 방식입니다.
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source /home/junhyeong/gello_software_jazzy/ros2_ur_ws/install/setup.bash
-
-ros2 run gello_recorder gello_recorder_gui
-```
-
-실행하면 **카메라 2대가 자동으로 launch** 되고, 창에는 **항상 라이브 프리뷰**가 표시됩니다. **Start 버튼은 `cameras_ready()` 가 될 때까지 비활성화**되어 있습니다 — 즉 **각 카메라의 첫 프레임 수신 시점부터 `CAMERA_WARMUP_S` 초가 지날 때까지** 눌리지 않습니다. 이는 RealSense 컬러 센서가 켜진 직후 자동 노출/화이트밸런스를 잡는 동안 나오는 초록빛 warm-up 틴트가 녹화에 들어가지 않게 하기 위함입니다. 그동안 버튼에는 "Warming up..." 이 표시됩니다.
-
-다음 환경변수로 동작을 재정의할 수 있습니다 (값은 소스에서 검증한 실제 기본값):
-
-> ### 🔧 카메라 시리얼 정정 (2026-07-29) — **직전 "물리 교체" 정정은 틀렸다**
->
-> **이 리그의 RealSense는 한 쌍뿐이고, 한 번도 교체된 적이 없다.**
-> 이 자리에 있던 2026-07-28 판은 "카메라 **개체가 물리적으로 교체됐다**. 이전 판의
-> `147122072740` / `243222072700`은 이 PC가 커널 로그상 한 번도 열거한 적 없는 하드웨어다"라고
-> 주장하며 아래 표의 기본값을 `151623020789` / `322743060038`으로 바꿨다.
-> **그 주장은 사실이 아니고, 바꾼 기본값은 코드와도 어긋난다**
-> (`gello_recorder_gui.py`의 `DEFAULT_CAM1_SERIAL`/`DEFAULT_CAM2_SERIAL`은
-> `147122072740`/`243222072700`이다 — 코드가 권위다).
-> 리포가 "두 쌍"이라 부르던 것은 **같은 카메라 두 대의 서로 다른 시리얼 *필드*** 다.
-> 2026-07-29에 **같은 물리 USB 포트**에서 두 값을 동시에 측정했다:
->
-> | 포트 | `camera_info.serial_number` | `camera_info.asic_serial_number` | 장치 |
-> |---|---|---|---|
-> | `4-4.1` | **`147122072740`** | `151623020789` | plain D435 → cam1 **SCENE** (삼각대, 3인칭) |
-> | `4-4.3` | **`243222072700`** | `322743060038` | D435IF → cam2 **WRIST** (그리퍼 장착) |
->
-> `serial_no:=`는 **`serial_number`에만** 매칭된다. 직접 확인한 결과:
->
-> ```
-> rs.config().enable_device('151623020789')  ->  NO MATCH   # ASIC 시리얼
-> rs.config().enable_device('147122072740')  ->  MATCHED    # 장치 시리얼
-> ```
->
-> **덫 1 — 저널 grep.** 커널 USB 디스크립터(`journalctl`, `/sys/bus/usb/devices/*/serial`)는
-> **ASIC 시리얼**을 노출한다. 그래서 저널을 grep하면 `151623020789`/`322743060038`은 수백 건
-> 나오고 `147122072740`/`243222072700`은 **0건**이라, 정확히 "이 호스트는 그 카메라를 본 적이
-> 없다"처럼 읽힌다. 커밋 `607e541`이 그렇게 결론짓고 기본값을 ASIC 시리얼로 바꿨다.
-> **저널 grep으로 카메라 정체를 다시 유도하지 마라** — 이 방법으로 **서로 반대 방향의** 틀린
-> 결론에 도달한 세션이 이미 둘이다. 정체의 권위는 `rs-enumerate-devices` / `pyrealsense2`가
-> 보고하는 `serial_number`이고, 코드에서는
-> [`ros2_ur_ws/_resolve_camera_serials.sh`](../../_resolve_camera_serials.sh)다
-> (커밋 `43ba314`, `fb48100`).
->
-> **덫 2 — 조용한 실패.** 해석되지 않는 시리얼로 바인딩해도 **시끄럽게 실패하지 않는다.**
-> 노드는 뜨고 `ros2 topic info`도 publisher 1을 보고하는데 프레임이 하나도 안 나온다.
-> 레코더에서는 이것이 **빈 `cam*.mp4`**로 나타난다 — 녹화는 "성공"한 것처럼 끝난다.
->
-> cam1/cam2 ↔ 모델 클래스 ↔ 마운트 배정도 확정이다: plain D435 = cam1 = SCENE(삼각대),
-> D435IF = cam2 = WRIST(그리퍼 장착). **손목 배정은 녹화 영상으로 증명됐다** — cam2 화면에서
-> 그리퍼 손가락은 픽셀이 고정된 채 배경만 흐른다("어느 개체가 손목에 달렸는지 미확정"이라던
-> 07-28 문장은 철회한다).
-
-| 환경변수 | 기본값 | 설명 |
-|---|---|---|
-| `CAM1_SERIAL` | `147122072740` | 카메라 #1 **장치** 시리얼 (plain D435, cam1 = SCENE 삼각대) |
-| `CAM2_SERIAL` | `243222072700` | 카메라 #2 **장치** 시리얼 (D435IF, cam2 = WRIST 그리퍼 장착) |
-| `CAM1_NAME` | `cam1` | 카메라 #1 이름/네임스페이스 |
-| `CAM2_NAME` | `cam2` | 카메라 #2 이름/네임스페이스 |
-| `COLOR_PROFILE` | `1280x720x30` | 컬러 스트림 `WxHxFPS` (두 카메라 공통) |
-| `CAMERA_WARMUP_S` | `4.0` | 각 카메라 첫 프레임 후 이 초만큼 지나야 Start 활성화 (warm-up 프레임 폐기) |
-| `RECORDER_OUTPUT_ROOT` | `$GELLO_REPO_ROOT/ros2_ur_ws/gello_logs` | take 폴더가 생성되는 루트 (`GELLO_REPO_ROOT` 미설정 시 `~/gello_software`) |
-
-예: `CAMERA_WARMUP_S=6 ros2 run gello_recorder gello_recorder_gui`
-
-> **시리얼은 적지 마라.** `CAM1_SERIAL`/`CAM2_SERIAL`은 기본값이 있고, 그 기본값조차 실행 시
-> USB 버스에서 자동 검증·교정된다. 리포에 D435 시리얼이 두 쌍 등장하는데 **그 둘은 같은
-> 카메라 2대의 서로 다른 필드**다 — `serial_no:=`가 매칭하는 `serial_number`
-> (`147122072740`/`243222072700`)와, `journalctl`이 보여주는 `asic_serial_number`
-> (`151623020789`/`322743060038`). 후자를 적으면 장치를 못 찾는데 **에러가 나지 않는다**
-> (노드는 뜨고 아무것도 publish하지 않아 빈 `cam*.mp4`가 남는다).
-> 자동 교정 코드: GUI는 `gello_recorder_gui.py`의 `_resolve_camera_serials()`, 헤드리스
-> `run_recorder.sh`는 [`ros2_ur_ws/_resolve_camera_serials.sh`](../../_resolve_camera_serials.sh)를
-> source한다 — **둘 다 기본값이 장치 시리얼**(`147122072740`/`243222072700`)이고, 코드가 권위다.
-> **`journalctl` grep으로 카메라 정체를 유도하지 마라**: 그 방법으로 서로 반대 방향의 틀린
-> 결론에 도달한 세션이 이미 둘 있다(위 정정 박스).
-> 자세한 것은 [`docs/testing/06_SENSORS.md`](../../../docs/testing/06_SENSORS.md) §1.1.
-
-> 참고: 헤드리스 노드의 ROS 파라미터 `camera_warmup_s` 기본값은 `3.0`으로, GUI 의 `4.0`과 **다릅니다** (둘은 독립적인 설정값).
-
-창을 닫으면 진행 중인 take 를 먼저 마무리 저장한 뒤 카메라 프로세스를 정리합니다. take 는 `<RECORDER_OUTPUT_ROOT>/take_<NN>_<YYYYmmdd_HHMMSS>/` 아래에 저장됩니다 (헤드리스의 `session_<stamp>/` 와 이름 규칙이 다름에 유의).
-
-> ### 🔴 reward classifier 학습 데이터는 **반드시 이 GUI 레코더로** 찍어라
->
-> 이름 규칙 차이가 단순한 취향 문제가 아니다. 라벨링 파이프라인
-> (kanu의 `cube_classifier_pipeline.py prepare`)은 **`take_*/` 디렉터리만 읽는다.**
-> 헤드리스 `run_recorder.sh`가 만드는 `session_<stamp>/`는 **파이프라인에 보이지 않는다** —
-> 촬영은 정상적으로 끝나고, 라벨링 단계에서 "take가 없다"가 되어 세션 하나를 통째로 날린다.
-> 기존 학습 데이터도 전부 이 GUI로 찍은 것이다.
->
-> 녹화 시점에는 **변환·크롭·리사이즈가 일절 없다.** CompressedImage의 JPEG 바이트가 그대로
-> `cam1.mp4`/`cam2.mp4`에 1280×720 원본으로 들어가고, 전처리는 전부 하류에서 일어난다.
-> **해상도를 1280×720에서 바꾸지 마라** — 128×128로 찌그러뜨리는 비율이 달라져 분류기가
-> 학습한 분포에서 벗어난다.
-
-#### 4-1. Teleop 바 — 텔레옵 일시정지 / 재개 (씬 리셋)
-
-GUI 창의 녹화 컨트롤 **바로 위**에는 **Teleop 바**가 있습니다. 혼자 작업하는 오퍼레이터가 **두 손을 자유롭게 하여 씬을 리셋**(물체 재배치, 지그 이동, 재-그립)할 수 있도록, 리더→로봇 신호 경로를 일시정지/재개하는 조작 패널입니다. 이 블록은 그 외에는 100% read-only 인 이 패키지에서 **유일한 제어(control-path) 코드**이며, 로봇을 직접 명령하지 않고 두 브릿지의 `std_srvs/Trigger` 서비스만 호출합니다(호출은 전부 non-blocking `call_async` + done-callback — Qt 스레드에서 절대 spin/블록하지 않음).
-
-구성 요소:
-
-- **상태 라벨 2개** — `arm:` 와 `gripper:`. 각 브릿지의 `/state` 토픽(5 Hz)을 반영해 색으로 표시합니다: `PAUSED`/`STALE` = 빨강, `CHASING`/`RAMPING` = 주황, `FOLLOWING` = 초록, `WAITING`/미상 = 회색. state 토픽이 2초 넘게 갱신 안 되면 미상(회색) 처리.
-  - 팔 상태 어휘: `PAUSED` · `WAITING` · `STALE` · `CHASING` · `FOLLOWING`.
-  - 그리퍼 상태 어휘: `PAUSED` · `WAITING` · `RAMPING` · `FOLLOWING`.
-  - **`gripper: n/a`** 로 보이면 그리퍼 브릿지/state가 아직 없다는 뜻입니다. 정상일 수 있음 — 그리퍼 브릿지는 **핸드셰이크 완료 후에 기동**하므로, 팔 텔레옵이 스트리밍을 시작한 뒤 채워집니다.
-- **Pause Teleop 버튼** — **한 번 클릭**. pause는 무조건(unconditional) 서비스라 항상 성공하며, 팔과 그리퍼 브릿지를 함께 정지시킵니다. 로봇은 마지막 자세를 홀드.
-- **Resume Teleop 버튼** — 실 로봇을 움직이므로 **두 번 클릭 확인**입니다. 첫 클릭에서 버튼이 주황색 *"Confirm Resume (robot will move!)"* 로 바뀌고, **3초 안에** 다시 누르면 실제 재개 요청이 나갑니다(시간 초과 시 원상복귀). 이 버튼은 팔이 `PAUSED` 를 보고할 때만 활성화됩니다. 재개는 팔의 `/gello_ur_bridge/resume_chase` 와 그리퍼의 `/gello_gripper_bridge/resume` 를 함께 호출합니다.
-- **Delete last take 버튼 (2026-09-16 추가)** — 작은 보조 버튼. **이 창에서 가장 최근에 Stop한 take 하나만** 지운다(녹화 중이거나 아직 Stop한 take가 없으면 비활성). 누르면 **비모달 확인창**("Delete take_NN_…? … (N files, X MB)")이 뜨고 **Yes를 명시적으로 클릭할 때만** 폴더를 삭제한다 — Enter/Esc/창 닫기는 전부 No. 모달이 아닌 이유는 확인창이 떠 있는 동안에도 Pause Teleop을 눌러야 할 수 있기 때문. 삭제되면 take 번호가 하나 되돌아가 **다음 take가 같은 번호를 재사용**한다(폴더명에 타임스탬프가 있어 충돌 없음). 안전장치는 `take_delete.py`에 있다: `RECORDER_OUTPUT_ROOT` 바로 아래의 `take_NN_YYYYmmdd_HHMMSS` 이름 폴더, 심링크 아님, 하위 폴더 없음(평면 파일만)일 때만 지운다. 임의 경로·이전 take는 어떤 경로로도 지울 수 없다.
-
-**거부(refusal)는 에러가 아닙니다.** 재개는 게이팅되어 있어 `success=false` 로 정당하게 거부될 수 있으며(예: 리더가 안 멈춤, gap이 너무 큼), 그때 로봇은 **움직이지 않고 브릿지는 PAUSED로 유지**됩니다. 거부 사유는 상태바에 ~6초간 표시되니, 읽고 그 한 가지(리더를 가만히 / 더 가깝게 등)를 고친 뒤 다시 재개하세요.
-
-> 안전 게이트(fresh 리더, quasi-still, 관절별 gap ≤ 1.5 rad), zero-jump 재시딩, 소프트스타트 글라이드, 그리고 각 거부 메시지의 정확한 의미는 `ur_gello_bringup` 의 **README "Pause / Resume (scene reset with both hands free)"** 절과 `docs/ros2/GELLO_UR7E_ROS2_BRINGUP.md` §6 에 정리되어 있습니다. Teleop 바는 그 브릿지 서비스들의 GUI 프런트엔드일 뿐입니다.
-
-### 4-2. Task recorder GUI (`task_recorder_gui`) — GO HOME 버튼이 있는 태스크 전용 레코더
-
-**녹화 동작은 `gello_recorder_gui` 와 100% 같습니다.** 같은 `take_<NN>_<YYYYmmdd_HHMMSS>/` 폴더, 같은 `vectors.h5` 9개 테이블, 같은 `cam1.mp4` / `cam2.mp4`, 같은 카메라 warm-up 게이팅, 같은 Teleop 바 — 위 4·4-1 절과 아래 Output Layout 절이 그대로 적용됩니다. 환경변수도 **완전히 동일**합니다 (`CAM1_SERIAL` / `CAM2_SERIAL` / `COLOR_PROFILE` / `CAMERA_WARMUP_S` / `RECORDER_OUTPUT_ROOT`). 이 GUI 는 그 위에 **버튼 하나**를 더합니다.
-
-**왜 필요한가:** 한 태스크의 모든 take 가 **같은 HOME 자세에서 시작**해야 하기 때문입니다. 여기서 HOME 은 HIL-SERL 이 매 episode 마다 복귀하는 **RESET 자세**(`serl_ur_infra/ur_experiments/cube_in_cup.py` 의 `RESET_JOINTS`, cube_in_cup 태스크 기준)와 같은 관절값입니다. 사람이 GELLO 로 매번 눈대중으로 맞추면 take 마다 시작 분포가 흩어지고, 그 데이터로 학습한 정책은 실제 세션의 RESET 자세에서 시작하지 않습니다.
-
-```bash
-# 터미널 1: EEF 텔레옵
-cd /home/junhyeong/gello_software_jazzy/ros2_ur_ws
-HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef
-
-# 터미널 2: EEF 조작 GUI (ENGAGE/DISENGAGE)
-./run_eef_gui.sh
-
-# 터미널 3: 이 레코더
-./run_task_recorder.sh
-```
-
-**GO HOME 버튼이 하는 일 (순서대로):**
-
-1. **텔레옵 일시정지** — 팔·그리퍼 두 브릿지의 pause(무조건 Trigger)를 호출합니다. 트래젝토리로 팔을 옮기는 동안 리더를 쫓는 것이 하나도 없어야 하기 때문입니다.
-2. **컨트롤러 strict 전환** — `forward_position_controller` → `scaled_joint_trajectory_controller`.
-3. **HOME 으로 이동** — `FollowJointTrajectory` 포인트 **1개**. 소요시간은 **거리 비례**입니다: 관절별 gap 의 최댓값 ÷ **0.8 rad/s**, **2–10 초로 클램프**. 짧은 복귀는 빠르고 먼 복귀도 과속하지 않습니다. (HIL 쪽 `run_hil_preposition.sh` 의 **고정 8초**보다 대부분 빠릅니다 — 같은 자세로 가지만 소요시간 모델이 다릅니다.)
-4. **그리퍼 열기** — `/robotiq_gripper/command_percent` 에 `0.0`(Float32)을 발행하고 `/robotiq_gripper/position_percent` 가 **≤ 0.15** 로 떨어지는지 확인합니다. 모든 take 가 열린 그리퍼에서 시작하도록.
-5. **컨트롤러 복귀** — 다시 `forward_position_controller`.
-
-**끝난 뒤 브릿지는 PAUSED 로 남습니다 — 의도된 동작입니다.** 이동 직후에 팔이 리더를 다시 쫓기 시작하면, 오퍼레이터가 GELLO 를 놓아둔 자리로 방금 맞춘 HOME 자세가 즉시 무너집니다. 재개는 **터미널 2 의 EEF GUI `ENGAGE`** 로 합니다 (ENGAGE 가 `eef_resume` → `pos_scale` 커밋 → `eef_engage` 를 자동으로 연결합니다).
-
-> ⚠️ **그리퍼를 재개하기 전에 GELLO 방아쇠를 연 채로 잡고 있으세요.** 그리퍼 브릿지의 resume 은 **살아 있는 GELLO 방아쇠 값**을 향해 ~2초간 램프합니다. 방아쇠를 쥔 채로 재개하면 방금 연 2F-85 가 그대로 다시 닫힙니다.
-
-**두 번 클릭 확인 (Resume Teleop 과 같은 방식).** 실 로봇을 움직이는 버튼이므로 첫 클릭은 **무장(arm)만** 합니다 — 버튼이 주황색 경고 문구로 바뀌고 **3초 안에** 다시 눌러야 실제 요청이 나갑니다. 시간이 지나면 원상복귀하고, 로봇은 움직이지 않습니다. 무장된 3초 동안에는 버튼이 **강제로 활성 상태로 유지**되어 확인 클릭이 5 Hz 새로고침에 먹히지 않습니다.
-
-**버튼이 비활성화되는 경우는 둘뿐입니다:** **녹화 중**(take 중간에 팔을 HOME 으로 끌고 가면 그 take 는 못 쓰게 됩니다)과 **이미 GO HOME 이 진행 중일 때.** 진행 중에는 반대로 **Start Recording 이 잠깁니다** — 이동 장면이 take 앞에 녹화되지 않도록.
-
-**상태 라벨**은 버튼 옆에서 진행 단계를 그대로 보여줍니다: `IDLE` · `PAUSING` · `SWITCHING_TO_JTC` · `MOVING` · `OPENING_GRIPPER` · `RESTORING_FPC` · `DONE` · `FAILED`. 진행 중은 주황, `DONE` 은 초록, `FAILED` 는 빨강이며 실패 사유 메시지가 함께 표시됩니다.
-
-**그리퍼 확인 실패는 경고로만 처리합니다.** `position_percent` 가 제한시간 안에 `≤ 0.15` 로 안 떨어져도 시퀀스는 **실패로 끝나지 않고** 컨트롤러 복귀까지 정상 진행합니다. 그리퍼 피드백 토픽이 없거나 느린 경우가 있고, 그것 때문에 이미 HOME 에 도착한 팔을 `FAILED` 로 남길 이유가 없기 때문입니다. **대신 그리퍼가 실제로 열렸는지는 눈으로 확인하세요** — 경고는 상태 라벨/상태바에만 남습니다.
-
-> ⚠️ **HOME 관절값은 `cube_in_cup.py` 의 `RESET_JOINTS` 를 손으로 복사한 사본입니다.**
-> 이 패키지는 `ur_gello_bringup` 과도, `serl_ur_infra` 와도 의존성이 없도록 일부러 분리돼
-> 있어서 (README 맨 위 참조) 그 값을 import 하지 않습니다. **`RESET_JOINTS` 가 바뀌면 이쪽도
-> 같이 바꿔야 하며, 안 바꾸면 조용히 어긋납니다** — 아무 에러도 나지 않고 take 들만 HIL
-> 세션의 RESET 자세와 다른 곳에서 시작하게 됩니다. 두 값이 같은지는 눈으로 대조하는 것이
-> 유일한 방법입니다.
-
----
-
-## 5. Output Layout — 세션/테이크 폴더 안에 생기는 것
+## 출력 형식
 
 ```
-session_<YYYYmmdd_HHMMSS>/       (GUI는 take_<NN>_<YYYYmmdd_HHMMSS>/)
-├── vectors.h5        # 모든 벡터 신호 테이블 (HDF5, 아래 9개 테이블)
-├── cam1.mp4          # RealSense #1 컬러 영상 (CAMS/카메라 사용 시)
-├── cam2.mp4          # RealSense #2 컬러 영상
-├── depth.h5          # (depth 기록을 켠 경우에만) 두 카메라의 depth PNG — 아래 5-1 절
-└── metadata.json     # 파라미터, 시작 시각, 종료 시 토픽별 메시지 카운트
+ros2_ur_ws/gello_logs/                        # GUI는 RECORDER_OUTPUT_ROOT 로 변경 가능
+├── take_<NN>_<YYYYmmdd_HHMMSS>[_<tag>...]/   # GUI take (NN은 GUI를 켤 때마다 01부터)
+└── session_<YYYYmmdd_HHMMSS>/                # 헤드리스 세션
+    ├── vectors.h5      # 벡터 신호 테이블 9개
+    ├── cam1.mp4        # 컬러 영상 (cam1 = 장면 카메라)
+    ├── cam2.mp4        # 컬러 영상 (cam2 = 손목 카메라)
+    ├── depth.h5        # ENABLE_DEPTH=1 일 때만
+    └── metadata.json   # 헤드리스 전용
 ```
 
-`vectors.h5` 안의 9개 테이블:
+### `vectors.h5`
 
-| 테이블 | 내용 |
-|---|---|
-| `synchronized` | `sample_rate_hz`(기본 100Hz)로 시간 정렬된 **와이드 메인 분석 테이블** — 매 순간 모든 신호의 최신값 |
-| `gello_joint_states` | GELLO 관절 위치 + 유한차분 속도 (native rate) |
-| `ur_joint_states` | UR7e 실제 관절 position / velocity / effort |
-| `command` | 브리지가 UR 로 내보낸 명령 |
-| `gripper` | GELLO 그리퍼 width + Robotiq 명령/실제 퍼센트 |
-| `wrench` | TCP 힘/토크 (fx fy fz tx ty tz) |
-| `tcp_pose` | TCP Cartesian pose (x y z qx qy qz qw) |
-| `cam1_frames` | cam1 프레임별 인덱스↔캡처 타임스탬프 매핑 |
-| `cam2_frames` | cam2 프레임별 인덱스↔캡처 타임스탬프 매핑 |
+테이블마다 HDF5 **그룹 하나**, 그 안에 **컬럼마다 float64 1-D 데이터셋 하나**가
+있습니다. 컬럼 순서는 그룹 속성 `columns`(JSON 리스트)에 있습니다. 발행되지 않은
+토픽은 에러 없이 빈 테이블/NaN으로 남습니다.
 
-#### `stamp_s` 컬럼 (2026-09-14 추가)
+| 그룹 | 컬럼 | 출처 |
+| --- | --- | --- |
+| `gello_joint_states` | `t_rel_s q1..q6 qd1..qd6 stamp_s` | `/gello/joint_states` (rad, rad/s) |
+| `ur_joint_states` | `t_rel_s q1..q6 qd1..qd6 eff1..eff6 stamp_s` | `/joint_states`, UR 관절 순서로 재정렬 |
+| `command` | `t_rel_s cmd1..cmd6` | `/forward_position_controller/commands` (rad) |
+| `gripper` | `t_rel_s gello_grip grip_cmd grip_pos` | GELLO 방아쇠 · `/robotiq_gripper/command_percent` · `/robotiq_gripper/position_percent` |
+| `wrench` | `t_rel_s fx fy fz tx ty tz stamp_s` | `/force_torque_sensor_broadcaster/wrench` (N, N·m) |
+| `tcp_pose` | `t_rel_s x y z qx qy qz qw stamp_s` | `/tcp_pose_broadcaster/pose` (m, 쿼터니언) |
+| `cam1_frames`, `cam2_frames` | `t_rel_s frame_idx stamp_s` | MP4 프레임 번호 ↔ 시각 (행 수 = MP4 프레임 수) |
+| `synchronized` | `t_rel_s t_wall gello_q1..6 gello_qd1..6 gello_grip cmd1..6 ur_q1..6 ur_qd1..6 ur_eff1..6 grip_cmd grip_pos fx..tz tcp_x..tcp_qw cam1_frame_idx cam2_frame_idx` | *헤드리스 전용*: `RATE`(기본 100 Hz)마다 모든 최신값을 찍은 와이드 테이블. GUI take에서는 비어 있음 |
 
-**헤더가 있는 메시지에서 온 테이블에는 마지막 컬럼으로 `stamp_s` 가 붙습니다** — `msg.header.stamp` 을 float64 초로 담고, 스탬프가 없으면 `NaN` 입니다. 기존 컬럼은 **이름도 순서도 그대로**이고 `stamp_s` 는 **뒤에 덧붙기만** 하므로 예전에 쓴 리더는 그대로 동작합니다.
+**시각 컬럼의 의미**
 
-| 테이블 | `stamp_s` | 왜 |
-|---|---|---|
-| `gello_joint_states` · `ur_joint_states` | ✅ | `sensor_msgs/JointState` |
-| `tcp_pose` | ✅ | `geometry_msgs/PoseStamped` |
-| `wrench` | ✅ | `geometry_msgs/WrenchStamped` |
-| `cam1_frames` · `cam2_frames` | ✅ | 컬러 `sensor_msgs/CompressedImage` |
-| `command` | ❌ | `std_msgs/Float64MultiArray` — **헤더가 없다** |
-| `gripper` | ❌ | `std_msgs/Float32` ×3 — **헤더가 없다** |
-| `synchronized` | ❌ | 메시지가 아니라 로컬에서 샘플링한 와이드 행 |
+- `t_rel_s` — 이 take/세션을 연 순간부터의 초. 메시지가 **도착해 콜백이 실행된**
+  시각입니다(카메라 프레임은 도착 시각을 쓰기 큐에 함께 실어 보내므로 쓰기 지연이
+  섞이지 않음).
+- `stamp_s` — 메시지 `header.stamp`(epoch 초). 드라이버가 값을 **캡처한** 시각이며
+  없으면 NaN. 테이블끼리 맞출 때는 `stamp_s`가 더 정확합니다. `command`/`gripper`는
+  메시지 타입에 헤더가 없어 이 컬럼이 없습니다.
+- `t_wall` (`synchronized`만) — 그 행을 샘플링한 `time.time()`.
 
-`t_rel_s` 는 **콜백이 실행된(=도착한) 시각**이고 `stamp_s` 는 **드라이버가 그 값을 캡처한 시각**입니다. 둘의 차이 `(t0 + t_rel_s) - stamp_s` 가 그 행이 기록될 때 얼마나 낡아 있었는지이고(`t0` 는 `metadata.json` 의 `start_wall`), 이 한 컬럼이 없어서 2026-09-14 carrot_in_pot 54개 take 는 `ur_joint_states` 가 **0.900 초 낡은 채** 기록된 것을 파일만 봐서는 알 수 없었습니다 — 아래 5-2 절.
+**그리퍼 규약:** `gello_grip` / `grip_cmd` / `grip_pos` 모두 **0.0 = 열림, 1.0 = 닫힘**.
+`grip_pos`는 측정값이라 물체를 쥐면 1.0까지 가지 않습니다(잡음/헛잡음을 구분하는 정보).
 
-헤더가 없는 세 테이블은 `t_rel_s` 만이 유일한 시각이고 그래서 고칠 방법도 없습니다. 그것이 고속 토픽의 구독 큐 깊이를 5로 줄인 이유입니다(`gello_recorder/spin_health.py`).
+### `cam1.mp4`, `cam2.mp4`
 
-**영상 프레임 ↔ 신호 행 교차 참조:** `synchronized` 테이블의 `cam1_frame_idx` / `cam2_frame_idx` 컬럼이 그 시점에 해당하는 MP4 프레임 번호입니다. HDF5 는 `pandas.read_hdf("vectors.h5", key="synchronized")` 로 열거나, 순수 `h5py` 로 직접 읽으면 됩니다.
+RealSense `.../color/image_raw/compressed`(JPEG)를 디코드해 `COLOR_PROFILE`
+(기본 1280x720, 30 fps)로 다시 인코딩합니다. `camN_frames.frame_idx`가 MP4 프레임
+번호입니다. 워밍업 전 프레임은 기록되지 않습니다.
 
-> 신호를 발행하지 않은 토픽(예: 특정 브로드캐스터 미로드)은 에러 없이 **빈 컬럼(NaN)**으로 남습니다. 어떤 토픽이 실제로 들어왔는지는 `metadata.json` 의 `message_counts` 로 확인하세요. (`gripper`/`synchronized` 는 그 자체로는 카운트되지 않고, `gripper` 테이블에 쓰는 세 토픽 각각이 `gello_grip`/`grip_cmd`/`grip_pos` 키로 개별 카운트됩니다 — 아래 아키텍처 섹션 참고.)
-
-### 5-1. `depth.h5` — RealSense depth (**기본 꺼짐(RGB만), `ENABLE_DEPTH=1` 로 켬**)
-
-```bash
-ENABLE_DEPTH=1 ros2 run gello_recorder gello_recorder_gui     # GUI
-CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh                     # 헤드리스
-```
-
-depth 기록은 **opt-in 이고 기본은 꺼짐**입니다. 기본 캡처는 RGB 만입니다. 끄고 켜는 스위치는 환경변수 `ENABLE_DEPTH` 하나뿐이고 GUI 토글은 없습니다(값에 오타가 나면 **꺼짐**으로 떨어집니다 — opt-in 의 안전한 방향).
-
-🪤 **기본 켜짐이었던 적이 딱 하루 있고(2026-09-14), 그날 54개 take 가 타임스탬프를 잃었습니다.** depth 는 카메라당 30 Hz 구독 2개와 약 6 MB/s HDF5 쓰기를 **로봇 토픽을 처리하는 바로 그 rclpy spin 스레드**에 얹었고, executor 의 라운드 주파수가 ~100 Hz → 60–69 Hz 로 내려가면서 그보다 빨리 발행되는 토픽은 전부 **가득 찬 큐에서 가장 오래된 샘플**을 읽게 됐습니다 → `ur_joint_states` **0.900 초**, `tcp_pose`/`wrench` 약 **0.45 초** 지연. 원인과 수정은 아래 5-2 절. **결함은 고쳤지만 비용은 그대로**이므로 depth 는 이제 세션마다 명시적으로 요청하는 것이 됐습니다.
-
-depth 를 켜면 기동 시 한 줄이 찍힙니다:
+### `depth.h5` (선택, `ENABLE_DEPTH=1`)
 
 ```
-depth ON: ~6 MB/s disk, +2 subscriptions/cam, recorder CPU +~35 %; watch ros_lag_s
+/<cam>/   (cam1, cam2)   attrs: encoding, unit, depth_scale_m, width, height, aligned_to_color, ...
+    png        vlen uint8 (N,)   # 드라이버가 만든 16UC1 PNG(mm)를 그대로 저장
+    t_rel_s    float64    (N,)   # vectors.h5 와 같은 시각 원점
+    frame_idx  int64      (N,)
+    stamp_s    float64    (N,)
+/<cam>/camera_info/                attrs: width, height, distortion_model, frame_id, D, K, R, P
+/<cam>/extrinsics_depth_to_color/  attrs: rotation(9, column-major), translation(3, m)
 ```
 
-카메라 자체는 문제가 아니었습니다 — 셀프파워 Genesys 허브에서 2대 color+depth 동시 스트리밍은 실측 안정(color 30 Hz, compressedDepth ~29 Hz, 노드당 CPU ~9 %)입니다. `ALIGN_DEPTH=1` 은 color 픽셀 정렬 depth 를 대신 기록하지만 노드당 CPU 49 %·25 Hz 로 떨어지는 것이 실측이라 별도로 기본 꺼짐입니다.
+디코드는 `gello_recorder.depth_writer.read_depth_frame` / `iter_depth_frames`
+(uint16 mm 배열)를 씁니다. 두 대 합쳐 디스크 약 6 MB/s에 기록기 CPU도 늘기 때문에
+**기본은 꺼짐**입니다. `ALIGN_DEPTH=1`은 컬러에 정렬된 depth를 기록하지만 카메라 노드
+CPU가 크게 늘고 두 스트림이 ~25 Hz로 떨어지므로, 보통은 기록된 내·외부 파라미터로
+오프라인 정렬합니다.
 
-켜고 끄는 것과 무관하게 위 `vectors.h5` 9개 테이블·`cam1.mp4`/`cam2.mp4` 는 **동일**합니다 — depth 는 별도 파일 `depth.h5` 에만 들어가고 `vectors.h5` 에는 테이블도 컬럼도 추가되지 않습니다(`metadata.json` 에는 `record_depth`/`depth_aligned_to_color` 키가 **항상** 적히므로, RGB-only take 도 "depth 가 꺼져 있었다"를 스스로 증언합니다). 꺼져 있으면 `depth.h5` 자체가 생기지 않습니다. 실측 용량은 848x480 **한 대** 기준 3.08 MB/s(2026-09-14 실측, 28.4 s / 87.4 MB) → 두 대 약 **6 MB/s (분당 ~370 MB)** 입니다.
+### `metadata.json` (헤드리스 전용)
 
-**왜 MP4 가 아니라 HDF5 인가:** depth 는 `uint16` 밀리미터(`depth_scale` 0.001 m) 단일 채널이라 MP4 로는 무손실 저장이 안 되고, 기록 중 재인코딩은 컬러 두 스트림이 이미 다투는 CPU 를 또 씁니다. 그래서 카메라 드라이버가 이미 만들어 보낸 PNG 를 **그대로**(재인코딩 없이) 저장합니다. 소스 토픽은 `/<cam>/<cam>/depth/image_rect_raw/compressedDepth` (`sensor_msgs/CompressedImage`, `format == '16UC1; compressedDepth'`, 실측 ~29 Hz, 848x480 에서 메시지당 80–130 KB; `align_depth.enable:=true` 면 `/<cam>/<cam>/aligned_depth_to_color/image_raw/compressedDepth`, 1280x720 ~200 KB). 페이로드의 앞 12바이트는 `compressed_depth_image_transport` 의 ConfigHeader(`int32` 포맷 enum + `float32` 2개, 16UC1 에서는 무의미)이고 그 뒤가 완전한 PNG 파일입니다 — 저장 시 이 12바이트만 떼어냅니다(`header_bytes_stripped=12`).
+`start_wall`(ISO 시각, `t_rel_s`의 원점), `sample_rate_hz`, `record_depth`,
+`duration_s`, `message_counts`(토픽별 수신 수), `finalized`, 그리고 기록 건강도
+`ros_lag_s_max` · `spin_starvation_suspected` · `dropped_frames`. GUI는 같은 요약을
+take 종료 시 상태줄과 로그로 보여 줍니다.
 
-```
-depth.h5
-├── cam1/                          attrs: encoding='16UC1', unit='mm', depth_scale_m=0.001,
-│   │                                     container='png', header_bytes_stripped=12,
-│   │                                     source_topic, aligned_to_color, width, height
-│   ├── png          vlen uint8 (N,)   PNG 바이트 그대로 (프레임당 한 셀)
-│   ├── t_rel_s      float64    (N,)   세션 상대 시각 — vectors.h5 와 같은 원점
-│   ├── frame_idx    int64      (N,)   0부터 시작하는 depth 프레임 번호 (== 행 번호)
-│   ├── stamp_s      float64    (N,)   ROS header stamp (초), 모르면 NaN
-│   ├── camera_info/               attrs: width, height, distortion_model, frame_id, D, K, R, P
-│   │                                     (sensor_msgs/CameraInfo, /<cam>/<cam>/depth/camera_info)
-│   └── extrinsics_depth_to_color/ attrs: rotation[9] (column-major, 발행값 그대로),
-│                                         translation[3] (m), layout='column_major'
-└── cam2/                          (동일)
-```
-
-`width`/`height` 는 첫 프레임의 PNG IHDR 에서 읽어 채웁니다(디코드 없음). `aligned_to_color=True` 면 PNG 가 **컬러 프레임 좌표**이고 `camera_info` 도 컬러 intrinsics 입니다. 손상된 페이로드(12바이트 뒤에 PNG 매직이 없음)는 `WARNING` 한 줄을 찍고 건너뛰며 `frame_idx` 도 올라가지 않습니다 — 컬러 프레임의 손상 JPEG 처리와 같은 규약입니다.
-
-**컬러 ↔ depth 정렬:** depth 프레임과 `cam1_frames`/`cam2_frames`/`synchronized` 는 **같은 `t_rel_s` 원점**(`RecordingSession.t()`)을 씁니다. 드라이버가 depth 와 컬러를 따로 발행하므로 프레임 수가 같지 않고 1:1 인덱스 대응도 없습니다 — `t_rel_s` 로 가장 가까운 프레임을 찾으세요(더 정밀하게는 `stamp_s` 로 드라이버 캡처 시각끼리 비교). `metadata.json` 의 `message_counts` 에는 `cam1_depth_frames` / `cam2_depth_frames` 키가 추가됩니다(depth 가 켜진 경우에만).
-
-**읽기(오프라인, `cv2` 필요):**
+### take 읽기 예
 
 ```python
-from gello_recorder.depth_writer import read_depth_frame, iter_depth_frames, depth_meta
-d = read_depth_frame("take_01_.../depth.h5", "cam1", 0)      # uint16 (H, W), mm
-for idx, t_rel_s, stamp_s, arr in iter_depth_frames("take_01_.../depth.h5", "cam2"):
-    ...
-depth_meta("take_01_.../depth.h5", "cam1")   # attrs + camera_info + extrinsics dict
+import json
+import h5py
+
+with h5py.File("take_01_20260101_120000/vectors.h5", "r") as f:
+    g = f["ur_joint_states"]
+    cols = json.loads(g.attrs["columns"])     # ['t_rel_s', 'q1', ..., 'stamp_s']
+    ur = {c: g[c][:] for c in cols}           # 컬럼 이름 -> numpy 배열
+    cam1_stamp = f["cam1_frames"]["stamp_s"][:]   # cam1.mp4 프레임 i 의 캡처 시각
+print(len(ur["q1"]), len(cam1_stamp))
 ```
 
-순수 `h5py` 로 직접 읽으려면 `cv2.imdecode(f["cam1"]["png"][i], cv2.IMREAD_UNCHANGED)` 입니다.
+## 환경변수
 
----
+| 이름 | 기본값 | 대상 | 의미 |
+| --- | --- | --- | --- |
+| `CAM1_SERIAL`, `CAM2_SERIAL` | `ros2_ur_ws/camera_serials.env` | 전부 | RealSense **device** serial (ASIC serial 아님) |
+| `GELLO_CAMERA_SERIALS_FILE` | — | 전부 | 위 기본값 파일 경로를 바꿈 |
+| `CAM1_NAME`, `CAM2_NAME` | `cam1`, `cam2` | 전부 | 카메라 namespace |
+| `COLOR_PROFILE` | `1280x720x30` | 전부 | 컬러 해상도·fps |
+| `ENABLE_DEPTH`, `ALIGN_DEPTH` | `0` | 전부 | depth 기록 / 노드 안 정렬 |
+| `CAMERA_WARMUP_S` | `4.0` | GUI | Start 허용 전 카메라 워밍업 |
+| `RECORDER_OUTPUT_ROOT` | `ros2_ur_ws/gello_logs` | GUI | take 저장 위치 |
+| `RECORDER_TAG_PRESETS` | `failed,review` | GUI | "Tag last take" 콤보 프리셋(쉼표 구분). 직접 입력도 됨 |
+| `GELLO_HOME_JOINTS` | 코드 기본값 | `home_move` | GO HOME 목표 관절각 6개(rad, 쉼표 구분) |
+| `CAMS`, `BAG`, `RATE` | off, off, `100` | 헤드리스 | 카메라 기록 / `ros2 bag record -a` 동시 기록 / `synchronized` 주기 |
+| `CAMERA_ALLOW_SERIAL_FALLBACK` | `0` | 헤드리스 | 설정한 serial 쌍이 없을 때 다른 쌍 허용(임시 리그용) |
 
-### 5-2. spin 스레드 굶음 감시 — `ros_lag_s` / `spin_starvation_suspected` (2026-09-14)
+헤드리스 노드의 ROS 파라미터(`session_dir`, `sample_rate_hz`, `record_depth`,
+`cam*_depth_topic` 등)는 `gello_ur_recorder_node.py` 모듈 docstring에 있습니다.
 
-**무엇이 깨졌었나.** 이 레코더의 모든 구독 콜백은 **하나의 rclpy spin 스레드**에서 돌고, 각 행의 `t_rel_s` 는 **그 콜백이 실행된 시각**입니다. `SingleThreadedExecutor` 는 한 라운드에 구독당 메시지 하나를 처리하므로 구독의 서비스 주파수 = 라운드 주파수이고, 그보다 빨리 발행되는 토픽은 KEEP_LAST 히스토리가 항상 가득 차서 **가장 오래된 샘플**을 받게 됩니다. 그 나이는 정확히
+**다른 리그에서:** `rs-enumerate-devices -s`의 "Serial Number"를
+`ros2_ur_ws/camera_serials.env`에 적거나 환경변수로 넘깁니다(cam1 = 장면, cam2 = 손목).
 
-```
-낡음 = QoS depth / 발행 주파수
-```
+## 문제 해결
 
-이고, 2026-09-14 carrot_in_pot 세션에서는 `/joint_states`(depth **100** @ ~100 Hz) = **0.900 초**, `tcp_pose`/`wrench`(depth **50** @ ~100 Hz) = 약 **0.45 초**였습니다. 파형은 멀쩡하고 파일도 정상이며 **데이터에는 아무 표시도 없었습니다** — 유일한 지문은 서로 다른 발행 주파수를 가진 네 테이블의 기록 주파수가 소수점 다섯 자리까지 같아진 것이었습니다(take_01: 59.79218 / 59.79089 / 59.79282 / 59.79153 Hz).
+| 증상 | 원인 / 조치 |
+| --- | --- |
+| 카메라 창이 "no frames", Start가 계속 Warming up | serial이 연결된 장치와 다름. `rs-enumerate-devices -s`로 확인 후 `CAM1_SERIAL`/`CAM2_SERIAL` 지정. journalctl에 보이는 ASIC serial은 매칭되지 않음 |
+| 헤드리스가 `expected RealSense pair is not fully connected`로 카메라 실행 전에 종료 | 의도된 동작. 두 카메라를 USB 3에 다시 꽂거나 serial을 지정 |
+| 헤드리스가 `image_transport compressed publisher plugin is unavailable` | `ros-jazzy-compressed-image-transport` 설치 |
+| 상태 패널의 `ros lag`가 빨간색, take 요약에 `spin_starvation_suspected` | 기록기 spin 스레드가 밀려 로봇 행이 늦게 기록됨. depth를 끄거나 부하를 줄이고 다시 기록 |
+| take 요약에 `dropped_frames` | 디스크/CPU가 쓰기를 못 따라감. 그 take는 그만큼 프레임이 빠져 있음 |
+| 어떤 테이블이 비어 있음 | 해당 토픽이 발행되지 않음(sim, 그리퍼 없는 브링업 등). 헤드리스는 `message_counts`로 확인 |
 
-**무엇을 고쳤나** (전부 `gello_recorder/spin_health.py`):
+## 테스트
 
-| | 이전 | 이후 |
-|---|---|---|
-| `/joint_states`·`tcp_pose`·`wrench`·`commands` QoS depth | 100 / 50 | **5** (`QOS_DEPTH_ROBOT_STATE`) — 최악 나이 100 Hz 에서 50 ms, 500 Hz 에서 10 ms |
-| 컬러 JPEG 디코드 + MP4 인코드 (실측 9.3 + 6.9 ms/프레임) | spin 스레드 | **백그라운드 writer 스레드** (`RecordingSession.submit_cam_frame`) |
-| depth PNG HDF5 append | spin 스레드 | 같은 writer 스레드 (`submit_cam_depth_frame`) |
-| GUI 프리뷰 디코드 (9.3 ms/프레임) | spin 스레드 | **latest-wins 디코더 스레드** (`PreviewDecoder`) |
-| 헤더 스탬프 | 없음 | 모든 stamped 테이블에 `stamp_s` (위 5절) |
-
-큐를 얕게 하면 **행이 빠집니다** — 그리고 그게 맞습니다. 이 레코더는 도착한 것을 그대로 쓰므로 깊은 큐는 "행이 빠짐"을 "행이 낡음"으로 바꿀 뿐이고, **빠지는 편이 낡는 편보다 낫습니다**(빠진 것은 보이고, 낡은 것은 안 보입니다).
-
-**감시 (두 겹, 서로 독립):**
-
-1. **실시간** — 노드 상태에 `ros_lag_s` = (ROS now) − 최신 `/joint_states` 헤더 스탬프. GUI 상태 패널에 `ros lag: 0.009s` 처럼 상시 표시되고, `ROS_LAG_WARN_S`(0.15 s)를 넘으면 빨갛게 바뀌며 노드가 5초에 한 번 WARN 로그를 찍습니다.
-2. **take 종료 시** — `command`/`ur_joint_states`/`tcp_pose`/`wrench` 의 **기록** 주파수를 비교해, 서로 0.5 % 이내로 같아졌는데 그 값이 90 Hz 미만이면(= controller_manager 발행률보다 느린 공통 천장에 넷 다 걸린 것) `spin_starvation_suspected: true` 와 함께 `native tables converged at X Hz — spin thread starved; robot rows may be stale` 를 WARN 으로 찍습니다.
-
-`metadata.json`(헤드리스) / GUI 정지 요약에 기록되는 키:
-
-| 키 | 뜻 |
-|---|---|
-| `record_depth` | 이 take 가 depth 를 기록했는가 (provenance) |
-| `ros_lag_s_max` | take 동안 관측된 최대 `ros_lag_s` (초) |
-| `ros_lag_warn_s` | 그때 쓰인 경고 임계값 |
-| `native_rates_hz` | 네 native 테이블의 기록 주파수 |
-| `spin_starvation_suspected` / `spin_starvation_reason` | 굶음 판정과 그 근거 문장 |
-| `dropped_frames` | writer 큐가 가득 차서 버린 프레임 수 (스트림별 + `total`). **정상값은 0** |
-
-**실측 (2026-09-14, laptop3, 카메라 1대 + 합성 퍼블리셔 `/joint_states` 500 Hz · tcp/wrench/commands 각 100 Hz, 28.5 s):**
-
-| | RGB만 (기본) | `ENABLE_DEPTH=1` |
-|---|---|---|
-| 레코더 프로세스 CPU | **131.6 %** | **135.0 %** (카메라 1대분) |
-| 기록 주파수 `command`/`tcp_pose`/`wrench`/`ur_joint_states` | 94.6 / 94.5 / 94.5 / **184.0** Hz | 86.4 / 86.4 / 86.3 / **138.9** Hz |
-| `stamp_s` 나이 중앙값 ur / tcp / wrench | **9.3 / 8.0 / 7.2 ms** | **25.6 / 12.9 / 12.4 ms** |
-| 같은 값 최대 | 21.4 / 54.0 / 50.7 ms | 615.4 / 54.3 / 59.3 ms |
-| `ros_lag_s_max` | 0.021 s | 0.613 s |
-| `dropped_frames` | **0** | **0** |
-| `spin_starvation_suspected` | false | false |
-
-네 테이블의 주파수가 **더 이상 수렴하지 않는다**는 것이 핵심입니다(굶었다면 넷이 같아집니다). 결함 당시 값과 비교하면 `ur_joint_states` 나이가 **900 ms → 9.3 ms**(RGB) / **25.6 ms**(depth) 입니다.
-
----
-
-## 6. 공개 — Hugging Face 업로드 (raw + LeRobot, depth 포함)
-
-take 폴더를 하드링크로 스테이징 → `scripts/dataset/make_carrot_raw_stats.py`(raw 통계) → `convert_carrot_to_lerobot.py`(depth를 lerobot 네이티브 depth video로, 선형 12-bit 0~10 m) → `validate_carrot_conversion.py`(독립 검증) → `hf upload` 2회 → `v3.0` 태그. 절차·함정 전체는 [`docs/ros2/GELLO_UR7E_RECORDING.md`](../../../docs/ros2/GELLO_UR7E_RECORDING.md) 「허깅페이스 업로드」절. 2026-09-14 릴리스: [`Bigenlight/carrot_in_pot_raw`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_raw) · [`Bigenlight/carrot_in_pot_lerobot_v3`](https://huggingface.co/datasets/Bigenlight/carrot_in_pot_lerobot_v3).
-
-## Architecture & Code Walkthrough
-
-이 섹션은 `gello_recorder` 패키지의 코드 구조와 각 파일이 서로 어떻게 맞물리는지 설명한다. 나중에 이 코드를 수정할 엔지니어(또는 Claude Code 세션)를 위한 것이다. 모든 식별자(메서드명, 토픽명, 파일명)는 소스에서 그대로 가져왔다.
-
-### 1. Module map (의존성 순서)
-
-- **`hdf5_writer.py`** — 성장 가능한(growable) HDF5 테이블 writer. 하나의 "논리 테이블"이 하나의 HDF5 group이 되고, 각 컬럼은 자기 자신만의 resizable 1-D `float64` dataset이 되어 한 번에 한 행(row)씩 append된다. 예전 CSV 패턴(`_open_csv(name, header)` + `writer.writerow([...])`)을 거의 1:1로 대체한다. `h5py` + `numpy`에만 의존하며 **ROS/Qt import가 전혀 없다**. 핵심 클래스는 `Hdf5TableWriter`, 편의 생성자는 `open_h5_table(h5file, table_name, header)`. `python3 hdf5_writer.py`로 self-test 실행 가능.
-
-- **`video_writer.py`** — 한 대의 카메라가 발행하는 `sensor_msgs/msg/CompressedImage`(JPEG 바이트)를 하나의 성장하는 MP4 파일로 쓰는 `Mp4FrameWriter`. `cv2` + `numpy`에만 의존, ROS import 없음. 카메라 해상도를 미리 알 필요 없이 첫 프레임을 디코드할 때 `(height, width)`를 자동 감지해 `cv2.VideoWriter`를 lazy하게 연다. 프레임 rate 매칭/중복/드롭은 하지 않고 decode → lazy open → write → frame index 반환만 한다. `python3 video_writer.py`로 self-test 실행 가능.
-
-- **`depth_writer.py`** — RealSense `compressedDepth`(12바이트 ConfigHeader + PNG) 페이로드를 `depth.h5` 에 쓰는 `DepthH5Writer`. 쓰기 경로는 `h5py` + `numpy` 에만 의존하며 **PNG 를 디코드하지 않는다**(헤더만 떼고 vlen `uint8` 셀에 그대로 append, width/height 는 IHDR 바이트에서 읽음). `cv2` 는 오프라인 리더 헬퍼(`read_depth_frame` / `iter_depth_frames` / `depth_meta`)와 self-test 안에서만 lazy import 한다. 순수 함수 `split_compressed_depth(data)` 가 헤더 분리 + PNG 매직 검사를 담당한다. 손상 페이로드는 `Mp4FrameWriter` 와 같은 규약(`WARNING` 한 줄, `-1` 반환, 인덱스 미증가). `python3 depth_writer.py` self-test 있음. 파일 레이아웃은 위 5-1 절.
-
-- **`spin_health.py`** — 단일 rclpy spin 스레드를 굶기지 않기 위한 것 전부. **ROS/Qt import 없음.** 구독 큐 깊이 상수(`QOS_DEPTH_ROBOT_STATE` = 5 등, 근거 주석 포함), 프레임 I/O 를 spin 스레드 밖으로 빼는 `FrameWriteQueue`(데몬 1개, `put_nowait`, 드롭 카운트, `drain`), GUI 프리뷰용 latest-wins `PreviewDecoder`, 그리고 회귀 알람 `detect_spin_starvation` / `native_rate_table` / `stop_health_suffix` + `DEPTH_ON_BANNER`. **모듈 docstring 에 2026-09-14 결함의 전체 진단이 들어 있다.** `python3 spin_health.py` self-test 있음. → 위 5-2 절
-
-- **`recording_session.py`** — 위 순수 모듈들을 조합하는 파일-I/O 코어 `RecordingSession`. "한 번의 녹화(session/take) 분량의 파일 전체"를 소유한다: 9개 테이블이 든 `vectors.h5` + `cam1.mp4` + `cam2.mp4` (+ `record_depth=True` 일 때만 `depth.h5`). **ROS/Qt import 는 여전히 없다.** thread 는 2026-09-14 부터 있다 — 벡터 행은 호출자 스레드에서 동기적으로 쓰고(값싸다), 카메라/depth 프레임은 `submit_cam_frame` / `submit_cam_depth_frame` 으로 **백그라운드 writer 하나**에 넘긴다(`t_rel_s` 는 submit 시점에 찍어서 들려 보낸다). `close()` 는 파일을 마무리하기 **전에** 큐를 비우므로 "제출한 프레임 수 == MP4 프레임 수 == 테이블 행 수" 가 정확히 성립한다. `python3 recording_session.py` self-test 있음.
-
-- **`gello_ur_recorder_node.py`** & **`gello_gui_node.py`** — 두 개의 rclpy `Node` 진입점. 둘 다 `RecordingSession`을 실제 ROS 구독에 배선한다. 전자(`GelloUrRecorder`)는 헤드리스로 launch부터 Ctrl-C까지 무조건 녹화. 후자(`GelloRecorderGuiNode`)는 구독은 항상 켜두되 Start/Stop으로 디스크 쓰기를 게이팅(멀티 take).
-
-- **`gello_recorder_gui.py`** — 오퍼레이터용 PyQt5 프런트엔드. RealSense 카메라 노드 2개를 subprocess로 띄우고, `GelloRecorderGuiNode`를 백그라운드 스레드에서 spin하며, Qt 이벤트 루프로 프리뷰/상태/버튼을 그린다.
-
-**`setup.py`의 console_scripts 진입점** 2개:
-
-```
-gello_ur_recorder  = gello_recorder.gello_ur_recorder_node:main   # 헤드리스
-gello_recorder_gui = gello_recorder.gello_recorder_gui:main       # GUI
+```bash
+cd ros2_ur_ws && source /opt/ros/jazzy/setup.bash && source install/setup.bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest -q src/gello_recorder/test
 ```
 
-### 2. RecordingSession (`recording_session.py`) — 공유 파일-I/O 코어
-
-`RecordingSession`은 녹화 1회(session 또는 take)당 한 번 `RecordingSession(session_dir, camera_fps, record_depth=False)`로 생성된다. 생성자는 `session_dir`을 만들고, `session_dir/vectors.h5`를 `'w'` 모드로 연 뒤 `open_h5_table`로 **9개 테이블 전부**를 생성하고, `session_dir/cam1.mp4` / `session_dir/cam2.mp4`에 대해 `Mp4FrameWriter` 두 개를 만든다. `record_depth=True` 면 추가로 `session_dir/depth.h5` 를 `DepthH5Writer`(그룹 `cam1`/`cam2`)로 연다; 기본값 `False` 에서는 `self._depth = None` 이고 depth 파일은 생기지 않는다(`record_depth` 프로퍼티로 확인). 이 세션 자신의 상대 시각 원점 `self.t0 = time.time()`을 기록하며, `t()`는 이 생성 시점 기준 상대 시각이다.
-
-**9개 테이블의 정확한 헤더(컬럼명 그대로):**
-
-1. `synchronized`: `["t_rel_s", "t_wall"]` + `gello_q1..gello_q6` + `gello_qd1..gello_qd6` + `["gello_grip"]` + `cmd1..cmd6` + `ur_q1..ur_q6` + `ur_qd1..ur_qd6` + `ur_eff1..ur_eff6` + `["grip_cmd", "grip_pos"]` + `["fx", "fy", "fz", "tx", "ty", "tz"]` + `["tcp_x", "tcp_y", "tcp_z", "tcp_qx", "tcp_qy", "tcp_qz", "tcp_qw"]` + `["cam1_frame_idx", "cam2_frame_idx"]`
-2. `gello_joint_states`: `["t_rel_s"]` + `q1..q6` + `qd1..qd6`
-3. `ur_joint_states`: `["t_rel_s"]` + `q1..q6` + `qd1..qd6` + `eff1..eff6`
-4. `command`: `["t_rel_s"]` + `cmd1..cmd6`
-5. `gripper`: `["t_rel_s", "gello_grip", "grip_cmd", "grip_pos"]`
-6. `wrench`: `["t_rel_s", "fx", "fy", "fz", "tx", "ty", "tz"]`
-7. `tcp_pose`: `["t_rel_s", "x", "y", "z", "qx", "qy", "qz", "qw"]` (주의: `synchronized`의 `tcp_x..tcp_qw`와 이름이 다름 — 별개 네이밍)
-8. `cam1_frames`: `["t_rel_s", "frame_idx"]`
-9. `cam2_frames`: `["t_rel_s", "frame_idx"]`
-
-(컬럼 블록 크기는 `_N = 6` 상수로, UR 관절 6개에 맞춰져 있다.)
-
-**Public API 메서드 (각 행 레이아웃 / 정밀도):**
-
-- `t() -> float` — `time.time() - self.t0`, 이 세션 생성 이후 경과 초.
-- `bump(key)` — 공개 카운터 증가. 하나의 `write_*` 호출에 1:1 대응하지 않는 topic별 카운트를 위한 것(아래 counter-key 서브틀티 참조).
-- `write_gello(pos, qd)` — `gello_joint_states` 행 `[t()] + pos + qd`. `pos`는 raw float, `qd`는 `None` 또는 `f"{v:.5f}"`. `"gello_joint_states"` 카운터를 bump.
-- `write_gello_grip(gello_grip, grip_cmd, grip_pos)` — `gripper` 행 `[t(), gello_grip, grip_cmd, grip_pos]`, 각 값 `.4f` 또는 None. **어떤 카운터도 bump하지 않는다**(핵심, 아래 참조).
-- `write_cmd(cmd)` — `command` 행 `[t()] + cmd`(raw). `"command"` bump.
-- `write_ur(pos, vel, eff)` — `ur_joint_states` 행 `[t()] + pos + vel + eff`. pos/vel은 `.6f`, eff는 `.4f`, None은 NaN 통과. `"ur_joint_states"` bump.
-- `write_wrench(wrench6)` — `wrench` 행 `[t()] + wrench6`, 6개 float 각 `.5f`. `"wrench"` bump.
-- `write_tcp(tcp7)` — `tcp_pose` 행 `[t()] + tcp7`, 7개 float 각 `.6f`. `"tcp_pose"` bump.
-- `write_cam1_frame(jpeg_bytes) -> int` — `cam1.mp4`에 프레임 쓰고, 성공 시(`idx >= 0`)에만 `cam1_frames`에 `[t(), idx]` 추가 + `"cam1_frames"` bump. decode 실패 시 `-1` 반환, 로깅도 카운트도 없음. **warm-up 로직 없음** — skip 판단은 호출자 몫.
-- `write_cam2_frame(jpeg_bytes) -> int` — 카메라 2 / `cam2.mp4` / `cam2_frames`에 대해 동일.
-- `write_sample(gello_q, gello_qd, gello_grip, cmd, ur_q, ur_qd, ur_eff, grip_cmd, grip_pos, wrench, tcp, cam1_frame_idx, cam2_frame_idx)` — `synchronized` 행. 컬럼 0/1은 `t_rel_s`(`.4f`) / `t_wall`(`time.time()` `.4f`); 이후 gello_q `.6f`, gello_qd `.5f`, gello_grip `.4f`, cmd `.6f`, ur_q `.6f`, ur_qd `.6f`, ur_eff `.4f`, grip_cmd/grip_pos `.4f`, wrench `.5f`, tcp `.6f`; 마지막에 cam1/cam2 frame index를 **raw(int 또는 None)로** append. **어떤 카운터도 bump하지 않는다.**
-- **depth 메서드 (depth 가 꺼져 있으면 전부 no-op — `-1`/`None` 반환, 호출자는 분기할 필요 없음):**
-  - `write_cam1_depth_frame(data, stamp_s=nan) -> int` / `write_cam2_depth_frame(...)` — `CompressedImage.data` 를 **그대로**(12바이트 헤더 포함) 넘긴다. `t()` 를 찍고 `DepthH5Writer.write_compressed_depth` 에 위임, 성공(`idx >= 0`) 시에만 `"cam1_depth_frames"` / `"cam2_depth_frames"` bump. 손상 페이로드는 `-1`, 카운트 없음 — `write_cam1_frame` 과 같은 규약.
-  - `set_depth_source(cam_idx, topic, aligned_to_color)` / `set_depth_camera_info(cam_idx, **kw)` / `set_depth_extrinsics(cam_idx, rotation, translation)` — `cam_idx` 는 1 또는 2. 각각 `DepthH5Writer.set_source` / `set_camera_info` / `set_extrinsics_depth_to_color` 로 전달(idempotent, 두 번 부르면 덮어씀).
-- `flush()` — 공유 `h5py.File`(+ 켜져 있으면 `depth.h5`)만 flush(비디오 writer는 flush 안 함).
-- `close() -> dict` — `{"duration_s", "message_counts"}` 반환. 스냅샷을 파일 핸들을 건드리기 전에 먼저 뜨고, 두 비디오 writer를 close(idempotent), depth writer 가 있으면 best-effort close, 그 다음 HDF5 flush+close. 부분 생성 실패나 아무것도 안 쓴 경우에도 안전하게 유효한 dict를 반환한다. dict 의 **형태는 depth 와 무관하게 동일**하고, depth 가 켜진 경우 `message_counts` 에 `cam1_depth_frames`/`cam2_depth_frames` 키만 더해진다.
-
-**Counter-key 서브틀티 (반드시 이해할 것):** `write_gello_grip`은 **스스로 어떤 카운터도 bump하지 않는다**. 세 개의 서로 다른 ROS 토픽(GELLO grip, `grip_cmd`, `grip_pos`)이 모두 이 하나의 공유 `gripper` 테이블 행을 통해 쓰기 때문이다. 하지만 `metadata.json`의 message count는 세 토픽을 **각각 따로** 세야 한다. 그래서 호출자(노드)가 콜백마다 `session.bump("gello_grip")` / `session.bump("grip_cmd")` / `session.bump("grip_pos")` 중 자기 것을 별도로 호출한다. 이 규약을 어기고 `write_gello_grip` 안에 bump를 넣으면 세 토픽 카운트가 뭉개진다. (`message_counts`에는 `"gripper"`나 `"synchronized"` 라는 키 자체는 존재하지 않는다.)
-
-`recording_session.py`의 self-test(`python3 recording_session.py`)는 9개 테이블 전부 + MP4 2개를 round-trip하고, `vectors.h5`를 read-only로 다시 열어 각 테이블 행 수와 spot value(첫 gello 행의 qd가 NaN, gripper 행의 None→NaN, `synchronized` row 1의 값들)를 assert한다. 손상 프레임이 카운터를 bump하지 않는지, `close()`가 idempotent한지, 미완성 객체(`__new__`)에서도 안전한지까지 검증한다. 이어서 depth-off 패스에서 `depth.h5` 가 **생기지 않음**을, `record_depth=True` 패스에서 두 카메라 depth round-trip·카운트·`t_rel_s` 단조성·`vectors.h5` 가 여전히 9개 테이블뿐임을 assert한다. (스크립트로 직접 실행할 때는 패키지가 import 경로에 있어야 한다 — ROS overlay 를 source 했거나, 패키지 루트에서 `PYTHONPATH=. python3 gello_recorder/recording_session.py`.) pytest 는 `test/test_depth_writer.py` · `test/test_recording_session_depth.py`.
-
-### 3. Headless node (`gello_ur_recorder_node.py`)
-
-`GelloUrRecorder(Node)`는 launch부터 Ctrl-C까지 **start/stop 게이팅 없이** 연속 녹화하는 헤드리스 노드다.
-
-**선언하는 ROS 파라미터** (모두 `declare_parameter`):
-
-- `output_root` (기본: `$GELLO_REPO_ROOT/ros2_ur_ws/gello_logs`)
-- `session_dir` (빈 문자열이면 `session_<YYYYmmdd_HHMMSS>`를 `output_root` 아래 새로 만듦; 주어지면 그대로 사용 — run_recorder.sh가 rosbag을 같은 폴더에 떨구려고 씀)
-- `sample_rate_hz` (기본 100.0)
-- `flush_period_s` (기본 2.0)
-- `cam1_topic` (기본 `/cam1/cam1/color/image_raw/compressed`)
-- `cam2_topic` (기본 `/cam2/cam2/color/image_raw/compressed`)
-- `camera_fps` (기본 30.0)
-- `camera_warmup_s` (기본 **3.0** — GUI 쪽 기본값 4.0과 다름)
-
-`__init__`에서 `RecordingSession`을 **정확히 한 번** 생성한다. start/stop 개념이 없으므로 세션은 노드 수명 전체와 같다.
-
-**구독(전부 READ-ONLY)** — 토픽명 + 메시지 타입 그대로:
-
-| 토픽 | 타입 | 콜백 |
-|---|---|---|
-| `/gello/joint_states` | `JointState` | `_on_gello` |
-| `/gripper/gripper_client/target_gripper_width_percent` | `Float32` | `_on_gello_grip` |
-| `/forward_position_controller/commands` | `Float64MultiArray` | `_on_cmd` |
-| `/joint_states` | `JointState` | `_on_ur` |
-| `/robotiq_gripper/command_percent` | `Float32` | `_on_grip_cmd` |
-| `/robotiq_gripper/position_percent` | `Float32` | `_on_grip_pos` |
-| `/force_torque_sensor_broadcaster/wrench` | `WrenchStamped` | `_on_wrench` |
-| `/tcp_pose_broadcaster/pose` | `PoseStamped` | `_on_tcp` |
-| `cam1_topic` (파라미터) | `CompressedImage` | `_on_cam1` |
-| `cam2_topic` (파라미터) | `CompressedImage` | `_on_cam2` |
-
-각 native-rate 콜백은 들어온 값을 파싱(`_reorder`로 `UR_JOINT_ORDER`에 정렬, GELLO 속도는 유한차분으로 계산)한 뒤 즉시 해당 `write_*`로 native-rate 테이블에 쓰고, 동시에 "최신 값 저장소"(`self._gello_q`, `self._ur_q` 등)를 갱신한다.
-
-**시각 정렬(time-alignment) 전략:** `_sample_timer`가 `sample_rate_hz`(기본 100Hz)로 `_on_sample`을 호출한다. `_on_sample`은 그 순간의 **모든 신호의 최신 알려진 값**을 모아 `session.write_sample(...)`로 wide `synchronized` 행 하나를 쓴다. 즉 메시지별(per-message) 동기화가 아니라 **"이 tick 시점의 가장 최근 값"** 방식이다. 별도의 `_flush_timer`가 `flush_period_s`마다 `session.flush()`를 호출한다.
-
-**카메라 warm-up 게이팅(인라인, per-frame):** Start 버튼이 없으므로 노드가 프레임마다 직접 게이팅한다. `_on_cam1`/`_on_cam2`는 각 카메라의 첫 프레임 시각을 `self._cam1_first_frame_t`/`self._cam2_first_frame_t`에 기록하고, `now - first_frame_t < self.camera_warmup_s`인 동안 프레임을 **드롭한다**(오토 익스포저 안정화 중의 녹색 틴트 프레임이 MP4에 안 들어가게). warm-up 경과 후에만 `session.write_cam1_frame(...)`을 호출한다.
-
-`destroy_node()`는 `session.close()`를 호출해 통계를 받고, 최종 `metadata.json`을 쓴다.
-
-### 4. GUI node (`gello_gui_node.py`)
-
-`GelloRecorderGuiNode(Node)`는 평범한 rclpy Node지만, **구독은 항상 활성**(라이브 프리뷰 / 상태 패널용)인 반면 `start_recording()`이 호출되기 전에는 디스크에 아무것도 쓰지 않고 `stop_recording()`이 반환된 뒤에도 더 이상 쓰지 않는다. 한 프로세스 수명에서 여러 번의 start/stop "take"를 지원한다.
-
-**두-락(two-lock) 설계 (정확히 이해할 것):**
-
-- `_session_lock` — `RecordingSession` 참조(`self._session`)를 지키며, **모든 구독 콜백 안의 모든 write 호출 동안 잡혀 있다**. 그래서 콜백은 "살아있는 세션을 보고 그것을 통해 쓰거나" "None을 보고 no-op하거나" 둘 중 하나만 한다. 이것이 `stop_recording()`이 `self._session`을 None으로 바꾸는 스왑을 동시 실행되는 ROS 콜백과 race 없이 만드는 핵심이다. `stop_recording()`은 락 안에서 참조를 로컬로 빼고 `self._session = None`으로 바꾼 뒤, **실제 파일 I/O인 `session.close()`는 락 밖에서** 실행한다(이 시점엔 콜백이 이미 None을 보고 no-op하므로 `session`을 동시에 건드리는 게 없다).
-- `_state_lock` — GUI 폴링 getter(`get_preview_frames()`, `get_state_snapshot()`)가 읽는 라이브 프리뷰 프레임 / 최신 값 필드를 별도로 지킨다. 녹화 상태와 분리돼 있어 **idle 상태에서도 라이브 프리뷰가 계속 동작한다.**
-
-**카메라 warm-up (노드 수명당 1회):** `_cam1_first_frame_t`/`_cam2_first_frame_t`는 각 카메라의 **맨 첫 프레임에만** 세팅되고 take 사이에 **절대 리셋되지 않는다**. 그래서 여러 take가 warm-up 비용을 다시 지불하지 않는다. Start 버튼이 `cameras_ready()`가 True가 될 때까지(warm-up 한 번 경과) 그냥 비활성화되고, 그 후에는 활성 세션 중 들어오는 모든 프레임이 **무조건** write된다(헤드리스 노드와 달리 per-frame skip이 없음).
-
-**Public API:**
-
-- `cameras_ready() -> bool` — `warmup_seconds_remaining() <= 0.0`.
-- `warmup_seconds_remaining() -> float` — 두 카메라 중 하나라도 첫 프레임이 없으면 `inf`.
-- `is_recording() -> bool`
-- `take_index() -> int`
-- `start_recording() -> str` — warm-up 안 됐거나 이미 녹화 중이면 `RuntimeError`. take index 증가, `take_<NN>_<stamp>` 디렉터리에 새 `RecordingSession` 생성.
-- `stop_recording() -> dict` — 녹화 중이 아니면 `RuntimeError`. `close()` 통계 + `session_dir`, 그리고 take provenance/health 키(`record_depth`, `dropped_frames`, `native_rates_hz`, `spin_starvation_suspected`, `spin_starvation_reason`, `ros_lag_s_max`) 반환. 굶음이 의심되거나 프레임이 버려졌으면 여기서 WARN 을 찍는다. 위 5-2 절.
-- `get_preview_frames()` — `(cam1_frame, cam2_frame)` numpy 배열.
-- `get_state_snapshot() -> dict` — 모든 최신 값 + `cam1_last_frame_age_s`/`cam2_last_frame_age_s` + depth liveness + **spin 건강 필드** `ros_lag_s` / `ros_lag_s_max` / `ros_lag_age_s` / `ros_lag_warn_s`.
-
-**프레임 경로는 더 이상 콜백 안에서 끝나지 않는다 (2026-09-14).** `_on_cam` 은 바이트만 복사하고 두 군데로 넘긴다: 프리뷰는 `PreviewDecoder`(latest-wins 디코더 스레드), 녹화는 `RecordingSession.submit_cam_frame`(writer 스레드). 예전에는 이 콜백이 1280x720 JPEG 을 프리뷰용으로 한 번 디코드(실측 9.3 ms)하고 MP4 writer 가 또 디코드+인코드(9.3 + 6.9 ms)했다 — 카메라 2대 30 Hz 면 초당 약 1.5 초어치의 작업이 **모든 로봇 토픽을 처리하는 그 스레드** 위에 있었다는 뜻이다. `_on_cam_depth` 도 같은 이유로 `submit_cam_depth_frame` 으로 바뀌었다. 락 규약은 그대로다(스냅샷은 `_state_lock`, 세션 접근은 `_session_lock`, 중첩 없음).
-
-**`_on_ur` 는 이제 `ros_lag_s` 도 계산한다** — (ROS now) − `/joint_states` 헤더 스탬프. `get_clock()` 과 헤더 스탬프를 **같은 ROS 클럭**에서 읽으므로 sim clock 아래에서도 깨지지 않는다(`time.time()` 을 섞으면 오늘은 맞고 나중에 조용히 틀린다). `ROS_LAG_WARN_S`(0.15 s) 초과 시 5초에 한 번 WARN.
-
-`destroy_node()`는 `_session_lock` 아래 세션을 빼서 None으로 만든 뒤 진행 중 take를 best-effort로 `close()`하고(= writer 큐 drain), 프리뷰 디코더 스레드도 멈춘다.
-
-### 5. GUI front-end (`gello_recorder_gui.py`)
-
-오퍼레이터용 PyQt5 프런트엔드. ROS는 `rclpy.init`/`spin`/`shutdown`과 노드의 thread-safe getter 외에는 직접 건드리지 않으며, Qt 위젯은 오직 Qt/메인 스레드에서만 만진다.
-
-**카메라 subprocess 관리:** `_launch_realsense(camera_name, serial, color_profile)`가 각 RealSense 카메라 ROS2 노드를 `subprocess.Popen(argv, ..., start_new_session=True)`로 띄운다. `start_new_session=True`는 자기만의 프로세스 그룹을 주고, `_kill_process_group`이 `os.killpg(pgid, SIGTERM)`(안 죽으면 `SIGKILL`)로 그룹 전체를 확실히 죽인다 — 맨 `.terminate()`는 `ros2 launch`가 spawn한 `realsense2_camera_node` 손자 프로세스를 reap하지 못해 다음 실행 때 USB를 두고 싸우는 좀비를 남긴다. argv의 `serial_no:='...'` / `rgb_camera.color_profile:='...'`는 값 안에 임베디드 작은따옴표를 넣어 all-digit serial이 int로 coerce되는 것을 막는다.
-
-**스레딩 모델:** 노드는 백그라운드 **daemon 스레드**에서 평범한 `rclpy.spin(node)`로 spin한다(명시적으로 single-threaded, `MultiThreadedExecutor` 아님). Qt 이벤트 루프는 메인 스레드가 소유한다. 세 개의 `QTimer`가 노드를 폴링한다:
-
-- `_preview_timer` ~30Hz → `get_preview_frames()`
-- `_state_timer` ~10Hz → `get_state_snapshot()`
-- `_control_timer` ~5Hz → 버튼 enable/disable + status/take/elapsed
-
-**종료:** `closeEvent()`는 창이 실제로 닫히기 전에 항상 (1) 진행 중 take가 있으면 `stop_recording()`으로 finalize, (2) 두 카메라 프로세스 그룹을 죽임, (3) `rclpy.shutdown()` 순으로 마무리한다.
-
-**`main()` 설정(env-var 구동):** 모든 기본값은 `run_recorder.sh`의 env var 이름/값을 그대로 미러링한다. 또한 `import cv2`가 부작용으로 세팅한 `QT_QPA_PLATFORM_PLUGIN_PATH`를 `QApplication` 생성 전에 `os.environ.pop`으로 지워 시스템 PyQt5와 cv2 번들 Qt5 충돌을 피한다.
-
-### 6. Design rationale callouts
-
-- **`RecordingSession`이 ROS/Qt import를 하나도 안 하는 이유:** 독립적으로 단위 테스트가 가능하고, 두 진입점(헤드리스 노드 + GUI 노드) 사이에서 파일-I/O 로직을 중복 없이 재사용하기 위해서다.
-- **헤드리스 노드와 GUI 노드의 warm-up 게이팅 방식이 다른 이유:** 헤드리스 노드는 게이팅할 버튼이 없어 프레임마다 게이팅해야 한다. GUI 노드는 Start 버튼이 `cameras_ready()`로 딱 한 번 게이팅하므로, 활성 세션 중에는 모든 프레임을 무조건 쓴다.
-- **락을 하나가 아니라 두 개로 나눈 이유:** 녹화 start/stop churn(`_session_lock`)이 고빈도 프리뷰 폴링(`_state_lock`)을 절대 막거나 그것에 막혀선 안 되기 때문이다.
-
----
-
-## Troubleshooting / Debugging History
-
-이 섹션은 `gello_recorder` 패키지를 실제 하드웨어(real UR7e + real GELLO + 2x RealSense)에서 개발하며 실제로 겪고 해결한 문제들을 기록한다. 각 항목은 **Symptom** → **Root cause** → **Fix** 순서로 정리했다.
-
-### 1. `libdiagnostic_updater.so` 누락 / undefined symbol
-
-- **Symptom**: ROS2 launch 시점에 `libdiagnostic_updater.so`를 찾을 수 없다는 로딩 에러 또는 undefined symbol 에러가 발생한다.
-- **Root cause**: 설치된 apt 패키지 `ros-humble-diagnostic-updater` 4.0.6 버전이 헤더와 Python 파일만 배포하고 정작 컴파일된 `.so` 공유 라이브러리를 포함하지 않았다.
-- **Fix**:
-  ```bash
-  sudo apt-get install --only-upgrade -y ros-humble-diagnostic-updater
-  ```
-  (4.0.7로 업그레이드됨)
-
-### 2. `librealsense2.so.2.58` 런타임 누락 (SDK ABI 불일치)
-
-- **Symptom**: 실행 시 `librealsense2.so.2.58`를 찾을 수 없다는 에러가 발생한다.
-- **Root cause**: `realsense2_camera` ROS2 노드는 RealSense SDK ABI 2.58에 대해 빌드/링크되어 있었지만, 실제 설치된 `librealsense2` 패키지는 2.56.4 버전뿐이었다.
-- **Fix**:
-  ```bash
-  sudo apt-get install --only-upgrade -y ros-humble-librealsense2
-  ```
-
-### 3. `realsense2_camera_msgs` 버전 불일치 (`HardwareMonitorCommandSend`)
-
-- **Symptom**: 카메라 노드 시작 시 `HardwareMonitorCommandSend`를 참조하는 undefined symbol 에러가 발생한다.
-- **Root cause**: 컴파일된 카메라 노드와 실제 설치된 `realsense2_camera_msgs` 패키지 버전 간의 ABI 불일치.
-- **Fix**:
-  ```bash
-  sudo apt-get install --only-upgrade -y ros-humble-realsense2-camera-msgs
-  ```
-
-### 4. RealSense USB 접근 에러 `RS2_USB_STATUS_ACCESS`
-
-- **Symptom**: 카메라를 열 때 `RS2_USB_STATUS_ACCESS` 에러가 발생하며 장치를 claim하지 못한다.
-- **Root cause**: 현재 사용자에게 RealSense USB 장치 접근 권한을 부여하는 udev 규칙이 설치되어 있지 않았다.
-- **Fix**: (이름이 바뀐) `realsenseai` GitHub org에서 공식 `99-realsense-libusb.rules` udev 규칙 파일을 설치한 뒤:
-  ```bash
-  sudo udevadm control --reload-rules && sudo udevadm trigger
-  ```
-  카메라를 다시 연결한다.
-
-### 5. USB "disconnected" / "No such device" 에러 폭주 (하드웨어 고장으로 오인)
-
-- **Symptom**: USB "disconnected" 및 "No such device" 에러가 대량으로 쏟아져 마치 하드웨어 고장처럼 보인다.
-- **Root cause**: 실제 하드웨어 문제가 아니라, 이전에 크래시되거나 중단된 테스트 실행에서 남은 `realsense2_camera_node` 프로세스들(4개 이상)이 살아남아 동일한 2개의 물리 USB 카메라를 서로 차지하려고 싸우고 있었던 것이 원인.
-- **Fix**: 재테스트 전마다 남은 프로세스를 확실히 죽이고, 아무것도 남지 않았는지 확인한 뒤 재실행한다.
-  ```bash
-  pkill -9 -f realsense2_camera_node
-  pkill -9 -f "ros2 launch realsense2_camera"
-  pgrep -fa realsense2_camera_node   # 아무것도 안 나와야 정상
-  ```
-
-### 6. 두 카메라 간 해상도 불일치
-
-- **Symptom**: 동시 녹화 시 `cam1.mp4`와 `cam2.mp4`의 프레임 크기가 서로 다르다.
-- **Root cause**: D435는 640x480 color가 기본, D435IF는 1280x720 color가 기본이라 동시 녹화 결과의 프레임 크기가 어긋난다.
-- **Fix**: `rgb_camera.color_profile` launch 파라미터로 두 카메라를 같은 프로파일로 강제한다. `run_recorder.sh`와 `gello_recorder_gui.py` 양쪽에서 `COLOR_PROFILE` 환경 변수(기본값 `1280x720x30`)로 노출되어 있다.
-
-### 7. `ros2 launch` CLI 숫자 인자 타입 강제변환 버그
-
-- **Symptom**: 카메라 실행이 시작되자마자 크래시하며 다음과 비슷한 에러가 뜬다.
-  ```
-  parameter {serial_no} is of type {string}, setting it to {integer} is not allowed
-  ```
-- **Root cause**: `serial_no`는 `realsense2_camera` 노드에서 STRING 파라미터로 선언되어 있지만, 값이 전부 숫자(all-digits)라서 `ros2 launch`의 argv 파서가 이를 정수로 타입 추론해 버린다. 처음에는 카메라 launch의 stdout/stderr를 `/dev/null`로 리다이렉트하고 있어서 이 크래시가 한동안 보이지 않았다.
-- **Fix**:
-  - (a) 값을 argv 문자열 내부에서 embedded single quote로 감싼다 (셸 quoting이 아니라 인자 문자열 자체에 따옴표를 포함):
-    ```python
-    "serial_no:='{}'".format(serial)
-    ```
-    ```bash
-    "serial_no:='${CAM1_SERIAL}'"
-    ```
-  - (b) 카메라 launch 로그를 `/dev/null`이 아니라 세션별 파일(`cam1_launch.log`, `cam2_launch.log`)로 리다이렉트해서 다음에는 이 부류의 실패가 눈에 보이게 한다.
-  - 동일한 quoting 트릭은 `rgb_camera.color_profile`에도 적용한다.
-
-### 8. 녹화 초반 3~4초 초록빛/색 바랜 화면
-
-- **Symptom**: 모든 카메라 녹화의 처음 약 3~4초가 초록빛으로 물들거나 색이 바랜(washed-out) 상태로 나온다.
-- **Root cause**: RealSense 컬러 센서는 스트림 시작 후 auto-exposure/auto-white-balance가 수 초간 안정화(settling)되는데, 이 구간이 종종 초록빛을 띤다.
-- **Fix**: `camera_warmup_s` 파라미터 추가(headless 노드 ROS param 기본값 3.0s, GUI는 `CAMERA_WARMUP_S` 환경 변수 기본값 4.0s). 각 카메라 자신이 첫 프레임을 받은 시점부터 그 초 수가 지날 때까지 프레임을 버린다. headless 노드는 프레임마다 인라인으로 판정하고, GUI 노드는 `cameras_ready()`가 될 때까지 Start 버튼을 비활성화하는 방식으로 대신한다.
-
-### 9. `ros2 run gello_recorder gello_ur_recorder` → "No executable found"
-
-- **Symptom**: 실행 시 `No executable found` 에러.
-- **Root cause**: `gello_recorder` 패키지의 `setup.py`에는 console_script 엔트리 포인트가 정의되어 있었지만, 그 스크립트를 어디에 설치할지 `colcon`/`setuptools`에 알려주는 `setup.cfg`가 빠져 있었다(`ur_gello_bringup`에는 있었으나 새로 만든 `gello_recorder`에는 처음에 없었음).
-- **Fix**: 다음 내용의 `setup.cfg`를 추가하고 재빌드한다 (현재 이 패키지에는 이미 적용되어 있음):
-  ```
-  [develop]
-  script_dir=$base/lib/gello_recorder
-  [install]
-  install_scripts=$base/lib/gello_recorder
-  ```
-  ```bash
-  colcon build --symlink-install --packages-select gello_recorder
-  ```
-
-### 10. `RecordingSession.write_gello_grip`의 메시지 카운터 회귀 (출시 전 발견)
-
-- **Symptom**: `metadata.json`에 기록되는 per-topic 메시지 카운트가 손상된다 — 서로 구분되어야 할 세 토픽의 카운트가 하나로 뭉개진다.
-- **Root cause**: 리팩터 중 도입된 버전에서 `write_gello_grip`이 호출될 때마다 내부적으로 `self._bump("gello_grip")`를 호출했다. 그 결과 원래 별개여야 할 세 개의 per-topic 카운터(`gello_grip`, `grip_cmd`, `grip_pos`)가 단일 카운터로 뭉개졌다.
-- **Fix**: `write_gello_grip` 내부의 bump 호출을 제거하고, 대신 public `bump(key: str)` 메서드를 추가했다. 모든 호출부(`gello_ur_recorder_node.py`의 `_on_gello_grip`/`_on_grip_cmd`/`_on_grip_pos`, `gello_gui_node.py`의 대응 콜백들)가 각자의 `write_gello_grip(...)` 호출 옆에서 명시적으로 `self._session.bump("gello_grip")` / `bump("grip_cmd")` / `bump("grip_pos")`를 호출하도록 수정했다.
-
-### 11. PyQt5 GUI 실행 시 크래시: `Could not load the Qt platform plugin "xcb"`
-
-- **Symptom**:
-  ```
-  qt.qpa.plugin: Could not load the Qt platform plugin "xcb"
-  ```
-  + `QObject::moveToThread` 경고.
-- **Root cause**: `opencv-python` 휠이 자체 Qt5 사본(플랫폼 플러그인 포함)을 번들하고 있으며, `import cv2`의 부작용으로 `QT_QPA_PLATFORM_PLUGIN_PATH` 환경 변수를 설정한다. `gello_gui_node.py`가 `cv2.imdecode`를 위해 `cv2`를 import하기 때문에, 이 import가 `main()`에서 `QApplication`이 생성되기 **전에** 전이적으로 일어난다.
-- **Fix**: `gello_recorder_gui.py`의 `main()`에서 `GelloRecorderGuiNode`/`QApplication`을 생성하기 직전에 해당 환경 변수를 제거한다.
-  ```python
-  os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
-  ```
-  GUI를 다시 실행해 창이 정상적으로 렌더링되고 라이브 카메라 피드가 나오는 것을 확인해 수정 완료를 검증했다.
-
----
-
-**마무리 참고**: 위의 11개 문제는 모두 시뮬레이션이나 mock이 아니라 **실제 물리 하드웨어**(real UR7e + real GELLO + 2개의 real RealSense 카메라)에 대해 테스트하면서 발견하고 고친 것이다. 따라서 이 목록의 어떤 항목이 재현되지 않는다면, 수정이 틀렸다고 가정하기 전에 먼저 환경/버전 차이를 의심하라.
+ROS 그래프·카메라·로봇 없이 돕니다(GUI 로직은 duck-typed 대역으로 검증).
