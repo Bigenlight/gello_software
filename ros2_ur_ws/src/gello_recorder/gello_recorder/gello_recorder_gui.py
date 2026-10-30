@@ -32,12 +32,14 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -377,6 +379,15 @@ _STATE_FIELDS = [
     ("tcp", "TCP pose"),
 ]
 
+# Keep the live state table geometrically stable.  Without fixed dimensions,
+# QLabel recalculates its size hint every time a sign/digit or wrap point
+# changes in a vector.  In the integrated collection window that changing
+# minimum width propagates through the horizontal splitter and makes the whole
+# EEF pane visibly jitter at the state update rate.
+_STATE_PANEL_WIDTH = 430
+_STATE_VALUE_WIDTH = 310
+_STATE_VALUE_HEIGHT = 38
+
 
 def _fmt_value(value):
     """Render a snapshot value (scalar / list / None) as a compact string."""
@@ -414,6 +425,24 @@ _TELEOP_STATE_COLORS = {
 _TELEOP_GRAY = "#888888"
 # A state-topic reading older than this many seconds is treated as unknown.
 _TELEOP_STATE_STALE_S = 2.0
+
+
+_RECORDING_BANNER_IDLE_STYLE = (
+    "color: white; background-color: #455a64; border: 4px solid #263238; "
+    "font-size: 18pt; font-weight: bold; padding: 10px;"
+)
+_RECORDING_BANNER_ACTIVE_STYLE = (
+    "color: white; background-color: #d50000; border: 6px solid #ffeb3b; "
+    "font-size: 23pt; font-weight: bold; padding: 12px;"
+)
+_RECORDING_PANEL_IDLE_STYLE = (
+    "QWidget#recorderRecordingPanel {"
+    "background-color: #eceff1; border: 5px solid #546e7a; }"
+)
+_RECORDING_PANEL_ACTIVE_STYLE = (
+    "QWidget#recorderRecordingPanel {"
+    "background-color: #ffebee; border: 12px solid #ff1744; }"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -504,8 +533,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ UI --
     def _build_ui(self):
         central = QWidget(self)
+        central.setObjectName("recorderRecordingPanel")
+        central.setStyleSheet(_RECORDING_PANEL_IDLE_STYLE)
+        self._recording_panel = central
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+
+        self._recording_banner = QLabel("○ NOT RECORDING — PREVIEW ONLY")
+        self._recording_banner.setAlignment(Qt.AlignCenter)
+        self._recording_banner.setMinimumHeight(72)
+        self._recording_banner.setStyleSheet(_RECORDING_BANNER_IDLE_STYLE)
+        root.addWidget(self._recording_banner)
 
         # --- Top: cameras (left/center) + state panel (right) ------------- #
         top = QHBoxLayout()
@@ -555,12 +593,19 @@ class MainWindow(QMainWindow):
         label.setStyleSheet(
             "background-color: #202020; color: #999999; border: 1px solid #444;"
         )
-        # Let the pane shrink/grow; we scale pixmaps to its current size.
+        # QLabel's default sizeHint follows its current QPixmap.  Since each
+        # preview tick scales a new pixmap to the label's current dimensions,
+        # feeding that hint back into the layout can make the two camera panes
+        # oscillate by a few pixels forever.  Ignore pixmap-derived hints: the
+        # surrounding layout owns the pane geometry and frames only paint into
+        # the already-decided rectangle.
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         label.setScaledContents(False)
         return label
 
     def _build_state_panel(self):
         box = QGroupBox("Robot / GELLO state")
+        box.setFixedWidth(_STATE_PANEL_WIDTH)
         layout = QVBoxLayout(box)
 
         # Camera live/stale indicators (+ one line for the depth streams).
@@ -586,8 +631,11 @@ class MainWindow(QMainWindow):
             name_label = QLabel("{}:".format(human))
             name_label.setMinimumWidth(90)
             value_label = QLabel("—")
+            value_label.setFixedSize(_STATE_VALUE_WIDTH, _STATE_VALUE_HEIGHT)
             value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             value_label.setWordWrap(True)
+            value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            value_label.setStyleSheet("font-family: monospace;")
             row.addWidget(name_label)
             row.addWidget(value_label, stretch=1)
             layout.addLayout(row)
@@ -641,10 +689,16 @@ class MainWindow(QMainWindow):
         bar = QHBoxLayout()
 
         self._start_button = QPushButton("Start Recording")
-        self._start_button.setStyleSheet(_BIG_BUTTON_STYLE)
+        self._start_button.setStyleSheet(
+            _BIG_BUTTON_STYLE
+            + "background-color: #2e7d32; color: white; font-weight: bold;"
+        )
         self._start_button.clicked.connect(self._on_start_clicked)
         self._stop_button = QPushButton("Stop Recording")
-        self._stop_button.setStyleSheet(_BIG_BUTTON_STYLE)
+        self._stop_button.setStyleSheet(
+            _BIG_BUTTON_STYLE
+            + "background-color: #c62828; color: white; font-weight: bold;"
+        )
         self._stop_button.clicked.connect(self._on_stop_clicked)
         self._stop_button.setEnabled(False)
 
@@ -663,6 +717,25 @@ class MainWindow(QMainWindow):
             self._on_delete_last_take_clicked
         )
 
+        self._tag_combo = QComboBox()
+        self._tag_combo.setEditable(True)
+        self._tag_combo.addItems(["recover", "other_side"])
+        self._tag_combo.setCurrentIndex(-1)
+        self._tag_combo.lineEdit().setPlaceholderText("tag...")
+        self._tag_combo.setFixedWidth(125)
+        self._tag_combo.setToolTip(
+            "Tag the most recently stopped take. Choose recover/other_side "
+            "or type a custom tag. Multiple tags may be appended."
+        )
+        self._tag_last_take_button = QPushButton("Tag last take")
+        self._tag_last_take_button.setEnabled(False)
+        self._tag_last_take_button.clicked.connect(
+            self._on_tag_last_take_clicked
+        )
+        self._tag_combo.lineEdit().returnPressed.connect(
+            self._on_tag_last_take_clicked
+        )
+
         self._elapsed_label = QLabel("")
         self._status_label = QLabel("PREVIEW")
         self._status_label.setStyleSheet("font-weight: bold;")
@@ -673,6 +746,8 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._take_label)
         bar.addSpacing(8)
         bar.addWidget(self._delete_last_take_button)
+        bar.addWidget(self._tag_combo)
+        bar.addWidget(self._tag_last_take_button)
         bar.addSpacing(20)
         bar.addWidget(self._elapsed_label)
         bar.addStretch(1)
@@ -843,14 +918,35 @@ class MainWindow(QMainWindow):
             self._stop_button.setEnabled(True)
             self._status_label.setText("● RECORDING take {}".format(take_n))
             self._status_label.setStyleSheet("color: #cc3333; font-weight: bold;")
+            elapsed = 0.0
             if self._record_start_wall is not None:
                 elapsed = time.monotonic() - self._record_start_wall
                 self._elapsed_label.setText("Elapsed: {:.1f}s".format(elapsed))
+            self._recording_banner.setText(
+                "● RECORDING NOW  —  TAKE {}  —  {:.1f} s".format(take_n, elapsed)
+            )
+            if self._recording_banner.property("recording") is not True:
+                self._recording_banner.setProperty("recording", True)
+                self._recording_banner.setStyleSheet(
+                    _RECORDING_BANNER_ACTIVE_STYLE
+                )
+                self._recording_panel.setStyleSheet(
+                    _RECORDING_PANEL_ACTIVE_STYLE
+                )
         else:
             self._stop_button.setEnabled(False)
             self._elapsed_label.setText("")
             self._status_label.setText("PREVIEW")
             self._status_label.setStyleSheet("font-weight: bold;")
+            self._recording_banner.setText("○ NOT RECORDING — PREVIEW ONLY")
+            if self._recording_banner.property("recording") is not False:
+                self._recording_banner.setProperty("recording", False)
+                self._recording_banner.setStyleSheet(
+                    _RECORDING_BANNER_IDLE_STYLE
+                )
+                self._recording_panel.setStyleSheet(
+                    _RECORDING_PANEL_IDLE_STYLE
+                )
             if ready:
                 self._start_button.setEnabled(True)
                 self._start_button.setText("Start Recording")
@@ -880,6 +976,9 @@ class MainWindow(QMainWindow):
         self._delete_last_take_button.setEnabled(
             not recording and self._node.deletable_take_dir() is not None
         )
+        can_tag = not recording and self._node.deletable_take_dir() is not None
+        self._tag_combo.setEnabled(can_tag)
+        self._tag_last_take_button.setEnabled(can_tag)
 
         # Teleop panel shares this ~5 Hz timer (added block).
         self._refresh_teleop()
@@ -1034,6 +1133,29 @@ class MainWindow(QMainWindow):
         except (AttributeError, TypeError, ValueError):
             msg = "Take saved."
         self.statusBar().showMessage(msg, 8000)
+
+    def _on_tag_last_take_clicked(self):
+        """Append the selected tag to the latest completed take directory."""
+        if self._node.deletable_take_dir() is None:
+            return
+        tag = self._tag_combo.currentText().strip()
+        if not tag:
+            self.statusBar().showMessage("Enter or select a tag first.", 5000)
+            return
+        try:
+            result = self._node.tag_last_take(tag)
+        except RuntimeError as exc:
+            self.statusBar().showMessage("Tag failed: {}".format(exc), 8000)
+            return
+        self._tag_combo.setCurrentIndex(-1)
+        self._tag_combo.setEditText("")
+        basename = os.path.basename(os.path.normpath(result["path"]))
+        if result.get("changed"):
+            message = "Tagged last take -> {}".format(basename)
+        else:
+            message = "Last take already has tag '{}'".format(result["tag"])
+        self.statusBar().showMessage(message, 8000)
+        self._refresh_controls()
 
     # ---------------------------------------------------- delete last take --
     def _on_delete_last_take_clicked(self):

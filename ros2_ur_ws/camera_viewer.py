@@ -413,10 +413,12 @@ def _parse_args(argv=None):
                    help="Overlay label for camera 1")
     p.add_argument("--cam2-label", required=True,
                    help="Overlay label for camera 2")
+    p.add_argument("--eval-log-root", default=None,
+                   help="Show success/failure tags for the latest recorded eval")
     return p.parse_args(argv)
 
 
-def main(argv=None):
+def legacy_opencv_main(argv=None):
     args = _parse_args(argv)
 
     rclpy.init()
@@ -440,7 +442,17 @@ def main(argv=None):
     # policy_leader_node's ~/start_execution and ~/hold. spin_once() below both
     # dispatches the service replies and updates the camera frames.
     bar = TriggerButtonBar(node)
-    cv2.setMouseCallback(window, bar.on_mouse)
+    tag_panel = None
+    if args.eval_log_root:
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent / "setup_jazzy/real_eval_recording_dev"))
+        from viewer_tags import TagPanel
+        tag_panel = TagPanel(args.eval_log_root)
+    def on_mouse(event, x, y, flags, param):
+        bar.on_mouse(event, x, y, flags, param)
+        if tag_panel:
+            tag_panel.on_mouse(event, x, y, flags, param)
+    cv2.setMouseCallback(window, on_mouse)
 
     exit_code = 0
     try:
@@ -457,7 +469,10 @@ def main(argv=None):
             now = time.monotonic()
             bar.update(now, camera_row.shape[1])
             strip = bar.render_strip(camera_row.shape[1], now)
-            cv2.imshow(window, cv2.vconcat([camera_row, strip]))
+            parts = [camera_row, strip]
+            if tag_panel:
+                parts.append(tag_panel.draw(camera_row.shape[1], camera_row.shape[0]+strip.shape[0]))
+            cv2.imshow(window, cv2.vconcat(parts))
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):  # 'q' or Esc
@@ -478,6 +493,11 @@ def main(argv=None):
         cv2.destroyAllWindows()
 
     sys.exit(exit_code)
+
+
+def main(argv=None):
+    from camera_viewer_qt import run
+    return run(_parse_args(argv), CameraViewer, TriggerButtonBar)
 
 
 if __name__ == "__main__":

@@ -79,6 +79,8 @@ from sensor_msgs.msg import CameraInfo, CompressedImage, JointState
 from std_msgs.msg import Float32, Float64MultiArray, String
 from std_srvs.srv import Trigger
 
+from gello_recorder import take_tag
+
 try:  # realsense2_camera_msgs ships with realsense-ros; absent => no extrinsics
     from realsense2_camera_msgs.msg import Extrinsics
 except ImportError:  # pragma: no cover - depends on the installed overlay
@@ -539,6 +541,38 @@ class GelloRecorderGuiNode(Node):
         """
         with self._session_lock:
             return self._last_take_dir if self._session is None else None
+
+    def tag_last_take(self, tag: str) -> dict:
+        """Append ``tag`` to the most recently stopped take's folder name.
+
+        The same eligibility rule as deletion applies: only the latest take
+        stopped by this process, and never while a recording is active.  A
+        successful rename updates ``_last_take_dir`` so another tag may be
+        appended and the Delete-last-take button still points at the renamed
+        folder. ``os.rename`` is atomic because source and destination share
+        the same output directory.
+        """
+        with self._session_lock:
+            if self._session is not None:
+                raise RuntimeError("cannot tag while recording")
+            if self._last_take_dir is None:
+                raise RuntimeError("no take to tag")
+            take_dir = self._last_take_dir
+            self._last_take_dir = None
+        try:
+            result = take_tag.tag_take_dir(take_dir, self.output_root, tag)
+        except (take_tag.TakeTagError, OSError) as exc:
+            with self._session_lock:
+                if self._last_take_dir is None:
+                    self._last_take_dir = take_dir
+            raise RuntimeError("could not tag {}: {}".format(take_dir, exc)) from exc
+        with self._session_lock:
+            if self._last_take_dir is None:
+                self._last_take_dir = result["path"]
+        self.get_logger().info(
+            "Tagged take -> {} (tag={})".format(result["path"], result["tag"])
+        )
+        return result
 
     def delete_last_take(self) -> dict:
         """Permanently delete the take from ``deletable_take_dir()``.

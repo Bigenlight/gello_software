@@ -119,6 +119,21 @@ case "${CAMERA_CHECK_ONLY,,}" in
         ;;
 esac
 
+# --- Single-instance guard (2026-09-23) ---------------------------------------
+# A second launch_cameras.sh must never start while one is running: it cannot open
+# the busy devices, and its cleanup backstop below (pkill by node name+namespace)
+# would SIGKILL the FIRST instance's camera nodes too (observed 2026-09-23 17:15:
+# the running viewer went STALL). Exit here, before any trap/launch exists.
+for ns in "${CAM1_NAME}" "${CAM2_NAME}"; do
+    running="$(pgrep -f "realsense2_camera_node.*__ns:=/${ns}(\$| )" | tr '\n' ' ')"
+    if [ -n "${running}" ]; then
+        echo "### REFUSED — camera '${ns}' is already running (realsense2_camera_node pid ${running})." >&2
+        echo "###   Use the existing camera window, or stop it (Ctrl-C in its terminal) and run this again." >&2
+        echo "###   Nothing was started or stopped." >&2
+        exit 1
+    fi
+done
+
 # --- ROS2 Jazzy environment -------------------------------------------------
 source "$SCRIPT_DIR/install/setup.bash"
 
@@ -137,9 +152,17 @@ if [ ! -f "${TOPIC_CHECKER}" ]; then
     exit 1
 fi
 TOPIC_CHECKER_PY="/usr/bin/python3"
+VIEWER_PY="${TOPIC_CHECKER_PY}"
 if [ ! -x "${TOPIC_CHECKER_PY}" ]; then
     echo "FATAL: system Python missing: ${TOPIC_CHECKER_PY}" >&2
     exit 1
+fi
+if [ "${VIEW}" != "false" ] && [ "${VIEW}" != "0" ]; then
+    if ! "${VIEWER_PY}" -c 'import cv2; import numpy; import h5py; import rclpy; from PyQt5.QtWidgets import QApplication; from sensor_msgs.msg import CompressedImage; from std_srvs.srv import Trigger'; then
+        echo "FATAL: camera viewer dependencies unavailable in ${VIEWER_PY}." >&2
+        echo "### Install python3-opencv and ROS dependencies, or use VIEW=false." >&2
+        exit 1
+    fi
 fi
 
 # Fail before opening either USB camera if the native JPEG publisher plugin is
@@ -348,11 +371,12 @@ else
     # lost, plus a BrokenPipeError in the child.  Ignoring INT/TERM in the
     # filter keeps it alive until its stdin reaches EOF, i.e. until the viewer
     # is really gone.
-    python3 "$SCRIPT_DIR/camera_viewer.py" \
+    "${VIEWER_PY}" "$SCRIPT_DIR/camera_viewer.py" \
         --cam1-topic "${CAM1_TOPIC}" \
         --cam2-topic "${CAM2_TOPIC}" \
         --cam1-label "cam1 - SCENE - ${CAM1_SERIAL}" \
         --cam2-label "cam2 - WRIST - ${CAM2_SERIAL}" \
+        --eval-log-root "${SVF_EVAL_LOG_ROOT:-$SCRIPT_DIR/log/svf_ifqlparity}" \
         2> >(trap '' INT TERM; _filter_qt_font_noise >&2) &
     VIEWER_PID=$!
     wait "${VIEWER_PID}"
