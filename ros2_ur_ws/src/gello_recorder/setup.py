@@ -22,6 +22,10 @@ setup(
         'console_scripts': [
             'gello_ur_recorder = gello_recorder.gello_ur_recorder_node:main',
             'gello_recorder_gui = gello_recorder.gello_recorder_gui:main',
+            'task_recorder_gui = gello_recorder.task_recorder_gui:main',
+            'reward_classifier = gello_recorder.reward_classifier_node:main',
+            'remote_reward_classifier = gello_recorder.remote_reward_classifier_node:main',
+            'classifier_view_gui = gello_recorder.classifier_view_gui:main',
         ],
     },
 )

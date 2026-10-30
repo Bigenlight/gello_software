@@ -1,0 +1,30 @@
+# CPU-local learner environment validated for this milestone.  TensorFlow is
+# intentionally absent; serl_ur_infra/tensorflow supplies the annotation-only
+# tf.Tensor compatibility surface used by upstream HIL-SERL.
+absl-py==2.3.1
+chex==0.1.89
+distrax==0.1.5
+einops==0.8.1
+flax==0.10.5
+grpcio==1.74.0
+gymnasium==0.29.1
+imageio==2.37.0
+jax==0.5.3
+jaxlib==0.5.3
+lz4==4.4.4
+matplotlib==3.10.3
+ml-collections==1.1.0
+numpy==1.26.4
+optax==0.2.4
+orbax-checkpoint==0.11.5
+protobuf==7.34.1
+pytest==8.4.1
+requests==2.32.4
+scipy==1.11.4
+tensorflow-probability==0.25.0
+tqdm==4.67.1
+wandb==0.26.0
+
+# ReplayIngress's upstream datastore base class.  The exact commit matches the
+# receive-server milestone; no Agentlace network transport is used locally.
+agentlace @ git+https://github.com/youliangtan/agentlace.git@cf2c337c5e3694cdbfc14831b239bd657bc4894d

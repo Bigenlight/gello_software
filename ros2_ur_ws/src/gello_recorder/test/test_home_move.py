@@ -159,9 +159,8 @@ def drive_to_done(ctrl, ops):
 # ===================================================================== #
 # Drift guards -- constants that are coupled across files and cannot be imported
 #
-# (The HOME_JOINTS == run_hil_preposition.sh / cube_in_cup.py RESET_JOINTS
-# guards live on research/hil-serl together with those files; this branch
-# does not carry them.)
+# (research/hil-serl: the HOME_JOINTS == run_hil_preposition.sh / cube_in_cup.py
+# RESET_JOINTS guards below live only on this branch, next to those files.)
 # ===================================================================== #
 def _repo_file(*parts):
     here = os.path.dirname(os.path.abspath(__file__))          # .../test
@@ -172,6 +171,17 @@ def _repo_file(*parts):
     if not os.path.exists(path):
         pytest.skip("source tree not available at {}".format(path))
     return path
+
+
+def test_home_joints_match_hil_preposition_script():
+    """The three copies of this pose must stay identical (see HOME_JOINTS comment)."""
+    text = open(
+        _repo_file("ros2_ur_ws", "run_hil_preposition.sh"), encoding="utf-8"
+    ).read()
+    match = re.search(r'RESET_JOINTS_CSV="([^"]+)"', text)
+    assert match, "RESET_JOINTS_CSV not found in run_hil_preposition.sh"
+    csv = tuple(float(v) for v in match.group(1).split(","))
+    assert csv == HOME_JOINTS
 
 
 def test_the_node_ticks_fast_enough_for_the_settle_window_to_be_a_stream():
@@ -197,6 +207,48 @@ def test_the_node_ticks_fast_enough_for_the_settle_window_to_be_a_stream():
     period = float(match.group(1))
     assert period > 0
     assert GRIPPER_OPEN_REASSERT_S / period >= 5.0
+
+
+def test_the_hil_preposition_script_streams_its_gripper_open_too():
+    """Same defect, same fix, a different process (it is a shell script).
+
+    ``ros2 topic pub --once`` builds a publisher, sends one message and destroys
+    it, which is exactly the measured DDS-discovery loss.  The default path must
+    stream instead, and whatever it starts must be stopped on the way out --
+    an orphaned publisher would keep asserting 0.0 at the gripper for as long as
+    it lived.
+    """
+    text = open(
+        _repo_file("ros2_ur_ws", "run_hil_preposition.sh"), encoding="utf-8"
+    ).read()
+
+    # Streams by default (and the old one-shot survives only as the 0 opt-out).
+    assert re.search(
+        r'GRIPPER_OPEN_HOLD_S="\$\{GRIPPER_OPEN_HOLD_S:-([0-9.]+)\}"', text
+    ), "GRIPPER_OPEN_HOLD_S default not found"
+    default_hold = float(
+        re.search(
+            r'GRIPPER_OPEN_HOLD_S="\$\{GRIPPER_OPEN_HOLD_S:-([0-9.]+)\}"', text
+        ).group(1)
+    )
+    assert default_hold > 0.0
+    assert 'ros2 topic pub -r "$GRIPPER_OPEN_RATE_HZ" "$GRIPPER_CMD_TOPIC"' in text
+
+    # ...and the stream is always stopped, including on the Ctrl-C path.
+    cleanup = re.search(r"^cleanup\(\) \{\n(.*?)^\}", text, re.MULTILINE | re.DOTALL)
+    assert cleanup, "cleanup() not found in run_hil_preposition.sh"
+    assert "gripper_open_publish_stop" in cleanup.group(1)
+
+
+def test_home_joints_match_cube_in_cup_config():
+    text = open(
+        _repo_file("serl_ur_infra", "ur_experiments", "cube_in_cup.py"),
+        encoding="utf-8",
+    ).read()
+    match = re.search(r"RESET_JOINTS:[^=]*=\s*np\.array\(\s*\[([^\]]+)\]", text)
+    assert match, "RESET_JOINTS not found in cube_in_cup.py"
+    values = tuple(float(v) for v in match.group(1).replace("\n", "").split(","))
+    assert values == HOME_JOINTS
 
 
 # ===================================================================== #
