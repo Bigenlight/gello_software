@@ -1,7 +1,8 @@
 """Headless tests for the "Delete last take" button in the recorder GUI.
 
 Same pattern as ``test_task_recorder_gui.py`` (itself borrowed from
-``ur_gello_bringup/test/test_hil_actor_status.py``): the window methods are
+``ur_gello_bringup/test/test_hil_actor_status.py``; both live on the
+research/* branches, not here): the window methods are
 called UNBOUND against a plain duck-typed stand-in, so there is no Qt event
 loop, no QApplication, no rclpy node and no robot -- only the operator-facing
 decision logic (when is the button live, does Yes delete exactly once, does a

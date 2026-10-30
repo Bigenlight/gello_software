@@ -25,7 +25,7 @@ fi
 # (AMENT_TRACE_SETUP_FILES, AMENT_PYTHON_EXECUTABLE, ...), so they abort under
 # `set -u`. Keep strict nounset checking for the rest of this script and
 # disable it only while the upstream/generated environment scripts are sourced.
-# Same treatment as run_ur7e_diffusion_remote.sh.
+# (Same treatment as the policy-deploy launchers on the research/* branches.)
 set +u
 GELLO_ROS_DISTRO="${GELLO_ROS_DISTRO:-jazzy}"
 source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"

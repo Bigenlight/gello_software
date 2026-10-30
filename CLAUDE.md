@@ -59,6 +59,7 @@ HEADLESS=true ./run_ur7e_gello_real.sh [control_mode:=eef]   # 실기 — 팔이
   파라미터로 하고 근거는 [`GELLO_UR7E_SETUP_CLI.md`](docs/ros2/GELLO_UR7E_SETUP_CLI.md) §5를 먼저 읽는다.
 - **카메라 시리얼은 module serial이다**(`rs-enumerate-devices -s`). `lsusb`/sysfs/`journalctl`의 ASIC 시리얼은
   `serial_no`와 절대 매칭되지 않고, 잘못된 시리얼은 에러 없이 프레임 0을 낸다.
+  기본값은 `ros2_ur_ws/camera_serials.env` 한 곳(셸 `load_camera_serial_defaults` + Python `gello_recorder.camera_defaults`)이고 export한 `CAM1_SERIAL`/`CAM2_SERIAL`이 이긴다.
 - **ROS는 시스템 `/usr/bin/python3`(3.12)로.** conda `python3`가 PATH 앞에 있으면 rclpy/colcon이 깨진다.
 - **공유 브랜치다.** 머지·리베이스·푸시 전에 확인을 받을 것.
 
@@ -74,5 +75,5 @@ cd .. && /usr/bin/python3 -m pytest -q -p no:cacheprovider gello/dynamixel/tests
 ```
 
 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`이 없으면 `~/.local`의 anyio 플러그인 때문에 collection에서 죽는다.
-2026-10-30 `2ab795f` 실측(`/usr/bin/python3` 3.12): `ur_gello_bringup` **625 passed**, `gello/dynamixel/tests` **31 passed**,
-`gello_recorder` 202 passed / **5 failed**(`test_recorder_gui_delete.py`, `_Absent.setText` — 미해결).
+2026-10-30 머지 후 실측(clean `colcon build`, `/usr/bin/python3` 3.12.3, 위 플래그 그대로): `ur_gello_bringup` **625 passed**,
+`gello_recorder` **221 passed**(실패 0), `gello/dynamixel/tests` **31 passed**. 세 숫자를 합치지 말 것 — 실행 디렉터리가 다르다.
