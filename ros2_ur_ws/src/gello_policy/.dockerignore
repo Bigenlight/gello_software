@@ -1,9 +1,0 @@
-**/__pycache__/
-**/*.py[cod]
-.git/
-.env
-deploy/remote_diffusion/.env
-checkpoints/
-datasets/
-*.h5
-*.mp4
