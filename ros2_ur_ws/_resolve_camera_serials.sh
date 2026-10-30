@@ -1,8 +1,8 @@
 # Shared RealSense serial auto-resolution helper.
 #
-# SOURCE this file (do NOT execute it directly) from a script that has already
-# set CAM1_SERIAL and CAM2_SERIAL to their configured/default values, then call
-# `resolve_serials`. On return it has REASSIGNED the caller's CAM1_SERIAL /
+# SOURCE this file (do NOT execute it directly), call
+# `load_camera_serial_defaults` (or set CAM1_SERIAL / CAM2_SERIAL yourself),
+# then call `resolve_serials`. On return it has REASSIGNED the caller's CAM1_SERIAL /
 # CAM2_SERIAL shell variables in place -- that only works because the caller
 # sources this file into its own shell rather than executing it as a
 # subprocess.
@@ -21,6 +21,35 @@
 # Enumeration (`rs.context().query_devices()`) takes no streaming lock, so
 # this is safe to run even while another process already holds the cameras
 # (it just re-reports the same devices).
+# load_camera_serial_defaults: fill CAM1_SERIAL / CAM2_SERIAL from the shared
+# defaults file (camera_serials.env next to this helper, or
+# $GELLO_CAMERA_SERIALS_FILE) ONLY where the caller left them empty/unset, so an
+# exported value always wins. gello_recorder.camera_defaults reads the same file.
+load_camera_serial_defaults() {
+    local helper_dir file line key value
+    helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    file="${GELLO_CAMERA_SERIALS_FILE:-$helper_dir/camera_serials.env}"
+    if [ ! -r "$file" ]; then
+        echo "### WARN: camera serial defaults file not readable: $file" >&2
+        return 0
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        line="${line#export }"
+        [[ "$line" == *=* ]] || continue
+        key="${line%%=*}"
+        value="${line#*=}"
+        value="${value#[\"\']}"
+        value="${value%[\"\']}"
+        case "$key" in
+            CAM1_SERIAL) [ -n "${CAM1_SERIAL:-}" ] || CAM1_SERIAL="$value" ;;
+            CAM2_SERIAL) [ -n "${CAM2_SERIAL:-}" ] || CAM2_SERIAL="$value" ;;
+        esac
+    done < "$file"
+}
+
 resolve_serials() {
     local enumerator="${REALSENSE_ENUMERATOR:-rs-enumerate-devices}"
     local devices name serial line field value have_cam1=false have_cam2=false

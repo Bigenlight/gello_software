@@ -87,7 +87,7 @@ else
     note_failure 'no live ToolComm process'
 fi
 
-launch_pids="$(pgrep -f '/opt/ros/.*/bin/ros2 launch gello_policy ur7e_diffusion_real\.launch\.py' 2>/dev/null || true)"
+launch_pids="$(pgrep -f '/opt/ros/.*/bin/ros2 launch (ur_gello_bringup|gello_policy) [^ ]*\.launch\.py' 2>/dev/null || true)"
 if [ -n "$launch_pids" ]; then
     while IFS= read -r launch_pid; do
         [ -r "/proc/$launch_pid/environ" ] || continue
@@ -99,7 +99,7 @@ if [ -n "$launch_pids" ]; then
         fi
     done <<<"$launch_pids"
 else
-    printf '%s\n' 'no live gello_policy real-robot launch found'
+    printf '%s\n' 'no live ur_gello_bringup / gello_policy launch found'
 fi
 
 tool_comm_log="$(latest_tool_comm_launch_log || true)"

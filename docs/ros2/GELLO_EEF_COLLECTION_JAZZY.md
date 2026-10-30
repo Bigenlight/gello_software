@@ -1,135 +1,107 @@
-# GELLO EEF collection on Jazzy
+# GELLO EEF 텔레옵 데이터 수집 (Jazzy)
 
-For rendered videos from the MuJoCo simulation (not the ROS mock), use the
-[sim_collect migration and collection guide](../../sim_collect/UBUNTU24_JAZZY_MIGRATION.md).
+EEF(Cartesian delta) 텔레옵으로 실기 데모 take를 모으는 운영 절차다. 레코더 통합 GUI 하나가 카메라
+2대와 녹화 세션을 소유하고, 텔레옵 프로세스는 충돌 뒤에 따로 내렸다 올릴 수 있다.
 
-This checkout targets ROS 2 Jazzy on Ubuntu 24.04. The wrappers resolve paths
-from their own checkout, so run them from any working directory. They also put
-the ROS Jazzy and system Python 3.12 paths ahead of an auto-activated conda
-base (Python 3.13). `GELLO_ROS_DISTRO` can override `jazzy` when using another
-installed ROS distribution.
+- EEF 모드 자체(앵커·재클러치·속도 상한·게이트): [`GELLO_UR7E_EEF_MODE.md`](./GELLO_UR7E_EEF_MODE.md)
+- 레코더 출력 스키마·GUI 상세: [`ros2_ur_ws/src/gello_recorder/README.md`](../../ros2_ur_ws/src/gello_recorder/README.md)
+- MuJoCo 시뮬레이션에서 같은 형식의 take를 렌더링해 모으는 `sim_collect`는 `research/sim-collect` 브랜치에 있다.
 
-## Before a real run
+래퍼는 자기 checkout 기준으로 경로를 풀므로 어느 디렉터리에서 실행해도 되고, ROS Jazzy·시스템
+Python 3.12를 auto-activate된 conda보다 앞에 둔다. 다른 배포판은 `GELLO_ROS_DISTRO`로 바꾼다.
 
-Do not launch the real wrapper until the robot Ethernet link has carrier and
-both RealSense cameras are connected. As observed on 2026-09-16, this machine
-has neither a robot NIC carrier nor cameras; that is a current readiness
-observation, not a permanent hardware restriction. Keep the pendant E-stop
-reachable and verify the External Control or
-headless/Remote setup described in the real wrapper before enabling motion.
+## 실기 전
 
-Build or rebuild the workspace with the validated helper:
+- 로봇 전용 이더넷에 carrier가 있고(`setup_jazzy/setup_ur7e_ethernet.sh --check`) RealSense 2대가 꽂혀
+  있을 것(`./launch_cameras.sh --check`).
+- 펜던트 E-STOP을 손 닿는 곳에. External Control 또는 headless/Remote 설정은
+  [`GELLO_UR7E_SETUP_CLI.md`](./GELLO_UR7E_SETUP_CLI.md) §3–4.
+- 빌드: `cd ~/gello_software/ros2_ur_ws && ./build_ur7e.sh`
 
-```bash
-cd /path/to/gello_software_jazzy/ros2_ur_ws
-./build_ur7e.sh
-```
-
-## Three-terminal EEF collection
-
-Use the same checkout path in all three terminals.
+## 2-터미널 수집
 
 ```bash
-# Terminal 1 — real UR7e + physical GELLO EEF teleop
-cd /path/to/gello_software_jazzy/ros2_ur_ws
+# Terminal 1 — 실기 UR7e + 물리 GELLO, EEF 텔레옵 (충돌 뒤 내렸다 다시 올려도 된다)
+cd ~/gello_software/ros2_ur_ws
 HEADLESS=true ./run_ur7e_gello_real.sh control_mode:=eef gripper_mode:=continuous
 ```
 
 ```bash
-# Terminal 2 — EEF operator GUI
-cd /path/to/gello_software_jazzy/ros2_ur_ws
-START_POSE_CONFIG="$PWD/src/gello_policy/config/ifql_deploy.yaml" ./run_eef_gui.sh
+# Terminal 2 — 통합 수집 GUI (카메라 + 녹화 + EEF 조작). Terminal 1을 재시작해도 계속 띄워 둔다
+cd ~/gello_software/ros2_ur_ws
+./run_eef_collection_gui.sh
 ```
 
-```bash
-# Terminal 3 — task recorder GUI; it owns and launches both cameras
-cd /path/to/gello_software_jazzy/ros2_ur_ws
-./run_task_recorder.sh
-```
+창 어디서나 쓰는 키:
 
-The task recorder resolves the two connected camera serials, waits for camera
-warm-up, and writes `take_<NN>_<timestamp>/` folders under the recorder output
-root. Override `CAM1_SERIAL`, `CAM2_SERIAL`, `COLOR_PROFILE`,
-`CAMERA_WARMUP_S`, or `RECORDER_OUTPUT_ROOT` only when needed.
+| 키 | 동작 |
+|---|---|
+| `R` | 녹화 START / STOP (카메라 워밍업 중에는 무시) |
+| `SPACE` | EEF ENGAGE / DISENGAGE (ENGAGE는 두 번 눌러 확인) |
+| `G` | 그리퍼 PAUSE / RESUME (RESUME은 두 번 눌러 확인) |
 
-## Motion and pose defaults
+GUI는 연결된 카메라 시리얼을 설정값과 대조하고(불일치면 실패 — [`REALSENSE_D435_TROUBLESHOOTING.md`](../hardware/REALSENSE_D435_TROUBLESHOOTING.md)),
+워밍업을 기다린 뒤 `take_<NN>_<timestamp>/` 폴더를 레코더 출력 루트 아래에 쓴다. `CAM1_SERIAL`, `CAM2_SERIAL`,
+`COLOR_PROFILE`, `CAMERA_WARMUP_S`, `START_POSE_CONFIG`는 필요할 때만 덮어쓴다.
 
-`control_mode:=eef` derives `start_mode:=switch_only`: bring-up switches the
-controller in place and does not move the arm. EEF motion begins when the GUI
-engages teleop; the recorder's **GO HOME** button and the EEF GUI's **GO TO
-START POSE** button also command arm motion. The recorder **START** button only
-starts a take; it is not required for those motion paths.
+> 마우스 GUI만 따로 쓰고 싶으면 Terminal 2에서 `./run_eef_gui.sh`(EEF 조작만) +
+> 별도 터미널에서 `ros2 run gello_recorder gello_recorder_gui`(녹화만)로 나눌 수 있다.
 
-The EEF GUI default above reads `ifql_deploy.yaml`:
+## 동작과 자세 기본값
+
+`control_mode:=eef`는 `start_mode:=switch_only`를 유도한다 — 기동은 컨트롤러를 제자리에서 전환할 뿐
+**팔을 움직이지 않는다.** EEF 동작은 GUI가 ENGAGE한 뒤에만 시작한다. 그 외에 팔을 움직이는 것은
+레코더의 **GO HOME**과 EEF GUI의 **GO TO START POSE** 두 버튼뿐이다. 녹화 START는 take만 연다.
+
+**GO TO START POSE**는 `START_POSE_CONFIG`(기본 `src/ur_gello_bringup/config/start_pose.yaml`)의
+`policy_leader_node.ros__parameters.start_pose`/`start_gripper`를 읽는다. 기본 파일은 carrot_in_pot 시작 자세다:
 
 ```text
-start_pose   = [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
+start_pose    = [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
 start_gripper = 0.0
 ```
 
-The recorder's **GO HOME** uses its own fixed recorder `HOME_JOINTS` target
-(`3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331`) and opens the gripper.
-These are intentionally distinct targets; do not treat GO HOME as the
-`START_POSE_CONFIG` target. Choose the deploy YAML for the task being collected
-when changing `START_POSE_CONFIG`.
+다른 태스크는 그 태스크의 자세를 담은 yaml을 가리킨다(같은 키 경로라 정책 deploy yaml을 그대로 줘도 된다).
+"비슷해 보이는 값"으로 고치지 말 것 — banana와 carrot 시작 자세는 pan 값이 약 2π 차이로 비슷해 보여도
+다른 관절이 최대 0.33 rad 다르다.
 
-After **GO HOME**, both bridges remain `PAUSED` by design. Leave the recorder's
-generic **Resume Teleop** button alone: it calls the joint-mode resume path.
-With the GELLO trigger held open, use the EEF GUI in Terminal 2 and press
-**ENGAGE**; it performs `eef_resume`, commits `pos_scale`, and then
-`eef_engage`, re-anchoring at the current pose.
-The gripper is separate: resume it with the EEF GUI's gripper resume control
-when ready. Arm ENGAGE alone does not resume a paused gripper.
+레코더 **GO HOME**은 기본적으로 자기 고정 목표 `HOME_JOINTS`
+(`3.1382, -1.5276, 1.7168, -1.7592, -1.5216, -3.1331`)로 가고 그리퍼를 연다. 두 목표는 **의도적으로 다르다** —
+GO HOME을 `START_POSE_CONFIG` 목표로 취급하지 말 것.
 
-## Gripper contract
+GO HOME 뒤에는 두 브리지가 설계대로 `PAUSED`로 남는다. 레코더의 일반 **Resume Teleop** 버튼은 조인트 모드
+재개 경로라 쓰지 않는다. GELLO 트리거를 연 채로 EEF 쪽 **ENGAGE**를 누르면 `eef_resume` → `pos_scale` 커밋 →
+`eef_engage`가 이어져 현재 자세에 다시 앵커한다. 그리퍼는 별개다 — 준비되면 그리퍼 RESUME을 따로 한다.
+팔 ENGAGE만으로는 멈춘 그리퍼가 풀리지 않는다.
 
-The real wrapper defaults to `gripper_mode:=continuous` (its `GRIPPER_MODE`
-banner default and launch default). The command is preserved as `0.0 = OPEN`
-and `1.0 = CLOSED` throughout the teleop, recorder, and task sidecar. Continuous
-mode passes the trigger continuously in that range. `gripper_mode:=discrete` snaps
-to the two endpoints with hysteresis; recorded `grip_cmd` values are then
-binary. Keep the mode fixed across a dataset and leave the trigger open before
-resuming after GO HOME.
+## 그리퍼 규약
 
-## Safe wrapper validation
+실기 래퍼 기본은 `gripper_mode:=continuous`다. 명령은 텔레옵·레코더 전 구간에서 **0.0 = 열림 / 1.0 = 닫힘**으로
+유지된다. continuous는 트리거 값을 그 범위로 그대로 흘리고, `gripper_mode:=discrete`는 히스테리시스
+(`>=0.7` 닫힘, `<=0.3` 열림, 사이는 유지)로 양 끝에 스냅하므로 녹화된 `grip_cmd`가 이진이 된다.
+**한 데이터셋 안에서는 모드를 고정**하고, GO HOME 뒤 재개 전에는 트리거를 연 상태로 둔다.
+상세: [`GELLO_UR7E_GRIPPER.md`](./GELLO_UR7E_GRIPPER.md) §8.
 
-These checks do not contact a robot, GELLO serial device, or camera:
+## 안전한 래퍼 검증 (로봇·GELLO·카메라 미접속)
 
 ```bash
-cd /path/to/gello_software_jazzy/ros2_ur_ws
-bash -n run_eef_gui.sh run_task_recorder.sh run_recorder.sh \
+cd ~/gello_software/ros2_ur_ws
+bash -n run_eef_gui.sh run_eef_collection_gui.sh run_recorder.sh \
   run_ur7e_gello_real.sh run_ur7e_gello_mock.sh run_ur7e_gello_sim.sh
-DRY_RUN=1 ./run_ur7e_gello_mock.sh --print-args \
-  control_mode:=eef launch_rviz:=false
+DRY_RUN=1 ./run_ur7e_gello_mock.sh --print-args control_mode:=eef launch_rviz:=false
 ```
 
-The mock script pins `robot_ip:=127.0.0.1` and `use_fake_hardware:=true`; it
-cannot be redirected to the physical robot. The real wrapper is intentionally
-not run by this readiness check.
+mock 스크립트는 `robot_ip:=127.0.0.1`과 `use_fake_hardware:=true`를 고정하므로 실기로 돌릴 수 없다.
 
-## Verified 2026-09-17 (no real hardware)
-
-- Three-package build and rosdep check passed; full suite: **931 passed**.
-- EEF GUI constructed and refreshed offscreen with the IFQL start-pose YAML.
-- Actual ROS GenericSystem smoke passed: STRICT handoff into HOLD, singular
-  anchor refusal, zero-jump engage with mismatched leader/robot poses, reclutch,
-  leader delta tracking, disengaged hold, and zero-jump re-engage.
-- Synthetic recorder output reopened successfully: RGB MP4s have 39 decodable
-  frames per camera; separate depth run has 29 frames per camera in MP4/depth.h5.
-  These are synthetic transport/storage tests, not camera or robot measurements.
-- Evidence is under `ros2_ur_ws/log/jazzy_port_20260916/` (ignored by Git).
-
-To repeat the EEF smoke in an **unused** local ROS domain:
+EEF 서비스 mock 스모크(GenericSystem, 쓰지 않는 로컬 ROS 도메인에서):
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
 ROS_DOMAIN_ID=176 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
   /usr/bin/python3 setup_jazzy/eef_mock_smoke.py
 ```
 
-The smoke refuses an occupied domain and verifies GenericSystem before sending
-any mock positioning commands. It seeds a non-singular mock pose after checking
-that the driver's default singular pose is correctly refused; no safety gate
-or production control limit is relaxed. This does not validate real UR tracking,
-physical camera serial assignment, gripper motion, or a safe real HOME path.
+점유된 도메인은 거부하고, GenericSystem임을 확인한 뒤에만 mock 위치 명령을 보낸다. 드라이버 기본 자세가
+특이점으로 거부되는 것을 확인한 다음 비특이 자세를 시드한다. 검증 범위: STRICT 핸드오프 → HOLD, 특이점 앵커
+거부, 리더/로봇 자세가 다를 때 zero-jump engage, 재클러치, 델타 추종, disengage 후 hold, zero-jump 재engage
+(2026-09-17 PASS). 실제 UR 추종, 카메라 시리얼 배정, 그리퍼 동작, 실기 HOME 경로는 검증하지 않는다.

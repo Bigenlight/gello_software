@@ -35,7 +35,7 @@ joint 모드(`q_cmd = q_leader`, 절대 미러링) 및 eef 모드와 공존하�
 
 **빌드 (yaml/launch/py 변경 시마다 필수):**
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 colcon build --packages-select ur_gello_bringup
 source install/setup.bash
 ```
@@ -186,7 +186,7 @@ delta[i] += d
 - **yaml/launch를 고쳤으면 반드시 rebuild.** colcon은 심볼릭 링크가 아니라 **복사**한다.
 
 ```bash
-cd /home/laptop3/gello_software/ros2_ur_ws
+cd ~/gello_software/ros2_ur_ws
 colcon build --packages-select ur_gello_bringup
 ```
 

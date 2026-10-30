@@ -1,7 +1,7 @@
 import pickle
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import mujoco
 import mujoco.viewer
@@ -299,6 +299,7 @@ class MujocoRobotServer:
         add_cube: bool = False,
         add_red_cube: bool = False,
         stable_grasp: bool = False,
+        start_joints: Optional[Sequence[float]] = None,
     ):
         self._has_gripper = gripper_xml_path is not None
         # Some models (e.g. franka panda.xml) bundle the gripper actuator in the
@@ -344,11 +345,36 @@ class MujocoRobotServer:
         # over a pose without racing mj_step.
         self._reset_lock = threading.Lock()
         self._pending_reset: Optional[np.ndarray] = None
+        if start_joints is not None:
+            self._init_pose(np.asarray(start_joints, dtype=float))
 
         self._zmq_server = ZMQRobotServer(robot=self, host=host, port=port)
         self._zmq_server_thread = ZMQServerThread(self._zmq_server)
 
         self._print_joints = print_joints
+
+    def _init_pose(self, start_joints: np.ndarray) -> None:
+        """Open the sim at ``start_joints`` instead of the all-zero qpos.
+
+        Without this the arm sits at qpos=0 (for UR: stretched flat on the floor)
+        until the agent's first command arrives.
+        """
+        if len(start_joints) != self._num_joints:
+            print(
+                f"Warning: start_joints has {len(start_joints)} values but the sim "
+                f"has {self._num_joints} actuators; keeping the default pose."
+            )
+            return
+        # The gripper actuator's qpos is not a single slot (2F-85 has several
+        # joints), so only the arm joints are placed; the gripper starts at its
+        # model default and is driven to its command by ctrl.
+        has_gripper = self._has_gripper or self._gripper_builtin
+        n_arm = self._num_joints - 1 if has_gripper else self._num_joints
+        self._data.qpos[:n_arm] = start_joints[:n_arm]
+        mujoco.mj_forward(self._model, self._data)
+        self.command_joint_state(start_joints)
+        self._data.ctrl[:] = self._joint_cmd
+        self._joint_state = self._data.qpos.copy()[: self._num_joints]
 
     def num_dofs(self) -> int:
         return self._num_joints

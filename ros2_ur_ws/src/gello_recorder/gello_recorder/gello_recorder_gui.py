@@ -44,12 +44,13 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# The node CLASS lives in the companion module in this same package and is
-# imported lazily inside main() (historical: so this file could be tooled while
-# gello_gui_node.py was still being written). The pure depth-topic helper is
-# re-exported here at module level because run_recorder.sh's headless node and
-# the tests need the SAME single definition without going through main().
+# The node CLASS lives in the companion module gello_gui_node and is imported
+# inside main(). The pure depth-topic helper is re-exported here at module
+# level because the headless node and the tests need the SAME single
+# definition without going through main().
 from gello_recorder.gello_gui_node import depth_topics_for  # noqa: F401 (re-export)
+from gello_recorder.camera_defaults import load_default_serials
+from gello_recorder import take_tag
 from gello_recorder.paths import default_repo_root
 from gello_recorder.spin_health import (  # noqa: F401 (DEPTH_ON_BANNER re-export)
     DEPTH_ON_BANNER,
@@ -61,88 +62,42 @@ from gello_recorder.spin_health import (  # noqa: F401 (DEPTH_ON_BANNER re-expor
 # Camera subprocess management
 # --------------------------------------------------------------------------- #
 
-# Defaults mirror run_recorder.sh / launch_cameras.sh exactly (same env var
-# names + values). They are a PREFERENCE, not a requirement:
-# _resolve_camera_serials() below checks them against what pyrealsense2
-# actually enumerates on the USB bus and falls back by model class (or raises)
-# if the configured pair isn't plugged in.
+# Camera serial defaults come from ONE file shared with the shell launchers:
+# ros2_ur_ws/camera_serials.env (see gello_recorder.camera_defaults). The
+# CAM1_SERIAL / CAM2_SERIAL env vars override it per run. The defaults are a
+# PREFERENCE, not a requirement: _resolve_camera_serials() below checks them
+# against what pyrealsense2 actually enumerates and falls back (with a loud
+# warning) when the configured pair is not plugged in.
 #
-# The two "pairs" named across this repo are the SAME two cameras under two
-# different serial FIELDS -- there was no hardware swap. Measured 2026-07-29,
-# one physical port reporting both values:
-#
-#   port    serial_number     asic_serial_number   device
-#   4-4.1   147122072740      151623020789         D435    -> cam1
-#   4-4.3   243222072700      322743060038         D435IF  -> cam2
-#
-# serial_no:= matches serial_number, not the ASIC serial: enable_device on
-# 151623020789 returns NO MATCH while 147122072740 MATCHES. The kernel USB
-# descriptor exposes the ASIC serial, so grepping journalctl finds only the
-# ASIC values -- a different FIELD, not a different camera.
-#
-# Binding realsense2_camera to a serial that does not resolve does NOT fail
-# loudly: the node comes up, publishes nothing, and this GUI's camera panes
-# show "no signal" instead of "wrong serial", which is why this is
-# auto-detected instead of trusted blindly. See
-# ros2_ur_ws/_resolve_camera_serials.sh (the shell equivalent used by
-# launch_cameras.sh / run_recorder.sh) for the full incident history.
-#
-# 2026-09-14 LAB MOVE: the rig now carries TWO PLAIN D435 bodies (the D435IF
-# is gone), so the model-class rule below cannot separate them.  Measured on
-# the Genesys 4-port hub (bus 4), assignment confirmed from live snapshots
-# (cam2's frame shows the gripper fingers; cam1's shows the table front-on):
-#
-#   port    serial_number     asic_serial_number   device   fw
-#   4-4.3   143322071682      143623022572         D435     5.17.3.10  -> cam1 SCENE
-#   4-4.4   143322072540      143523020769         D435     5.17.0.10  -> cam2 WRIST
-#
-# With two plain units resolve_serials() falls back to sorted-serial order,
-# which happens to match this table -- do not rely on that: keep the defaults
-# below equal to the table so the resolver passes them through silently.
-DEFAULT_CAM1_SERIAL = "143322071682"   # plain D435   (ASIC 143623022572)  SCENE
-DEFAULT_CAM2_SERIAL = "143322072540"   # plain D435   (ASIC 143523020769)  WRIST
+# serial_no:= matches the DEVICE serial_number, not the ASIC serial that the
+# kernel USB descriptor (and therefore journalctl) shows. Binding a serial that
+# does not resolve does NOT fail loudly -- the camera node starts and publishes
+# nothing -- which is why the pair is checked here instead of trusted blindly.
+DEFAULT_CAM1_SERIAL, DEFAULT_CAM2_SERIAL = load_default_serials()
 DEFAULT_CAM1_NAME = "cam1"
 DEFAULT_CAM2_NAME = "cam2"
 DEFAULT_COLOR_PROFILE = "1280x720x30"
 
-# Depth is OPT-IN and OFF by default. RGB-only is the default capture.
-#
-# It was ON by default for exactly one day (2026-09-14) and that day cost a
-# 54-take corpus its timestamps. Depth recording put two more 30 Hz
-# subscriptions per camera plus a ~6 MB/s HDF5 write onto the single rclpy
-# spin thread that also services every robot topic; the executor's round rate
-# fell from ~100 Hz to 60-69 Hz, and every topic publishing faster than that
-# was then read out of a permanently full queue -- ur_joint_states rows landed
-# 0.900 s late, tcp_pose/wrench ~0.45 s late, with nothing in the file saying
-# so (see gello_recorder.spin_health and docs/ros2/GELLO_UR7E_RECORDING.md).
-#
-# That defect is FIXED -- header stamps, depth-5 queues, a background frame
-# writer and a starvation watchdog -- but the COST is not: depth still costs
-# the disk bandwidth, the subscriptions and the CPU. So it is now something a
-# recording asks for on purpose, per session, rather than something it gets by
-# default and discovers later:
+# Depth is OPT-IN and OFF by default (RGB-only capture):
 #
 #     ENABLE_DEPTH=1 ros2 run gello_recorder gello_recorder_gui
 #
-# The 2026-09-14 hub measurements still stand for when it IS on (2x color
-# 1280x720x30 + 2x depth 848x480x30 stable for minutes: color 30 Hz,
-# compressedDepth ~29 Hz, ~9 % CPU per camera node, zero USB errors) -- the
-# question was never whether the cameras could do it.
-#
-# A typo in the value also leaves depth OFF (only the values below turn it on),
-# which is the safe direction for an opt-in. HIL's launch_cameras.sh has always
-# defaulted to off: nothing in the HIL actor reads depth. An explicit
-# enable_depth kwarg wins over the env var.
+# Depth adds two 30 Hz subscriptions per camera and a ~6 MB/s HDF5 write. When
+# that load landed on the same rclpy spin thread as the robot topics, the
+# executor fell behind and robot rows were silently read out of full queues
+# (stamped up to ~0.9 s late). Header stamps, small queues, a background frame
+# writer and a starvation watchdog (gello_recorder.spin_health) now prevent and
+# detect that, but the disk/CPU cost remains -- so depth is asked for per
+# session. Only the values in _DEPTH_ON_VALUES turn it on (a typo leaves it
+# off, the safe direction). An explicit enable_depth kwarg wins over the env.
 _DEPTH_ENV_VAR = "ENABLE_DEPTH"
 _DEPTH_ON_VALUES = ("1", "true", "yes", "on")
 _DEPTH_DEFAULT = "0"
 
-# Depth->color ALIGNMENT stays OFF by default and is opt-in via ALIGN_DEPTH.
-# Measured 2026-09-14 (same hub, same profiles): align_depth.enable:=true makes
-# realsense2_camera_node jump from ~9 % to ~49 % CPU and BOTH color and depth
-# drop from 30 Hz to ~25 Hz (the aligned frame is 1280x720, ~200 KB vs
-# 80-130 KB). Unaligned depth + the recorded intrinsics/extrinsics lets the
-# alignment be done offline instead, so the default never pays that cost.
+# Depth->color ALIGNMENT is separately opt-in via ALIGN_DEPTH. In-node
+# alignment raised realsense2_camera_node from ~9 % to ~49 % CPU and dropped
+# both streams from 30 Hz to ~25 Hz. The recorded intrinsics/extrinsics allow
+# the alignment to be done offline instead.
 _ALIGN_ENV_VAR = "ALIGN_DEPTH"
 _ALIGN_DEFAULT = "0"
 
@@ -266,8 +221,8 @@ def _realsense_argv(camera_name, serial, color_profile, enable_depth=None,
     the camera, not at the call, which is expensive to notice.
 
     ``enable_depth=None`` defers to :func:`_depth_enabled_from_env`; pass a bool
-    to override the env var (see ``_DEPTH_ENV_VAR`` above -- depth is ON by
-    default for the recorder since 2026-09-14). ``align_depth=None`` likewise
+    to override the env var (see ``_DEPTH_ENV_VAR`` above -- depth is OFF by
+    default). ``align_depth=None`` likewise
     defers to :func:`_align_depth_from_env` (``ALIGN_DEPTH``, default off --
     see ``_ALIGN_ENV_VAR`` for the measured cost). The
     ``align_depth.enable:=`` element is emitted ONLY when depth is enabled:
@@ -279,17 +234,15 @@ def _realsense_argv(camera_name, serial, color_profile, enable_depth=None,
     *embedded* single quotes in the value itself. ``ros2 launch`` type-infers
     bare ``key:=value`` CLI args from their content, so an all-digit serial gets
     coerced to an integer and the node (which declares serial_no as a string)
-    dies instantly. Wrapping the value as ``serial_no:='147122072740'`` -- quote
+    dies instantly. Wrapping the value as ``serial_no:='123456789012'`` -- quote
     characters included in the argv string, NOT shell quoting -- forces a string.
 
     ``enable_depth`` needs no such wrapping: "true"/"false" is exactly what the
     type inference is supposed to read as a bool.
 
-    The example above deliberately uses a *device* serial (the
-    ``DEFAULT_CAM1_SERIAL`` above), not an ASIC serial. ``serial_no`` is matched
-    against ``camera_info.serial_number``; the ASIC serial is what the kernel USB
-    descriptor exposes, so it is what ``journalctl`` shows and it will never
-    resolve here. See the port/field table near ``DEFAULT_CAM1_SERIAL``.
+    ``serial_no`` is matched against the DEVICE ``camera_info.serial_number``,
+    never the ASIC serial that ``journalctl`` shows (see the note near
+    ``DEFAULT_CAM1_SERIAL``).
     """
     if enable_depth is None:
         enable_depth = _depth_enabled_from_env()
@@ -410,7 +363,7 @@ def _fmt_scalar(v):
 
 
 # --------------------------------------------------------------------------- #
-# Teleop control panel (added) -- state -> colour map
+# Teleop control panel -- state -> colour map
 # --------------------------------------------------------------------------- #
 # Covers both arm (PAUSED|WAITING|STALE|CHASING|FOLLOWING) and gripper
 # (PAUSED|WAITING|RAMPING|FOLLOWING) vocabularies. Anything unknown/None -> gray.
@@ -505,7 +458,7 @@ class MainWindow(QMainWindow):
         # _on_delete_last_take_clicked / _on_start_clicked / closeEvent.
         self._delete_box = None
 
-        # --- Teleop control panel state (added block) --------------------- #
+        # --- Teleop control panel state ----------------------------------- #
         # Two-click resume confirm gate + last statusBar-shown teleop message.
         self._teleop_resume_armed = False
         self._teleop_last_shown_msg = None
@@ -560,7 +513,7 @@ class MainWindow(QMainWindow):
 
         top.addWidget(self._build_state_panel(), stretch=1)
 
-        # --- Teleop control bar (added) -- directly above record controls -- #
+        # --- Teleop control bar -- directly above record controls --------- #
         root.addLayout(self._build_teleop_bar())
 
         # --- Bottom: record control bar ----------------------------------- #
@@ -612,9 +565,9 @@ class MainWindow(QMainWindow):
         self._cam1_status = QLabel("cam1: --")
         self._cam2_status = QLabel("cam2: --")
         self._depth_status = QLabel("depth: --")
-        # ros_lag = now - /joint_states header stamp. It is on screen because
-        # the 2026-09-14 carrot_in_pot corpus was recorded 0.900 s stale with
-        # nothing visible anywhere; this is that number, live.
+        # ros_lag = now - /joint_states header stamp. On screen because a
+        # starved recorder once wrote robot rows ~0.9 s stale with nothing
+        # visible anywhere; this is that number, live.
         self._ros_lag_status = QLabel("ros lag: --")
         layout.addWidget(self._cam1_status)
         layout.addWidget(self._cam2_status)
@@ -645,7 +598,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_teleop_bar(self):
-        """Teleop pause/resume bar (added block).
+        """Teleop pause/resume bar.
 
         Lets a solo operator pause the leader->robot signal path (single click)
         and resume it (two-click confirm, because resume initiates physical
@@ -719,13 +672,14 @@ class MainWindow(QMainWindow):
 
         self._tag_combo = QComboBox()
         self._tag_combo.setEditable(True)
-        self._tag_combo.addItems(["recover", "other_side"])
+        self._tag_combo.addItems(take_tag.preset_tags())
         self._tag_combo.setCurrentIndex(-1)
         self._tag_combo.lineEdit().setPlaceholderText("tag...")
         self._tag_combo.setFixedWidth(125)
         self._tag_combo.setToolTip(
-            "Tag the most recently stopped take. Choose recover/other_side "
-            "or type a custom tag. Multiple tags may be appended."
+            "Tag the most recently stopped take (appended to its folder "
+            "name). Pick a preset (RECORDER_TAG_PRESETS) or type a custom "
+            "tag. Multiple tags may be appended."
         )
         self._tag_last_take_button = QPushButton("Tag last take")
         self._tag_last_take_button.setEnabled(False)
@@ -980,10 +934,10 @@ class MainWindow(QMainWindow):
         self._tag_combo.setEnabled(can_tag)
         self._tag_last_take_button.setEnabled(can_tag)
 
-        # Teleop panel shares this ~5 Hz timer (added block).
+        # Teleop panel shares this ~5 Hz timer.
         self._refresh_teleop()
 
-    # ---------------------------------------------------- teleop (added) --
+    # ------------------------------------------------------------ teleop --
     def _refresh_teleop(self):
         """~5 Hz: drive teleop state labels + pause/resume button enablement."""
         st = self._node.get_teleop_status()
@@ -1331,7 +1285,7 @@ class MainWindow(QMainWindow):
 def _depth_node_kwargs(cam1_name, cam2_name, enable_depth, align_depth):
     """Node ctor kwargs for depth recording: ``{}`` when depth is off.
 
-    Shared by ``main()`` here and ``task_recorder_gui.main()`` so both GUIs wire
+    Shared by ``main()`` here and by GUIs built on this module so they all wire
     the node from the same :func:`depth_topics_for` names the cameras will
     actually publish under (aligned or not).
     """

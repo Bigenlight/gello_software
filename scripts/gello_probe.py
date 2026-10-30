@@ -96,7 +96,7 @@ def report_ports(configs: Dict[str, P.LeaderConfig], chosen: str, port_override:
         print("  ❌ 포트를 다른 프로세스가 잡고 있다 (Dynamixel 버스는 단일 마스터 — 같이 쓰면 ping/read가 서로 깨진다):")
         for ln in users:
             print(f"     {ln}")
-        print("  gello_publisher / run_hil_hardware.sh / 텔레옵 launch를 먼저 내리고 다시 실행하라. "
+        print("  gello_publisher / 텔레옵·녹화 launch를 먼저 내리고 다시 실행하라. "
               "이 스크립트는 아무것도 죽이지 않는다.")
         if not allow_busy:
             sys.exit(3)
@@ -113,7 +113,7 @@ def open_bus(port: str, baud: int):
         users = _port_users(port)
         msg = f"포트를 열 수 없다: {port}"
         if users:
-            msg += "\n  다른 프로세스가 잡고 있다 (gello_publisher / run_hil_hardware.sh 등을 먼저 내려라):\n    " + "\n    ".join(users)
+            msg += "\n  다른 프로세스가 잡고 있다 (gello_publisher / 텔레옵·녹화 launch 등을 먼저 내려라):\n    " + "\n    ".join(users)
         elif not os.path.exists(port):
             msg += "\n  경로가 없다 — USB 연결/시리얼(by-id 이름)을 확인"
         else:

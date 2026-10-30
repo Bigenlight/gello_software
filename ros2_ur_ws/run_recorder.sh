@@ -1,66 +1,40 @@
 #!/usr/bin/env bash
-# Diagnostic recorder for the GELLO -> UR7e teleop.
+# Headless recorder for the GELLO -> UR7e teleop (no GUI, one session per run).
 #
 # Run this in a SECOND terminal WHILE the teleop (sim or real) is running. It
-# logs GELLO joints + velocity, the bridge command, the UR7e ACTUAL joint
-# position/velocity/effort, the gripper, and TCP force-torque / pose into a
-# timestamped sub-folder:
+# records GELLO joints, the bridge command, the UR7e joint state, the gripper,
+# TCP wrench / pose and (optionally) both RealSense cameras into
 #
 #     ros2_ur_ws/gello_logs/session_<YYYYmmdd_HHMMSS>/
-#         vectors.h5         <- ONE HDF5 file with all the vector-signal tables
-#                               (synchronized + gello_joint_states, ur_joint_states,
-#                               command, gripper, wrench, tcp_pose, and the
-#                               cam1_frames/cam2_frames frame-index tables); this
-#                               replaces the old per-signal CSVs.
-#         cam1.mp4  cam2.mp4  <- the two RealSense color streams (only when CAMS=true)
-#         depth.h5            <- both RealSense depth streams (CAMS=true and ENABLE_DEPTH
-#                               not 0): one PNG 16UC1 mm frame per row + depth
-#                               intrinsics + depth->color extrinsics (depth_writer.py)
+#         vectors.h5           all vector tables (see src/gello_recorder/README.md)
+#         cam1.mp4  cam2.mp4   color streams              (CAMS=true only)
+#         depth.h5             depth frames + calibration (CAMS=true ENABLE_DEPTH=1)
 #         metadata.json
 #
 # Usage:
-#     ./run_recorder.sh                 # signal logging only (vectors.h5)
-#     BAG=true ./run_recorder.sh        # ALSO capture a full `ros2 bag -a`
-#     CAMS=true ./run_recorder.sh       # ALSO launch both RealSense cameras (-> cam1.mp4/cam2.mp4)
-#     CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh   # ...and record depth.h5 too (costly, see below)
-#     RATE=200 ./run_recorder.sh        # synchronized-table sample rate (Hz)
+#     ./run_recorder.sh                            # vectors.h5 only
+#     CAMS=true ./run_recorder.sh                  # + both RealSense cameras
+#     CAMS=true ENABLE_DEPTH=1 ./run_recorder.sh   # + depth.h5 (costly, opt-in)
+#     BAG=true ./run_recorder.sh                   # + a full `ros2 bag record -a`
+#     RATE=200 ./run_recorder.sh                   # synchronized-table rate (Hz, default 100)
 #
-# Camera env vars (only used when CAMS=true or CAMS=1):
-#     CAM1_SERIAL    RealSense #1 serial (auto-resolved; default 143322071682, plain D435, SCENE)
-#     CAM2_SERIAL    RealSense #2 serial (auto-resolved; default 143322072540, plain D435, WRIST)
-#     CAM1_NAME      camera_name/namespace for #1 (default cam1)
-#     CAM2_NAME      camera_name/namespace for #2 (default cam2)
-#     COLOR_PROFILE  color WxHxFPS, same for both cameras (default 1280x720x30)
-#     ENABLE_DEPTH   default 0 = RGB only. 1|true -> ALSO stream and record
-#                    depth (-> depth.h5), at ~6 MB/s disk, +2 subscriptions per
-#                    camera and ~+35 % recorder CPU. (Default ON for one day,
-#                    2026-09-14, then reverted: that load starved the recorder's
-#                    spin thread and back-dated every robot row by 0.9 s. Fixed,
-#                    but still costly -- so it is opt-in per session.)
-#     ALIGN_DEPTH    1|true -> align_depth.enable:=true (depth resampled onto the
-#                    1280x720 color image; the node then records the
-#                    aligned_depth_to_color topics). default 0: measured at ~49 %
-#                    CPU per camera node with BOTH streams dropping to ~25 Hz, so
-#                    it is opt-in only; align offline from the recorded
-#                    intrinsics/extrinsics instead.
-# The serials above identify the production scene/wrist pair. resolve_serials()
-# (shared with launch_cameras.sh, see _resolve_camera_serials.sh) validates that
-# exact pair against what rs-enumerate-devices reports and fails before launch when
-# either camera is absent. CAMERA_ALLOW_SERIAL_FALLBACK=1 explicitly opts into
-# the legacy temporary-rig fallback. Binding an absent serial otherwise does not
-# fail loudly: the node starts but publishes no frames.
-# The cameras are launched via realsense2_camera rs_launch.py. The recorder node
-# subscribes to the color topics realsense2_camera publishes under
-# /<CAM1_NAME>/<CAM1_NAME>/color/image_raw/compressed (and likewise CAM2) and
-# writes them to cam1.mp4 / cam2.mp4 in the session folder. The RealSense
-# driver publishes this native image_transport endpoint when its compressed
-# plugin is installed; Jazzy checks that plugin before opening either camera.
-# With depth on it also gets record_depth:=true plus the six depth topic params
-# (/<cam>/<cam>/depth/image_rect_raw/compressedDepth, .../depth/camera_info,
-# .../extrinsics/depth_to_color -- or the aligned_depth_to_color variants when
-# ALIGN_DEPTH=1) and writes depth.h5.
+# Camera env vars (only used with CAMS=true):
+#     CAM1_SERIAL / CAM2_SERIAL  RealSense DEVICE serials. Default: camera_serials.env
+#                                next to this script (scene camera = cam1, wrist = cam2).
+#     CAM1_NAME / CAM2_NAME      camera_name/namespace (default cam1 / cam2)
+#     COLOR_PROFILE              color WxHxFPS for both cameras (default 1280x720x30)
+#     ENABLE_DEPTH               1|true -> also record depth.h5 (~6 MB/s disk, extra
+#                                subscriptions and CPU; default 0 = RGB only)
+#     ALIGN_DEPTH                1|true -> in-node depth->color alignment (~5x camera
+#                                CPU, both streams drop to ~25 Hz; default 0 -- align
+#                                offline from the recorded intrinsics/extrinsics)
+#     CAMERA_ALLOW_SERIAL_FALLBACK=1  accept a different camera pair (temporary rigs)
 #
-# Stop with Ctrl-C (flushes + finalises metadata.json, and stops the bag + cameras).
+# The serial pair is checked against `rs-enumerate-devices` before launch
+# (_resolve_camera_serials.sh) because a camera node bound to an absent serial
+# starts but publishes nothing.
+#
+# Stop with Ctrl-C (flushes + finalises metadata.json, stops the bag + cameras).
 # READ-ONLY: subscribes only; never commands the robot or GELLO.
 set -e
 
@@ -105,39 +79,20 @@ if [ "${BAG}" = "true" ] || [ "${BAG}" = "1" ]; then
 fi
 
 if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
-    # serial_no:= matches the RealSense device serial_number, not its ASIC
-    # serial. The production pair is strict by default; see
-    # _resolve_camera_serials.sh for the explicit temporary-rig fallback.
-    # 2026-09-14 lab move: two PLAIN D435 bodies now. cam1=SCENE, cam2=WRIST.
-    CAM1_SERIAL="${CAM1_SERIAL:-143322071682}"   # ASIC 143623022572
-    CAM2_SERIAL="${CAM2_SERIAL:-143322072540}"   # ASIC 143523020769
+    # Serial defaults come from camera_serials.env; exported values win.
+    source "$SCRIPT_DIR/_resolve_camera_serials.sh"
+    load_camera_serial_defaults
     CAM1_NAME="${CAM1_NAME:-cam1}"
     CAM2_NAME="${CAM2_NAME:-cam2}"
-    # Both cameras record at the same resolution/fps so the two MP4s line up
-    # visually (D435 defaults to 640x480, D435IF to 1280x720 -- force both to
-    # match). Override with COLOR_PROFILE=WxHxFPS if you ever need something else.
+    # Same resolution/fps on both cameras so the two MP4s line up.
     COLOR_PROFILE="${COLOR_PROFILE:-1280x720x30}"
-    # Depth is OPT-IN and OFF by default: RGB only unless ENABLE_DEPTH=1.
-    # It was on by default for one day (2026-09-14) and that day cost a 54-take
-    # corpus its timestamps -- two extra 30 Hz subscriptions per camera plus a
-    # ~6 MB/s HDF5 write on the recorder's single rclpy spin thread dropped its
-    # round rate to 60-69 Hz, and every faster topic was then read out of a full
-    # queue (ur_joint_states 0.900 s late, tcp_pose/wrench ~0.45 s). That defect
-    # is fixed (header stamps + depth-5 queues + a background frame writer +
-    # a starvation watchdog, see gello_recorder/spin_health.py) but the COST is
-    # not, so depth is now something a session asks for on purpose.
-    # The cameras were never the problem: on the self-powered Genesys hub
-    # 2x color+depth measured stable (30 Hz color / ~29 Hz depth / ~9 % CPU per
-    # node). ALIGN_DEPTH=1 additionally turns on in-node depth->color alignment
-    # -- opt-in only, it costs ~49 % CPU and ~25 Hz on both streams (measured);
-    # the aligned element is emitted ONLY when depth is on (same rule as
-    # gello_recorder_gui._realsense_argv).
+    # Depth / alignment are opt-in (see header). The aligned element is emitted
+    # ONLY when depth is on (same rule as gello_recorder_gui._realsense_argv).
     ENABLE_DEPTH="${ENABLE_DEPTH:-0}"
     ALIGN_DEPTH="${ALIGN_DEPTH:-0}"
     case "${ENABLE_DEPTH,,}" in 1|true|yes|on) DEPTH_ON=true; DEPTH_ARG="enable_depth:=true" ;; *) DEPTH_ON=false; DEPTH_ARG="enable_depth:=false" ;; esac
     case "${ALIGN_DEPTH,,}" in 1|true|yes|on) ALIGN_ON=true ;; *) ALIGN_ON=false ;; esac
-    # Extra launch args + recorder params, filled only when depth is on. Bash
-    # arrays so the depth-off launch line stays byte-identical to before.
+    # Extra launch args + recorder params, filled only when depth is on.
     DEPTH_LAUNCH_EXTRA=()
     DEPTH_NODE_ARGS=()
     if [ "${DEPTH_ON}" = "true" ]; then
@@ -169,7 +124,6 @@ if [ "${CAMS}" = "true" ] || [ "${CAMS}" = "1" ]; then
     fi
     # Resolve against what is actually on the USB bus before launching anything
     # (enumeration takes no streaming lock, so this is safe here).
-    source "$SCRIPT_DIR/_resolve_camera_serials.sh"
     resolve_serials
 
     if [ "${GELLO_ROS_DISTRO}" = "jazzy" ]; then

@@ -60,13 +60,13 @@ esac
 # (AMENT_TRACE_SETUP_FILES, AMENT_PYTHON_EXECUTABLE, ...), so they abort under
 # `set -u`. Keep strict nounset checking for the rest of this script and
 # disable it only while the upstream/generated environment scripts are sourced.
-# Same treatment as run_ur7e_diffusion_remote.sh.
+# (Same treatment as the policy-deploy launchers on the research/* branches.)
 set +u
 source "/opt/ros/${GELLO_ROS_DISTRO}/setup.bash"
 set -u
 
 # --from-paths src scans the WHOLE workspace regardless of which packages are
-# selected below for colcon build, so all three packages' rosdep keys are
+# selected below for colcon build, so every package's rosdep keys are
 # resolved together here even when GELLO_BUILD_PACKAGES only builds a subset.
 rosdep install --from-paths src --ignore-src -r -y --skip-keys dynamixel_sdk
 

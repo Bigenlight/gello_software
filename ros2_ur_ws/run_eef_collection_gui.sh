@@ -10,6 +10,12 @@
 #   R      recording START / STOP
 #   SPACE  EEF ENGAGE / DISENGAGE (engage keeps the two-press confirmation)
 #   G      gripper PAUSE / RESUME (resume keeps the two-press confirmation)
+#   H      GO TO START POSE (two-press confirmation)
+#
+# The recorder pane takes the same env vars as gello_recorder_gui:
+#   CAM1_SERIAL / CAM2_SERIAL (default: camera_serials.env), COLOR_PROFILE,
+#   ENABLE_DEPTH=1, ALIGN_DEPTH=1, RECORDER_OUTPUT_ROOT, RECORDER_TAG_PRESETS.
+# START_POSE_CONFIG selects the yaml read by GO TO START POSE.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

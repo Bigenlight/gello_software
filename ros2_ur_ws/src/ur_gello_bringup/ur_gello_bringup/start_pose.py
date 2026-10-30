@@ -2,7 +2,8 @@
 
 Pure module: stdlib + PyYAML only. No rclpy, no Qt. It reads ONE thing -- the
 ``policy_leader_node.ros__parameters.start_pose`` (+ optional ``start_gripper``)
-entry of a policy deploy yaml (``src/gello_policy/config/*_deploy.yaml``) -- and
+entry of a yaml (default ``config/start_pose.yaml``, copied from a policy deploy
+yaml ``src/gello_policy/config/*_deploy.yaml`` on the research/* branches) -- and
 hands back validated numbers. Everything that moves the robot lives in the GUI
 node; this module never touches ROS.
 
