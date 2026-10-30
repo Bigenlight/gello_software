@@ -599,6 +599,8 @@ class CaptureService:
             return {**res, "ok": bool(res.get("ok", True)), "msg": msg}
         if cmd == "discard_last_take":
             return self.recorder.discard_last()
+        if cmd == "tag_last_take":
+            return self.recorder.tag_last(str(req.get("tag", "")))
         return {"ok": False, "msg": f"unknown cmd {cmd!r}"}
 
     def status(self) -> Dict[str, Any]:

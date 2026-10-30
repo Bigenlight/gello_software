@@ -426,6 +426,25 @@ def test_discard_last_and_second_take_counter(take):
     shutil.rmtree(d1)
 
 
+def test_tag_last_take_renames_completed_folder(tmp_path):
+    recorder, take_dir, _res, _n = record_take(tmp_path, seconds=0.15, record_depth=False)
+    result = recorder.tag_last("Other Side")
+    assert result["ok"] and result["changed"]
+    assert result["path"].endswith("_other_side")
+    assert not os.path.exists(take_dir)
+    assert os.path.isdir(result["path"])
+    assert recorder.status()["last_take_dir"] == result["path"]
+    again = recorder.tag_last("other-side")
+    assert again["ok"] and not again["changed"]
+
+
+def test_tag_last_take_rejects_unsafe_tag(tmp_path):
+    recorder, take_dir, _res, _n = record_take(tmp_path, seconds=0.15, record_depth=False)
+    result = recorder.tag_last("../escape")
+    assert not result["ok"]
+    assert os.path.isdir(take_dir)
+
+
 def test_bad_messages_never_raise(tmp_path):
     r = SimTakeRecorder()
     r.on_state({"q": [1, 2]})                          # not recording: ignored

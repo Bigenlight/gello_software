@@ -228,10 +228,10 @@ class SimMain:
         self._settle(float(self.cfg.layout.get("settle_s", 0.5)))
         self.controller.reseed()
 
-    def reset_scene(self, seed: Optional[int] = None) -> Dict[str, Any]:
+    def reset_scene(self, seed: Optional[int] = None, *, move_home: bool = False) -> Dict[str, Any]:
         self.controller.disengage()
         home = self.cfg.home_joints
-        q = self._leader_pose_nearest(home)
+        q = home if move_home else self._leader_pose_nearest(home)
         if q is None:
             q = np.asarray(self.data.qpos[:6], dtype=float).copy()
         self._teleport_arm(q, open_gripper=True)
@@ -326,6 +326,8 @@ class SimMain:
             "robot": self.cfg.robot.get("name", "ur7e"), "home_joints": self.meta["home_joints"],
             "objects": objs, "object_names": list(objs), "chosen_food": self.task_cfg.food,
             "container": self.task_cfg.container, "task": self.task_cfg.name,
+            "task_type": self.task_cfg.task_type, "upper_object": self.task_cfg.upper,
+            "lower_object": self.task_cfg.lower,
             "cameras": self.meta["cameras"], "floor": self.meta["floor"], "names": self.meta["names"],
             "layout": self.layout, "layout_seed": self.seed, "timestep": self.dt,
             "control_hz": self.control_hz, "leader_hz": self.leader_hz,
@@ -374,6 +376,13 @@ class SimMain:
             return {"ok": True, "msg": msg, "layout": layout, "seed": self.seed,
                     "layout_attempt": int(layout.get("_attempt", 0)),
                     "arm_moved_home": "teleported to home" in self.last_reset_note}
+        if cmd == "reset_scene_home":
+            layout = self.reset_scene(req.get("seed"), move_home=True)
+            return {"ok": True,
+                    "msg": f"scene reset (seed {self.seed}) + arm teleported to home",
+                    "layout": layout, "seed": self.seed,
+                    "layout_attempt": int(layout.get("_attempt", 0)),
+                    "arm_moved_home": True}
         if cmd == "home":
             self.home()
             return {"ok": True, "msg": "arm teleported to home", "layout": self.layout, "seed": self.seed}

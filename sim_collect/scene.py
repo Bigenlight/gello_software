@@ -46,6 +46,16 @@ def resolve_path(p: str) -> str:
     return p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
 
 
+def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 # --------------------------------------------------------------------------- #
 # Config                                                                        #
 # --------------------------------------------------------------------------- #
@@ -94,6 +104,12 @@ class SceneConfig:
         path = resolve_path(path)
         with open(path, "r") as f:
             d = yaml.safe_load(f)
+        extends = d.pop("extends", None)
+        if extends:
+            base_path = resolve_path(str(extends))
+            with open(base_path, "r") as f:
+                base = yaml.safe_load(f)
+            d = _deep_merge(base, d)
         return cls.from_dict(d, path=os.path.abspath(path))
 
     @property
@@ -360,6 +376,28 @@ def _site_size_info(model: mjcf.RootElement, name: str) -> Dict[str, Any]:
     return info
 
 
+def _simplify_bowl_collision(model: mjcf.RootElement, body_name: str, segments: int = 12) -> None:
+    """Keep the visual soup-bowl mesh but replace its dense 40-box collision shell."""
+    body = model.find("body", body_name)
+    if body is None:
+        raise ValueError(f"cannot simplify bowl collision: missing body {body_name!r}")
+    for geom in body.find_all("geom"):
+        if int(geom.group or 0) == 3:
+            geom.contype = 0
+            geom.conaffinity = 0
+    body.add("geom", name=f"{body_name}_simple_bottom", type="cylinder",
+             size=[0.020, 0.005], pos=[0.0, 0.0, 0.005], mass=0,
+             group=3, condim=4, friction=[1.0, 0.01, 0.001], rgba=[0.5, 0.5, 0.5, 0.2])
+    for index in range(int(segments)):
+        angle = 2.0 * math.pi * index / int(segments)
+        cosine, sine = math.cos(angle), math.sin(angle)
+        body.add("geom", name=f"{body_name}_simple_wall{index}", type="capsule",
+                 fromto=[0.017 * cosine, 0.017 * sine, 0.006,
+                         0.049 * cosine, 0.049 * sine, 0.049],
+                 size=[0.003], mass=0, group=3, condim=4,
+                 friction=[1.0, 0.01, 0.001], rgba=[0.5, 0.5, 0.5, 0.2])
+
+
 # --------------------------------------------------------------------------- #
 # Build                                                                         #
 # --------------------------------------------------------------------------- #
@@ -396,6 +434,8 @@ def build_scene(cfg: SceneConfig, layout: Optional[Dict[str, Dict[str, Any]]] = 
     root.option.cone = str(ph.get("cone", "elliptic"))
     root.option.impratio = float(ph.get("impratio", 10))
     root.option.noslip_iterations = int(ph.get("noslip_iterations", 0))
+    if ph.get("memory"):
+        root.size.memory = str(ph["memory"])
     # Gravity compensation on the ARM LINKS ONLY (default 1.0): the menagerie
     # position actuators are plain PD (no integral action), so an uncompensated
     # arm sags ~0.011 rad per (re)seed at the home pose (0.022 measured after
@@ -426,6 +466,14 @@ def build_scene(cfg: SceneConfig, layout: Optional[Dict[str, Dict[str, Any]]] = 
 
     # ---- gripper + flange F/T site ----------------------------------------
     hand = mjcf.from_path(resolve_path(cfg.robot["gripper_xml"]))
+    pad_friction = cfg.robot.get("gripper_pad_friction", [[1.0, 0.01, 0.001],
+                                                           [0.9, 0.01, 0.001]])
+    for side in ("left", "right"):
+        for pad_index, friction in enumerate(pad_friction, start=1):
+            pad = hand.find("geom", f"{side}_pad{pad_index}")
+            if pad is not None:
+                pad.condim = 4
+                pad.friction = [float(value) for value in friction]
     ft_name = str(cfg.robot.get("ft_site", "ft_site"))
     base_mount = hand.find("body", "base_mount")
     # base_mount sits 7 mm above the attachment frame; put the site AT the flange.
@@ -512,13 +560,24 @@ def build_scene(cfg: SceneConfig, layout: Optional[Dict[str, Dict[str, Any]]] = 
     key_ctrl[:6] = list(cfg.home_joints)
     for spec in cfg.objects:
         name = spec["name"]
+        asset_name = str(spec.get("asset_name", name))
         path = _object_asset_path(cfg, spec)
         if path is not None:
             om = mjcf.from_path(path)
             om.model = name
-            _validate_object_model(name, om, path)
+            _validate_object_model(asset_name, om, path)
+            if spec.get("simple_bowl_collision"):
+                _simplify_bowl_collision(
+                    om, asset_name, int(spec.get("collision_segments", 12)))
+            tint = spec.get("visual_rgba")
+            if tint is not None:
+                tint = [float(value) for value in tint]
+                for geom in om.find_all("geom"):
+                    if int(geom.group or 0) == 2 or (geom.contype == 0 and geom.conaffinity == 0):
+                        geom.material = None
+                        geom.rgba = tint
             size = {"source": path}
-            size.update(_site_size_info(om, name))
+            size.update(_site_size_info(om, asset_name))
         else:
             if "placeholder" not in spec:
                 raise FileNotFoundError(f"object {name!r}: no asset xml and no placeholder spec")
@@ -535,10 +594,12 @@ def build_scene(cfg: SceneConfig, layout: Optional[Dict[str, Dict[str, Any]]] = 
         meta["objects"][name] = {
             "kind": spec.get("kind", "object"),
             "frame_body": f"{name}/",
-            "body": f"{name}/{name}",
-            "center_site": f"{name}/{name}_center",
-            "opening_site": f"{name}/{name}_opening" if om.find("site", f"{name}_opening") is not None else None,
-            "floor_site": f"{name}/{name}_floor" if om.find("site", f"{name}_floor") is not None else None,
+            "body": f"{name}/{asset_name}",
+            "center_site": f"{name}/{asset_name}_center",
+            "opening_site": (f"{name}/{asset_name}_opening"
+                             if om.find("site", f"{asset_name}_opening") is not None else None),
+            "floor_site": (f"{name}/{asset_name}_floor"
+                           if om.find("site", f"{asset_name}_floor") is not None else None),
             "radius_m": float(spec.get("radius_m", 0.05)),
             "size": size,
         }

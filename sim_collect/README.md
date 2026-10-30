@@ -177,14 +177,14 @@ DISENGAGE (팔은 그 자리에 선다) → GELLO를 편한 자세로 옮긴다 
 - 기본 `continuous`: 방아쇠 값이 그대로 `grip_cmd`가 된다(0=열림, 1=닫힘). `deadband 0.02` 미만 변화는 무시(떨림 억제).
 - `configs/carrot_in_pot_sim.yaml`의 `gripper.mode: discrete`로 바꾸면 **0.3/0.7 히스테리시스 래치**:
   `>=0.7`이면 닫힘, `<=0.3`이면 열림, 그 사이는 **직전 상태 유지**.
-- `Gripper PAUSE`는 현재 값에서 **얼린다**. `Gripper Resume`은 확인 클릭이 한 번 더 필요하다(재개 순간 방아쇠 값으로 튄다).
+- `Gripper PAUSE`는 현재 값에서 **얼린다**. `Gripper Resume`은 확인 클릭이 한 번 더 필요하다(재개 순간 방아쇠 값으로 튄다). 단축키 `g`도 같은 토글이며 resume에는 두 번 눌러야 한다.
 
 ### 3-6. RESET SCENE / HOME
 
 | 버튼 | 하는 일 |
 | --- | --- |
-| `RESET SCENE` (`n`) | **녹화 중에는 거부된다** (STOP TAKE 먼저). DISENGAGE → 팔을 **GELLO의 현재 자세**로 텔레포트 → 그리퍼 열기 → 물체 위치 재샘플 → 속도 0 → `settle_s`(0.5 s) 동안 물리 빨리감기. seed를 안 적으면 **직전 seed + 1**, 옆 `seed:` 칸에 정수를 넣으면 그 seed로 고정(같은 배치 재현) |
-| `HOME` (`h`) | DISENGAGE → 팔을 `robot.home_joints`(GELLO 캘리브레이션 자세)로 텔레포트. **물체는 건드리지 않는다** |
+| `RESET SCENE` (`n`) | **녹화 중에는 거부된다** (STOP TAKE 먼저). DISENGAGE → 팔을 **GELLO의 현재 자세**로 텔레포트 → 그리퍼 열기 → `↑/↓`로 선택한 seed의 물체 위치 재생성 → 속도 0 → `settle_s`(0.5 s) 동안 물리 빨리감기 |
+| `RESET + HOME` (`h`) | **녹화 중에는 거부된다.** DISENGAGE → 팔을 `robot.home_joints`로 텔레포트 → 그리퍼 열기 → `↑/↓`로 선택한 seed로 물체 재배치 |
 
 둘 다 wrench tare를 다시 잡는다.
 
@@ -195,13 +195,28 @@ DISENGAGE (팔은 그 자리에 선다) → GELLO를 편한 자세로 옮긴다 
 | `START TAKE` (`r`) | 새 take 디렉터리를 열고 기록 시작. 씬/렌더 워커가 준비 안 됐거나 sim state가 1초 이상 끊겼으면 거부한다 |
 | `STOP TAKE` (`r`) | 파일을 닫고 `sim_meta`에 `task_success_at_stop`·`duration_s`를 적는다 |
 | `DISCARD LAST` | 확인 클릭 2회. **마지막으로 끝낸 take 디렉터리를 통째로 지운다**(되돌릴 수 없다). 녹화 중에는 거부 |
+| `TAG LAST` | 마지막으로 끝낸 take 폴더명 뒤에 `recover`, `other_side` 또는 직접 입력한 태그를 붙인다. 녹화 중에는 거부 |
 
 GUI에 `Take: N`, `● RECORDING`, 경과 시간, `frames cam1/cam2 · rows`, take 경로가 뜬다.
+녹화 중에는 창 상단 전체가 큰 빨간 배너로 바뀌고 녹화 패널도 옅은 빨강 배경과 굵은 빨강 테두리로 강조된다.
 상단 오른쪽 `TASK` 배지는 기하학적 성공 판정(음식이 용기 개구부 안 + 거의 정지 + 그리퍼 열림)이며 **참고용**이다 —
 학습용 라벨은 변환할 때 사람이 `--outcome`으로 준다.
 
-**단축키:** `space` ENGAGE/DISENGAGE · `r` START/STOP TAKE · `n` RESET SCENE · `h` HOME
-(seed 입력칸에 커서가 있으면 단축키는 안 먹는다).
+**단축키:** `space` ENGAGE/DISENGAGE · `r` START/STOP TAKE · `g` GRIPPER PAUSE/RESUME · `↑/↓` seed 변경 · `n` RESET SCENE · `h` RESET SCENE + HOME.
+태그 입력칸에 커서가 있을 때만 단축키 입력을 보류한다.
+
+### Bowl stack
+
+기존 카메라·목재 바닥·조명·로봇 구성을 그대로 쓰고, 좌측 오렌지 국그릇을 우측 보라색
+국그릇 위에 포개는 별도 태스크다. seed 0–19는 색상과 좌우 역할을 바꾸지 않고 위치만 각
+기준점에서 최대 3 cm 변화시킨다.
+
+```bash
+DISPLAY=:1 ./sim_collect/run_bowl_stack.sh --control-mode eef
+```
+
+take는 기본적으로 `ros2_ur_ws/gello_logs/sim/bowl_stack/`에 저장된다. 성공 배지는 오렌지
+그릇의 중심 정렬·상대 높이·기울기·정지와 열린 그리퍼를 함께 검사한다.
 
 ### 3-8. joint 모드는 무엇이 다른가
 

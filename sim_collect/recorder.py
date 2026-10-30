@@ -47,6 +47,7 @@ import gello_recorder.hdf5_writer as _h5w
 import gello_recorder.recording_session as _rs
 from gello_recorder.hdf5_writer import Hdf5TableWriter
 from gello_recorder.recording_session import RecordingSession
+from sim_collect.take_tag import TakeTagError, tag_take_dir
 
 
 class BufferedHdf5TableWriter(Hdf5TableWriter):
@@ -416,6 +417,23 @@ class SimTakeRecorder:
             shutil.rmtree(d)
             self.last_take_dir = None
             return {"ok": True, "msg": f"deleted {d}", "deleted": d}
+
+    def tag_last(self, raw_tag: str) -> Dict[str, Any]:
+        """Append a safe folder-name tag to the latest completed take."""
+        with self._lock:
+            if self._session is not None:
+                return {"ok": False, "msg": "stop the take before tagging it"}
+            take_dir = self.last_take_dir
+            if not take_dir:
+                return {"ok": False, "msg": "no take to tag"}
+            try:
+                result = tag_take_dir(take_dir, os.path.dirname(take_dir), raw_tag)
+            except TakeTagError as exc:
+                return {"ok": False, "msg": str(exc)}
+            self.last_take_dir = result["path"]
+            verb = "tagged" if result["changed"] else "already tagged"
+            return {"ok": True, **result,
+                    "msg": f"{verb} {os.path.basename(result['path'])}"}
 
     def status(self) -> Dict[str, Any]:
         with self._lock:

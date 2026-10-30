@@ -38,6 +38,9 @@ robot:
   gripper_driver_joint: robotiq_2f85/right_driver_joint
   gripper_driver_range: [0.0, 0.871]
   gripper_actuator: robotiq_2f85/fingers_actuator      # ctrl 0..255
+  # Override the upstream MJCF silicone pads after loading. condim=4 adds
+  # torsional contact friction; the two rows correspond to outer/inner pads.
+  gripper_pad_friction: [[1.0, 0.01, 0.001], [0.9, 0.01, 0.001]]
   ft_site: ft_site                                      # flange force/torque site
 
 physics:
@@ -45,7 +48,9 @@ physics:
   integrator: implicitfast
   cone: elliptic
   impratio: 10
-  noslip_iterations: 0
+  # Extra friction-cone refinement. Five passes noticeably reduce object/pad
+  # slip in this small scene without materially lowering the 500 Hz physics loop.
+  noslip_iterations: 5
   # Gravity compensation on the six arm links (fraction of weight). The menagerie
   # position actuators are PD-only, so without it the held arm sags ~0.011 rad
   # per seed (0.022 measured after teleport+seed); with 1.0 the residual is

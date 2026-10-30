@@ -197,19 +197,45 @@ def test_gripper_pause_is_one_click_resume_is_two(app, stubs):
 
 
 @needs_display
+def test_g_key_toggles_gripper_with_confirmed_resume(app, stubs):
+    app._key(app.on_toggle_gripper)
+    assert stubs.sim.gripper_paused
+    app._key(app.on_toggle_gripper)
+    assert app.is_armed("grip_resume") and stubs.sim.gripper_paused
+    app._key(app.on_toggle_gripper)
+    assert not stubs.sim.gripper_paused
+
+
+@needs_display
 def test_home_and_reset_scene_with_seed(app, stubs):
     app.on_home()
     assert stubs.sim.home_count == 1
+    assert stubs.sim.reset_count == 1
+    assert stubs.sim.saw("reset_scene_home")
 
     app.seed_var.set("7")
-    app.on_reset_scene()
-    assert stubs.sim.calls_of("reset_scene")[-1].get("seed") == 7
-
-    app.seed_var.set("not-an-int")          # bad seed -> ignored, still resets
-    app.on_reset_scene()
-    assert "seed" not in stubs.sim.calls_of("reset_scene")[-1]
+    app.on_home()
+    assert stubs.sim.calls_of("reset_scene_home")[-1].get("seed") == 7
     assert stubs.sim.reset_count == 2
-    assert any("정수가 아니다" in l for l in app.log_lines())
+
+
+@needs_display
+def test_seed_uses_arrow_keys_and_never_creates_an_entry_focus(app, stubs):
+    app.sim_status["layout_seed"] = 7
+    app._seed_user_selected = False
+    app.refresh()
+    assert app.seed_var.get() == "7"
+    assert not hasattr(app, "seed_entry")
+
+    app.on_seed_step(1)
+    assert app.seed_var.get() == "8"
+    app.on_seed_step(-1)
+    assert app.seed_var.get() == "7"
+    app.on_seed_step(-20)
+    assert app.seed_var.get() == "0"
+
+    app.on_reset_scene()
+    assert stubs.sim.calls_of("reset_scene")[-1].get("seed") == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -225,11 +251,16 @@ def test_start_and_stop_take(app, stubs):
     assert "RECORDING take 1" in app.rec_var.get()
     assert app.start_btn.cget("state") == "disabled"
     assert app.stop_btn.cget("state") == "normal"
+    assert "RECORDING NOW" in app.recording_banner_var.get()
+    assert app.recording_banner.cget("background") == gui_mod._REC_RED
+    assert app.recording_box.cget("background") == gui_mod._REC_BG
 
     app.on_stop_take()
     assert stubs.capture.saw("stop_take")
     assert not app.recording
     assert app.rec_var.get() == "PREVIEW"
+    assert "NOT RECORDING" in app.recording_banner_var.get()
+    assert app.recording_box.cget("background") == gui_mod._BG
     assert any("saved take_01" in l for l in app.log_lines())
 
 
@@ -242,15 +273,31 @@ def test_toggle_take_key(app, stubs):
 
 
 @needs_display
+def test_physical_r_keycode_toggles_take_with_non_latin_keysym(app, stubs):
+    event = type("Event", (), {"keysym": "Hangul_Jieuj", "keycode": 27})()
+    app._dispatch_key_press(event)
+    assert stubs.capture.recording
+    app._key_down["r"] = False
+    app._key_last["r"] = 0.0
+    app._dispatch_key_press(event)
+    assert not stubs.capture.recording
+
+
+@needs_display
 def test_reset_scene_is_refused_while_recording(app, stubs):
     app.on_start_take()
     assert app.recording
     assert app.reset_btn.cget("state") == "disabled"
+    assert app.home_btn.cget("state") == "disabled"
 
     assert app.on_reset_scene() is None
     assert not stubs.sim.saw("reset_scene")
     assert stubs.sim.reset_count == 0
     assert any("RESET SCENE 거부" in l for l in app.log_lines())
+
+    assert app.on_home() is None
+    assert not stubs.sim.saw("reset_scene_home")
+    assert any("RESET + HOME 거부" in l for l in app.log_lines())
 
     app.on_stop_take()
     app.on_reset_scene()
@@ -270,6 +317,19 @@ def test_discard_last_needs_a_confirm_and_is_blocked_while_recording(app, stubs)
     app.on_discard_last()                       # fires
     assert stubs.capture.saw("discard_last_take")
     assert stubs.capture.discarded
+
+
+@needs_display
+def test_tag_last_take_accepts_preset_and_updates_path(app, stubs):
+    app.on_start_take()
+    app.on_stop_take()
+    old = stubs.capture.last_take_dir
+    app.tag_var.set("other_side")
+    rep = app.on_tag_last()
+    assert rep and rep["ok"]
+    assert stubs.capture.saw("tag_last_take")
+    assert stubs.capture.last_take_dir == old + "_other_side"
+    assert app.tag_var.get() == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -513,22 +573,12 @@ def test_held_space_does_not_engage_and_disengage(app, stubs):
 
 
 @needs_display
-def test_seed_entry_does_not_swallow_the_shortcuts_forever(app, stubs):
-    app.seed_entry.focus_set()
-    app.pump(0.05)
-    app._key(app.on_home)                       # typing: shortcut ignored
-    assert stubs.sim.home_count == 0
-
-    app.seed_var.set("42")
-    app._blur_entry()                           # <Return> hands focus back
-    app.pump(0.05)
-    app._key(app.on_home)
-    assert stubs.sim.home_count == 1
-    assert app.seed_var.get() == "42"           # Return keeps the seed
-
-    app.seed_entry.focus_set(); app.pump(0.05)
-    app._blur_entry(clear=True)                 # <Escape> blurs AND clears
-    assert app.seed_var.get() == ""
-    app.pump(0.05)
-    app._key(app.on_home)
-    assert stubs.sim.home_count == 2
+def test_physical_arrow_keycodes_select_seed(app, stubs):
+    app.seed_var.set("4")
+    up = type("Event", (), {"keysym": "NoSymbol", "keycode": 111})()
+    down = type("Event", (), {"keysym": "NoSymbol", "keycode": 116})()
+    app._dispatch_key_press(up)
+    assert app.seed_var.get() == "5"
+    app._key_down["up"] = False
+    app._dispatch_key_press(down)
+    assert app.seed_var.get() == "4"

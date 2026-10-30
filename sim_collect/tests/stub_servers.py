@@ -264,6 +264,16 @@ class StubSim(_StubServer):
             self.home_count += 1
         return {"ok": True, "msg": "homed"}
 
+    def do_reset_scene_home(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            self.engaged = False
+            self.seed = req.get("seed")
+            self.reset_count += 1
+            self.home_count += 1
+            self.task_success = False
+        return {"ok": True, "msg": f"scene reset (seed={self.seed}) + homed",
+                "seed": self.seed, "arm_moved_home": True}
+
     def do_gripper_pause(self, req: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
             self.gripper_paused = True
@@ -457,6 +467,20 @@ class StubCapture(_StubServer):
             self.last_take_dir = None
             self.take_dir = None
         return {"ok": True, "msg": f"deleted {d}", "deleted": d}
+
+    def do_tag_last_take(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        with self.lock:
+            if self.recording:
+                return {"ok": False, "msg": "stop the take before tagging it"}
+            if not self.last_take_dir:
+                return {"ok": False, "msg": "no take to tag"}
+            tag = str(req.get("tag", "")).strip().lower().replace(" ", "_")
+            old = self.last_take_dir
+            if not old.endswith("_" + tag):
+                self.last_take_dir = old + "_" + tag
+        return {"ok": True, "old_path": old, "path": self.last_take_dir,
+                "tag": tag, "changed": old != self.last_take_dir,
+                "msg": f"tagged {self.last_take_dir.rsplit('/', 1)[-1]}"}
 
     def do_snapshot(self, req: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True, "cam1": solid_jpeg((30, 90, 200)), "cam2": solid_jpeg((30, 200, 90)),

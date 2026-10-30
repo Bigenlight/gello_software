@@ -6,7 +6,7 @@ physics, no cameras and no files: it is a thin, never-blocking client of the two
 servers of §2.1/§2.2 plus the 10 Hz preview PUB of §2.2.
 
     sim_rep      (A, sim_main.py) : get_status engage disengage set_pos_scale
-                                    set_control_mode reset_scene home
+                                    set_control_mode reset_scene reset_scene_home home
                                     gripper_pause gripper_resume
     capture_rep  (B, capture.py)  : get_status start_take stop_take
                                     discard_last_take snapshot
@@ -51,6 +51,7 @@ import os
 import sys
 import time
 import tkinter as tk
+from tkinter import ttk
 from typing import Any, Dict, Optional
 
 import cv2
@@ -78,6 +79,10 @@ _GRAY = "#888888"
 _DISABLED_BG = "#cfd8dc"
 _DISABLED_FG = "#7a8a94"
 _BG = "#eceff1"
+_REC_BG = "#ffebee"
+_REC_RED = "#d50000"
+_REC_BORDER = "#ff1744"
+_REC_YELLOW = "#ffeb3b"
 
 #: eef_state → (colour, one-line meaning). Same vocabulary as the real EEF GUI.
 _STATE_STYLE = {
@@ -169,6 +174,7 @@ class SimCollectGui:
         self._last_poll_msg: Dict[str, str] = {}
         self._last_problems: list = []
         self._closed = False
+        self._seed_user_selected = False
 
         self._build_ui()
         self._bind_keys()
@@ -189,9 +195,17 @@ class SimCollectGui:
     def _build_ui(self) -> None:
         root = self.root
 
+        self.recording_banner_var = tk.StringVar(value="○ NOT RECORDING — PREVIEW ONLY")
+        self.recording_banner = tk.Label(
+            root, textvariable=self.recording_banner_var, bg="#455a64", fg="white",
+            font=("DejaVu Sans", 18, "bold"), pady=10,
+            highlightbackground="#263238", highlightthickness=4,
+        )
+        self.recording_banner.pack(fill="x", padx=8, pady=(8, 4))
+
         # --- status bar --------------------------------------------------
         bar = tk.Frame(root, bg=_BG)
-        bar.pack(fill="x", padx=8, pady=(8, 2))
+        bar.pack(fill="x", padx=8, pady=(2, 2))
         self.sim_conn_var = tk.StringVar(value="sim: DISCONNECTED")
         self.cap_conn_var = tk.StringVar(value="capture: DISCONNECTED")
         self.sim_conn_lbl = tk.Label(bar, textvariable=self.sim_conn_var, bg=_GRAY,
@@ -276,53 +290,68 @@ class SimCollectGui:
         tk.Label(mrow, text="  (engage 중에는 잠김)", bg=_BG, fg="#666666",
                  font=("DejaVu Sans", 9, "italic")).pack(side="left")
 
-        self.home_btn = self._button(mrow, "HOME", self.on_home)
+        self.home_btn = self._button(mrow, "RESET + HOME [H]", self.on_home)
         self.home_btn.pack(side="right", padx=4)
         self.reset_btn = self._button(mrow, "RESET SCENE", self.on_reset_scene)
         self.reset_btn.pack(side="right", padx=4)
-        self.seed_var = tk.StringVar(value="")
-        self.seed_entry = tk.Entry(mrow, textvariable=self.seed_var, width=8,
-                                   font=("DejaVu Sans", 10))
-        self.seed_entry.pack(side="right")
-        # Clicking the entry steals focus and would otherwise kill every shortcut for the
-        # rest of the session: Return and Escape hand focus back to the window (Escape
-        # also clears what was typed).
-        self.seed_entry.bind("<Return>", lambda e: self._blur_entry())
-        self.seed_entry.bind("<KP_Enter>", lambda e: self._blur_entry())
-        self.seed_entry.bind("<Escape>", lambda e: self._blur_entry(clear=True))
-        tk.Label(mrow, text="seed:", bg=_BG, font=("DejaVu Sans", 10)).pack(side="right", padx=(8, 2))
+        self.seed_var = tk.StringVar(value="0")
+        self.seed_up_btn = self._button(mrow, "▲", lambda: self.on_seed_step(1))
+        self.seed_up_btn.pack(side="right", padx=(2, 0))
+        self.seed_down_btn = self._button(mrow, "▼", lambda: self.on_seed_step(-1))
+        self.seed_down_btn.pack(side="right", padx=2)
+        self.seed_lbl = tk.Label(mrow, textvariable=self.seed_var, width=5, bg="#ffffff",
+                                 relief="sunken", bd=1, font=("DejaVu Sans Mono", 11, "bold"))
+        self.seed_lbl.pack(side="right")
+        tk.Label(mrow, text="seed (↑/↓):", bg=_BG,
+                 font=("DejaVu Sans", 10)).pack(side="right", padx=(8, 2))
 
         # --- recording block -------------------------------------------------
         rbox = tk.LabelFrame(root, text="녹화 (recording)", bg=_BG,
-                             font=("DejaVu Sans", 10, "bold"))
+                             font=("DejaVu Sans", 10, "bold"),
+                             highlightbackground="#546e7a", highlightthickness=3)
         rbox.pack(fill="x", padx=8, pady=4)
+        self.recording_box = rbox
         rrow = tk.Frame(rbox, bg=_BG)
         rrow.pack(fill="x", padx=4, pady=2)
-        self.start_btn = self._button(rrow, "START TAKE", self.on_start_take, _GREEN, _GREEN_HI)
+        self.recording_row = rrow
+        self.start_btn = self._button(rrow, "START TAKE [R]", self.on_start_take, _GREEN, _GREEN_HI)
         self.start_btn.pack(side="left", padx=2)
-        self.stop_btn = self._button(rrow, "STOP TAKE", self.on_stop_take, _BLUE, _BLUE_HI)
+        self.stop_btn = self._button(rrow, "STOP TAKE [R]", self.on_stop_take, _BLUE, _BLUE_HI)
         self.stop_btn.pack(side="left", padx=2)
         self.discard_btn = self._button(rrow, "DISCARD LAST", self.on_discard_last)
         self.discard_btn.pack(side="left", padx=2)
         self.take_var = tk.StringVar(value="Take: 0")
-        tk.Label(rrow, textvariable=self.take_var, bg=_BG,
-                 font=("DejaVu Sans", 12, "bold")).pack(side="left", padx=10)
+        self.take_lbl = tk.Label(rrow, textvariable=self.take_var, bg=_BG,
+                                 font=("DejaVu Sans", 12, "bold"))
+        self.take_lbl.pack(side="left", padx=10)
         self.rec_var = tk.StringVar(value="PREVIEW")
         self.rec_lbl = tk.Label(rrow, textvariable=self.rec_var, bg=_BG, fg="#333333",
                                 font=("DejaVu Sans", 12, "bold"))
         self.rec_lbl.pack(side="left", padx=6)
         self.elapsed_var = tk.StringVar(value="")
-        tk.Label(rrow, textvariable=self.elapsed_var, bg=_BG,
-                 font=("DejaVu Sans", 11)).pack(side="left", padx=6)
+        self.elapsed_lbl = tk.Label(rrow, textvariable=self.elapsed_var, bg=_BG,
+                                    font=("DejaVu Sans", 11))
+        self.elapsed_lbl.pack(side="left", padx=6)
+        self.tag_var = tk.StringVar(value="")
+        self.tag_combo = ttk.Combobox(rrow, textvariable=self.tag_var, width=13,
+                                      values=("recover", "other_side"))
+        self.tag_combo.pack(side="left", padx=(10, 2))
+        self.tag_combo.bind("<Return>", lambda _e: self._tag_from_entry())
+        self.tag_combo.bind("<Escape>", lambda _e: self._blur_tag(clear=True))
+        self.tag_btn = self._button(rrow, "TAG LAST", self.on_tag_last)
+        self.tag_btn.pack(side="left", padx=2)
         self.counts_var = tk.StringVar(value="frames cam1 0 / cam2 0 · rows 0")
-        tk.Label(rbox, textvariable=self.counts_var, bg=_BG, anchor="w",
-                 font=("DejaVu Sans", 10)).pack(fill="x", padx=6)
+        self.counts_lbl = tk.Label(rbox, textvariable=self.counts_var, bg=_BG, anchor="w",
+                                   font=("DejaVu Sans", 10))
+        self.counts_lbl.pack(fill="x", padx=6)
         self.rows_var = tk.StringVar(value="streams: —")
-        tk.Label(rbox, textvariable=self.rows_var, bg=_BG, anchor="w", fg="#555555",
-                 font=("DejaVu Sans", 9)).pack(fill="x", padx=6)
+        self.rows_lbl = tk.Label(rbox, textvariable=self.rows_var, bg=_BG, anchor="w", fg="#555555",
+                                 font=("DejaVu Sans", 9))
+        self.rows_lbl.pack(fill="x", padx=6)
         self.take_dir_var = tk.StringVar(value="take dir: —")
-        tk.Label(rbox, textvariable=self.take_dir_var, bg=_BG, anchor="w", fg="#555555",
-                 font=("DejaVu Sans", 9)).pack(fill="x", padx=6)
+        self.take_dir_lbl = tk.Label(rbox, textvariable=self.take_dir_var, bg=_BG, anchor="w", fg="#555555",
+                                     font=("DejaVu Sans", 9))
+        self.take_dir_lbl.pack(fill="x", padx=6)
 
         # --- camera previews --------------------------------------------------
         prow = tk.Frame(root, bg=_BG)
@@ -351,14 +380,21 @@ class SimCollectGui:
         self.log_text.pack(side="left", fill="both", expand=True)
 
         hint = ("keys: space = ENGAGE/DISENGAGE · r = START/STOP TAKE · "
-                "n = RESET SCENE · h = HOME")
+                "g = GRIPPER PAUSE/RESUME · ↑/↓ = SEED · n = RESET SCENE · h = RESET SCENE + HOME")
         tk.Label(root, text=hint, bg=_BG, fg="#555555",
                  font=("DejaVu Sans", 9, "italic")).pack(anchor="w", padx=10, pady=(0, 6))
 
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     #: shortcut → action name, action
-    _SHORTCUTS = (("space", "primary"), ("r", "take"), ("n", "reset"), ("h", "home"))
+    _SHORTCUTS = (("space", "primary"), ("r", "take"), ("g", "gripper"),
+                  ("n", "reset"), ("h", "home"), ("up", "seed_up"),
+                  ("down", "seed_down"))
+
+    # X11 physical keycodes for the shortcuts.  These keep the controls working
+    # when an IME changes the event keysym (notably with a Korean keyboard layout).
+    _X11_KEYCODES = {65: "space", 27: "r", 42: "g", 57: "n", 43: "h",
+                     111: "up", 116: "down"}
 
     def _bind_keys(self) -> None:
         """Bind the four shortcuts, once per key, HELD-KEY SAFE.
@@ -372,17 +408,37 @@ class SimCollectGui:
         than a human double-tap (X11 repeats every ~30 ms; people tap at >150 ms) so the
         two-click ENGAGE confirm is never silently swallowed.
         """
-        actions = {"primary": self.on_primary, "take": self.on_toggle_take,
-                   "reset": self.on_reset_scene, "home": self.on_home}
+        self._shortcut_actions = {
+            key: action for key, action in (
+                ("space", self.on_primary), ("r", self.on_toggle_take),
+                ("g", self.on_toggle_gripper), ("n", self.on_reset_scene),
+                ("h", self.on_home), ("up", lambda: self.on_seed_step(1)),
+                ("down", lambda: self.on_seed_step(-1)),
+            )
+        }
         self._key_down: Dict[str, bool] = {}
         self._key_release_job: Dict[str, Optional[str]] = {}
         self._key_last: Dict[str, float] = {}
-        for key, name in self._SHORTCUTS:
-            fn = actions[name]
-            for spec in ({"space": ("space",)}.get(key, (key, key.upper()))):
-                self.root.bind(f"<KeyPress-{spec}>",
-                               lambda e, k=key, f=fn: self._on_key_press(k, f))
-                self.root.bind(f"<KeyRelease-{spec}>", lambda e, k=key: self._on_key_release(k))
+        self.root.bind_all("<KeyPress>", self._dispatch_key_press, add="+")
+        self.root.bind_all("<KeyRelease>", self._dispatch_key_release, add="+")
+
+    def _event_shortcut(self, event) -> Optional[str]:
+        keysym = str(getattr(event, "keysym", "")).lower()
+        if keysym in self._shortcut_actions:
+            return keysym
+        return self._X11_KEYCODES.get(int(getattr(event, "keycode", -1)))
+
+    def _dispatch_key_press(self, event) -> Optional[str]:
+        key = self._event_shortcut(event)
+        if key is None:
+            return None
+        return self._on_key_press(key, self._shortcut_actions[key])
+
+    def _dispatch_key_release(self, event) -> Optional[str]:
+        key = self._event_shortcut(event)
+        if key is None:
+            return None
+        return self._on_key_release(key)
 
     def _on_key_press(self, key: str, fn) -> str:
         job = self._key_release_job.pop(key, None)
@@ -410,16 +466,22 @@ class SimCollectGui:
             clear()
         return "break"
 
-    def _blur_entry(self, clear: bool = False) -> str:
+    def _blur_tag(self, clear: bool = False) -> str:
         if clear:
-            self.seed_var.set("")
-        self.root.focus_set()
+            self.tag_var.set("")
+        self.primary.focus_set()
+        return "break"
+
+    def _tag_from_entry(self) -> str:
+        self.on_tag_last()
+        self.primary.focus_set()
         return "break"
 
     def _key(self, fn) -> str:
         """Run a shortcut unless the operator is typing into the seed entry."""
         try:
-            if isinstance(self.root.focus_get(), tk.Entry):
+            focus = self.root.focus_get()
+            if focus is not None and focus.winfo_class() in ("Entry", "TEntry", "TCombobox"):
                 return ""
         except (tk.TclError, KeyError):
             pass
@@ -648,21 +710,41 @@ class SimCollectGui:
         # Resume seeds/ramps the gripper to the leader → confirm, like the real GUI.
         self._armed_click("grip_resume", lambda: self.call_sim("gripper_resume"))
 
+    def on_toggle_gripper(self) -> None:
+        if bool(self.sim_status.get("gripper_paused")):
+            self.on_gripper_resume()
+        else:
+            self.on_gripper_pause()
+
+    def on_seed_step(self, delta: int) -> None:
+        try:
+            current = int(self.seed_var.get())
+        except ValueError:
+            current = int(self.sim_status.get("layout_seed", 0) or 0)
+        selected = max(0, current + int(delta))
+        self.seed_var.set(str(selected))
+        self._seed_user_selected = True
+        self.log(f"[gui] seed selected: {selected}")
+
     def on_reset_scene(self) -> Optional[Dict[str, Any]]:
         if self.recording:
             self.log("[gui] RESET SCENE 거부 — 녹화 중이다. STOP TAKE 먼저.")
             return None
-        seed_txt = self.seed_var.get().strip()
-        kw: Dict[str, Any] = {}
-        if seed_txt:
-            try:
-                kw["seed"] = int(seed_txt)
-            except ValueError:
-                self.log(f"[gui] seed {seed_txt!r} 는 정수가 아니다 — 무시하고 랜덤 시드로 간다")
-        return self.call_sim("reset_scene", **kw)
+        rep = self.call_sim("reset_scene", seed=int(self.seed_var.get()))
+        if rep.get("ok"):
+            self.seed_var.set(str(rep.get("seed", self.seed_var.get())))
+            self._seed_user_selected = False
+        return rep
 
-    def on_home(self) -> Dict[str, Any]:
-        return self.call_sim("home")
+    def on_home(self) -> Optional[Dict[str, Any]]:
+        if self.recording:
+            self.log("[gui] RESET + HOME 거부 — 녹화 중이다. STOP TAKE 먼저.")
+            return None
+        rep = self.call_sim("reset_scene_home", seed=int(self.seed_var.get()))
+        if rep.get("ok"):
+            self.seed_var.set(str(rep.get("seed", self.seed_var.get())))
+            self._seed_user_selected = False
+        return rep
 
     def on_start_take(self) -> Optional[Dict[str, Any]]:
         if self.recording:
@@ -684,6 +766,19 @@ class SimCollectGui:
             self.log("[gui] DISCARD LAST 거부 — 녹화 중이다. STOP TAKE 먼저.")
             return
         self._armed_click("discard", lambda: self.call_capture("discard_last_take"))
+
+    def on_tag_last(self) -> Optional[Dict[str, Any]]:
+        if self.recording:
+            self.log("[gui] TAG LAST 거부 — 녹화 중이다. STOP TAKE 먼저.")
+            return None
+        tag = self.tag_var.get().strip()
+        if not tag:
+            self.log("[gui] 태그를 선택하거나 입력한다")
+            return None
+        rep = self.call_capture("tag_last_take", tag=tag)
+        if rep.get("ok"):
+            self.tag_var.set("")
+        return rep
 
     # ------------------------------------------------------------- refresh --
     def refresh(self) -> None:
@@ -758,6 +853,8 @@ class SimCollectGui:
             bits.append(f"grip {st['gripper_mode']}")
         if st.get("layout_seed") is not None:
             bits.append(f"seed {st['layout_seed']}")
+            if not self._seed_user_selected:
+                self.seed_var.set(str(st["layout_seed"]))
         if info.get("soft_start_active"):
             bits.append("soft-start")
         if st.get("viewer") is False:
@@ -872,7 +969,7 @@ class SimCollectGui:
             self.mode_var.set(srv_mode)          # server is the authority (sim restarts)
 
         self._style(self.reset_btn, _SLATE, _SLATE_HI, live and not self.recording)
-        self._style(self.home_btn, _SLATE, _SLATE_HI, live)
+        self._style(self.home_btn, _SLATE, _SLATE_HI, live and not self.recording)
 
     def _refresh_recording(self) -> None:
         cs = self.cap_status
@@ -880,6 +977,9 @@ class SimCollectGui:
         rec = self.recording
         self._style(self.start_btn, _GREEN, _GREEN_HI, live and not rec)
         self._style(self.stop_btn, _BLUE, _BLUE_HI, live and rec)
+        can_tag = live and not rec and bool(cs.get("last_take_dir"))
+        self._style(self.tag_btn, _SLATE, _SLATE_HI, can_tag)
+        self.tag_combo.configure(state="normal" if can_tag else "disabled")
         if self.is_armed("discard"):
             self.discard_btn.configure(text="Click AGAIN to DISCARD")
             self._style(self.discard_btn, _ORANGE, _ORANGE_HI, live and not rec)
@@ -895,10 +995,27 @@ class SimCollectGui:
             self.rec_lbl.configure(fg=_RED)
             dur = cs.get("duration_s", self.preview_msg.get("duration_s")) or 0.0
             self.elapsed_var.set(f"Elapsed: {float(dur):.1f}s")
+            self.recording_banner_var.set(f"● RECORDING NOW — TAKE {n} — {float(dur):.1f} s")
+            self.recording_banner.configure(bg=_REC_RED, fg="white",
+                                            font=("DejaVu Sans", 22, "bold"), pady=12,
+                                            highlightbackground=_REC_YELLOW, highlightthickness=6)
         else:
             self.rec_var.set("PREVIEW" if live else "—")
             self.rec_lbl.configure(fg="#333333")
             self.elapsed_var.set("")
+            self.recording_banner_var.set("○ NOT RECORDING — PREVIEW ONLY")
+            self.recording_banner.configure(bg="#455a64", fg="white",
+                                            font=("DejaVu Sans", 18, "bold"), pady=10,
+                                            highlightbackground="#263238", highlightthickness=4)
+
+        panel_bg = _REC_BG if rec else _BG
+        panel_border = _REC_BORDER if rec else "#546e7a"
+        self.recording_box.configure(bg=panel_bg, highlightbackground=panel_border,
+                                     highlightthickness=8 if rec else 3)
+        self.recording_row.configure(bg=panel_bg)
+        for widget in (self.take_lbl, self.rec_lbl, self.elapsed_lbl, self.counts_lbl,
+                       self.rows_lbl, self.take_dir_lbl):
+            widget.configure(bg=panel_bg)
 
         frames = cs.get("frames") or (self.preview_msg.get("frames") or {})
         depth = cs.get("depth_frames") or {}

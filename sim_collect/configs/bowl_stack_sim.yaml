@@ -1,0 +1,52 @@
+# Bowl stacking task. Unspecified robot, camera, control and recording settings
+# inherit from the proven carrot-in-pot scene.
+extends: sim_collect/configs/carrot_in_pot_sim.yaml
+
+name: bowl_stack_sim
+
+physics:
+  # Two detailed soup-bowl collision models can create many simultaneous
+  # constraints while nesting; the default arena (~14 MB) is insufficient.
+  memory: 64M
+
+objects:
+  # Directional task: ORANGE soup bowl starts on the left (+y) and is placed
+  # into/on the PURPLE soup bowl on the right (-y).
+  - name: bowl_purple
+    asset_name: bowl
+    xml: sim_collect/assets/objects/bowl/bowl.xml
+    kind: container
+    radius_m: 0.07
+    simple_bowl_collision: true
+    collision_segments: 12
+    visual_rgba: [0.48, 0.16, 0.72, 1.0]
+  - name: bowl_orange
+    asset_name: bowl
+    xml: sim_collect/assets/objects/bowl/bowl.xml
+    kind: object
+    radius_m: 0.07
+    simple_bowl_collision: true
+    collision_segments: 12
+    visual_rgba: [0.95, 0.30, 0.06, 1.0]
+
+layout:
+  seed: 0
+  min_gap_m: 0.04
+  # Seeds change each bowl by only a few centimetres; colour/side never swaps.
+  collection_seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  items:
+    bowl_orange: {nominal_pos: [0.45,  0.18, 0.0], random_xy_radius: 0.03, random_yaw_deg: 20}
+    bowl_purple: {nominal_pos: [0.45, -0.20, 0.0], random_xy_radius: 0.03, random_yaw_deg: 20}
+
+task:
+  type: stack
+  name: bowl_stack
+  upper: bowl_orange
+  lower: bowl_purple
+  max_xy_offset_m: 0.035
+  min_relative_z_m: 0.003
+  max_relative_z_m: 0.075
+  max_tilt_deg: 20
+  max_linear_speed_m_s: 0.05
+  max_angular_speed_rad_s: 0.5
+  gripper_open_below: 0.3
