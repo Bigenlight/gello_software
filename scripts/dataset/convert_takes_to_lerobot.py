@@ -182,7 +182,8 @@ def preflight_take(take_dir: str) -> dict[str, Any]:
     if os.path.exists(os.path.join(take_dir, "depth.h5")):
         raise TakeRefused(
             f"{name}: has depth.h5 -> this is a depth-era (old recorder) take. "
-            "Use scripts/dataset/convert_carrot_to_lerobot.py for that corpus."
+            "Use scripts/dataset/convert_carrot_to_lerobot.py (research/sim-collect "
+            "branch) for that corpus."
         )
     for fn in ("vectors.h5", "cam1.mp4", "cam2.mp4"):
         if not os.path.isfile(os.path.join(take_dir, fn)):
@@ -197,7 +198,8 @@ def preflight_take(take_dir: str) -> dict[str, Any]:
                 raise TakeRefused(
                     f"{name}: '{g}' has no stamp_s column -> recorded by the PRE-FIX "
                     "recorder (callback-time rows only). Use "
-                    "scripts/dataset/convert_carrot_to_lerobot.py, which knows how to "
+                    "scripts/dataset/convert_carrot_to_lerobot.py (research/sim-collect "
+                    "branch), which knows how to "
                     "correct those clocks."
                 )
         for k in range(1, 7):
