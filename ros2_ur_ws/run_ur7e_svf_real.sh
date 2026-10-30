@@ -4,14 +4,14 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SVF_ROOT="${SVF_ROOT:-$HOME/carrot_svf/campaigns/svf_real_20260917}"
+SVF_ROOT="${SVF_ROOT:-$HOME/svf_real_carrot_commonenc_20260919}"
 # SVF_* is canonical.  IFQL_* aliases retain the established launcher-style invocation.
 SVF_RUN_DIR="${SVF_RUN_DIR:-${IFQL_RUN_DIR:-$SVF_ROOT/exp/qflow_rc/svf_real/svf_real_k06_c1_lead6_aug8_p1_s0_100k}}"
 SVF_STEP="${SVF_STEP:-${IFQL_STEP:-100000}}"
 SVF_SAMPLER="${SVF_SAMPLER:-${IFQL_SAMPLER:-actor}}"
 SVF_NORM_STATS="${SVF_NORM_STATS:-${IFQL_NORM_STATS:-}}"
 SVF_REAL_DATA="${SVF_REAL_DATA:-}"
-SVF_SERVER_PY="${SVF_SERVER_PY:-$SVF_ROOT/source/fmrl-vision/vision_carrot/ifql_server.py}"
+SVF_SERVER_PY="${SVF_SERVER_PY:-$SVF_ROOT/source/vision_carrot/svf_jazzy_adapter.py}"
 SVF_QFLOW_DIR="${SVF_QFLOW_DIR:-$SVF_ROOT/runtime/qflow_svf_merged}"
 SVF_PY="${SVF_PY:-${IFQL_PY:-/home/junhyeong/miniconda3/envs/il/bin/python}}"
 
@@ -45,9 +45,9 @@ if [[ -z "$SVF_REAL_DATA" ]]; then
     SVF_REAL_DATA=$("$SVF_PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("env_name", ""))' "$SVF_RUN_DIR/flags.json")
 fi
 
-"$SVF_PY" "$SCRIPT_DIR/setup_jazzy/svf_real_preflight.py" \
+"$SVF_PY" "$SCRIPT_DIR/setup_jazzy/svf_real_preflight_v2.py" \
     --run-dir "$SVF_RUN_DIR" --step "$SVF_STEP" \
-    --norm-stats "$SVF_NORM_STATS" --real-data "$SVF_REAL_DATA" \
+    --norm-stats "$SVF_NORM_STATS" \
     --qflow-dir "$SVF_QFLOW_DIR" --server-py "$SVF_SERVER_PY"
 
 [[ -f "$SVF_SERVER_PY" ]] || { echo "ERROR: missing staged SVF server: $SVF_SERVER_PY" >&2; exit 2; }

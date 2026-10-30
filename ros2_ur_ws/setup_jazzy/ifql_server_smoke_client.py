@@ -93,7 +93,10 @@ def main() -> int:
                 len(actions[0]), [round(value, 5) for value in actions[0]]),
             flush=True,
         )
-        refill_indices = list(range(0, len(latencies), 24))
+        queue_len = int(reset.get("n_action_steps", 24))
+        if queue_len < 1:
+            raise RuntimeError(f"invalid server queue length: {queue_len}")
+        refill_indices = list(range(0, len(latencies), queue_len))
         refill_latencies = [latencies[index] for index in refill_indices]
         queue_hits = [value for index, value in enumerate(latencies) if index not in refill_indices]
         print(

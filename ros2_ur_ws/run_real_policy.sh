@@ -19,12 +19,15 @@ Profiles:
   ifql-bc-orange       Orange Flow BC, K=1
   ifql-mean-orange     Orange IFQL BoN32, mean
   ifql-min-orange      Orange IFQL BoN32, min
+  common-bc-carrot     New lighted-carrot common encoder + frozen Base Flow, K=1
+  common-ifql-carrot   New lighted-carrot common encoder + IFQL BoN32, step 50000
   svf-carrot           Distilled SVF actor
   dsrl-carrot          Real-demo DSRL deterministic latent actor
   dsrl-orange          Orange real-demo DSRL deterministic latent actor
 
-Short aliases: ifql-bc, ifql-mean, ifql-min, svf, dsrl -> carrot profiles.
-Every profile records HDF5 + diagnostic MP4 by default. Start cameras first:
+Short aliases: ifql-bc, ifql-mean, ifql-min, common-bc, common-ifql, svf, dsrl -> carrot profiles.
+IFQL/DSRL profiles record HDF5 + diagnostic MP4 by default. The staged
+common-encoder SVF server currently runs with recording disabled. Start cameras first:
   ./launch_cameras.sh
 EOF
 }
@@ -44,6 +47,8 @@ case "$PROFILE" in
     ifql-bc) PROFILE=ifql-bc-carrot ;;
     ifql-mean) PROFILE=ifql-mean-carrot ;;
     ifql-min) PROFILE=ifql-min-carrot ;;
+    common-bc) PROFILE=common-bc-carrot ;;
+    common-ifql) PROFILE=common-ifql-carrot ;;
     svf) PROFILE=svf-carrot ;;
     dsrl) PROFILE=dsrl-carrot ;;
 esac
@@ -72,8 +77,16 @@ case "$PROFILE" in
     ifql-bc-orange)   run_ifql orange bc "" ;;
     ifql-mean-orange) run_ifql orange bon mean ;;
     ifql-min-orange)  run_ifql orange bon min ;;
+    common-bc-carrot)
+        env COMMON_IFQL_SAMPLER=bc IFQL_DRY_RUN="$DRY" \
+            "$SCRIPT_DIR/run_ur7e_common_ifql_carrot.sh" "${EXTRA[@]}"
+        ;;
+    common-ifql-carrot)
+        env COMMON_IFQL_SAMPLER=bon IFQL_DRY_RUN="$DRY" \
+            "$SCRIPT_DIR/run_ur7e_common_ifql_carrot.sh" "${EXTRA[@]}"
+        ;;
     svf-carrot)
-        env IFQL_DRY_RUN="$DRY" "$SCRIPT_DIR/run_ur7e_svf_real.sh" "${EXTRA[@]}"
+        env IFQL_DRY_RUN="$DRY" "$SCRIPT_DIR/run_ur7e_svf_carrot_new.sh" "${EXTRA[@]}"
         ;;
     dsrl-carrot|dsrl-orange)
         task="${PROFILE#dsrl-}"

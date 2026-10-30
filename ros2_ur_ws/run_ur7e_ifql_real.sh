@@ -325,7 +325,7 @@ IFQL_LOG_TAG="${IFQL_LOG_TAG:-${_TASK_LOG_TAG:-$(basename "${IFQL_RUN_DIR}")}}"
 # each server start. UTC nanoseconds + PID identify a run; mkdir below makes a collision
 # fail closed rather than silently reusing a stale partial recording.
 IFQL_LOG_ROOT="${IFQL_LOG_ROOT:-${IFQL_LOG_DIR:-$SCRIPT_DIR/log/ifql/real_$(date -u +%Y%m%d)/${IFQL_LOG_TAG}_${IFQL_TAG}}}"
-REAL_EVAL_RUN_DIR="${REAL_EVAL_RUN_DIR:-${IFQL_LOG_ROOT}/run_$(date -u +%Y%m%dT%H%M%S.%NZ)_pid$$}"
+REAL_EVAL_RUN_DIR="${REAL_EVAL_RUN_DIR:-${IFQL_LOG_ROOT}/.sessions/run_$(date -u +%Y%m%dT%H%M%S.%NZ)_pid$$}"
 IFQL_LOG_DIR="${REAL_EVAL_RUN_DIR}"
 
 # --- start_mode: gello ONLY -----------------------------------------------------
@@ -393,10 +393,14 @@ if [ "$IFQL_COMPAT" = auto ]; then
         IFQL_COMPAT=1
     fi
 fi
-if [ -n "${IFQL_Q_AGG}" ]; then
+if [ -n "${IFQL_Q_AGG}" ] && [ "${IFQL_Q_AGG_NATIVE:-0}" != 1 ]; then
     # q_agg is an inference-time ensemble reduction for IFQL BoN.  The pinned
     # server reads it from flags.json, so route through the compatibility adapter,
     # which stages a temporary flags copy while keeping the checkpoint immutable.
+    # Opt-in IFQL_Q_AGG_NATIVE=1: the launched IFQL_SERVER_PY adapter applies
+    # IFQL_Q_AGG itself (e.g. common_retrained_ifql_final_server.py, whose
+    # export-manifest norm_stats the r18_ss compat adapter would refuse).
+    # Unset/0 keeps the historical behaviour above.
     IFQL_COMPAT=1
 fi
 IFQL_SERVER_ENTRY=("${IFQL_SERVER_PY}")
@@ -682,7 +686,10 @@ document = {
         "outputs": {"hdf5_log_dir": str(hdf5_dir), "hdf5_files": hdf5_files,
                     "mp4": named_path("mp4", os.environ["REAL_EVAL_MP4_PATH"])},
     },
-    "recording": {"enabled": os.environ["REAL_EVAL_RECORDING"] == "1",
+    "recording": {"enabled": os.environ["REAL_EVAL_RECORDING"] == "1" or os.environ.get("SVF_EPISODE_RECORDING") == "1",
+                  "legacy_server_enabled": os.environ["REAL_EVAL_RECORDING"] == "1",
+                  "ros_episode_enabled": os.environ.get("SVF_EPISODE_RECORDING") == "1",
+                  "ros_episode_dir": os.environ.get("REAL_EVAL_EPISODE_ROOT", str(Path(os.environ["REAL_EVAL_RUN_DIR"]) / "episodes")) if os.environ.get("SVF_EPISODE_RECORDING") == "1" else None,
                   "ffmpeg": os.environ.get("REAL_EVAL_FFMPEG") or None,
                   "min_free_gib": float(os.environ["REAL_EVAL_MIN_FREE_GIB"])},
 }
@@ -694,6 +701,7 @@ PYEOF
 
 # --- Recording preflight and manifest: no robot/camera/server process starts here --
 mkdir -p "${IFQL_LOG_ROOT}"
+mkdir -p "$(dirname "${REAL_EVAL_RUN_DIR}")"
 if [ -e "${REAL_EVAL_RUN_DIR}" ]; then
     echo "ERROR: real-eval run directory already exists; refusing stale/colliding run: ${REAL_EVAL_RUN_DIR}" >&2
     exit 1
@@ -711,7 +719,11 @@ if [ "${REAL_EVAL_RECORDING}" = "1" ]; then
         --renderer-hook "${REAL_EVAL_RENDERER_HOOK}" --ffmpeg "${REAL_EVAL_FFMPEG}" \
         --min-free-gib "${REAL_EVAL_MIN_FREE_GIB}"
 else
-    echo "### REAL_EVAL_RECORDING=0: paired HDF5+MP4 is explicitly disabled for this launch." >&2
+    if [ "${SVF_EPISODE_RECORDING:-0}" = "1" ]; then
+        echo "### ROS episode recording ON: ${REAL_EVAL_RUN_DIR}/episodes (legacy server HDF5 backend disabled)." >&2
+    else
+        echo "### REAL_EVAL_RECORDING=0: paired HDF5+MP4 is explicitly disabled for this launch." >&2
+    fi
     mkdir "${REAL_EVAL_RUN_DIR}"
     REAL_EVAL_FFMPEG=""
 fi
@@ -726,6 +738,7 @@ if [ "${IFQL_DRY_RUN}" = "1" ]; then
     echo "### IFQL_DRY_RUN=1: every preflight passed; printing the two resolved commands and exiting WITHOUT starting either one."
     echo "### task=${IFQL_TASK} run_dir=${IFQL_RUN_DIR} norm_stats=${IFQL_NORM_STATS} params_file=${IFQL_PARAMS_FILE} px=${IS_PX_RUN} act_port=${IFQL_PORT} q_agg=${IFQL_Q_AGG:-checkpoint-default}"
     echo "### recording=${REAL_EVAL_RECORDING} manifest=${REAL_EVAL_RUN_DIR}/launch_manifest.json hdf5_dir=${REAL_EVAL_HDF5_LOG_DIR} mp4=${REAL_EVAL_MP4_PATH} ffmpeg=${REAL_EVAL_FFMPEG:-<disabled>}"
+    echo "### ros_episode_recording=${SVF_EPISODE_RECORDING:-0} episodes=${REAL_EVAL_RUN_DIR}/episodes"
     echo "### server command:"
     printf '###   env -u FMRL_CAM1_CROP -u FMRL_CAM1_MODE QFLOW_DIR=%q TORCH_HOME=%q XLA_PYTHON_CLIENT_PREALLOCATE=false HF_HUB_OFFLINE=1 \\\n' \
         "${IFQL_QFLOW_DIR}" "${TORCH_HOME:-$IFQL_ROOT/.cache/torch}"
@@ -739,6 +752,10 @@ if [ "${IFQL_DRY_RUN}" = "1" ]; then
     trap - EXIT   # nothing was ever spawned; do not attempt to kill a nonexistent PID
     exit 0
 fi
+
+# Only real launches publish discovery; dry-run exits above without taking over GUI.
+REAL_EVAL_EPISODE_ROOT="$("${JAZZY_SYSTEM_PYTHON}" "$SCRIPT_DIR/eval_log_hub.py" --prepare "${REAL_EVAL_RUN_DIR}" "${REAL_EVAL_PROFILE:-${IFQL_LOG_TAG}}")"
+export REAL_EVAL_EPISODE_ROOT
 
 (
     cd "${IFQL_SERVER_DIR}"
@@ -844,6 +861,8 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
     if [ -z "${SAMPLER_OK}" ] && [ -f "${SERVER_LOG}" ]; then
         if [ "${REAL_EVAL_POLICY_TYPE}" = dsrl ]; then
             SAMPLER_LINE="$(grep -m1 -E 'agent ready: dsrl_na .*sampler=' "${SERVER_LOG}" || true)"
+        elif [ "${REAL_EVAL_POLICY_TYPE}" = svf ]; then
+            SAMPLER_LINE="$(grep -m1 -E 'sampler: *kind=' "${SERVER_LOG}" || true)"
         else
             SAMPLER_LINE="$(grep -m1 -E 'sampler: *kind=' "${SERVER_LOG}" || true)"
         fi
@@ -872,6 +891,12 @@ for i in $(seq 1 "${IFQL_WARMUP_TIMEOUT_S}"); do
             if [ -n "${PX_LINE}" ]; then
                 PX_OK=1
                 echo "### px check OK: DSRL real profile is pinned to frozen r18_ss features"
+            fi
+        elif [ "${REAL_EVAL_POLICY_TYPE}" = svf ]; then
+            PX_LINE="$(grep -m1 -E 'agent ready: svf px=false' "${SERVER_LOG}" || true)"
+            if [ -n "${PX_LINE}" ]; then
+                PX_OK=1
+                echo "### px check OK: SVF uses frozen feature encoder (px=false)"
             fi
         else
             PX_LINE="$(grep -m1 -E 'agent ready:.*px=' "${SERVER_LOG}" || true)"

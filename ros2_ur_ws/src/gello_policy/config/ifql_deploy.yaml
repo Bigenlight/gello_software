@@ -109,8 +109,10 @@ policy_leader_node:
     # NOTE: the lead0 REAL file (norm_stats_r18_ss_real.json) shares this same action
     # box, so a lead0/lead6 mix-up is NOT caught here -- only by the launcher's
     # "norm_stats: ... real_lead6" log check (run_ur7e_ifql_real.sh).
-    joint_limits_lo: [-3.8051, -1.8059, 1.2622, -2.6921, -1.9311, -4.6439]
-    joint_limits_hi: [-2.5783, -0.8822, 2.1445, -1.4393, -1.1990, -1.8221]
+    # 2026-09-20 operator request: prior configured envelope x1.10 about its centre.
+    # Adds 5% of the prior width each side; historical 1.2x notes above are provenance.
+    joint_limits_lo: [-3.86644, -1.852085, 1.218085, -2.75474, -1.967705, -4.7849900000000005]
+    joint_limits_hi: [-2.51696, -0.836015, 2.188615, -1.37666, -1.162395, -1.6810100000000001]
 
     # SAFETY CLAMP (b): per-joint max deviation (rad) of a commanded target from the
     # LIVE /joint_states. Bounds any single-step jump from the actual pose.

@@ -52,6 +52,7 @@ import zmq
 from gello_policy import obs_assembler
 from gello_policy.joint_angles import angular_deviations, positions_near_reference
 from gello_policy.obs_assembler import UR_JOINT_ORDER
+from gello_policy import tcp_floor
 from gello_policy.remote_diffusion_client import (
     ImageSnapshot,
     ObservationSnapshot,
@@ -112,6 +113,15 @@ class PolicyLeaderNode(Node):
             "joint_limits_hi", [3.67, -0.88, 2.62, -1.01, -1.25, -1.52]
         )
         self.declare_parameter("max_dev_rad", 0.5)
+        # (c) TCP Z-floor (2026-09-21, VLA multi-task profiles). Disabled unless a
+        # params file sets tcp_z_clamp_enabled: true. Evaluates FK(target)+tool
+        # after the joint clamps and shortens the live_q->target step so the tool
+        # centre point never drops below tcp_z_min (metres, base frame). Floor
+        # provenance: FM_RL/vla_eval/models/n17/tcp_z_floor_report.json.
+        self.declare_parameter("tcp_z_clamp_enabled", False)
+        self.declare_parameter("tcp_z_min", -1.0)
+        self.declare_parameter("tcp_tool_z", 0.174)
+        self.declare_parameter("tcp_z_clamp_mode", "clamp")  # "clamp" | "hold"
         # Max age of any observation before EXECUTE FAULTs. Guards against a frozen
         # camera / hung joint-state stream driving the policy on a stale frame
         # (review: obs-freshness watchdog). ~0.5 s = a real stall, not a dropped frame.
@@ -145,6 +155,28 @@ class PolicyLeaderNode(Node):
         self._lo = [float(x) for x in gp("joint_limits_lo").value]
         self._hi = [float(x) for x in gp("joint_limits_hi").value]
         self._max_dev = float(gp("max_dev_rad").value)
+        self._tcp_floor_enabled = bool(gp("tcp_z_clamp_enabled").value)
+        self._tcp_z_min = float(gp("tcp_z_min").value)
+        self._tcp_tool_z = float(gp("tcp_tool_z").value)
+        self._tcp_floor_mode = str(gp("tcp_z_clamp_mode").value).lower()
+        if self._tcp_floor_enabled:
+            if self._tcp_floor_mode not in ("clamp", "hold"):
+                raise ValueError("tcp_z_clamp_mode must be 'clamp' or 'hold'")
+            if not (-0.5 <= self._tcp_z_min <= 0.5) or not (0.0 <= self._tcp_tool_z <= 0.5):
+                raise ValueError(
+                    f"tcp_z_min={self._tcp_z_min} / tcp_tool_z={self._tcp_tool_z} out of range"
+                )
+        self.get_logger().info(
+            f"TCP z-floor clamp: enabled={self._tcp_floor_enabled} z_min={self._tcp_z_min:.4f} m "
+            f"tool_z={self._tcp_tool_z:.3f} m mode={self._tcp_floor_mode}"
+        )
+        # Last TCP-floor evaluation (recorded by leader_recording as leader_command fields).
+        self._last_tcp_z_raw = None
+        self._last_tcp_z = None
+        self._last_tcp_alpha = None
+        self._last_tcp_clamped = False
+        self._tcp_clamp_count = 0
+        self._last_arm_target = None
         self._obs_timeout_s = float(gp("obs_timeout_s").value)
         self._auto_start = bool(gp("auto_start_on_stream").value)
         cam1_topic = str(gp("cam1_topic").value)
@@ -441,7 +473,7 @@ class PolicyLeaderNode(Node):
             if not obj.get(obs_assembler.KEY_OK, False):
                 raise RuntimeError(f"server RESET returned ok:false ({obj})")
             ok = True
-            detail = "HDF5 finalized; renderer completed"
+            detail = "server RESET acknowledged (recording completion is reported by its writer)"
         except Exception as exc:  # noqa: BLE001 - reported, HOLD remains safe
             detail = f"{type(exc).__name__}: {exc}"
         finally:
@@ -558,6 +590,7 @@ class PolicyLeaderNode(Node):
             return False, f"refused: inference RESET failed ({exc})"
         if not obj.get(obs_assembler.KEY_OK, False):
             return False, f"refused: server RESET returned ok:false ({obj})"
+        self._last_arm_target = None  # tcp_z 'hold' mode never reuses a previous episode's target
         self._state = EXECUTE
         self.get_logger().info("~/start_execution: RESET ok -> EXECUTE.")
         return True, "EXECUTE"
@@ -600,6 +633,7 @@ class PolicyLeaderNode(Node):
         if generation != self._arming_generation:
             return
         if ok:
+            self._last_arm_target = None
             self._state = EXECUTE
             self.get_logger().info(f"gRPC ARMING complete -> EXECUTE ({detail}).")
         else:
@@ -724,9 +758,38 @@ class PolicyLeaderNode(Node):
                 throttle_duration_sec=1.0,
             )
 
+        # (c) TCP Z-floor: FK of the joint-clamped target + tool offset must stay
+        # above tcp_z_min. "clamp" shortens the step along live_q -> target
+        # (bisection, monotone in alpha for a short step); "hold" republishes
+        # the previous target. Gripper is never affected.
+        self._last_tcp_clamped = False
+        if self._tcp_floor_enabled:
+            floor = tcp_floor.clamp_to_floor(
+                live_q, target, self._tcp_z_min, self._tcp_tool_z
+            )
+            self._last_tcp_z_raw = floor.z_raw
+            self._last_tcp_z = floor.z
+            self._last_tcp_alpha = floor.alpha
+            if floor.clamped:
+                self._last_tcp_clamped = True
+                self._tcp_clamp_count += 1
+                if self._tcp_floor_mode == "hold" and self._last_arm_target is not None:
+                    target = list(self._last_arm_target)
+                    self._last_tcp_z = tcp_floor.tcp_z(target, self._tcp_tool_z)
+                    self._last_tcp_alpha = None
+                else:
+                    target = floor.target
+                self.get_logger().warn(
+                    f"SAFETY CLAMP engaged: tcp_z_floor z={floor.z_raw:.4f} < "
+                    f"{self._tcp_z_min:.4f} m (mode={self._tcp_floor_mode}, "
+                    f"alpha={floor.alpha:.3f}, count={self._tcp_clamp_count}).",
+                    throttle_duration_sec=1.0,
+                )
+
         grip = action[_N]
         grip = 0.0 if grip < 0.0 else (1.0 if grip > 1.0 else grip)
 
+        self._last_arm_target = list(target)
         self._publish_arm(target)
         self._publish_gripper(grip)
 
@@ -774,7 +837,19 @@ def main(args=None):
     rclpy.init(args=args)
     node = None
     try:
-        node = PolicyLeaderNode()
+        import os
+        if os.environ.get("SVF_EPISODE_RECORDING", "0") == "1":
+            import sys
+            from pathlib import Path
+            recorder_dir = os.environ["SVF_RECORDER_DIR"]
+            sys.path.insert(0, recorder_dir)
+            from leader_recording import instrumented_leader, launch_metadata
+            root = Path(os.environ["REAL_EVAL_RUN_DIR"]) / "episodes"
+            cls = instrumented_leader(PolicyLeaderNode, EXECUTE, root, launch_metadata())
+            node = cls()
+            node.get_logger().info(f"Eval recording ENABLED: {root} (START to HOLD)")
+        else:
+            node = PolicyLeaderNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
