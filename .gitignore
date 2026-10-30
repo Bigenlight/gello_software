@@ -66,3 +66,10 @@ arena.xml
 # Claude Code 로컬 산출물 (공유 설정 .claude/settings.json은 계속 추적)
 .claude/settings.local.json
 .claude/worktrees/
+
+# 수동 백업 사본과 런타임 산출물 (2026-10-30 리팩토링 전 정리)
+*.bak_*
+*.pre_*
+ros2_ur_ws/setup_jazzy/real_eval_recording_backups/
+# 모델 가중치 — 절대 커밋하지 않는다
+ros2_ur_ws/setup_jazzy/staged_models/
