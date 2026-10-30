@@ -146,7 +146,7 @@ mkdir -p "${TMPDIR_RUN}"
 # compressed plugin installed, it natively provides the policy's JPEG endpoints.
 CAM1_TOPIC="/${CAM1_NAME}/${CAM1_NAME}/color/image_raw/compressed"
 CAM2_TOPIC="/${CAM2_NAME}/${CAM2_NAME}/color/image_raw/compressed"
-TOPIC_CHECKER="${SCRIPT_DIR}/_hil_topic_rate_check.py"
+TOPIC_CHECKER="${SCRIPT_DIR}/_topic_rate_check.py"
 if [ ! -f "${TOPIC_CHECKER}" ]; then
     echo "FATAL: topic probe helper missing: ${TOPIC_CHECKER}" >&2
     exit 1
@@ -158,7 +158,7 @@ if [ ! -x "${TOPIC_CHECKER_PY}" ]; then
     exit 1
 fi
 if [ "${VIEW}" != "false" ] && [ "${VIEW}" != "0" ]; then
-    if ! "${VIEWER_PY}" -c 'import cv2; import numpy; import h5py; import rclpy; from PyQt5.QtWidgets import QApplication; from sensor_msgs.msg import CompressedImage; from std_srvs.srv import Trigger'; then
+    if ! "${VIEWER_PY}" -c 'import cv2; import numpy; import rclpy; from sensor_msgs.msg import CompressedImage'; then
         echo "FATAL: camera viewer dependencies unavailable in ${VIEWER_PY}." >&2
         echo "### Install python3-opencv and ROS dependencies, or use VIEW=false." >&2
         exit 1
@@ -376,7 +376,6 @@ else
         --cam2-topic "${CAM2_TOPIC}" \
         --cam1-label "cam1 - SCENE - ${CAM1_SERIAL}" \
         --cam2-label "cam2 - WRIST - ${CAM2_SERIAL}" \
-        --eval-log-root "${SVF_EVAL_LOG_ROOT:-$SCRIPT_DIR/log/svf_ifqlparity}" \
         2> >(trap '' INT TERM; _filter_qt_font_noise >&2) &
     VIEWER_PID=$!
     wait "${VIEWER_PID}"

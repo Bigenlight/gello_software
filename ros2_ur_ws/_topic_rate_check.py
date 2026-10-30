@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Bounded, gracefully-closed ROS topic liveness/rate probe for HIL arming.
+"""Bounded, gracefully-closed ROS topic liveness/rate probe (used by launch_cameras.sh).
 
 Unlike ``ros2 topic hz`` under an external SIGKILL timeout, this process exits
 as soon as it has received a small number of *advancing* samples and always
-destroys its reader before returning.  The default subscription QoS is the
-same RELIABLE/VOLATILE keep-last profile used by ``URRosBackend``.
+destroys its reader before returning.  The default subscription QoS is a
+RELIABLE/VOLATILE keep-last profile.
 """
 
 from __future__ import annotations
