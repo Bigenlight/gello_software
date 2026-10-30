@@ -5,10 +5,10 @@
 drives a duck-typed ``ops`` object.  THIS module is the rclpy adapter for it:
 the :class:`HomeMoveOps` adapter, the subscriptions / clients / publisher it
 reaches into, the freshness-gated ``latest_*`` readers, and the 10 Hz tick.
-It was split out of ``task_gui_node.py`` (the task recorder's GO HOME button,
-hardware-verified) so the EEF teleop GUI's GO TO START POSE button can run the
-identical sequence towards its own target pose instead of re-implementing --
-and re-discovering the hazards of -- five asynchronous ROS interfaces.
+It is shared so that every GUI with a GO HOME / GO TO START POSE button runs
+the identical, hardware-verified sequence towards its own target pose instead
+of re-implementing -- and re-discovering the hazards of -- five asynchronous
+ROS interfaces.
 
 The sequence, for reference (every deadline and fail-closed rule is in
 home_move.py)::
@@ -155,8 +155,8 @@ from gello_recorder.home_move import (
 # constant.
 #
 # The two teleop bridges' pause services (std_srvs/Trigger, unconditional and
-# idempotent per the bridge contract). The task recorder node aliases its base
-# class's existing clients for these instead of creating new ones -- see
+# idempotent per the bridge contract). A node that subclasses
+# GelloRecorderGuiNode can reuse its existing clients for these -- see
 # install_home_move_io(arm_pause_client=..., gripper_pause_client=...).
 ARM_PAUSE_SERVICE = "/gello_ur_bridge/pause"
 GRIPPER_PAUSE_SERVICE = "/gello_gripper_bridge/pause"
@@ -720,7 +720,7 @@ class HomeMoveOps:
         THE PUBLISHER IS LONG-LIVED (created in install_home_move_io, not here)
         and that is load-bearing, not incidental: a publisher created, used once
         and destroyed loses the message to DDS discovery often enough to measure
-        -- 3 of 7 sends on 2026-08-06. By the time a GO HOME runs, this one has
+        (3 of 7 sends were lost on the real rig). By the time a GO HOME runs, this one has
         been matched with the Robotiq driver for the whole life of the GUI.
         Between that and home_move's GRIPPER_OPEN_REASSERT_S settle window, the
         driver sees a stream of identical OPEN commands rather than one message
@@ -738,11 +738,9 @@ class HomeMoveIoMixin:
     from ``__init__`` (module docstring, "HOW A NODE USES IT").  A mixin rather
     than a free ``install_home_move_io(node, ...)`` function because the
     ``latest_*`` readers, the subscription callbacks and the three Qt-facing
-    methods are then REAL methods on the node class -- discoverable, overridable
-    and identical in shape to what task_gui_node.py had before the split, which
-    kept that node's diff to "delete the block, add the base class and one
-    call" -- whereas a function would have to monkey-patch bound methods onto an
-    instance.
+    methods are then REAL methods on the node class -- discoverable and
+    overridable -- whereas a function would have to monkey-patch bound methods
+    onto an instance.
 
     No ``__init__`` here, deliberately: rclpy.Node.__init__ takes a node name and
     keyword options, GelloRecorderGuiNode.__init__ takes a dozen recorder
@@ -793,7 +791,7 @@ class HomeMoveIoMixin:
 
         ``arm_pause_client`` / ``gripper_pause_client``: pass EXISTING
         std_srvs/Trigger clients for the bridge pause services when the node
-        already owns some (the task recorder's base class does) -- identical
+        already owns some (GelloRecorderGuiNode does) -- identical
         services with identical semantics, so a second client would only add
         graph entities.  When None, clients are created on
         ``arm_pause_service`` / ``gripper_pause_service``.

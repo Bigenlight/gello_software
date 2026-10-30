@@ -45,9 +45,17 @@ class _FakeWidget:
         self.style = ""
         self.enabled = None
         self.tooltip = None
+        self.properties = {}
 
     def setText(self, text):
         self.text = text
+
+    def property(self, name):
+        # QObject.property() returns None for an unset dynamic property.
+        return self.properties.get(name)
+
+    def setProperty(self, name, value):
+        self.properties[name] = value
 
     def setStyleSheet(self, style):
         self.style = style
@@ -268,6 +276,11 @@ class _DeleteWindow:
         self._take_label = _FakeWidget("Take: 0")
         self._elapsed_label = _FakeWidget()
         self._status_label = _FakeWidget()
+        # Recording banner/panel and the tag combo are touched by
+        # _refresh_controls on every tick, so they must be modelled here.
+        self._recording_banner = _FakeWidget()
+        self._recording_panel = _FakeWidget()
+        self._tag_combo = _FakeWidget()
         self._record_start_wall = None
         self._teleop_resume_armed = False
         self._teleop_last_shown_msg = None
