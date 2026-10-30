@@ -75,6 +75,14 @@ class Args:
     """Enable saving data with keyboard interface."""
 
 
+def _default_sim_start_joints(robot_cfg, arm_cfg):
+    """Open a MuJoCo sim at the agent's start_joints unless the robot sets its own."""
+    if not str(robot_cfg.get("_target_", "")).endswith("MujocoRobotServer"):
+        return
+    if robot_cfg.get("start_joints") is None:
+        robot_cfg["start_joints"] = arm_cfg["agent"].get("start_joints")
+
+
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
     cleanup()
@@ -121,6 +129,7 @@ def main():
         left_robot_cfg["config"] = OmegaConf.to_container(
             OmegaConf.load(left_robot_cfg["config"]), resolve=True
         )
+    _default_sim_start_joints(left_robot_cfg, left_cfg)
 
     left_robot = instantiate_from_dict(left_robot_cfg)
 
@@ -132,6 +141,7 @@ def main():
             right_robot_cfg["config"] = OmegaConf.to_container(
                 OmegaConf.load(right_robot_cfg["config"]), resolve=True
             )
+        _default_sim_start_joints(right_robot_cfg, right_cfg)
 
         right_robot = instantiate_from_dict(right_robot_cfg)
         robot = BimanualRobot(left_robot, right_robot)
