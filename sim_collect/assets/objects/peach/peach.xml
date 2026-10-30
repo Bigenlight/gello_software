@@ -1,0 +1,16 @@
+<mujoco model="peach">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh name="peach_mesh" file="peach.obj" maxhullvert="64"/>
+    <texture name="peach_tex" type="2d" file="peach.png"/>
+    <material name="peach_mat" texture="peach_tex" specular="0.25" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="peach" pos="0 0 0">
+      <inertial pos="-0.000776825 0.001151 0.0284746" quat="0.688312 0.545269 -0.474194 0.0636325" mass="0.13" diaginertia="5.0881e-05 4.92882e-05 4.54533e-05"/>
+      <site name="peach_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="peach_vis0" type="mesh" mesh="peach_mesh" pos="0.0142705 -0.005633 0.000215" material="peach_mat" group="2" contype="0" conaffinity="0"/>
+      <geom name="peach_col1" type="mesh" mesh="peach_mesh" pos="0.0142705 -0.005633 0.000215" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

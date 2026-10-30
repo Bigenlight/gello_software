@@ -1,0 +1,16 @@
+<mujoco model="bread">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh file="bread_bread.stl" name="bread_bread_mesh" scale="0.8 0.8 0.8" />
+    <texture file="bread_bread.png" type="2d" name="bread_tex-bread" />
+    <material name="bread_bread" reflectance="0.7" texrepeat="15 15" texture="bread_tex-bread" texuniform="true" />
+  </asset>
+  <worldbody>
+    <body name="bread" pos="0 0 0">
+      <inertial pos="-1.86265e-09 5.65322e-19 0.0232514" quat="0.707107 0 0 0.707107" mass="0.08" diaginertia="2.75642e-05 2.48744e-05 2.40231e-05"/>
+      <site name="bread_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="bread_vis0" type="mesh" mesh="bread_bread_mesh" pos="-1.98461e-09 0 0.0232514" material="bread_bread" group="2" contype="0" conaffinity="0"/>
+      <geom name="bread_col1" type="mesh" mesh="bread_bread_mesh" pos="-1.98461e-09 0 0.0232514" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

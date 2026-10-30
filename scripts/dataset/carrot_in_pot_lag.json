@@ -1,0 +1,551 @@
+{
+ "method": "tau_q_s: shift (s) by which ur_joint_states rows are stamped LATE relative to the fresh `command` table, i.e. the row stamped t_rel_s holds the arm state measured at t_rel_s - tau. Found by minimising mean_j mean_t |q_j(t) - cmd_j(t - tau)| over a 5 ms grid of tau in [0, 1.5] s, both streams linearly interpolated onto a uniform 100 Hz grid spanning the overlap minus the first 1.6 s and last 0.2 s; resid_rad is that minimum (resid_rad_at_zero is the same metric at tau = 0). tau_q_xcorr_s: independent second method -- the tau maximising the summed per-joint Pearson correlation between d/dt q(t) and d/dt cmd(t - tau) on the same grid (offset-immune); xcorr_r is that sum divided by 6. tau_tcp_s: how much LATER ur_joint_states is stamped than tcp_pose, from min_s mean|p_tcp(t) - p_fk(t + s)| with p_fk = UR7e nominal-DH forward kinematics (ur_gello_bringup.ur_kin.fk) of q plus a 0.174 m tool-z offset; positive means tcp_pose is FRESHER. tcp_resid_mm is that minimum in mm. Cause: gello_recorder GUI stamps rows at callback execution time and the single rclpy spin thread is starved by depth recording, so each table is stale by QoS depth / publish rate. Only ur_joint_states is corrected in the LeRobot release.",
+ "grid_s": 0.005,
+ "skip_head_s": 1.6,
+ "skip_tail_s": 0.2,
+ "eval_grid_hz": 100.0,
+ "tool_z_m": 0.174,
+ "n_takes": 54,
+ "takes": {
+  "take_01_20260914_164811": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00113,
+   "resid_rad_at_zero": 0.05898,
+   "tau_q_xcorr_s": 0.915,
+   "xcorr_r": 0.9673,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 0.7955,
+   "tcp_resid_mm_at_zero": 19.0723
+  },
+  "take_02_20260914_164845": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00613,
+   "resid_rad_at_zero": 0.0584,
+   "tau_q_xcorr_s": 0.88,
+   "xcorr_r": 0.8613,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.6456,
+   "tcp_resid_mm_at_zero": 17.1114
+  },
+  "take_03_20260914_164930": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00315,
+   "resid_rad_at_zero": 0.08971,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9514,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.7409,
+   "tcp_resid_mm_at_zero": 19.5432
+  },
+  "take_04_20260914_165011": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00483,
+   "resid_rad_at_zero": 0.07879,
+   "tau_q_xcorr_s": 0.91,
+   "xcorr_r": 0.9396,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.1295,
+   "tcp_resid_mm_at_zero": 20.7694
+  },
+  "take_05_20260914_165156": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00888,
+   "resid_rad_at_zero": 0.05797,
+   "tau_q_xcorr_s": 0.885,
+   "xcorr_r": 0.7858,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.6223,
+   "tcp_resid_mm_at_zero": 15.449
+  },
+  "take_06_20260914_165238": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00882,
+   "resid_rad_at_zero": 0.07434,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9253,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.9635,
+   "tcp_resid_mm_at_zero": 20.5525
+  },
+  "take_07_20260914_165316": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00717,
+   "resid_rad_at_zero": 0.05504,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9086,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.9681,
+   "tcp_resid_mm_at_zero": 16.4396
+  },
+  "take_08_20260914_165353": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.01028,
+   "resid_rad_at_zero": 0.08892,
+   "tau_q_xcorr_s": 0.89,
+   "xcorr_r": 0.892,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.7093,
+   "tcp_resid_mm_at_zero": 21.0737
+  },
+  "take_09_20260914_165429": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00997,
+   "resid_rad_at_zero": 0.05881,
+   "tau_q_xcorr_s": 0.89,
+   "xcorr_r": 0.8683,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.8227,
+   "tcp_resid_mm_at_zero": 15.3325
+  },
+  "take_10_20260914_165510": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00951,
+   "resid_rad_at_zero": 0.07365,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.8969,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.8471,
+   "tcp_resid_mm_at_zero": 22.3812
+  },
+  "take_11_20260914_165557": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00812,
+   "resid_rad_at_zero": 0.05119,
+   "tau_q_xcorr_s": 0.885,
+   "xcorr_r": 0.8759,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.7819,
+   "tcp_resid_mm_at_zero": 13.6955
+  },
+  "take_13_20260914_165647": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00875,
+   "resid_rad_at_zero": 0.05443,
+   "tau_q_xcorr_s": 0.89,
+   "xcorr_r": 0.829,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.1432,
+   "tcp_resid_mm_at_zero": 18.2514
+  },
+  "take_14_20260914_165719": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00791,
+   "resid_rad_at_zero": 0.07383,
+   "tau_q_xcorr_s": 0.88,
+   "xcorr_r": 0.903,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.9589,
+   "tcp_resid_mm_at_zero": 18.6811
+  },
+  "take_15_20260914_165753": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00522,
+   "resid_rad_at_zero": 0.05421,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9039,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.8577,
+   "tcp_resid_mm_at_zero": 15.3771
+  },
+  "take_16_20260914_165825": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00488,
+   "resid_rad_at_zero": 0.05646,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.8854,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.6815,
+   "tcp_resid_mm_at_zero": 15.8323
+  },
+  "take_17_20260914_165859": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00794,
+   "resid_rad_at_zero": 0.06177,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.8479,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.0327,
+   "tcp_resid_mm_at_zero": 17.8573
+  },
+  "take_18_20260914_165926": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00813,
+   "resid_rad_at_zero": 0.06339,
+   "tau_q_xcorr_s": 0.875,
+   "xcorr_r": 0.8709,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.0628,
+   "tcp_resid_mm_at_zero": 17.7324
+  },
+  "take_19_20260914_170024": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00807,
+   "resid_rad_at_zero": 0.0668,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.8974,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.1406,
+   "tcp_resid_mm_at_zero": 17.4478
+  },
+  "take_20_20260914_170107": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00502,
+   "resid_rad_at_zero": 0.0536,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.8766,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.7007,
+   "tcp_resid_mm_at_zero": 16.0172
+  },
+  "take_21_20260914_170135": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00595,
+   "resid_rad_at_zero": 0.05644,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.916,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.5437,
+   "tcp_resid_mm_at_zero": 16.9949
+  },
+  "take_22_20260914_170211": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.0087,
+   "resid_rad_at_zero": 0.0708,
+   "tau_q_xcorr_s": 0.88,
+   "xcorr_r": 0.8451,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 2.8887,
+   "tcp_resid_mm_at_zero": 18.2701
+  },
+  "take_23_20260914_170302": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00822,
+   "resid_rad_at_zero": 0.08397,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9105,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.3721,
+   "tcp_resid_mm_at_zero": 23.317
+  },
+  "take_24_20260914_170339": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00164,
+   "resid_rad_at_zero": 0.06561,
+   "tau_q_xcorr_s": 0.91,
+   "xcorr_r": 0.9671,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.5159,
+   "tcp_resid_mm_at_zero": 19.809
+  },
+  "take_25_20260914_170407": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00171,
+   "resid_rad_at_zero": 0.08015,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9623,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.699,
+   "tcp_resid_mm_at_zero": 22.3077
+  },
+  "take_26_20260914_170447": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00258,
+   "resid_rad_at_zero": 0.05441,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9385,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.5701,
+   "tcp_resid_mm_at_zero": 16.5683
+  },
+  "take_27_20260914_170519": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00763,
+   "resid_rad_at_zero": 0.07526,
+   "tau_q_xcorr_s": 0.875,
+   "xcorr_r": 0.8575,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.8954,
+   "tcp_resid_mm_at_zero": 20.9968
+  },
+  "take_28_20260914_170557": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00074,
+   "resid_rad_at_zero": 0.06505,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9766,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.691,
+   "tcp_resid_mm_at_zero": 18.6226
+  },
+  "take_29_20260914_170629": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00484,
+   "resid_rad_at_zero": 0.06618,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9007,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.9989,
+   "tcp_resid_mm_at_zero": 17.1105
+  },
+  "take_30_20260914_170700": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00176,
+   "resid_rad_at_zero": 0.06936,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9482,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.6101,
+   "tcp_resid_mm_at_zero": 19.7948
+  },
+  "take_31_20260914_170732": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00374,
+   "resid_rad_at_zero": 0.07735,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9327,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.9358,
+   "tcp_resid_mm_at_zero": 21.611
+  },
+  "take_32_20260914_170803": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00498,
+   "resid_rad_at_zero": 0.05931,
+   "tau_q_xcorr_s": 0.89,
+   "xcorr_r": 0.885,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.4861,
+   "tcp_resid_mm_at_zero": 16.9541
+  },
+  "take_33_20260914_170854": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00486,
+   "resid_rad_at_zero": 0.06323,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.9162,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.623,
+   "tcp_resid_mm_at_zero": 21.7456
+  },
+  "take_34_20260914_170932": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00807,
+   "resid_rad_at_zero": 0.06651,
+   "tau_q_xcorr_s": 0.885,
+   "xcorr_r": 0.8212,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 2.8008,
+   "tcp_resid_mm_at_zero": 19.6143
+  },
+  "take_35_20260914_171001": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00532,
+   "resid_rad_at_zero": 0.06439,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9017,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.6742,
+   "tcp_resid_mm_at_zero": 18.6429
+  },
+  "take_36_20260914_171037": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00248,
+   "resid_rad_at_zero": 0.06185,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.9446,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 0.7532,
+   "tcp_resid_mm_at_zero": 17.8763
+  },
+  "take_37_20260914_171113": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00619,
+   "resid_rad_at_zero": 0.06067,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.896,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.9912,
+   "tcp_resid_mm_at_zero": 17.2009
+  },
+  "take_38_20260914_171144": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00693,
+   "resid_rad_at_zero": 0.06532,
+   "tau_q_xcorr_s": 0.89,
+   "xcorr_r": 0.8926,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.6031,
+   "tcp_resid_mm_at_zero": 19.5937
+  },
+  "take_39_20260914_171227": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00355,
+   "resid_rad_at_zero": 0.05647,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9224,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.4163,
+   "tcp_resid_mm_at_zero": 16.7738
+  },
+  "take_40_20260914_171256": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00286,
+   "resid_rad_at_zero": 0.05349,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9209,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.1099,
+   "tcp_resid_mm_at_zero": 17.3746
+  },
+  "take_41_20260914_171328": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00617,
+   "resid_rad_at_zero": 0.06289,
+   "tau_q_xcorr_s": 0.89,
+   "xcorr_r": 0.8601,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.9931,
+   "tcp_resid_mm_at_zero": 18.7558
+  },
+  "take_42_20260914_171358": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00614,
+   "resid_rad_at_zero": 0.05394,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.7342,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.0993,
+   "tcp_resid_mm_at_zero": 13.1799
+  },
+  "take_43_20260914_171435": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00745,
+   "resid_rad_at_zero": 0.06632,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.9048,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.5595,
+   "tcp_resid_mm_at_zero": 16.1551
+  },
+  "take_44_20260914_171505": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00721,
+   "resid_rad_at_zero": 0.05534,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9049,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.8899,
+   "tcp_resid_mm_at_zero": 17.1205
+  },
+  "take_45_20260914_171534": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00631,
+   "resid_rad_at_zero": 0.05412,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.8162,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.6259,
+   "tcp_resid_mm_at_zero": 15.0755
+  },
+  "take_46_20260914_171603": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00473,
+   "resid_rad_at_zero": 0.04916,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.8224,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.0468,
+   "tcp_resid_mm_at_zero": 13.5226
+  },
+  "take_47_20260914_171640": {
+   "tau_q_s": 0.895,
+   "resid_rad": 0.00871,
+   "resid_rad_at_zero": 0.06059,
+   "tau_q_xcorr_s": 0.875,
+   "xcorr_r": 0.8514,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.4288,
+   "tcp_resid_mm_at_zero": 14.3501
+  },
+  "take_48_20260914_171732": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00517,
+   "resid_rad_at_zero": 0.06368,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9296,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.4839,
+   "tcp_resid_mm_at_zero": 15.5621
+  },
+  "take_49_20260914_171812": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00621,
+   "resid_rad_at_zero": 0.05864,
+   "tau_q_xcorr_s": 0.88,
+   "xcorr_r": 0.8946,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.1233,
+   "tcp_resid_mm_at_zero": 11.1879
+  },
+  "take_50_20260914_171849": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00266,
+   "resid_rad_at_zero": 0.06202,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9384,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 0.791,
+   "tcp_resid_mm_at_zero": 12.2437
+  },
+  "take_51_20260914_171924": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00403,
+   "resid_rad_at_zero": 0.07082,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.9258,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.0614,
+   "tcp_resid_mm_at_zero": 18.0197
+  },
+  "take_52_20260914_171957": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.0065,
+   "resid_rad_at_zero": 0.06279,
+   "tau_q_xcorr_s": 0.895,
+   "xcorr_r": 0.8925,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.4529,
+   "tcp_resid_mm_at_zero": 12.4218
+  },
+  "take_53_20260914_172033": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00649,
+   "resid_rad_at_zero": 0.07559,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9401,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.9226,
+   "tcp_resid_mm_at_zero": 18.9266
+  },
+  "take_54_20260914_172116": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00547,
+   "resid_rad_at_zero": 0.05235,
+   "tau_q_xcorr_s": 0.905,
+   "xcorr_r": 0.8567,
+   "tau_tcp_s": 0.495,
+   "tcp_resid_mm": 1.9037,
+   "tcp_resid_mm_at_zero": 14.8155
+  },
+  "take_55_20260914_172155": {
+   "tau_q_s": 0.9,
+   "resid_rad": 0.00737,
+   "resid_rad_at_zero": 0.06865,
+   "tau_q_xcorr_s": 0.9,
+   "xcorr_r": 0.9019,
+   "tau_tcp_s": 0.5,
+   "tcp_resid_mm": 1.8136,
+   "tcp_resid_mm_at_zero": 18.5291
+  }
+ }
+}

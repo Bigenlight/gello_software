@@ -1,0 +1,14 @@
+# Policy-server side for sim_collect/eval (ros2_ur_ws/act_venv, Python 3.12) — the same env the
+# real robot deploy uses. Install torch first for your CUDA (laptop3: cu128); CPU-only torch works
+# for ACT, is slow for Diffusion/FM (use --timeout-s 30 in run_eval).
+#   python3.12 -m venv ros2_ur_ws/act_venv && ros2_ur_ws/act_venv/bin/pip install -r sim_collect/requirements-policy-server.txt
+lerobot==0.6.1
+torch==2.11.0
+torchvision==0.26.0
+transformers==5.14.0
+diffusers==0.35.2
+safetensors==0.8.0
+draccus==0.10.0
+pyzmq==27.1.0
+opencv-python-headless==4.13.0.92
+numpy==2.2.6

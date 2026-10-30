@@ -1,0 +1,1902 @@
+{
+  "verdict": "PASS",
+  "interpreter": "/home/laptop3/youngwoong_ws/lr_env/bin/python",
+  "raw_root": "/home/laptop3/youngwoong_ws/Put_carrot_in_pot",
+  "lerobot_root": "/home/laptop3/youngwoong_ws/carrot_in_pot_lerobot_v3",
+  "repo_id": "Bigenlight/carrot_in_pot_lerobot_v3",
+  "task": "Put carrot in pot",
+  "excluded": [],
+  "test_mode": {
+    "max_frames": 0,
+    "max_takes": 0
+  },
+  "n_takes_found": 54,
+  "n_takes_included": 54,
+  "takes": [
+    "take_01_20260914_164811",
+    "take_02_20260914_164845",
+    "take_03_20260914_164930",
+    "take_04_20260914_165011",
+    "take_05_20260914_165156",
+    "take_06_20260914_165238",
+    "take_07_20260914_165316",
+    "take_08_20260914_165353",
+    "take_09_20260914_165429",
+    "take_10_20260914_165510",
+    "take_11_20260914_165557",
+    "take_13_20260914_165647",
+    "take_14_20260914_165719",
+    "take_15_20260914_165753",
+    "take_16_20260914_165825",
+    "take_17_20260914_165859",
+    "take_18_20260914_165926",
+    "take_19_20260914_170024",
+    "take_20_20260914_170107",
+    "take_21_20260914_170135",
+    "take_22_20260914_170211",
+    "take_23_20260914_170302",
+    "take_24_20260914_170339",
+    "take_25_20260914_170407",
+    "take_26_20260914_170447",
+    "take_27_20260914_170519",
+    "take_28_20260914_170557",
+    "take_29_20260914_170629",
+    "take_30_20260914_170700",
+    "take_31_20260914_170732",
+    "take_32_20260914_170803",
+    "take_33_20260914_170854",
+    "take_34_20260914_170932",
+    "take_35_20260914_171001",
+    "take_36_20260914_171037",
+    "take_37_20260914_171113",
+    "take_38_20260914_171144",
+    "take_39_20260914_171227",
+    "take_40_20260914_171256",
+    "take_41_20260914_171328",
+    "take_42_20260914_171358",
+    "take_43_20260914_171435",
+    "take_44_20260914_171505",
+    "take_45_20260914_171534",
+    "take_46_20260914_171603",
+    "take_47_20260914_171640",
+    "take_48_20260914_171732",
+    "take_49_20260914_171812",
+    "take_50_20260914_171849",
+    "take_51_20260914_171924",
+    "take_52_20260914_171957",
+    "take_53_20260914_172033",
+    "take_54_20260914_172116",
+    "take_55_20260914_172155"
+  ],
+  "take_frame_counts": [
+    253,
+    274,
+    308,
+    258,
+    290,
+    295,
+    250,
+    301,
+    233,
+    271,
+    350,
+    253,
+    343,
+    390,
+    308,
+    273,
+    328,
+    344,
+    291,
+    274,
+    355,
+    295,
+    239,
+    238,
+    274,
+    244,
+    264,
+    312,
+    303,
+    283,
+    267,
+    243,
+    344,
+    373,
+    442,
+    370,
+    295,
+    367,
+    355,
+    301,
+    304,
+    289,
+    280,
+    361,
+    389,
+    360,
+    278,
+    506,
+    426,
+    411,
+    418,
+    285,
+    481,
+    249
+  ],
+  "expected_total_frames": 17088,
+  "info": {
+    "codebase_version": "v3.0",
+    "fps": 30,
+    "total_episodes": 54,
+    "total_frames": 17088,
+    "total_tasks": 1,
+    "robot_type": "ur7e_gello",
+    "splits": {
+      "train": "0:54"
+    }
+  },
+  "max_abs_dev_state": 0.0,
+  "max_abs_dev_action": 0.0,
+  "rgb_video_corr": {
+    "n": 24,
+    "min": 0.9984056629089103,
+    "mean": 0.9990729669904056
+  },
+  "depth_feature_info": {
+    "observation.images.cam1_depth": {
+      "is_depth_map": true,
+      "depth_unit": "mm",
+      "video.codec": "hevc",
+      "video.pix_fmt": "gray12le",
+      "video.depth_min": 0.0,
+      "video.depth_max": 10.0,
+      "video.shift": 0.0,
+      "video.use_log": false,
+      "video.height": 480,
+      "video.width": 848,
+      "video.channels": 1
+    },
+    "observation.images.cam2_depth": {
+      "is_depth_map": true,
+      "depth_unit": "mm",
+      "video.codec": "hevc",
+      "video.pix_fmt": "gray12le",
+      "video.depth_min": 0.0,
+      "video.depth_max": 10.0,
+      "video.shift": 0.0,
+      "video.use_log": false,
+      "video.height": 480,
+      "video.width": 848,
+      "video.channels": 1
+    }
+  },
+  "depth_counts": {
+    "observation.images.cam1_depth": {
+      "episodes_ok": true,
+      "files": [
+        "chunk0/file0: 3336 frames (12 eps, want 3336)",
+        "chunk0/file1: 3201 frames (10 eps, want 3201)",
+        "chunk0/file2: 3011 frames (11 eps, want 3011)",
+        "chunk0/file3: 2807 frames (8 eps, want 2807)",
+        "chunk0/file4: 2889 frames (8 eps, want 2889)",
+        "chunk0/file5: 1844 frames (5 eps, want 1844)"
+      ]
+    },
+    "observation.images.cam2_depth": {
+      "episodes_ok": true,
+      "files": [
+        "chunk0/file0: 6242 frames (21 eps, want 6242)",
+        "chunk0/file1: 6402 frames (21 eps, want 6402)",
+        "chunk0/file2: 4444 frames (12 eps, want 4444)"
+      ]
+    }
+  },
+  "depth_fidelity": {
+    "observation.images.cam1_depth": {
+      "n": 162,
+      "med_max": 1.0,
+      "p99_max": 1.0,
+      "abs_max": 1.0,
+      "zero_frac_min": 1.0,
+      "n_valid": 57721353,
+      "n_zero": 8219127,
+      "bad_med": 0,
+      "bad_p99": 0,
+      "bad_max": 0,
+      "bad_zero": 0
+    },
+    "observation.images.cam2_depth": {
+      "n": 162,
+      "med_max": 1.0,
+      "p99_max": 1.0,
+      "abs_max": 1.0,
+      "zero_frac_min": 1.0,
+      "n_valid": 42893168,
+      "n_zero": 23047312,
+      "bad_med": 0,
+      "bad_p99": 0,
+      "bad_max": 0,
+      "bad_zero": 0
+    }
+  },
+  "depth_timestamps": {
+    "cam1": {
+      "max_dt_ms": 44.48925552368164,
+      "min_in_tol_frac_soft": 0.7591240875912408,
+      "min_in_tol_frac_hard": 0.9957983193277311,
+      "median_signed_offset_ms": -8.773278999328769,
+      "soft_tol_ms": 21.666666666666668,
+      "hard_tol_ms": 33.333333333333336,
+      "worst_episode": "ep53 (take_55_20260914_172155)"
+    },
+    "cam2": {
+      "max_dt_ms": 51.48631248474121,
+      "min_in_tol_frac_soft": 0.9734848484848485,
+      "min_in_tol_frac_hard": 0.9958847736625515,
+      "median_signed_offset_ms": 7.148872184753463,
+      "soft_tol_ms": 21.666666666666668,
+      "hard_tol_ms": 33.333333333333336,
+      "worst_episode": "ep26 (take_28_20260914_170557)"
+    }
+  },
+  "depth_cameras_json": {
+    "cam1_depth": {
+      "n_takes_checked": 54,
+      "mismatches": []
+    },
+    "cam2_depth": {
+      "n_takes_checked": 54,
+      "mismatches": []
+    }
+  },
+  "source_takes_json": {
+    "names": [
+      "take_01_20260914_164811",
+      "take_02_20260914_164845",
+      "take_03_20260914_164930",
+      "take_04_20260914_165011",
+      "take_05_20260914_165156",
+      "take_06_20260914_165238",
+      "take_07_20260914_165316",
+      "take_08_20260914_165353",
+      "take_09_20260914_165429",
+      "take_10_20260914_165510",
+      "take_11_20260914_165557",
+      "take_13_20260914_165647",
+      "take_14_20260914_165719",
+      "take_15_20260914_165753",
+      "take_16_20260914_165825",
+      "take_17_20260914_165859",
+      "take_18_20260914_165926",
+      "take_19_20260914_170024",
+      "take_20_20260914_170107",
+      "take_21_20260914_170135",
+      "take_22_20260914_170211",
+      "take_23_20260914_170302",
+      "take_24_20260914_170339",
+      "take_25_20260914_170407",
+      "take_26_20260914_170447",
+      "take_27_20260914_170519",
+      "take_28_20260914_170557",
+      "take_29_20260914_170629",
+      "take_30_20260914_170700",
+      "take_31_20260914_170732",
+      "take_32_20260914_170803",
+      "take_33_20260914_170854",
+      "take_34_20260914_170932",
+      "take_35_20260914_171001",
+      "take_36_20260914_171037",
+      "take_37_20260914_171113",
+      "take_38_20260914_171144",
+      "take_39_20260914_171227",
+      "take_40_20260914_171256",
+      "take_41_20260914_171328",
+      "take_42_20260914_171358",
+      "take_43_20260914_171435",
+      "take_44_20260914_171505",
+      "take_45_20260914_171534",
+      "take_46_20260914_171603",
+      "take_47_20260914_171640",
+      "take_48_20260914_171732",
+      "take_49_20260914_171812",
+      "take_50_20260914_171849",
+      "take_51_20260914_171924",
+      "take_52_20260914_171957",
+      "take_53_20260914_172033",
+      "take_54_20260914_172116",
+      "take_55_20260914_172155"
+    ],
+    "n_frames": [
+      253,
+      274,
+      308,
+      258,
+      290,
+      295,
+      250,
+      301,
+      233,
+      271,
+      350,
+      253,
+      343,
+      390,
+      308,
+      273,
+      328,
+      344,
+      291,
+      274,
+      355,
+      295,
+      239,
+      238,
+      274,
+      244,
+      264,
+      312,
+      303,
+      283,
+      267,
+      243,
+      344,
+      373,
+      442,
+      370,
+      295,
+      367,
+      355,
+      301,
+      304,
+      289,
+      280,
+      361,
+      389,
+      360,
+      278,
+      506,
+      426,
+      411,
+      418,
+      285,
+      481,
+      249
+    ]
+  },
+  "ur_lag_s": 0.9,
+  "lag_json": "/home/laptop3/youngwoong_ws/carrot_in_pot_lag.json",
+  "tau_per_take": {
+    "take_01_20260914_164811": 0.9,
+    "take_02_20260914_164845": 0.9,
+    "take_03_20260914_164930": 0.9,
+    "take_04_20260914_165011": 0.9,
+    "take_05_20260914_165156": 0.895,
+    "take_06_20260914_165238": 0.9,
+    "take_07_20260914_165316": 0.9,
+    "take_08_20260914_165353": 0.895,
+    "take_09_20260914_165429": 0.895,
+    "take_10_20260914_165510": 0.895,
+    "take_11_20260914_165557": 0.895,
+    "take_13_20260914_165647": 0.9,
+    "take_14_20260914_165719": 0.9,
+    "take_15_20260914_165753": 0.9,
+    "take_16_20260914_165825": 0.9,
+    "take_17_20260914_165859": 0.895,
+    "take_18_20260914_165926": 0.895,
+    "take_19_20260914_170024": 0.9,
+    "take_20_20260914_170107": 0.9,
+    "take_21_20260914_170135": 0.9,
+    "take_22_20260914_170211": 0.9,
+    "take_23_20260914_170302": 0.9,
+    "take_24_20260914_170339": 0.9,
+    "take_25_20260914_170407": 0.9,
+    "take_26_20260914_170447": 0.9,
+    "take_27_20260914_170519": 0.9,
+    "take_28_20260914_170557": 0.9,
+    "take_29_20260914_170629": 0.9,
+    "take_30_20260914_170700": 0.9,
+    "take_31_20260914_170732": 0.9,
+    "take_32_20260914_170803": 0.895,
+    "take_33_20260914_170854": 0.9,
+    "take_34_20260914_170932": 0.895,
+    "take_35_20260914_171001": 0.895,
+    "take_36_20260914_171037": 0.9,
+    "take_37_20260914_171113": 0.9,
+    "take_38_20260914_171144": 0.9,
+    "take_39_20260914_171227": 0.9,
+    "take_40_20260914_171256": 0.9,
+    "take_41_20260914_171328": 0.9,
+    "take_42_20260914_171358": 0.895,
+    "take_43_20260914_171435": 0.895,
+    "take_44_20260914_171505": 0.9,
+    "take_45_20260914_171534": 0.9,
+    "take_46_20260914_171603": 0.9,
+    "take_47_20260914_171640": 0.895,
+    "take_48_20260914_171732": 0.9,
+    "take_49_20260914_171812": 0.9,
+    "take_50_20260914_171849": 0.9,
+    "take_51_20260914_171924": 0.9,
+    "take_52_20260914_171957": 0.9,
+    "take_53_20260914_172033": 0.9,
+    "take_54_20260914_172116": 0.9,
+    "take_55_20260914_172155": 0.9
+  },
+  "lag_metadata": {
+    "per_episode_lag_s": {
+      "take_01_20260914_164811": 0.9,
+      "take_02_20260914_164845": 0.9,
+      "take_03_20260914_164930": 0.9,
+      "take_04_20260914_165011": 0.9,
+      "take_05_20260914_165156": 0.895,
+      "take_06_20260914_165238": 0.9,
+      "take_07_20260914_165316": 0.9,
+      "take_08_20260914_165353": 0.895,
+      "take_09_20260914_165429": 0.895,
+      "take_10_20260914_165510": 0.895,
+      "take_11_20260914_165557": 0.895,
+      "take_13_20260914_165647": 0.9,
+      "take_14_20260914_165719": 0.9,
+      "take_15_20260914_165753": 0.9,
+      "take_16_20260914_165825": 0.9,
+      "take_17_20260914_165859": 0.895,
+      "take_18_20260914_165926": 0.895,
+      "take_19_20260914_170024": 0.9,
+      "take_20_20260914_170107": 0.9,
+      "take_21_20260914_170135": 0.9,
+      "take_22_20260914_170211": 0.9,
+      "take_23_20260914_170302": 0.9,
+      "take_24_20260914_170339": 0.9,
+      "take_25_20260914_170407": 0.9,
+      "take_26_20260914_170447": 0.9,
+      "take_27_20260914_170519": 0.9,
+      "take_28_20260914_170557": 0.9,
+      "take_29_20260914_170629": 0.9,
+      "take_30_20260914_170700": 0.9,
+      "take_31_20260914_170732": 0.9,
+      "take_32_20260914_170803": 0.895,
+      "take_33_20260914_170854": 0.9,
+      "take_34_20260914_170932": 0.895,
+      "take_35_20260914_171001": 0.895,
+      "take_36_20260914_171037": 0.9,
+      "take_37_20260914_171113": 0.9,
+      "take_38_20260914_171144": 0.9,
+      "take_39_20260914_171227": 0.9,
+      "take_40_20260914_171256": 0.9,
+      "take_41_20260914_171328": 0.9,
+      "take_42_20260914_171358": 0.895,
+      "take_43_20260914_171435": 0.895,
+      "take_44_20260914_171505": 0.9,
+      "take_45_20260914_171534": 0.9,
+      "take_46_20260914_171603": 0.9,
+      "take_47_20260914_171640": 0.895,
+      "take_48_20260914_171732": 0.9,
+      "take_49_20260914_171812": 0.9,
+      "take_50_20260914_171849": 0.9,
+      "take_51_20260914_171924": 0.9,
+      "take_52_20260914_171957": 0.9,
+      "take_53_20260914_172033": 0.9,
+      "take_54_20260914_172116": 0.9,
+      "take_55_20260914_172155": 0.9
+    },
+    "per_episode_dropped_stale_tail": {
+      "take_01_20260914_164811": 27,
+      "take_02_20260914_164845": 27,
+      "take_03_20260914_164930": 27,
+      "take_04_20260914_165011": 28,
+      "take_05_20260914_165156": 27,
+      "take_06_20260914_165238": 28,
+      "take_07_20260914_165316": 27,
+      "take_08_20260914_165353": 28,
+      "take_09_20260914_165429": 28,
+      "take_10_20260914_165510": 27,
+      "take_11_20260914_165557": 28,
+      "take_13_20260914_165647": 27,
+      "take_14_20260914_165719": 27,
+      "take_15_20260914_165753": 27,
+      "take_16_20260914_165825": 27,
+      "take_17_20260914_165859": 27,
+      "take_18_20260914_165926": 27,
+      "take_19_20260914_170024": 27,
+      "take_20_20260914_170107": 27,
+      "take_21_20260914_170135": 28,
+      "take_22_20260914_170211": 28,
+      "take_23_20260914_170302": 28,
+      "take_24_20260914_170339": 27,
+      "take_25_20260914_170407": 27,
+      "take_26_20260914_170447": 28,
+      "take_27_20260914_170519": 27,
+      "take_28_20260914_170557": 27,
+      "take_29_20260914_170629": 27,
+      "take_30_20260914_170700": 27,
+      "take_31_20260914_170732": 27,
+      "take_32_20260914_170803": 27,
+      "take_33_20260914_170854": 27,
+      "take_34_20260914_170932": 27,
+      "take_35_20260914_171001": 27,
+      "take_36_20260914_171037": 27,
+      "take_37_20260914_171113": 27,
+      "take_38_20260914_171144": 27,
+      "take_39_20260914_171227": 27,
+      "take_40_20260914_171256": 28,
+      "take_41_20260914_171328": 27,
+      "take_42_20260914_171358": 27,
+      "take_43_20260914_171435": 27,
+      "take_44_20260914_171505": 27,
+      "take_45_20260914_171534": 27,
+      "take_46_20260914_171603": 27,
+      "take_47_20260914_171640": 26,
+      "take_48_20260914_171732": 27,
+      "take_49_20260914_171812": 27,
+      "take_50_20260914_171849": 27,
+      "take_51_20260914_171924": 27,
+      "take_52_20260914_171957": 28,
+      "take_53_20260914_172033": 27,
+      "take_54_20260914_172116": 28,
+      "take_55_20260914_172155": 27
+    },
+    "stale_tail": "dropped",
+    "timestamp_correction": {
+      "ur_joint_states_lag_s": [
+        0.895,
+        0.9
+      ],
+      "why": "recorder spin-thread starvation; rows stamped at callback time were depth/rate late",
+      "tcp_pose/wrench": "not in this dataset",
+      "applied_to": [
+        "observation.state[0:6] (ur_joint_states q1..q6)"
+      ],
+      "not_applied_to": [
+        "observation.state[6] (grip_pos)",
+        "action (command + grip_cmd)",
+        "observation.images.cam1",
+        "observation.images.cam2",
+        "observation.images.cam1_depth",
+        "observation.images.cam2_depth"
+      ],
+      "convention": "ur_joint_states row clock = t_rel_s - tau before the nearest-timestamp lookup (master frame at t reads the ur row stamped t + tau)",
+      "stale_tail": "dropped",
+      "stale_tail_rule": "a master frame k is kept iff cam1_t[k] + tau <= ur_joint_states t_rel_s[-1]; the trailing frames without a real joint sample at or after their corrected lookup time would otherwise repeat the last ur row while the arm is still moving, so the whole frame (state, action, cam1, cam2, both depth streams) is dropped. Per-episode count: n_frames_dropped_stale_tail.",
+      "n_frames_dropped_stale_tail_total": 1469,
+      "source": "carrot_in_pot_lag.json",
+      "per_episode": {
+        "take_01_20260914_164811": 0.9,
+        "take_02_20260914_164845": 0.9,
+        "take_03_20260914_164930": 0.9,
+        "take_04_20260914_165011": 0.9,
+        "take_05_20260914_165156": 0.895,
+        "take_06_20260914_165238": 0.9,
+        "take_07_20260914_165316": 0.9,
+        "take_08_20260914_165353": 0.895,
+        "take_09_20260914_165429": 0.895,
+        "take_10_20260914_165510": 0.895,
+        "take_11_20260914_165557": 0.895,
+        "take_13_20260914_165647": 0.9,
+        "take_14_20260914_165719": 0.9,
+        "take_15_20260914_165753": 0.9,
+        "take_16_20260914_165825": 0.9,
+        "take_17_20260914_165859": 0.895,
+        "take_18_20260914_165926": 0.895,
+        "take_19_20260914_170024": 0.9,
+        "take_20_20260914_170107": 0.9,
+        "take_21_20260914_170135": 0.9,
+        "take_22_20260914_170211": 0.9,
+        "take_23_20260914_170302": 0.9,
+        "take_24_20260914_170339": 0.9,
+        "take_25_20260914_170407": 0.9,
+        "take_26_20260914_170447": 0.9,
+        "take_27_20260914_170519": 0.9,
+        "take_28_20260914_170557": 0.9,
+        "take_29_20260914_170629": 0.9,
+        "take_30_20260914_170700": 0.9,
+        "take_31_20260914_170732": 0.9,
+        "take_32_20260914_170803": 0.895,
+        "take_33_20260914_170854": 0.9,
+        "take_34_20260914_170932": 0.895,
+        "take_35_20260914_171001": 0.895,
+        "take_36_20260914_171037": 0.9,
+        "take_37_20260914_171113": 0.9,
+        "take_38_20260914_171144": 0.9,
+        "take_39_20260914_171227": 0.9,
+        "take_40_20260914_171256": 0.9,
+        "take_41_20260914_171328": 0.9,
+        "take_42_20260914_171358": 0.895,
+        "take_43_20260914_171435": 0.895,
+        "take_44_20260914_171505": 0.9,
+        "take_45_20260914_171534": 0.9,
+        "take_46_20260914_171603": 0.9,
+        "take_47_20260914_171640": 0.895,
+        "take_48_20260914_171732": 0.9,
+        "take_49_20260914_171812": 0.9,
+        "take_50_20260914_171849": 0.9,
+        "take_51_20260914_171924": 0.9,
+        "take_52_20260914_171957": 0.9,
+        "take_53_20260914_172033": 0.9,
+        "take_54_20260914_172116": 0.9,
+        "take_55_20260914_172155": 0.9
+      }
+    }
+  },
+  "state_action_physics": {
+    "skip_head_s": 1.6,
+    "skip_frames": 48,
+    "gate_rad": 0.02,
+    "n_episodes": 54,
+    "corrected": {
+      "median": 0.0018282769419385725,
+      "mean": 0.001989040487417348,
+      "min": 0.0007346507770563263,
+      "max": 0.004870579051143054
+    },
+    "tau0": {
+      "median": 0.06343857655115956,
+      "mean": 0.06472204572973272,
+      "min": 0.05054178846225817,
+      "max": 0.0931780987734537
+    },
+    "n_episodes_improved": 54,
+    "per_episode": [
+      {
+        "episode_index": 0,
+        "take": "take_01_20260914_164811",
+        "mean_abs_rad_corrected": 0.0008059871875173677,
+        "mean_abs_rad_tau0": 0.058874731529049755
+      },
+      {
+        "episode_index": 1,
+        "take": "take_02_20260914_164845",
+        "mean_abs_rad_corrected": 0.0023692162339314597,
+        "mean_abs_rad_tau0": 0.06029366857885963
+      },
+      {
+        "episode_index": 2,
+        "take": "take_03_20260914_164930",
+        "mean_abs_rad_corrected": 0.001192732117114923,
+        "mean_abs_rad_tau0": 0.09315253152297093
+      },
+      {
+        "episode_index": 3,
+        "take": "take_04_20260914_165011",
+        "mean_abs_rad_corrected": 0.0014707474481491815,
+        "mean_abs_rad_tau0": 0.0791140791915712
+      },
+      {
+        "episode_index": 4,
+        "take": "take_05_20260914_165156",
+        "mean_abs_rad_corrected": 0.003443557943522766,
+        "mean_abs_rad_tau0": 0.0601945985775677
+      },
+      {
+        "episode_index": 5,
+        "take": "take_06_20260914_165238",
+        "mean_abs_rad_corrected": 0.0026165715917723705,
+        "mean_abs_rad_tau0": 0.07677890535308282
+      },
+      {
+        "episode_index": 6,
+        "take": "take_07_20260914_165316",
+        "mean_abs_rad_corrected": 0.002571455716299932,
+        "mean_abs_rad_tau0": 0.05648858496064794
+      },
+      {
+        "episode_index": 7,
+        "take": "take_08_20260914_165353",
+        "mean_abs_rad_corrected": 0.0043403206292505474,
+        "mean_abs_rad_tau0": 0.0931780987734537
+      },
+      {
+        "episode_index": 8,
+        "take": "take_09_20260914_165429",
+        "mean_abs_rad_corrected": 0.0021006171767776077,
+        "mean_abs_rad_tau0": 0.061387984817092484
+      },
+      {
+        "episode_index": 9,
+        "take": "take_10_20260914_165510",
+        "mean_abs_rad_corrected": 0.003563305900414072,
+        "mean_abs_rad_tau0": 0.07430338485358542
+      },
+      {
+        "episode_index": 10,
+        "take": "take_11_20260914_165557",
+        "mean_abs_rad_corrected": 0.0022144544927226524,
+        "mean_abs_rad_tau0": 0.052143270277292784
+      },
+      {
+        "episode_index": 11,
+        "take": "take_13_20260914_165647",
+        "mean_abs_rad_corrected": 0.002731377322499345,
+        "mean_abs_rad_tau0": 0.05381608939752346
+      },
+      {
+        "episode_index": 12,
+        "take": "take_14_20260914_165719",
+        "mean_abs_rad_corrected": 0.002832465185283941,
+        "mean_abs_rad_tau0": 0.07834375591601356
+      },
+      {
+        "episode_index": 13,
+        "take": "take_15_20260914_165753",
+        "mean_abs_rad_corrected": 0.0024032850130724396,
+        "mean_abs_rad_tau0": 0.053182324761303315
+      },
+      {
+        "episode_index": 14,
+        "take": "take_16_20260914_165825",
+        "mean_abs_rad_corrected": 0.00079421905370859,
+        "mean_abs_rad_tau0": 0.05810280931301606
+      },
+      {
+        "episode_index": 15,
+        "take": "take_17_20260914_165859",
+        "mean_abs_rad_corrected": 0.0023806580790766965,
+        "mean_abs_rad_tau0": 0.0636647590884456
+      },
+      {
+        "episode_index": 16,
+        "take": "take_18_20260914_165926",
+        "mean_abs_rad_corrected": 0.0021213018468448095,
+        "mean_abs_rad_tau0": 0.06379833093711308
+      },
+      {
+        "episode_index": 17,
+        "take": "take_19_20260914_170024",
+        "mean_abs_rad_corrected": 0.0036078584086787595,
+        "mean_abs_rad_tau0": 0.06652578651099592
+      },
+      {
+        "episode_index": 18,
+        "take": "take_20_20260914_170107",
+        "mean_abs_rad_corrected": 0.0018723165547406232,
+        "mean_abs_rad_tau0": 0.05054178846225817
+      },
+      {
+        "episode_index": 19,
+        "take": "take_21_20260914_170135",
+        "mean_abs_rad_corrected": 0.0011027234669631913,
+        "mean_abs_rad_tau0": 0.05658255697703291
+      },
+      {
+        "episode_index": 20,
+        "take": "take_22_20260914_170211",
+        "mean_abs_rad_corrected": 0.004870579051143054,
+        "mean_abs_rad_tau0": 0.06921967802555114
+      },
+      {
+        "episode_index": 21,
+        "take": "take_23_20260914_170302",
+        "mean_abs_rad_corrected": 0.0030485122149128984,
+        "mean_abs_rad_tau0": 0.08132255801305115
+      },
+      {
+        "episode_index": 22,
+        "take": "take_24_20260914_170339",
+        "mean_abs_rad_corrected": 0.0009475385747446856,
+        "mean_abs_rad_tau0": 0.06923311376654873
+      },
+      {
+        "episode_index": 23,
+        "take": "take_25_20260914_170407",
+        "mean_abs_rad_corrected": 0.001028067814676385,
+        "mean_abs_rad_tau0": 0.08146164668233771
+      },
+      {
+        "episode_index": 24,
+        "take": "take_26_20260914_170447",
+        "mean_abs_rad_corrected": 0.0007531710606409034,
+        "mean_abs_rad_tau0": 0.056731135620128444
+      },
+      {
+        "episode_index": 25,
+        "take": "take_27_20260914_170519",
+        "mean_abs_rad_corrected": 0.002024483113061814,
+        "mean_abs_rad_tau0": 0.07277149681736823
+      },
+      {
+        "episode_index": 26,
+        "take": "take_28_20260914_170557",
+        "mean_abs_rad_corrected": 0.0009435179792804482,
+        "mean_abs_rad_tau0": 0.06535645105220654
+      },
+      {
+        "episode_index": 27,
+        "take": "take_29_20260914_170629",
+        "mean_abs_rad_corrected": 0.001475237234674319,
+        "mean_abs_rad_tau0": 0.06619426879015836
+      },
+      {
+        "episode_index": 28,
+        "take": "take_30_20260914_170700",
+        "mean_abs_rad_corrected": 0.0007346507770563263,
+        "mean_abs_rad_tau0": 0.06999257257561278
+      },
+      {
+        "episode_index": 29,
+        "take": "take_31_20260914_170732",
+        "mean_abs_rad_corrected": 0.0011733579297437736,
+        "mean_abs_rad_tau0": 0.07663709068974704
+      },
+      {
+        "episode_index": 30,
+        "take": "take_32_20260914_170803",
+        "mean_abs_rad_corrected": 0.0011962585979037816,
+        "mean_abs_rad_tau0": 0.05544933527027635
+      },
+      {
+        "episode_index": 31,
+        "take": "take_33_20260914_170854",
+        "mean_abs_rad_corrected": 0.0010065069565406213,
+        "mean_abs_rad_tau0": 0.060146074519198164
+      },
+      {
+        "episode_index": 32,
+        "take": "take_34_20260914_170932",
+        "mean_abs_rad_corrected": 0.003847896985642545,
+        "mean_abs_rad_tau0": 0.06798343226179346
+      },
+      {
+        "episode_index": 33,
+        "take": "take_35_20260914_171001",
+        "mean_abs_rad_corrected": 0.0021499044467241336,
+        "mean_abs_rad_tau0": 0.0663868313569289
+      },
+      {
+        "episode_index": 34,
+        "take": "take_36_20260914_171037",
+        "mean_abs_rad_corrected": 0.0009481612397531164,
+        "mean_abs_rad_tau0": 0.06223207117135553
+      },
+      {
+        "episode_index": 35,
+        "take": "take_37_20260914_171113",
+        "mean_abs_rad_corrected": 0.0024272869832767463,
+        "mean_abs_rad_tau0": 0.0602780488583859
+      },
+      {
+        "episode_index": 36,
+        "take": "take_38_20260914_171144",
+        "mean_abs_rad_corrected": 0.0013693454455428438,
+        "mean_abs_rad_tau0": 0.06713801646522183
+      },
+      {
+        "episode_index": 37,
+        "take": "take_39_20260914_171227",
+        "mean_abs_rad_corrected": 0.0014629061942065646,
+        "mean_abs_rad_tau0": 0.05512657390991099
+      },
+      {
+        "episode_index": 38,
+        "take": "take_40_20260914_171256",
+        "mean_abs_rad_corrected": 0.0010274944424499776,
+        "mean_abs_rad_tau0": 0.05366837693606862
+      },
+      {
+        "episode_index": 39,
+        "take": "take_41_20260914_171328",
+        "mean_abs_rad_corrected": 0.002279333524867323,
+        "mean_abs_rad_tau0": 0.056541112493306435
+      },
+      {
+        "episode_index": 40,
+        "take": "take_42_20260914_171358",
+        "mean_abs_rad_corrected": 0.001238449476659298,
+        "mean_abs_rad_tau0": 0.05196296920379003
+      },
+      {
+        "episode_index": 41,
+        "take": "take_43_20260914_171435",
+        "mean_abs_rad_corrected": 0.0018078444079904306,
+        "mean_abs_rad_tau0": 0.06842780500691627
+      },
+      {
+        "episode_index": 42,
+        "take": "take_44_20260914_171505",
+        "mean_abs_rad_corrected": 0.0017981705651886162,
+        "mean_abs_rad_tau0": 0.05633501331696565
+      },
+      {
+        "episode_index": 43,
+        "take": "take_45_20260914_171534",
+        "mean_abs_rad_corrected": 0.001733558690839936,
+        "mean_abs_rad_tau0": 0.05427106621420295
+      },
+      {
+        "episode_index": 44,
+        "take": "take_46_20260914_171603",
+        "mean_abs_rad_corrected": 0.0013058250251054065,
+        "mean_abs_rad_tau0": 0.0513383244489295
+      },
+      {
+        "episode_index": 45,
+        "take": "take_47_20260914_171640",
+        "mean_abs_rad_corrected": 0.0028891701601509354,
+        "mean_abs_rad_tau0": 0.06321239401387353
+      },
+      {
+        "episode_index": 46,
+        "take": "take_48_20260914_171732",
+        "mean_abs_rad_corrected": 0.0017792876215948575,
+        "mean_abs_rad_tau0": 0.0662767824055492
+      },
+      {
+        "episode_index": 47,
+        "take": "take_49_20260914_171812",
+        "mean_abs_rad_corrected": 0.002417401151712631,
+        "mean_abs_rad_tau0": 0.05961543182792275
+      },
+      {
+        "episode_index": 48,
+        "take": "take_50_20260914_171849",
+        "mean_abs_rad_corrected": 0.001500042079827983,
+        "mean_abs_rad_tau0": 0.06426108014856907
+      },
+      {
+        "episode_index": 49,
+        "take": "take_51_20260914_171924",
+        "mean_abs_rad_corrected": 0.0014661726763316313,
+        "mean_abs_rad_tau0": 0.07172748038700899
+      },
+      {
+        "episode_index": 50,
+        "take": "take_52_20260914_171957",
+        "mean_abs_rad_corrected": 0.0018487094758867144,
+        "mean_abs_rad_tau0": 0.06219087704881891
+      },
+      {
+        "episode_index": 51,
+        "take": "take_53_20260914_172033",
+        "mean_abs_rad_corrected": 0.002315697455372656,
+        "mean_abs_rad_tau0": 0.07833117866985573
+      },
+      {
+        "episode_index": 52,
+        "take": "take_54_20260914_172116",
+        "mean_abs_rad_corrected": 0.0026674702407948505,
+        "mean_abs_rad_tau0": 0.05382054484376915
+      },
+      {
+        "episode_index": 53,
+        "take": "take_55_20260914_172155",
+        "mean_abs_rad_corrected": 0.0013910053578973015,
+        "mean_abs_rad_tau0": 0.06888159679536203
+      }
+    ]
+  },
+  "drop_stale_tail": true,
+  "stale_tail": {
+    "mode": "dropped",
+    "max_tail_repeat_run": 2,
+    "median_tail_repeat_run": 1.0,
+    "dropped": {
+      "min": 26,
+      "median": 27.0,
+      "max": 28,
+      "total": 1469
+    },
+    "raw_frames_total": 18557,
+    "per_episode": [
+      {
+        "episode_index": 0,
+        "take": "take_01_20260914_164811",
+        "stored_frames": 253,
+        "expected_frames": 253,
+        "raw_frames": 280,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 1,
+        "take": "take_02_20260914_164845",
+        "stored_frames": 274,
+        "expected_frames": 274,
+        "raw_frames": 301,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 2,
+        "take": "take_03_20260914_164930",
+        "stored_frames": 308,
+        "expected_frames": 308,
+        "raw_frames": 335,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 3,
+        "take": "take_04_20260914_165011",
+        "stored_frames": 258,
+        "expected_frames": 258,
+        "raw_frames": 286,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 4,
+        "take": "take_05_20260914_165156",
+        "stored_frames": 290,
+        "expected_frames": 290,
+        "raw_frames": 317,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 5,
+        "take": "take_06_20260914_165238",
+        "stored_frames": 295,
+        "expected_frames": 295,
+        "raw_frames": 323,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 6,
+        "take": "take_07_20260914_165316",
+        "stored_frames": 250,
+        "expected_frames": 250,
+        "raw_frames": 277,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 7,
+        "take": "take_08_20260914_165353",
+        "stored_frames": 301,
+        "expected_frames": 301,
+        "raw_frames": 329,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 8,
+        "take": "take_09_20260914_165429",
+        "stored_frames": 233,
+        "expected_frames": 233,
+        "raw_frames": 261,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 9,
+        "take": "take_10_20260914_165510",
+        "stored_frames": 271,
+        "expected_frames": 271,
+        "raw_frames": 298,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 10,
+        "take": "take_11_20260914_165557",
+        "stored_frames": 350,
+        "expected_frames": 350,
+        "raw_frames": 378,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 11,
+        "take": "take_13_20260914_165647",
+        "stored_frames": 253,
+        "expected_frames": 253,
+        "raw_frames": 280,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 12,
+        "take": "take_14_20260914_165719",
+        "stored_frames": 343,
+        "expected_frames": 343,
+        "raw_frames": 370,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 13,
+        "take": "take_15_20260914_165753",
+        "stored_frames": 390,
+        "expected_frames": 390,
+        "raw_frames": 417,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 14,
+        "take": "take_16_20260914_165825",
+        "stored_frames": 308,
+        "expected_frames": 308,
+        "raw_frames": 335,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 15,
+        "take": "take_17_20260914_165859",
+        "stored_frames": 273,
+        "expected_frames": 273,
+        "raw_frames": 300,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 16,
+        "take": "take_18_20260914_165926",
+        "stored_frames": 328,
+        "expected_frames": 328,
+        "raw_frames": 355,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 17,
+        "take": "take_19_20260914_170024",
+        "stored_frames": 344,
+        "expected_frames": 344,
+        "raw_frames": 371,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 18,
+        "take": "take_20_20260914_170107",
+        "stored_frames": 291,
+        "expected_frames": 291,
+        "raw_frames": 318,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 19,
+        "take": "take_21_20260914_170135",
+        "stored_frames": 274,
+        "expected_frames": 274,
+        "raw_frames": 302,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 20,
+        "take": "take_22_20260914_170211",
+        "stored_frames": 355,
+        "expected_frames": 355,
+        "raw_frames": 383,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 21,
+        "take": "take_23_20260914_170302",
+        "stored_frames": 295,
+        "expected_frames": 295,
+        "raw_frames": 323,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 22,
+        "take": "take_24_20260914_170339",
+        "stored_frames": 239,
+        "expected_frames": 239,
+        "raw_frames": 266,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 2
+      },
+      {
+        "episode_index": 23,
+        "take": "take_25_20260914_170407",
+        "stored_frames": 238,
+        "expected_frames": 238,
+        "raw_frames": 265,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 24,
+        "take": "take_26_20260914_170447",
+        "stored_frames": 274,
+        "expected_frames": 274,
+        "raw_frames": 302,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 25,
+        "take": "take_27_20260914_170519",
+        "stored_frames": 244,
+        "expected_frames": 244,
+        "raw_frames": 271,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 26,
+        "take": "take_28_20260914_170557",
+        "stored_frames": 264,
+        "expected_frames": 264,
+        "raw_frames": 291,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 27,
+        "take": "take_29_20260914_170629",
+        "stored_frames": 312,
+        "expected_frames": 312,
+        "raw_frames": 339,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 28,
+        "take": "take_30_20260914_170700",
+        "stored_frames": 303,
+        "expected_frames": 303,
+        "raw_frames": 330,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 29,
+        "take": "take_31_20260914_170732",
+        "stored_frames": 283,
+        "expected_frames": 283,
+        "raw_frames": 310,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 30,
+        "take": "take_32_20260914_170803",
+        "stored_frames": 267,
+        "expected_frames": 267,
+        "raw_frames": 294,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 31,
+        "take": "take_33_20260914_170854",
+        "stored_frames": 243,
+        "expected_frames": 243,
+        "raw_frames": 270,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 32,
+        "take": "take_34_20260914_170932",
+        "stored_frames": 344,
+        "expected_frames": 344,
+        "raw_frames": 371,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 33,
+        "take": "take_35_20260914_171001",
+        "stored_frames": 373,
+        "expected_frames": 373,
+        "raw_frames": 400,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 34,
+        "take": "take_36_20260914_171037",
+        "stored_frames": 442,
+        "expected_frames": 442,
+        "raw_frames": 469,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 35,
+        "take": "take_37_20260914_171113",
+        "stored_frames": 370,
+        "expected_frames": 370,
+        "raw_frames": 397,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 36,
+        "take": "take_38_20260914_171144",
+        "stored_frames": 295,
+        "expected_frames": 295,
+        "raw_frames": 322,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 37,
+        "take": "take_39_20260914_171227",
+        "stored_frames": 367,
+        "expected_frames": 367,
+        "raw_frames": 394,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 38,
+        "take": "take_40_20260914_171256",
+        "stored_frames": 355,
+        "expected_frames": 355,
+        "raw_frames": 383,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 39,
+        "take": "take_41_20260914_171328",
+        "stored_frames": 301,
+        "expected_frames": 301,
+        "raw_frames": 328,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 40,
+        "take": "take_42_20260914_171358",
+        "stored_frames": 304,
+        "expected_frames": 304,
+        "raw_frames": 331,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 41,
+        "take": "take_43_20260914_171435",
+        "stored_frames": 289,
+        "expected_frames": 289,
+        "raw_frames": 316,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 42,
+        "take": "take_44_20260914_171505",
+        "stored_frames": 280,
+        "expected_frames": 280,
+        "raw_frames": 307,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 43,
+        "take": "take_45_20260914_171534",
+        "stored_frames": 361,
+        "expected_frames": 361,
+        "raw_frames": 388,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 44,
+        "take": "take_46_20260914_171603",
+        "stored_frames": 389,
+        "expected_frames": 389,
+        "raw_frames": 416,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 45,
+        "take": "take_47_20260914_171640",
+        "stored_frames": 360,
+        "expected_frames": 360,
+        "raw_frames": 386,
+        "dropped_stale_tail": 26,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 46,
+        "take": "take_48_20260914_171732",
+        "stored_frames": 278,
+        "expected_frames": 278,
+        "raw_frames": 305,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 47,
+        "take": "take_49_20260914_171812",
+        "stored_frames": 506,
+        "expected_frames": 506,
+        "raw_frames": 533,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 48,
+        "take": "take_50_20260914_171849",
+        "stored_frames": 426,
+        "expected_frames": 426,
+        "raw_frames": 453,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 49,
+        "take": "take_51_20260914_171924",
+        "stored_frames": 411,
+        "expected_frames": 411,
+        "raw_frames": 438,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 50,
+        "take": "take_52_20260914_171957",
+        "stored_frames": 418,
+        "expected_frames": 418,
+        "raw_frames": 446,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 51,
+        "take": "take_53_20260914_172033",
+        "stored_frames": 285,
+        "expected_frames": 285,
+        "raw_frames": 312,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 52,
+        "take": "take_54_20260914_172116",
+        "stored_frames": 481,
+        "expected_frames": 481,
+        "raw_frames": 509,
+        "dropped_stale_tail": 28,
+        "tail_repeat_run": 1
+      },
+      {
+        "episode_index": 53,
+        "take": "take_55_20260914_172155",
+        "stored_frames": 249,
+        "expected_frames": 249,
+        "raw_frames": 276,
+        "dropped_stale_tail": 27,
+        "tail_repeat_run": 1
+      }
+    ]
+  },
+  "thresholds": {
+    "tol": 1e-06,
+    "depth_err_p99_mm": 1.25,
+    "depth_err_max_mm": 1.25,
+    "depth_zero_decode_max_mm": 0.0,
+    "depth_zero_frac": 1.0,
+    "depth_dt_soft_tol_ms": 21.666666666666668,
+    "depth_dt_hard_tol_ms": 33.333333333333336,
+    "depth_dt_frac": 0.99,
+    "video_fail_corr": 0.98,
+    "video_warn_corr": 0.99
+  },
+  "counts": {
+    "pass": 81,
+    "fail": 0,
+    "warn": 2,
+    "skip": 0,
+    "total": 83
+  },
+  "rows": [
+    {
+      "status": "PASS",
+      "check": "vectorised nearest_idx == brute-force argmin reference",
+      "detail": "70 queries against ur/cam2/depth timelines"
+    },
+    {
+      "status": "PASS",
+      "check": "ffill_bfill reference case",
+      "detail": "[1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "codebase_version == 'v3.0'",
+      "detail": "got 'v3.0'"
+    },
+    {
+      "status": "PASS",
+      "check": "fps == 30",
+      "detail": "got 30"
+    },
+    {
+      "status": "PASS",
+      "check": "all expected features present",
+      "detail": "11 features"
+    },
+    {
+      "status": "PASS",
+      "check": "feature action",
+      "detail": "dtype=float32 shape=[7] names=['cmd1', 'cmd2', 'cmd3', 'cmd4', 'cmd5', 'cmd6', 'grip_cmd']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.state",
+      "detail": "dtype=float32 shape=[7] names=['ur_q1', 'ur_q2', 'ur_q3', 'ur_q4', 'ur_q5', 'ur_q6', 'grip_pos']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam1",
+      "detail": "dtype=video shape=[720, 1280, 3] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam2",
+      "detail": "dtype=video shape=[720, 1280, 3] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam1_depth",
+      "detail": "dtype=video shape=[480, 848, 1] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam2_depth",
+      "detail": "dtype=video shape=[480, 848, 1] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature timestamp",
+      "detail": "dtype=float32 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature frame_index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature episode_index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature task_index",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "total_episodes == 54 (included takes)",
+      "detail": "got 54"
+    },
+    {
+      "status": "PASS",
+      "check": "total_frames == 17088 (sum of cam1_frames rows)",
+      "detail": "got 17088"
+    },
+    {
+      "status": "PASS",
+      "check": "total_tasks == 1",
+      "detail": "got 1"
+    },
+    {
+      "status": "PASS",
+      "check": "splits.train covers all episodes",
+      "detail": "got {'train': '0:54'}"
+    },
+    {
+      "status": "PASS",
+      "check": "episode count == included take count",
+      "detail": "54"
+    },
+    {
+      "status": "PASS",
+      "check": "all 54 episode lengths match their source take",
+      "detail": "total 17088 frames"
+    },
+    {
+      "status": "PASS",
+      "check": "all 54 episodes re-derive exactly (tol=1e-06)",
+      "detail": "max|dstate|=0.000e+00  max|daction|=0.000e+00"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.state finite",
+      "detail": "NaN=0 Inf=0  range=[-4.4087, 2.0708]"
+    },
+    {
+      "status": "PASS",
+      "check": "action finite",
+      "detail": "NaN=0 Inf=0  range=[-4.4079, 2.0709]"
+    },
+    {
+      "status": "PASS",
+      "check": "exactly one task in meta/tasks.parquet",
+      "detail": "got {0: 'Put carrot in pot'}"
+    },
+    {
+      "status": "PASS",
+      "check": "task string == 'Put carrot in pot'",
+      "detail": "got ['Put carrot in pot']"
+    },
+    {
+      "status": "PASS",
+      "check": "single task_index across all frames",
+      "detail": "unique=[0]"
+    },
+    {
+      "status": "PASS",
+      "check": "every frame's task_index resolves to the task string",
+      "detail": "unique=[0] -> ['Put carrot in pot']"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode's meta 'tasks' == [task]",
+      "detail": "54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "sampled RGB video frames match raw source",
+      "detail": "n=24 min=0.99841 mean=0.99907 worst=ep26 observation.images.cam1 frame 175 (threshold 0.98)"
+    },
+    {
+      "status": "PASS",
+      "check": "episode boundaries monotonic & contiguous",
+      "detail": "0 .. 17088"
+    },
+    {
+      "status": "PASS",
+      "check": "episode spans cover all data rows",
+      "detail": "last dataset_to_index=17088 nrows=17088"
+    },
+    {
+      "status": "PASS",
+      "check": "global 'index' == 0..N-1",
+      "detail": "N=17088"
+    },
+    {
+      "status": "PASS",
+      "check": "episode_index non-decreasing across data",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "per-episode frame_index restarts at 0 and increments by 1",
+      "detail": ""
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp == frame_index / 30",
+      "detail": "max dev 8.901e-07"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth dtype == 'video'",
+      "detail": "got 'video'"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth shape == [480, 848, 1]",
+      "detail": "got [480, 848, 1]"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth names == ['height', 'width', 'channels']",
+      "detail": "got ['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth info block (is_depth_map/unit/codec/pix_fmt/quantization)",
+      "detail": "is_depth_map=True unit='mm' codec='hevc' pix_fmt='gray12le' min=0.0 max=10.0 shift=0.0 use_log=False"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth dtype == 'video'",
+      "detail": "got 'video'"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth shape == [480, 848, 1]",
+      "detail": "got [480, 848, 1]"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth names == ['height', 'width', 'channels']",
+      "detail": "got ['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth info block (is_depth_map/unit/codec/pix_fmt/quantization)",
+      "detail": "is_depth_map=True unit='mm' codec='hevc' pix_fmt='gray12le' min=0.0 max=10.0 shift=0.0 use_log=False"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1 unchanged RGB feature",
+      "detail": "shape=[720, 1280, 3] codec='av1' is_depth_map=False"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2 unchanged RGB feature",
+      "detail": "shape=[720, 1280, 3] codec='av1' is_depth_map=False"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth: every episode's video span == its frame count",
+      "detail": "54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth: container nb_frames == sum of episode lengths",
+      "detail": "chunk0/file0: 3336 frames (12 eps, want 3336); chunk0/file1: 3201 frames (10 eps, want 3201); chunk0/file2: 3011 frames (11 eps, want 3011); chunk0/file3: 2807 frames (8 eps, want 2807)"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth: every episode's video span == its frame count",
+      "detail": "54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth: container nb_frames == sum of episode lengths",
+      "detail": "chunk0/file0: 6242 frames (21 eps, want 6242); chunk0/file1: 6402 frames (21 eps, want 6402); chunk0/file2: 4444 frames (12 eps, want 4444)"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam1_depth: valid-px err (median<=1.0, p99<=1.25, max<=1.25 mm) and raw-zero decode",
+      "detail": "n=162 frames  valid px=57721353  zero px=8219127  max-of-medians=1 mm  max-of-p99=1 mm  max abs err=1 mm  min raw-zero<= 0.0mm frac=100.0000%"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.images.cam2_depth: valid-px err (median<=1.0, p99<=1.25, max<=1.25 mm) and raw-zero decode",
+      "detail": "n=162 frames  valid px=42893168  zero px=23047312  max-of-medians=1 mm  max-of-p99=1 mm  max abs err=1 mm  min raw-zero<= 0.0mm frac=100.0000%"
+    },
+    {
+      "status": "PASS",
+      "check": "meta/depth_cameras.json exists and parses",
+      "detail": "keys=['cam1_depth', 'cam2_depth', 'invalid_value_note', 'quantization']"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1_depth.aligned_to_color is false",
+      "detail": "got False"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1_depth.unit == 'mm'",
+      "detail": "got 'mm'"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1_depth width/height == 848x480",
+      "detail": "got 848x480"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1_depth: K/D/model/frame_id/extrinsics match all 54 takes (atol 1e-09)",
+      "detail": "K[0]=426.7417907714844 |t|=0.01507 m"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1_depth.color_feature == 'observation.images.cam1'",
+      "detail": "got 'observation.images.cam1'"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2_depth.aligned_to_color is false",
+      "detail": "got False"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2_depth.unit == 'mm'",
+      "detail": "got 'mm'"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2_depth width/height == 848x480",
+      "detail": "got 848x480"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2_depth: K/D/model/frame_id/extrinsics match all 54 takes (atol 1e-09)",
+      "detail": "K[0]=425.26434326171875 |t|=0.01490 m"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2_depth.color_feature == 'observation.images.cam2'",
+      "detail": "got 'observation.images.cam2'"
+    },
+    {
+      "status": "PASS",
+      "check": "invalid_value_note present",
+      "detail": "Raw depth 0 = no return / invalid (RealSense D435, 848x480, unaligned to colour). Quantization is LI..."
+    },
+    {
+      "status": "PASS",
+      "check": "quantization block present",
+      "detail": "{\"depth_min_m\": 0.0, \"depth_max_m\": 10.0, \"shift_m\": 0.0, \"use_log\": false, \"quant_bits\": 12, \"vcodec\": \"hevc\", \"pix_fmt"
+    },
+    {
+      "status": "PASS",
+      "check": "take list == sorted raw dir minus --exclude (54 takes)",
+      "detail": "54 entries, order matches"
+    },
+    {
+      "status": "PASS",
+      "check": "per-take n_frames == episode length",
+      "detail": "sum=17088 over 54 takes"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1: >= 99% of frames within 33.33 ms (one frame) of the cam1 master clock",
+      "detail": "worst-episode in-tol: soft 75.91% / hard 99.58%; max |dt| 44.49 ms at ep53 (take_55_20260914_172155); median signed offset -8.77 ms"
+    },
+    {
+      "status": "WARN",
+      "check": "cam1: 41 episode(s) below 99% within the agreed 21.67 ms (raw-clock phase, not a conversion error)",
+      "detail": "ep0 (take_01_20260914_164811): 90.12%; ep1 (take_02_20260914_164845): 75.91%; ep2 (take_03_20260914_164930): 87.66%; ep3 (take_04_20260914_165011): 79.84%; ep4 (take_05_20260914_165156): 86.21%  [worst-episode in-tol: soft 75.91% / hard 99.58%; max |dt| 44.49 ms at ep53 (take_55_20260914_172155); median signed offset -8.77 ms]"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2: >= 99% of frames within 33.33 ms (one frame) of the cam1 master clock",
+      "detail": "worst-episode in-tol: soft 97.35% / hard 99.59%; max |dt| 51.49 ms at ep26 (take_28_20260914_170557); median signed offset +7.15 ms"
+    },
+    {
+      "status": "WARN",
+      "check": "cam2: 3 episode(s) below 99% within the agreed 21.67 ms (raw-clock phase, not a conversion error)",
+      "detail": "ep22 (take_24_20260914_170339): 98.74%; ep24 (take_26_20260914_170447): 98.54%; ep26 (take_28_20260914_170557): 97.35%  [worst-episode in-tol: soft 97.35% / hard 99.59%; max |dt| 51.49 ms at ep26 (take_28_20260914_170557); median signed offset +7.15 ms]"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode carries ur_joint_states_lag_s == the expected tau (54 takes)",
+      "detail": "distinct tau values: [0.895, 0.9]"
+    },
+    {
+      "status": "PASS",
+      "check": "top-level timestamp_correction block present",
+      "detail": "keys=['applied_to', 'convention', 'n_frames_dropped_stale_tail_total', 'not_applied_to', 'per_episode', 'source', 'stale_tail', 'stale_tail_rule', 'tcp_pose/wrench', 'ur_joint_states_lag_s', 'why']"
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp_correction.ur_joint_states_lag_s == the applied tau value(s)",
+      "detail": "declared [0.895, 0.9], applied [0.895, 0.9]"
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp_correction.stale_tail is declared",
+      "detail": "got 'dropped'"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode carries n_frames_dropped_stale_tail",
+      "detail": "54/54 episodes; total declared 1469"
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp_correction.why is non-empty",
+      "detail": "recorder spin-thread starvation; rows stamped at callback time were depth/rate late"
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp_correction mentions tcp_pose/wrench",
+      "detail": "'not in this dataset'"
+    },
+    {
+      "status": "PASS",
+      "check": "corrected mean |state-action| < 0.02 rad in every episode",
+      "detail": "median 0.00183 rad, max 0.00487 rad (worst take_22_20260914_170211), n=54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "uncorrected (tau = 0) re-derivation is worse in every episode",
+      "detail": "tau=0 median 0.06344 rad, max 0.09318 rad; worse in 54/54 episodes; median improvement factor 33.7x"
+    },
+    {
+      "status": "PASS",
+      "check": "no episode ends with >= 3 identical consecutive ur_q rows",
+      "detail": "max trailing run 2 frames (ep22 take_24_20260914_170339), median 1, n=54 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode length == the expected count after the stale-tail rule",
+      "detail": "dropped per episode: min 26, median 27, max 28, total 1469 of 18557 raw frames (7.92%)"
+    }
+  ]
+}

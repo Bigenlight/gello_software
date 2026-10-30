@@ -1,0 +1,265 @@
+# sim_collect scene/task config — "carrot in pot" (see sim_collect/DESIGN.md §3).
+#
+# Everything an operator may want to tune lives here. Loaded by
+# sim_collect.scene.SceneConfig.load(); the same file drives [A] sim_main and
+# [B] capture so both build byte-identical models (scene.build_scene is
+# deterministic given this file + a layout dict).
+#
+# WORLD FRAME / LEFT-RIGHT CONVENTION (DESIGN §3.3, re-derived 2026-09-14 for the
+# REAL robot's home): the real UR7e works with J1 ~ -pi and its TCP on base-frame
+# +x (take_18: q0[0] = -3.299, tcp x0 = +0.49). The UR7e base sits at the world
+# origin on the floor (z=0); at `home_joints` the arm reaches along world +x
+# (TCP ~ (+0.48, +0.05, 0.29), measured with ur_kin.fk). Standing at the base and
+# looking along +x with z up:
+#       LEFT  = +y   -> food (carrot, fruit ...)
+#       RIGHT = -y   -> containers (pot, bowl, basket)
+#   cam1 stands 0.70 m in front of the base at x=+0.70 and looks back toward -x,
+#   so in the cam1 image world +y (LEFT) appears on the image RIGHT (the camera
+#   faces the robot). Negate the y of nominal_pos below to mirror the layout.
+#   (Earlier drafts used J1 ~ -0.16 / TCP on -x; the whole scene was rotated by
+#   180 deg about z to follow the real robot — exactly the J1 -pi shift.)
+
+name: carrot_in_pot_sim
+sim_collect_version: 1
+
+robot:
+  name: ur7e
+  xml: sim_collect/assets/robots/ur7e/ur7e.xml            # repo-relative
+  gripper_xml: third_party/mujoco_menagerie/robotiq_2f85/2f85.xml
+  attachment_site: attachment_site
+  # GELLO calibration pose read 2026-09-14 (DESIGN §1 "Start pose") with J1 shifted
+  # by -pi so it sits on the real robot's branch (take_18 q0[0] = -3.299). Also
+  # passed to the Dynamixel driver as start_joints so its +-2pi wrap lands there.
+  home_joints: [-3.302, -1.563, 1.607, -1.523, -1.615, -3.118]
+  # 2F-85 driver joint used for grip_pos (0 open .. 1 closed). The joint range in
+  # 2f85.xml is 0..0.8 but an empty-hand full close settles at 0.7822 rad (sim,
+  # ctrl 255) while the real Robotiq reports ~0.898 at empty-hand close, so
+  # hi = 0.7822 / 0.898 = 0.871 maps sim closed -> 0.90 like the real driver.
+  gripper_driver_joint: robotiq_2f85/right_driver_joint
+  gripper_driver_range: [0.0, 0.871]
+  gripper_actuator: robotiq_2f85/fingers_actuator      # ctrl 0..255
+  # Override the upstream MJCF silicone pads after loading. condim=4 adds
+  # torsional contact friction; the two rows correspond to outer/inner pads.
+  gripper_pad_friction: [[1.0, 0.01, 0.001], [0.9, 0.01, 0.001]]
+  ft_site: ft_site                                      # flange force/torque site
+
+physics:
+  timestep: 0.002
+  integrator: implicitfast
+  cone: elliptic
+  impratio: 10
+  # Extra friction-cone refinement. Five passes noticeably reduce object/pad
+  # slip in this small scene without materially lowering the 500 Hz physics loop.
+  noslip_iterations: 5
+  # Gravity compensation on the six arm links (fraction of weight). The menagerie
+  # position actuators are PD-only, so without it the held arm sags ~0.011 rad
+  # per seed (0.022 measured after teleport+seed); with 1.0 the residual is
+  # 0.0025 rad (the uncompensated gripper's weight). 0 = off.
+  arm_gravcomp: 1.0
+
+floor:
+  # Repeating LIBERO table-wood texture (delivered by O1 under assets/textures/).
+  # If the file is missing scene.py falls back to a procedural checker so the sim
+  # still runs; get_scene_meta reports which one was used (floor.texture_used).
+  texture: sim_collect/assets/textures/seamless_wood_planks_floor.png   # alt: martin_novak_wood_table.png
+  size_m: 5.0                 # plane half-extent -> 10 x 10 m
+  texrepeat: [20, 20]         # ~0.5 m grain period at size_m=5 (tune to real scale)
+  rgba: [0.75, 0.62, 0.45, 1.0]   # fallback tint when no texture file
+  friction: [1.0, 0.005, 0.0001]
+
+cameras:
+  # Names are the contract (real data: cam1 = fixed scene cam, cam2 = wrist cam).
+  color_fovy_deg: 42.0        # D435 color vertical FOV (1280x720)
+  # Depth recording is OPTIONAL and OFF by default: no depth render, no depth.h5 — the
+  # take has 3 files. Set true (or run the launcher with --depth) for the real
+  # recorder's 4-file take with 848x480 uint16 mm PNGs. Note: the LeRobot converter
+  # with depth features (convert_carrot_to_lerobot.py) needs depth.h5; recorded_demo
+  # (HIL offline demo) does not.
+  record_depth: false
+  depth_fovy_deg: 58.7        # matches depth K fx=426.7 @ 848x480
+  depth_offset_m: [0.015, 0.0, 0.0]   # depth cam origin, in the color cam frame (+x = image right)
+  cam1:
+    # 0.70 m along +x from the base, z = wrist_2 height at the home pose (0.570),
+    # looking back toward -x, pitched down at the workspace centre.
+    pos: [0.70, 0.0, 0.571]
+    lookat: [0.45, 0.0, 0.0]
+    up: [0.0, 0.0, 1.0]
+  cam2:
+    # Wrist camera. Mounted on the flange side FARTHEST from the base at the home
+    # pose: at home, tool(+attachment_site) +Y points along world +x (measured
+    # 2026-09-14 at home_joints: R_tool[:,1] = (0.979, -0.182, -0.091)), so the
+    # mount is along tool +Y. Looks along tool +Z (toward the fingertips, 0.174 m
+    # out) pitched `pitch_deg` toward the tool axis so the fingertips sit at the
+    # bottom of the frame; `axial_m` pushes the camera down the tool so the
+    # gripper body does not fill the lower half of the frame (0.08 -> only the
+    # fingertips intrude). All numbers are in the attachment_site (tool) frame;
+    # scene.py converts them into the wrist_3_link frame the <camera> lives in.
+    parent_body: wrist_3_link
+    mount_frame: attachment_site
+    radial_dir_tool: [0.0, 1.0, 0.0]
+    radial_m: 0.05
+    axial_m: 0.08           # along tool +Z from the flange
+    pitch_deg: 15.0
+
+render:
+  # Interactive viewer + offscreen renderer quality. Software GL: a 4096 shadow
+  # map in the viewer starved the capture workers (140 ms/frame measured).
+  viewer_shadowsize: 2048
+  offsamples: 0
+  # Lighting. cam1's lit floor saturated to white at headlight 0.6 / ambient 0.35 /
+  # sun 0.55 (mean 212); these give a floor mean ~150 with readable grain.
+  headlight_diffuse: 0.20
+  headlight_ambient: 0.12
+  sun_diffuse: 0.22
+  fill_diffuse: 0.12
+  floor_reflectance: 0.0
+  floor_tint: [0.80, 0.80, 0.80, 1.0]   # multiplies the wood texture
+
+objects:
+  # Each entry: assets/objects/<name>/<name>.xml is used when present (DESIGN §5.2);
+  # otherwise the `placeholder` primitive is built. `radius_m` = footprint radius for
+  # the no-overlap layout sampler.
+  #
+  # 2026-09-14 decision: the task is CARROT -> POT, so only those two are placed.
+  # The other vendored candidates stay available under assets/objects/ (bbox/mass in
+  # assets/objects/README.md, pictures in assets/preview.jpg) — to place one, add it
+  # here AND under layout.items:
+  #   foods:      strawberry(r 0.035) plum(0.035) lemon(0.04) peach(0.04) pear(0.06)
+  #               banana(0.10) bread(0.03)
+  #   containers: bowl(r 0.07, LIBERO akita_black_bowl) basket(r 0.10, LIBERO)
+  - {name: carrot, kind: food, radius_m: 0.10,   # procedural, 18.5 cm long, lies along +x
+     placeholder: {shape: capsule, radius: 0.018, half_length: 0.07, mass: 0.08, rgba: [0.93, 0.45, 0.10, 1.0]}}
+  - {name: pot,    kind: container, radius_m: 0.13,   # procedural, inner Ø18 cm × 11 cm
+     placeholder: {shape: open_cylinder, inner_radius: 0.09, height: 0.11, wall: 0.006, bottom: 0.006, n_wall: 24, mass: 0.55, rgba: [0.35, 0.35, 0.38, 1.0]}}
+
+layout:
+  seed: 0                     # default seed for reset_scene when none is given (GUI seed box / --seed)
+  drop_height_m: 0.02         # objects spawn this far above the floor
+  settle_s: 0.5               # fast-forward physics after a reset
+  min_gap_m: 0.02             # extra clearance between footprints
+  base_keepout_radius_m: 0.22 # nothing spawns closer than this to the base axis
+  max_tries: 200
+  # Looking from the base along +x (the arm's forward): LEFT = +y, RIGHT = -y.
+  # carrot LEFT, pot RIGHT. Every reset re-samples both from the seed: position
+  # uniformly inside `random_xy_radius` of `nominal_pos`, heading inside
+  # ±`random_yaw_deg` of the asset's default (carrot: along +x, i.e. pointing away
+  # from the robot). Same seed -> same layout. Reach at floor level is comfortable
+  # to ~0.65 m radial.
+  items:
+    carrot: {nominal_pos: [0.45,  0.18, 0.0], random_xy_radius: 0.06, random_yaw_deg: 35}
+    pot:    {nominal_pos: [0.45, -0.22, 0.0], random_xy_radius: 0.05, random_yaw_deg: 180}
+
+task:
+  name: carrot_in_pot
+  food: carrot
+  container: pot
+  max_vz_m_s: 0.05            # food must be (nearly) at rest vertically
+  gripper_open_below: 0.3     # grip_cmd < this counts as "open"
+
+control:
+  control_mode: eef           # eef | joint
+  control_hz: 250
+  leader_hz: 30
+  # ROS bridge parameter files (gello_ur_bridge section). The eef file is an
+  # OVERLAY on the base file, exactly as the launch loads them — both are read.
+  bridge_params:
+    - ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
+    - ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello_eef.yaml
+  bridge_node: gello_ur_bridge
+  # Sim-only additions (no ROS equivalent):
+  joint_engage_max_gap_rad: 1.5   # joint mode: refuse engage if any joint is farther than this from the leader
+
+leader:
+  # SINGLE SOURCE for the GELLO calibration: the ROS gello_publisher parameters
+  # (port, joint_ids, joint_offsets [0.0,1.571,4.712,4.712,4.712,3.142], joint_signs,
+  # gripper_config). With those offsets today's calibration pose reads J1 ~ +2.98;
+  # the driver's start_joints +-2pi wrap (gello/robots/dynamixel.py:84-104) moves it
+  # to -3.30 because start_joints = robot.home_joints (+ gripper 0). Do NOT copy
+  # numbers here — put deliberate deviations in `overrides` (default empty).
+  calibration_source: ros2_ur_ws/src/ur_gello_bringup/config/ur7e_gello.yaml
+  calibration_node: gello_publisher
+  overrides: {}               # e.g. {joint_offsets: [...], port: /dev/ttyUSB1}
+  warmup_reads: 5             # discard this many samples after connect (driver "comm failed" warm-up)
+  connect_timeout_s: 15.0
+
+gripper:
+  mode: continuous            # continuous | discrete
+  deadband: 0.02              # continuous: |trigger - last| < deadband is not applied (ROS gate)
+  resume_ramp_s: 2.0          # after gripper_resume: slew toward the leader value (ROS resume ramp)
+  resume_slew_per_s: 0.6      #   at this rate, bypassing the deadband
+  open_at: 0.3                # discrete latch: <= open_at -> OPEN
+  close_at: 0.7               # discrete latch: >= close_at -> CLOSED
+
+init_from_leader: true        # startup: read GELLO once and teleport the arm there
+
+eval:
+  # Closed-loop success-rate evaluation (sim_collect/eval/DESIGN.md §2.1). The harness
+  # applies the REAL deploy client's clamps (policy_leader_node._tick_execute, in this
+  # order): (1) per-joint envelope joint_limits_lo/hi, (2) |target - live_q| <= max_dev_rad,
+  # (3) grip clip 0..1 -> ctrl*255; then the unmodified 250 Hz bridge upsampler (`bridge`).
+  #
+  # start_pose / max_dev_rad / the COMMENTED real-data envelope below are copied VERBATIM from
+  #   /home/laptop3/gello_software_humble/ros2_ur_ws/src/gello_policy/config/carrot_eef_limits.json
+  #   (generated 2026-09-14T22:49:56+09:00 by scripts/dataset/make_carrot_eef_limits.py from
+  #   /home/laptop3/youngwoong_ws/Put_carrot_in_pot, 54 takes / 18557 frames, git a525f0f-dirty):
+  #   1.2x-expanded envelope of the OBSERVED real joints on the -pi shoulder_pan branch.
+  #   max_dev_rad 0.5 = the deploy yaml default (act_deploy.yaml policy_leader_node.max_dev_rad).
+  # start_pose is the REAL dataset's de-staled frame-0 pose, kept here for reference / the
+  # obs re-branching only; the SIM episode starts at robot.home_joints (what the sim demos
+  # started from), which lies inside both envelopes.
+  start_pose: [-3.1638, -1.4900, 1.7258, -1.8455, -1.5793, -3.2692]
+  start_grip_pos: 0.0118
+  max_dev_rad: 0.5
+  # ENVELOPE (clamp 1). DEFAULT = derived from the SIM demos with the real rule (block below).
+  # The real-data envelope is NOT the default because the sim scene's pot sits farther right
+  # than the real TCP workspace: the 22 sim demos leave it on 24 % of their command steps
+  # (J1 down to -4.05 < -3.805, elbow up to 2.61 > 2.144, J5 < -1.93), and replaying them
+  # through the harness with it scored 16/22 vs 19/22 without (2026-09-15). A sim-trained
+  # policy would be clipped near the pot for a harness reason. To evaluate against the REAL
+  # envelope instead, swap in these two lines (verbatim carrot_eef_limits.json values):
+  #   joint_limits_lo: [-3.8049, -1.8055, 1.2649, -2.6913, -1.9309, -4.6440]
+  #   joint_limits_hi: [-2.5787, -0.8823, 2.1442, -1.4379, -1.2014, -1.8222]
+  # Re-derive after recording new takes: .venv/bin/python -m sim_collect.eval.derive_limits ros2_ur_ws/gello_logs/sim
+  envelope_source: "sim-derived from 22 demos (derive_limits.py, NOT carrot_eef_limits.json)"
+  # --- joint envelope derived by sim_collect/eval/derive_limits.py (2026-09-15T03:13:12, git 2862b27) ---
+  # source: ros2_ur_ws/gello_logs/sim (22 takes, 44660 ur_joint_states rows); rule = the real
+  # carrot_eef_limits.json rule: 1.2x symmetric about the centre of the OBSERVED joints, quantised outward 0.0001.
+  # joint_raw_min: [-4.0391, -2.0368, 1.4208, -2.8826, -2.0592, -4.0385]
+  # joint_raw_max: [-2.8625, -1.0832, 2.6115, -1.3501, -1.3709, -2.6656]
+  # recorded `command` min/max (excluded from the envelope, as in the real rule; inside it):
+  #   [-4.0538, -2.0504, 1.4157, -2.9262, -2.0771, -4.0435] / [-2.8535, -1.0596, 2.6139, -1.3392, -1.3681, -2.6561]
+  joint_limits_lo: [-4.1568, -2.1322, 1.3017, -3.0359, -2.1281, -4.1758]
+  joint_limits_hi: [-2.7448, -0.9878, 2.7306, -1.1968, -1.3020, -2.5283]
+  # sim start pose (ur_joint_states row 0, mean / std / max_dev over takes) — reference only:
+  #   [-3.2715, -1.5458, 1.6424, -1.5687, -1.6081, -3.1064] / [0.0781, 0.0431, 0.0715, 0.1071, 0.0157, 0.0395] / [0.3341, 0.1397, 0.3033, 0.4632, 0.0475, 0.1437]
+  # 250 Hz bridge stage for POLICY deploys — the gello_ur_bridge values of
+  # ros2_ur_ws/src/gello_policy/config/act_deploy.yaml (diffusion/fm identical): One-Euro
+  # opened up vs teleop (3.0/4.0 instead of 1.0/2.0), safety values unchanged.
+  # deadband_rad only acts on the EMA path (filter_type ema); it is a no-op under one_euro.
+  bridge:
+    filter_type: one_euro
+    one_euro_min_cutoff: 3.0
+    one_euro_beta: 4.0
+    one_euro_d_cutoff: 1.0
+    ema_alpha: 0.4
+    max_step_rad: 0.0025        # 0.625 rad/s sustained @ 250 Hz
+    deadband_rad: 0.004
+    soft_start_s: 0.7           # slew ramps 15 % -> 100 % of max_step_rad after every (re)seed
+    # On the real robot the bridge is (re)seeded by move_to_start/resume and the 0.7 s ramp
+    # has ELAPSED before the operator calls start_execution, so by default the episode
+    # starts with the ramp already over (step = max_step_rad from the first tick).
+    # true = start the ramp at t=0 of the episode instead.
+    soft_start_at_episode_start: false
+    publish_rate_hz: 250.0
+  policy_hz: 30.0               # one ACT per 1/30 s (the leader node's publish_rate_hz)
+  max_steps: 600                # 20 s @ 30 Hz (no episode limit exists upstream; the harness adds one)
+  dwell_s: 1.0                  # success latch: TaskEvaluator must hold continuously this long
+  settle_s: 0.5                 # physics fast-forward after reset (same as layout.settle_s)
+  # Held-out layouts. The 22 demos were recorded with reset_scene seeds 0,1,2,... (auto-
+  # increment), so seeds 0-19 reproduce the TRAINING layouts exactly (measured 2026-09-15:
+  # nearest-demo carrot distance 0.0 cm for every seed 0-19). Evaluate on 100-119.
+  seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119]
+  # Failure detection (episode ends immediately, outcome "failure"):
+  object_bounds_xy_m: 1.5       # any object farther than this from the base axis / below
+  object_min_z_m: -0.05         #   this height has left the workspace (fell / was flung)
+  jpeg_quality: 92              # observation JPEGs, like capture.py

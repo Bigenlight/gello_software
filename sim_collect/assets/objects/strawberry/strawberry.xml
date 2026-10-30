@@ -1,0 +1,16 @@
+<mujoco model="strawberry">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh name="strawberry_mesh" file="strawberry.obj" maxhullvert="64"/>
+    <texture name="strawberry_tex" type="2d" file="strawberry.png"/>
+    <material name="strawberry_mat" texture="strawberry_tex" specular="0.25" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="strawberry" pos="0 0 0">
+      <inertial pos="-0.000630877 -0.00034432 0.0213315" quat="0.38003 0.18857 0.596939 0.680942" mass="0.025" diaginertia="5.76474e-06 5.22837e-06 4.70103e-06"/>
+      <site name="strawberry_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="strawberry_vis0" type="mesh" mesh="strawberry_mesh" pos="0.000862996 -0.015777 0.000217001" material="strawberry_mat" group="2" contype="0" conaffinity="0"/>
+      <geom name="strawberry_col1" type="mesh" mesh="strawberry_mesh" pos="0.000862996 -0.015777 0.000217001" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

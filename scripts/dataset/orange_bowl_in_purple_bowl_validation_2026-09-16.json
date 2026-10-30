@@ -1,0 +1,1301 @@
+{
+  "verdict": "PASS",
+  "interpreter": "/home/laptop3/youngwoong_ws/lr_env/bin/python",
+  "raw_root": "/home/laptop3/youngwoong_ws/Orange_bowl_in_purple_bowl",
+  "lerobot_root": "/home/laptop3/youngwoong_ws/orange_bowl_in_purple_bowl_lerobot_v3",
+  "repo_id": "Bigenlight/orange_bowl_in_purple_bowl_lerobot_v3",
+  "task": "put the orange bowl into the purple bowl",
+  "test_mode": {
+    "limit": 0
+  },
+  "n_takes_found": 52,
+  "n_takes_included": 52,
+  "takes": [
+    "take_01_20260915_230922",
+    "take_02_20260915_231002",
+    "take_03_20260915_231028",
+    "take_04_20260915_231055",
+    "take_05_20260915_231113",
+    "take_06_20260915_231144",
+    "take_07_20260915_231209",
+    "take_08_20260915_231238",
+    "take_09_20260915_231302",
+    "take_10_20260915_232957",
+    "take_11_20260915_233018",
+    "take_12_20260915_233055",
+    "take_13_20260915_233130",
+    "take_14_20260915_233151",
+    "take_15_20260915_233215",
+    "take_16_20260915_233235",
+    "take_17_20260915_233354",
+    "take_18_20260915_233418",
+    "take_19_20260915_233445",
+    "take_20_20260915_233511",
+    "take_21_20260915_233535",
+    "take_23_20260915_234136",
+    "take_24_20260915_234449",
+    "take_25_20260915_234512",
+    "take_26_20260915_234540",
+    "take_27_20260915_234621",
+    "take_28_20260915_234642",
+    "take_29_20260915_234708",
+    "take_30_20260915_234729",
+    "take_31_20260915_234753",
+    "take_32_20260915_234815",
+    "take_33_20260915_234841",
+    "take_34_20260915_234903",
+    "take_35_20260915_234924",
+    "take_36_20260915_234944",
+    "take_37_20260915_235009",
+    "take_38_20260915_235049",
+    "take_39_20260915_235114",
+    "take_41_20260915_235238",
+    "take_42_20260915_235304",
+    "take_43_20260915_235332",
+    "take_44_20260915_235353",
+    "take_45_20260915_235417",
+    "take_46_20260915_235440",
+    "take_47_20260915_235830",
+    "take_48_20260915_235848",
+    "take_49_20260915_235907",
+    "take_50_20260915_235928",
+    "take_51_20260915_235948",
+    "take_52_20260916_000006",
+    "take_53_20260916_000031",
+    "take_54_20260916_000055"
+  ],
+  "take_frame_counts": [
+    351,
+    339,
+    373,
+    225,
+    312,
+    383,
+    358,
+    301,
+    404,
+    285,
+    414,
+    615,
+    289,
+    326,
+    290,
+    302,
+    267,
+    341,
+    295,
+    297,
+    325,
+    356,
+    247,
+    374,
+    528,
+    266,
+    331,
+    325,
+    274,
+    252,
+    293,
+    240,
+    283,
+    252,
+    317,
+    256,
+    299,
+    314,
+    230,
+    268,
+    286,
+    228,
+    247,
+    280,
+    237,
+    268,
+    301,
+    304,
+    199,
+    244,
+    344,
+    274
+  ],
+  "expected_total_frames": 16009,
+  "info": {
+    "codebase_version": "v3.0",
+    "fps": 30,
+    "total_episodes": 52,
+    "total_frames": 16009,
+    "total_tasks": 1,
+    "robot_type": "ur7e_gello",
+    "splits": {
+      "train": "0:52"
+    }
+  },
+  "max_abs_dev_state": 0.0,
+  "max_abs_dev_action": 0.0,
+  "source_takes_json": {
+    "schema": "gello_recorder/lerobot_source_takes/2",
+    "n_episodes": 52,
+    "rows": [
+      {
+        "episode_index": 0,
+        "take": "take_01_20260915_230922",
+        "n_frames_declared": 351,
+        "n_frames_raw": 351,
+        "n_frames_parquet": 351,
+        "t0_off_s": 1789481362.5665817,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.0002372264862060547,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 1,
+        "take": "take_02_20260915_231002",
+        "n_frames_declared": 339,
+        "n_frames_raw": 339,
+        "n_frames_parquet": 339,
+        "t0_off_s": 1789481402.8826623,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.0001385211944580078,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 2,
+        "take": "take_03_20260915_231028",
+        "n_frames_declared": 373,
+        "n_frames_raw": 373,
+        "n_frames_parquet": 373,
+        "t0_off_s": 1789481428.2586608,
+        "cam1_stamp_minus_ur_stamp_median_s": -1.621246337890625e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 3,
+        "take": "take_04_20260915_231055",
+        "n_frames_declared": 225,
+        "n_frames_raw": 225,
+        "n_frames_parquet": 225,
+        "t0_off_s": 1789481455.082956,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00029730796813964844,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 4,
+        "take": "take_05_20260915_231113",
+        "n_frames_declared": 312,
+        "n_frames_raw": 312,
+        "n_frames_parquet": 312,
+        "t0_off_s": 1789481473.0776808,
+        "cam1_stamp_minus_ur_stamp_median_s": 1.9669532775878906e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 5,
+        "take": "take_06_20260915_231144",
+        "n_frames_declared": 383,
+        "n_frames_raw": 383,
+        "n_frames_parquet": 383,
+        "t0_off_s": 1789481504.568234,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00011229515075683594,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 6,
+        "take": "take_07_20260915_231209",
+        "n_frames_declared": 358,
+        "n_frames_raw": 358,
+        "n_frames_parquet": 358,
+        "t0_off_s": 1789481529.7737942,
+        "cam1_stamp_minus_ur_stamp_median_s": 1.0013580322265625e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 7,
+        "take": "take_08_20260915_231238",
+        "n_frames_declared": 301,
+        "n_frames_raw": 301,
+        "n_frames_parquet": 301,
+        "t0_off_s": 1789481558.244173,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00012135505676269531,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 8,
+        "take": "take_09_20260915_231302",
+        "n_frames_declared": 404,
+        "n_frames_raw": 404,
+        "n_frames_parquet": 404,
+        "t0_off_s": 1789481582.6585617,
+        "cam1_stamp_minus_ur_stamp_median_s": 2.3245811462402344e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 9,
+        "take": "take_10_20260915_232957",
+        "n_frames_declared": 285,
+        "n_frames_raw": 285,
+        "n_frames_parquet": 285,
+        "t0_off_s": 1789482597.0030565,
+        "cam1_stamp_minus_ur_stamp_median_s": -1.71661376953125e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 10,
+        "take": "take_11_20260915_233018",
+        "n_frames_declared": 414,
+        "n_frames_raw": 414,
+        "n_frames_parquet": 414,
+        "t0_off_s": 1789482618.606662,
+        "cam1_stamp_minus_ur_stamp_median_s": -5.519390106201172e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 11,
+        "take": "take_12_20260915_233055",
+        "n_frames_declared": 615,
+        "n_frames_raw": 615,
+        "n_frames_parquet": 615,
+        "t0_off_s": 1789482655.2279563,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00014400482177734375,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 12,
+        "take": "take_13_20260915_233130",
+        "n_frames_declared": 289,
+        "n_frames_raw": 289,
+        "n_frames_parquet": 289,
+        "t0_off_s": 1789482690.3025644,
+        "cam1_stamp_minus_ur_stamp_median_s": 2.1457672119140625e-05,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 13,
+        "take": "take_14_20260915_233151",
+        "n_frames_declared": 326,
+        "n_frames_raw": 326,
+        "n_frames_parquet": 326,
+        "t0_off_s": 1789482711.5306878,
+        "cam1_stamp_minus_ur_stamp_median_s": -7.152557373046875e-06,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 14,
+        "take": "take_15_20260915_233215",
+        "n_frames_declared": 290,
+        "n_frames_raw": 290,
+        "n_frames_parquet": 290,
+        "t0_off_s": 1789482735.3666613,
+        "cam1_stamp_minus_ur_stamp_median_s": -6.42538070678711e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 15,
+        "take": "take_16_20260915_233235",
+        "n_frames_declared": 302,
+        "n_frames_raw": 302,
+        "n_frames_parquet": 302,
+        "t0_off_s": 1789482755.3139029,
+        "cam1_stamp_minus_ur_stamp_median_s": -6.008148193359375e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 16,
+        "take": "take_17_20260915_233354",
+        "n_frames_declared": 267,
+        "n_frames_raw": 267,
+        "n_frames_parquet": 267,
+        "t0_off_s": 1789482834.8461943,
+        "cam1_stamp_minus_ur_stamp_median_s": 5.841255187988281e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 17,
+        "take": "take_18_20260915_233418",
+        "n_frames_declared": 341,
+        "n_frames_raw": 341,
+        "n_frames_parquet": 341,
+        "t0_off_s": 1789482858.802172,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00012636184692382812,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 18,
+        "take": "take_19_20260915_233445",
+        "n_frames_declared": 295,
+        "n_frames_raw": 295,
+        "n_frames_parquet": 295,
+        "t0_off_s": 1789482885.7152731,
+        "cam1_stamp_minus_ur_stamp_median_s": -4.57763671875e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 19,
+        "take": "take_20_20260915_233511",
+        "n_frames_declared": 297,
+        "n_frames_raw": 297,
+        "n_frames_parquet": 297,
+        "t0_off_s": 1789482911.5386796,
+        "cam1_stamp_minus_ur_stamp_median_s": -4.076957702636719e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 20,
+        "take": "take_21_20260915_233535",
+        "n_frames_declared": 325,
+        "n_frames_raw": 325,
+        "n_frames_parquet": 325,
+        "t0_off_s": 1789482935.7479742,
+        "cam1_stamp_minus_ur_stamp_median_s": 3.62396240234375e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 21,
+        "take": "take_23_20260915_234136",
+        "n_frames_declared": 356,
+        "n_frames_raw": 356,
+        "n_frames_parquet": 356,
+        "t0_off_s": 1789483296.1905775,
+        "cam1_stamp_minus_ur_stamp_median_s": 5.936622619628906e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 22,
+        "take": "take_24_20260915_234449",
+        "n_frames_declared": 247,
+        "n_frames_raw": 247,
+        "n_frames_parquet": 247,
+        "t0_off_s": 1789483489.0301704,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00021982192993164062,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 23,
+        "take": "take_25_20260915_234512",
+        "n_frames_declared": 374,
+        "n_frames_raw": 374,
+        "n_frames_parquet": 374,
+        "t0_off_s": 1789483512.4562624,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00010371208190917969,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 24,
+        "take": "take_26_20260915_234540",
+        "n_frames_declared": 528,
+        "n_frames_raw": 528,
+        "n_frames_parquet": 528,
+        "t0_off_s": 1789483540.986865,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00016379356384277344,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 25,
+        "take": "take_27_20260915_234621",
+        "n_frames_declared": 266,
+        "n_frames_raw": 266,
+        "n_frames_parquet": 266,
+        "t0_off_s": 1789483581.0202694,
+        "cam1_stamp_minus_ur_stamp_median_s": 5.9723854064941406e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 26,
+        "take": "take_28_20260915_234642",
+        "n_frames_declared": 331,
+        "n_frames_raw": 331,
+        "n_frames_parquet": 331,
+        "t0_off_s": 1789483602.298878,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00023245811462402344,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 27,
+        "take": "take_29_20260915_234708",
+        "n_frames_declared": 325,
+        "n_frames_raw": 325,
+        "n_frames_parquet": 325,
+        "t0_off_s": 1789483628.2322664,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00030303001403808594,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 28,
+        "take": "take_30_20260915_234729",
+        "n_frames_declared": 274,
+        "n_frames_raw": 274,
+        "n_frames_parquet": 274,
+        "t0_off_s": 1789483649.9335628,
+        "cam1_stamp_minus_ur_stamp_median_s": -6.842613220214844e-05,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 29,
+        "take": "take_31_20260915_234753",
+        "n_frames_declared": 252,
+        "n_frames_raw": 252,
+        "n_frames_parquet": 252,
+        "t0_off_s": 1789483673.6910763,
+        "cam1_stamp_minus_ur_stamp_median_s": 9.655952453613281e-06,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 30,
+        "take": "take_32_20260915_234815",
+        "n_frames_declared": 293,
+        "n_frames_raw": 293,
+        "n_frames_parquet": 293,
+        "t0_off_s": 1789483695.7697768,
+        "cam1_stamp_minus_ur_stamp_median_s": -8.344650268554688e-05,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 31,
+        "take": "take_33_20260915_234841",
+        "n_frames_declared": 240,
+        "n_frames_raw": 240,
+        "n_frames_parquet": 240,
+        "t0_off_s": 1789483721.9664745,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00012385845184326172,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 32,
+        "take": "take_34_20260915_234903",
+        "n_frames_declared": 283,
+        "n_frames_raw": 283,
+        "n_frames_parquet": 283,
+        "t0_off_s": 1789483743.2854707,
+        "cam1_stamp_minus_ur_stamp_median_s": -1.33514404296875e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 33,
+        "take": "take_35_20260915_234924",
+        "n_frames_declared": 252,
+        "n_frames_raw": 252,
+        "n_frames_parquet": 252,
+        "t0_off_s": 1789483764.1047692,
+        "cam1_stamp_minus_ur_stamp_median_s": -7.545948028564453e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 34,
+        "take": "take_36_20260915_234944",
+        "n_frames_declared": 317,
+        "n_frames_raw": 317,
+        "n_frames_parquet": 317,
+        "t0_off_s": 1789483784.0738666,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00025844573974609375,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 35,
+        "take": "take_37_20260915_235009",
+        "n_frames_declared": 256,
+        "n_frames_raw": 256,
+        "n_frames_parquet": 256,
+        "t0_off_s": 1789483809.9293709,
+        "cam1_stamp_minus_ur_stamp_median_s": -8.20159912109375e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 36,
+        "take": "take_38_20260915_235049",
+        "n_frames_declared": 299,
+        "n_frames_raw": 299,
+        "n_frames_parquet": 299,
+        "t0_off_s": 1789483849.2300627,
+        "cam1_stamp_minus_ur_stamp_median_s": 4.00543212890625e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 37,
+        "take": "take_39_20260915_235114",
+        "n_frames_declared": 314,
+        "n_frames_raw": 314,
+        "n_frames_parquet": 314,
+        "t0_off_s": 1789483874.6160727,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00027942657470703125,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 38,
+        "take": "take_41_20260915_235238",
+        "n_frames_declared": 230,
+        "n_frames_raw": 230,
+        "n_frames_parquet": 230,
+        "t0_off_s": 1789483958.0306048,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.0001589059829711914,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 39,
+        "take": "take_42_20260915_235304",
+        "n_frames_declared": 268,
+        "n_frames_raw": 268,
+        "n_frames_parquet": 268,
+        "t0_off_s": 1789483984.8174639,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.0001857280731201172,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 40,
+        "take": "take_43_20260915_235332",
+        "n_frames_declared": 286,
+        "n_frames_raw": 286,
+        "n_frames_parquet": 286,
+        "t0_off_s": 1789484012.2682598,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00018644332885742188,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 41,
+        "take": "take_44_20260915_235353",
+        "n_frames_declared": 228,
+        "n_frames_raw": 228,
+        "n_frames_parquet": 228,
+        "t0_off_s": 1789484033.6637695,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00017535686492919922,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 42,
+        "take": "take_45_20260915_235417",
+        "n_frames_declared": 247,
+        "n_frames_raw": 247,
+        "n_frames_parquet": 247,
+        "t0_off_s": 1789484057.7474647,
+        "cam1_stamp_minus_ur_stamp_median_s": 4.410743713378906e-05,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 43,
+        "take": "take_46_20260915_235440",
+        "n_frames_declared": 280,
+        "n_frames_raw": 280,
+        "n_frames_parquet": 280,
+        "t0_off_s": 1789484080.361278,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00012755393981933594,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 44,
+        "take": "take_47_20260915_235830",
+        "n_frames_declared": 237,
+        "n_frames_raw": 237,
+        "n_frames_parquet": 237,
+        "t0_off_s": 1789484310.0945776,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00011181831359863281,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 45,
+        "take": "take_48_20260915_235848",
+        "n_frames_declared": 268,
+        "n_frames_raw": 268,
+        "n_frames_parquet": 268,
+        "t0_off_s": 1789484328.4623685,
+        "cam1_stamp_minus_ur_stamp_median_s": -2.6226043701171875e-05,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 46,
+        "take": "take_49_20260915_235907",
+        "n_frames_declared": 301,
+        "n_frames_raw": 301,
+        "n_frames_parquet": 301,
+        "t0_off_s": 1789484347.1695743,
+        "cam1_stamp_minus_ur_stamp_median_s": 7.009506225585938e-05,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 47,
+        "take": "take_50_20260915_235928",
+        "n_frames_declared": 304,
+        "n_frames_raw": 304,
+        "n_frames_parquet": 304,
+        "t0_off_s": 1789484368.3530679,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.0002371072769165039,
+        "cam2_frame_reuse_count": 1
+      },
+      {
+        "episode_index": 48,
+        "take": "take_51_20260915_235948",
+        "n_frames_declared": 199,
+        "n_frames_raw": 199,
+        "n_frames_parquet": 199,
+        "t0_off_s": 1789484388.2103767,
+        "cam1_stamp_minus_ur_stamp_median_s": -0.00022339820861816406,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 49,
+        "take": "take_52_20260916_000006",
+        "n_frames_declared": 244,
+        "n_frames_raw": 244,
+        "n_frames_parquet": 244,
+        "t0_off_s": 1789484406.1357713,
+        "cam1_stamp_minus_ur_stamp_median_s": 0.00012826919555664062,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 50,
+        "take": "take_53_20260916_000031",
+        "n_frames_declared": 344,
+        "n_frames_raw": 344,
+        "n_frames_parquet": 344,
+        "t0_off_s": 1789484431.0258718,
+        "cam1_stamp_minus_ur_stamp_median_s": -7.975101470947266e-05,
+        "cam2_frame_reuse_count": 0
+      },
+      {
+        "episode_index": 51,
+        "take": "take_54_20260916_000055",
+        "n_frames_declared": 274,
+        "n_frames_raw": 274,
+        "n_frames_parquet": 274,
+        "t0_off_s": 1789484455.921366,
+        "cam1_stamp_minus_ur_stamp_median_s": -5.316734313964844e-05,
+        "cam2_frame_reuse_count": 1
+      }
+    ]
+  },
+  "video": {
+    "observation.images.cam1": {
+      "n": 312,
+      "corr_min": 0.9986945280569459,
+      "corr_mean": 0.9994069081039609,
+      "mad_max": 1.574982277199074,
+      "mad_mean": 1.3611128210228958,
+      "n_bad": 0
+    },
+    "observation.images.cam2": {
+      "n": 312,
+      "corr_min": 0.9995812415268782,
+      "corr_mean": 0.9997879773184951,
+      "mad_max": 1.627423683449074,
+      "mad_mean": 1.386551876520952,
+      "n_bad": 0
+    }
+  },
+  "no_abs_paths": {
+    "n_files_scanned": 3,
+    "offenders": []
+  },
+  "physics_sanity": {
+    "median_abs_state_action_rad": 0.00849682092666626,
+    "mean_abs_state_action_rad": 0.013065506508237833,
+    "cam2_reuse_count_median_rederived": 0.0,
+    "cam2_reuse_count_median_declared": 0.0,
+    "per_episode_reuse_count_rederived": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      1,
+      0,
+      1,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0,
+      0,
+      0,
+      1
+    ]
+  },
+  "alignment_evidence": {
+    "per_episode": [
+      {
+        "episode_index": 0,
+        "take": "take_01_20260915_230922",
+        "median_offset_ms": 0.2372264862060547,
+        "far_frac_gt_15ms": 0.002849002849002849
+      },
+      {
+        "episode_index": 1,
+        "take": "take_02_20260915_231002",
+        "median_offset_ms": -0.1385211944580078,
+        "far_frac_gt_15ms": 0.0029498525073746312
+      },
+      {
+        "episode_index": 2,
+        "take": "take_03_20260915_231028",
+        "median_offset_ms": -0.01621246337890625,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 3,
+        "take": "take_04_20260915_231055",
+        "median_offset_ms": 0.29730796813964844,
+        "far_frac_gt_15ms": 0.0044444444444444444
+      },
+      {
+        "episode_index": 4,
+        "take": "take_05_20260915_231113",
+        "median_offset_ms": 0.019669532775878906,
+        "far_frac_gt_15ms": 0.003205128205128205
+      },
+      {
+        "episode_index": 5,
+        "take": "take_06_20260915_231144",
+        "median_offset_ms": 0.11229515075683594,
+        "far_frac_gt_15ms": 0.0026109660574412533
+      },
+      {
+        "episode_index": 6,
+        "take": "take_07_20260915_231209",
+        "median_offset_ms": 0.010013580322265625,
+        "far_frac_gt_15ms": 0.002793296089385475
+      },
+      {
+        "episode_index": 7,
+        "take": "take_08_20260915_231238",
+        "median_offset_ms": 0.12135505676269531,
+        "far_frac_gt_15ms": 0.0033222591362126247
+      },
+      {
+        "episode_index": 8,
+        "take": "take_09_20260915_231302",
+        "median_offset_ms": 0.023245811462402344,
+        "far_frac_gt_15ms": 0.0024752475247524753
+      },
+      {
+        "episode_index": 9,
+        "take": "take_10_20260915_232957",
+        "median_offset_ms": -0.0171661376953125,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 10,
+        "take": "take_11_20260915_233018",
+        "median_offset_ms": -0.05519390106201172,
+        "far_frac_gt_15ms": 0.0024154589371980675
+      },
+      {
+        "episode_index": 11,
+        "take": "take_12_20260915_233055",
+        "median_offset_ms": -0.14400482177734375,
+        "far_frac_gt_15ms": 0.0016260162601626016
+      },
+      {
+        "episode_index": 12,
+        "take": "take_13_20260915_233130",
+        "median_offset_ms": 0.021457672119140625,
+        "far_frac_gt_15ms": 0.0034602076124567475
+      },
+      {
+        "episode_index": 13,
+        "take": "take_14_20260915_233151",
+        "median_offset_ms": -0.007152557373046875,
+        "far_frac_gt_15ms": 0.018404907975460124
+      },
+      {
+        "episode_index": 14,
+        "take": "take_15_20260915_233215",
+        "median_offset_ms": -0.0642538070678711,
+        "far_frac_gt_15ms": 0.006896551724137931
+      },
+      {
+        "episode_index": 15,
+        "take": "take_16_20260915_233235",
+        "median_offset_ms": -0.06008148193359375,
+        "far_frac_gt_15ms": 0.0033112582781456954
+      },
+      {
+        "episode_index": 16,
+        "take": "take_17_20260915_233354",
+        "median_offset_ms": 0.05841255187988281,
+        "far_frac_gt_15ms": 0.003745318352059925
+      },
+      {
+        "episode_index": 17,
+        "take": "take_18_20260915_233418",
+        "median_offset_ms": 0.12636184692382812,
+        "far_frac_gt_15ms": 0.002932551319648094
+      },
+      {
+        "episode_index": 18,
+        "take": "take_19_20260915_233445",
+        "median_offset_ms": -0.0457763671875,
+        "far_frac_gt_15ms": 0.003389830508474576
+      },
+      {
+        "episode_index": 19,
+        "take": "take_20_20260915_233511",
+        "median_offset_ms": -0.04076957702636719,
+        "far_frac_gt_15ms": 0.003367003367003367
+      },
+      {
+        "episode_index": 20,
+        "take": "take_21_20260915_233535",
+        "median_offset_ms": 0.0362396240234375,
+        "far_frac_gt_15ms": 0.003076923076923077
+      },
+      {
+        "episode_index": 21,
+        "take": "take_23_20260915_234136",
+        "median_offset_ms": 0.05936622619628906,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 22,
+        "take": "take_24_20260915_234449",
+        "median_offset_ms": -0.21982192993164062,
+        "far_frac_gt_15ms": 0.004048582995951417
+      },
+      {
+        "episode_index": 23,
+        "take": "take_25_20260915_234512",
+        "median_offset_ms": -0.10371208190917969,
+        "far_frac_gt_15ms": 0.00267379679144385
+      },
+      {
+        "episode_index": 24,
+        "take": "take_26_20260915_234540",
+        "median_offset_ms": -0.16379356384277344,
+        "far_frac_gt_15ms": 0.001893939393939394
+      },
+      {
+        "episode_index": 25,
+        "take": "take_27_20260915_234621",
+        "median_offset_ms": 0.059723854064941406,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 26,
+        "take": "take_28_20260915_234642",
+        "median_offset_ms": 0.23245811462402344,
+        "far_frac_gt_15ms": 0.0030211480362537764
+      },
+      {
+        "episode_index": 27,
+        "take": "take_29_20260915_234708",
+        "median_offset_ms": -0.30303001403808594,
+        "far_frac_gt_15ms": 0.003076923076923077
+      },
+      {
+        "episode_index": 28,
+        "take": "take_30_20260915_234729",
+        "median_offset_ms": -0.06842613220214844,
+        "far_frac_gt_15ms": 0.0036496350364963502
+      },
+      {
+        "episode_index": 29,
+        "take": "take_31_20260915_234753",
+        "median_offset_ms": 0.009655952453613281,
+        "far_frac_gt_15ms": 0.031746031746031744
+      },
+      {
+        "episode_index": 30,
+        "take": "take_32_20260915_234815",
+        "median_offset_ms": -0.08344650268554688,
+        "far_frac_gt_15ms": 0.034129692832764506
+      },
+      {
+        "episode_index": 31,
+        "take": "take_33_20260915_234841",
+        "median_offset_ms": -0.12385845184326172,
+        "far_frac_gt_15ms": 0.004166666666666667
+      },
+      {
+        "episode_index": 32,
+        "take": "take_34_20260915_234903",
+        "median_offset_ms": -0.0133514404296875,
+        "far_frac_gt_15ms": 0.0035335689045936395
+      },
+      {
+        "episode_index": 33,
+        "take": "take_35_20260915_234924",
+        "median_offset_ms": -0.07545948028564453,
+        "far_frac_gt_15ms": 0.003968253968253968
+      },
+      {
+        "episode_index": 34,
+        "take": "take_36_20260915_234944",
+        "median_offset_ms": -0.25844573974609375,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 35,
+        "take": "take_37_20260915_235009",
+        "median_offset_ms": -0.0820159912109375,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 36,
+        "take": "take_38_20260915_235049",
+        "median_offset_ms": 0.0400543212890625,
+        "far_frac_gt_15ms": 0.0
+      },
+      {
+        "episode_index": 37,
+        "take": "take_39_20260915_235114",
+        "median_offset_ms": -0.27942657470703125,
+        "far_frac_gt_15ms": 0.0031847133757961785
+      },
+      {
+        "episode_index": 38,
+        "take": "take_41_20260915_235238",
+        "median_offset_ms": -0.1589059829711914,
+        "far_frac_gt_15ms": 0.004347826086956522
+      },
+      {
+        "episode_index": 39,
+        "take": "take_42_20260915_235304",
+        "median_offset_ms": -0.1857280731201172,
+        "far_frac_gt_15ms": 0.0037313432835820895
+      },
+      {
+        "episode_index": 40,
+        "take": "take_43_20260915_235332",
+        "median_offset_ms": 0.18644332885742188,
+        "far_frac_gt_15ms": 0.0034965034965034965
+      },
+      {
+        "episode_index": 41,
+        "take": "take_44_20260915_235353",
+        "median_offset_ms": -0.17535686492919922,
+        "far_frac_gt_15ms": 0.0043859649122807015
+      },
+      {
+        "episode_index": 42,
+        "take": "take_45_20260915_235417",
+        "median_offset_ms": 0.04410743713378906,
+        "far_frac_gt_15ms": 0.004048582995951417
+      },
+      {
+        "episode_index": 43,
+        "take": "take_46_20260915_235440",
+        "median_offset_ms": 0.12755393981933594,
+        "far_frac_gt_15ms": 0.0035714285714285713
+      },
+      {
+        "episode_index": 44,
+        "take": "take_47_20260915_235830",
+        "median_offset_ms": 0.11181831359863281,
+        "far_frac_gt_15ms": 0.004219409282700422
+      },
+      {
+        "episode_index": 45,
+        "take": "take_48_20260915_235848",
+        "median_offset_ms": -0.026226043701171875,
+        "far_frac_gt_15ms": 0.0037313432835820895
+      },
+      {
+        "episode_index": 46,
+        "take": "take_49_20260915_235907",
+        "median_offset_ms": 0.07009506225585938,
+        "far_frac_gt_15ms": 0.0033222591362126247
+      },
+      {
+        "episode_index": 47,
+        "take": "take_50_20260915_235928",
+        "median_offset_ms": 0.2371072769165039,
+        "far_frac_gt_15ms": 0.003289473684210526
+      },
+      {
+        "episode_index": 48,
+        "take": "take_51_20260915_235948",
+        "median_offset_ms": -0.22339820861816406,
+        "far_frac_gt_15ms": 0.005025125628140704
+      },
+      {
+        "episode_index": 49,
+        "take": "take_52_20260916_000006",
+        "median_offset_ms": 0.12826919555664062,
+        "far_frac_gt_15ms": 0.004098360655737705
+      },
+      {
+        "episode_index": 50,
+        "take": "take_53_20260916_000031",
+        "median_offset_ms": -0.07975101470947266,
+        "far_frac_gt_15ms": 0.0029069767441860465
+      },
+      {
+        "episode_index": 51,
+        "take": "take_54_20260916_000055",
+        "median_offset_ms": -0.05316734313964844,
+        "far_frac_gt_15ms": 0.0036496350364963502
+      }
+    ],
+    "median_offset_ms_range": [
+      -0.30303001403808594,
+      0.29730796813964844
+    ],
+    "far_frac_range": [
+      0.0,
+      0.034129692832764506
+    ]
+  },
+  "thresholds": {
+    "tol": 0.0,
+    "video_min_corr": 0.97,
+    "video_max_mad": 12.0,
+    "state_action_absurd_low": 0.0001,
+    "state_action_absurd_high": 0.3,
+    "align_far_tol_s": 0.015,
+    "align_median_absurd_ms": 20.0,
+    "align_far_frac_absurd": 0.1
+  },
+  "counts": {
+    "pass": 43,
+    "fail": 0,
+    "warn": 0,
+    "skip": 0,
+    "total": 43
+  },
+  "rows": [
+    {
+      "status": "PASS",
+      "check": "vectorised nearest_idx == brute-force argmin reference",
+      "detail": "71 queries against ur/cam2 timelines of take_01_20260915_230922"
+    },
+    {
+      "status": "PASS",
+      "check": "ffill_bfill reference case",
+      "detail": "[1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0]"
+    },
+    {
+      "status": "PASS",
+      "check": "codebase_version == 'v3.0'",
+      "detail": "got 'v3.0'"
+    },
+    {
+      "status": "PASS",
+      "check": "fps == 30",
+      "detail": "got 30"
+    },
+    {
+      "status": "PASS",
+      "check": "total_episodes == 52 (included takes)",
+      "detail": "got 52"
+    },
+    {
+      "status": "PASS",
+      "check": "total_frames == 16009 (sum of cam1_frames rows)",
+      "detail": "got 16009"
+    },
+    {
+      "status": "PASS",
+      "check": "total_tasks == 1",
+      "detail": "got 1"
+    },
+    {
+      "status": "PASS",
+      "check": "feature set EXACTLY {action, observation.state, cam1/cam2 video, lerobot bookkeeping} -- no more, no less",
+      "detail": "9 features, exact match"
+    },
+    {
+      "status": "PASS",
+      "check": "no depth feature present (this corpus has no depth.h5)",
+      "detail": "none"
+    },
+    {
+      "status": "PASS",
+      "check": "feature action dtype/shape/names",
+      "detail": "dtype=float32 shape=[7] names=['cmd1', 'cmd2', 'cmd3', 'cmd4', 'cmd5', 'cmd6', 'grip_cmd']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.state dtype/shape/names",
+      "detail": "dtype=float32 shape=[7] names=['ur_q1', 'ur_q2', 'ur_q3', 'ur_q4', 'ur_q5', 'ur_q6', 'grip_pos']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam1 dtype/shape/names",
+      "detail": "dtype=video shape=[720, 1280, 3] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature observation.images.cam2 dtype/shape/names",
+      "detail": "dtype=video shape=[720, 1280, 3] names=['height', 'width', 'channels']"
+    },
+    {
+      "status": "PASS",
+      "check": "feature timestamp dtype/shape/names",
+      "detail": "dtype=float32 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature frame_index dtype/shape/names",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature episode_index dtype/shape/names",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature index dtype/shape/names",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "feature task_index dtype/shape/names",
+      "detail": "dtype=int64 shape=[1]"
+    },
+    {
+      "status": "PASS",
+      "check": "robot_type present (non-empty)",
+      "detail": "got 'ur7e_gello'"
+    },
+    {
+      "status": "PASS",
+      "check": "episode count == included take count",
+      "detail": "52"
+    },
+    {
+      "status": "PASS",
+      "check": "exactly one task in meta/tasks.parquet",
+      "detail": "got {0: 'put the orange bowl into the purple bowl'}"
+    },
+    {
+      "status": "PASS",
+      "check": "task string == 'put the orange bowl into the purple bowl'",
+      "detail": "got ['put the orange bowl into the purple bowl']"
+    },
+    {
+      "status": "PASS",
+      "check": "single task_index across all frames",
+      "detail": "unique=[0]"
+    },
+    {
+      "status": "PASS",
+      "check": "every frame's task_index resolves to the task string",
+      "detail": "unique=[0] -> ['put the orange bowl into the purple bowl']"
+    },
+    {
+      "status": "PASS",
+      "check": "every episode's meta 'tasks' == [task]",
+      "detail": "52 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "source_takes.json top level is an object",
+      "detail": "got dict"
+    },
+    {
+      "status": "PASS",
+      "check": "schema == 'gello_recorder/lerobot_source_takes/2'",
+      "detail": "got 'gello_recorder/lerobot_source_takes/2'"
+    },
+    {
+      "status": "PASS",
+      "check": "declared 'task' matches --task",
+      "detail": "got 'put the orange bowl into the purple bowl'"
+    },
+    {
+      "status": "PASS",
+      "check": "episodes list has 52 entries",
+      "detail": "got 52"
+    },
+    {
+      "status": "PASS",
+      "check": "take order == sorted raw take_* dirs",
+      "detail": "52 entries, order matches"
+    },
+    {
+      "status": "PASS",
+      "check": "every declared take basename exists under --raw",
+      "detail": "52 takes"
+    },
+    {
+      "status": "PASS",
+      "check": "n_frames per episode == declared == raw cam1 rows == parquet episode length (episode_index field consistent)",
+      "detail": "52 episodes, all agree"
+    },
+    {
+      "status": "PASS",
+      "check": "all 52 episodes re-derive with max|delta| <= 0",
+      "detail": "max|dstate|=0.000e+00  max|daction|=0.000e+00"
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp == frame_index / 30 (within 1e-4)",
+      "detail": "max dev 8.901e-07"
+    },
+    {
+      "status": "PASS",
+      "check": "per-episode frame_index contiguous (restarts at 0, +1 each frame)",
+      "detail": "52 episodes"
+    },
+    {
+      "status": "PASS",
+      "check": "observation.state finite",
+      "detail": "NaN=0 Inf=0  range=[-3.8684, 3.6232]"
+    },
+    {
+      "status": "PASS",
+      "check": "action finite",
+      "detail": "NaN=0 Inf=0  range=[-3.8674, 3.6262]"
+    },
+    {
+      "status": "PASS",
+      "check": "timestamp finite",
+      "detail": "NaN=0 Inf=0  range=[0.0000, 20.4667]"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1: every sampled frame has corr>=0.97 and MAD<=12.0",
+      "detail": "n=312  corr min=0.99869 mean=0.99941  MAD max=1.57 mean=1.36  (gate corr>=0.97, MAD<=12.0)"
+    },
+    {
+      "status": "PASS",
+      "check": "cam2: every sampled frame has corr>=0.97 and MAD<=12.0",
+      "detail": "n=312  corr min=0.99958 mean=0.99979  MAD max=1.63 mean=1.39  (gate corr>=0.97, MAD<=12.0)"
+    },
+    {
+      "status": "PASS",
+      "check": "no '/home/' substring in any meta/**/*.{json,jsonl,md} file (3 scanned)",
+      "detail": "3 files"
+    },
+    {
+      "status": "PASS",
+      "check": "median|state[:6]-action[:6]| in plausible range [0.0001, 0.3] rad",
+      "detail": "median|state[:6]-action[:6]|=0.00850 rad (mean 0.01307); expect ~0.01 rad (0.14s servo lag) -- NOT ~0, NOT ~0.06 like the uncorrected carrot corpus; per-episode cam2 reuse count (re-derived) median=0, declared in source_takes.json median=0"
+    },
+    {
+      "status": "PASS",
+      "check": "cam1<->ur alignment plausible (not absurd)",
+      "detail": "per-episode median offset: min=-0.30ms max=0.30ms (absurd gate |20|ms); far(>15ms) fraction: min=0.00% max=3.41% (should be ~0 at ~100Hz, absurd gate 10%)"
+    }
+  ]
+}

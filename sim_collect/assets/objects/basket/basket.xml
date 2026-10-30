@@ -1,0 +1,22 @@
+<mujoco model="basket">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <texture file="basket_texture.png" name="basket_tex-basket" type="2d" />
+    <material name="basket_basket" reflectance="0.5" texrepeat="1 1" texture="basket_tex-basket" texuniform="false" />
+    <mesh file="basket_basket_vis.msh" name="basket_basket_vis" scale="1.0 1.0 1.0" />
+  </asset>
+  <worldbody>
+    <body name="basket" pos="0 0 0">
+      <inertial pos="0.00123187 -0.000131397 0.05665" quat="0.00537632 0.714473 -0.0066473 0.69961" mass="0.4" diaginertia="0.00240062 0.00201104 0.00187765"/>
+      <site name="basket_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <site name="basket_opening" pos="0 0 0.1415" size="0.0647" rgba="0 0 0 0"/>
+      <site name="basket_floor" pos="0 0 0.0174" size="0.005" rgba="0 0 0 0"/>
+      <geom name="basket_vis0" type="mesh" mesh="basket_basket_vis" pos="-3.99961e-05 -0.000229003 -0.00421296" material="basket_basket" group="2" contype="0" conaffinity="0"/>
+      <geom name="basket_col1" type="box" size="0.00850 0.07240 0.07658" pos="0.00247 -0.000229003 0.00886704" quat="0.70880 -0.00000 0.70541 -0.00000" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="basket_col2" type="box" size="0.00667 0.06368 0.07240" pos="-0.07269 -0.000229003 0.072357" quat="0.02672 -0.02672 0.70660 0.70660" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="basket_col3" type="box" size="0.00667 0.06368 0.07240" pos="0.000430004 -0.068779 0.077557" quat="0.51263 -0.49025 0.50956 -0.48704" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="basket_col4" type="box" size="0.00667 0.06368 0.07240" pos="-0.000239996 0.068861 0.077557" quat="0.48794 -0.51043 -0.48935 0.51177" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="basket_col5" type="box" size="0.00667 0.06368 0.07240" pos="0.07553 -0.000229003 0.072357" quat="0.01765 0.01765 -0.70689 0.70689" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

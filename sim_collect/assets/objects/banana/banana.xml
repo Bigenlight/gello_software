@@ -1,0 +1,16 @@
+<mujoco model="banana">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh name="banana_mesh" file="banana.obj" maxhullvert="64"/>
+    <texture name="banana_tex" type="2d" file="banana.png"/>
+    <material name="banana_mat" texture="banana_tex" specular="0.25" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="banana" pos="0 0 0">
+      <inertial pos="-0.0188234 0.0140489 0.0171213" quat="0.624651 0.460717 -0.532813 0.337136" mass="0.12" diaginertia="0.00031319 0.000296919 3.25017e-05"/>
+      <site name="banana_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="banana_vis0" type="mesh" mesh="banana_mesh" pos="-0.011476 0.0073435 0.000407002" material="banana_mat" group="2" contype="0" conaffinity="0"/>
+      <geom name="banana_col1" type="mesh" mesh="banana_mesh" pos="-0.011476 0.0073435 0.000407002" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

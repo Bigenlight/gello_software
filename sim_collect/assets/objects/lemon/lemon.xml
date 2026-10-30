@@ -1,0 +1,16 @@
+<mujoco model="lemon">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+    <mesh name="lemon_mesh" file="lemon.obj" maxhullvert="64"/>
+    <texture name="lemon_tex" type="2d" file="lemon.png"/>
+    <material name="lemon_mat" texture="lemon_tex" specular="0.25" shininess="0.3"/>
+  </asset>
+  <worldbody>
+    <body name="lemon" pos="0 0 0">
+      <inertial pos="-0.000191493 -0.000639282 0.0264435" quat="0.467518 0.100121 0.704392 0.524628" mass="0.1" diaginertia="3.52236e-05 3.50466e-05 2.87684e-05"/>
+      <site name="lemon_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="lemon_vis0" type="mesh" mesh="lemon_mesh" pos="0.010579 -0.0216535 0.000235" material="lemon_mat" group="2" contype="0" conaffinity="0"/>
+      <geom name="lemon_col1" type="mesh" mesh="lemon_mesh" pos="0.010579 -0.0216535 0.000235" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+    </body>
+  </worldbody>
+</mujoco>

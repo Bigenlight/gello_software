@@ -1,0 +1,22 @@
+<mujoco model="carrot">
+  <compiler angle="radian" meshdir="." texturedir="."/>
+  <asset>
+  </asset>
+  <worldbody>
+    <body name="carrot" pos="0 0 0">
+      <inertial pos="0.0118717 0 0.0148979" quat="0.52208 0.476899 0.476899 0.52208" mass="0.08" diaginertia="9.93704e-05 9.92014e-05 8.79242e-06"/>
+      <site name="carrot_center" pos="0 0 0" size="0.005" rgba="0 0 0 0"/>
+      <geom name="carrot_vis0" type="capsule" size="0.0059" fromto="-0.0863788 0 0.0059 -0.0513788 0 0.0059" rgba="0.92 0.45 0.09 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="carrot_col1" type="capsule" size="0.0059" fromto="-0.0863788 0 0.0059 -0.0513788 0 0.0059" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="carrot_vis2" type="capsule" size="0.0098" fromto="-0.0513788 0 0.0098 -0.0163788 0 0.0098" rgba="0.92 0.45 0.09 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="carrot_col3" type="capsule" size="0.0098" fromto="-0.0513788 0 0.0098 -0.0163788 0 0.0098" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="carrot_vis4" type="capsule" size="0.0137" fromto="-0.0163788 0 0.0137 0.0186212 0 0.0137" rgba="0.92 0.45 0.09 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="carrot_col5" type="capsule" size="0.0137" fromto="-0.0163788 0 0.0137 0.0186212 0 0.0137" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="carrot_vis6" type="capsule" size="0.0176" fromto="0.0186212 0 0.0176 0.0536212 0 0.0176" rgba="0.92 0.45 0.09 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="carrot_col7" type="capsule" size="0.0176" fromto="0.0186212 0 0.0176 0.0536212 0 0.0176" rgba="0.5 0.5 0.5 0.3" group="3" condim="6" friction="1 0.02 0.004"/>
+      <geom name="carrot_vis8" type="capsule" size="0.0035" fromto="0.0536212 0 0.0195 0.0876212 0 0.0315" rgba="0.20 0.55 0.18 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="carrot_vis9" type="capsule" size="0.0035" fromto="0.0536212 0 0.0195 0.0876212 0.013 0.0235" rgba="0.20 0.55 0.18 1" group="2" contype="0" conaffinity="0"/>
+      <geom name="carrot_vis10" type="capsule" size="0.0035" fromto="0.0536212 0 0.0195 0.0876212 -0.013 0.0235" rgba="0.20 0.55 0.18 1" group="2" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+</mujoco>
